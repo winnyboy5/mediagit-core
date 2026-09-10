@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Comprehensive CLI Tag Command Tests
 //!
@@ -23,7 +13,15 @@ use tempfile::TempDir;
 
 #[allow(deprecated)]
 fn mediagit() -> Command {
-    Command::cargo_bin("mediagit").unwrap()
+    {
+        // `commit` refuses an unconfigured identity (UX-6) instead of
+        // authoring as `Unknown <unknown@localhost>`, so tests declare one
+        // the way a real user would.
+        let mut c = Command::cargo_bin("mediagit").unwrap();
+        c.env("MEDIAGIT_AUTHOR_NAME", "Test User")
+            .env("MEDIAGIT_AUTHOR_EMAIL", "test@example.com");
+        c
+    }
 }
 
 fn init_repo(dir: &Path) {
@@ -565,4 +563,38 @@ fn test_tag_list_full() {
         .assert()
         .success()
         .stdout(predicate::str::contains("v1.0.0"));
+}
+
+// ============================================================================
+// Tag Verify Fail-Closed Tests
+// ============================================================================
+
+#[test]
+fn test_tag_verify_annotated_tag() {
+    let temp_dir = TempDir::new().unwrap();
+    init_repo(temp_dir.path());
+
+    add_and_commit(temp_dir.path(), "file.txt", "Content", "Initial commit");
+
+    // Create annotated tag
+    mediagit()
+        .arg("tag")
+        .arg("create")
+        .arg("v1.0.0")
+        .arg("-a")
+        .arg("-m")
+        .arg("Release version 1.0.0")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+
+    // Verify annotated tag - exercises the fail-closed verification logic
+    // (the fix in tag.rs:565-585 that checks for sidecar existence when object is missing)
+    mediagit()
+        .arg("tag")
+        .arg("verify")
+        .arg("v1.0.0")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
 }

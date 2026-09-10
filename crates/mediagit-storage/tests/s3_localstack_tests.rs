@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Integration tests for S3 backend using LocalStack
 //!
@@ -34,8 +24,9 @@
 //! - Endpoint: http://localhost:4566
 
 #[cfg(test)]
+#[allow(unsafe_code)] // edition-2024: test-only env::set_var/remove_var requires unsafe
 mod s3_localstack_tests {
-    use mediagit_storage::{s3::S3Backend, StorageBackend};
+    use mediagit_storage::{StorageBackend, s3::S3Backend};
     use std::env;
 
     /// Helper function to create a test S3 backend connected to LocalStack
@@ -43,9 +34,12 @@ mod s3_localstack_tests {
         use mediagit_storage::s3::S3Config;
 
         // Set required environment variables for LocalStack
-        env::set_var("AWS_ACCESS_KEY_ID", "test");
-        env::set_var("AWS_SECRET_ACCESS_KEY", "test");
-        env::set_var("AWS_REGION", "us-east-1");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { env::set_var("AWS_ACCESS_KEY_ID", "test") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { env::set_var("AWS_SECRET_ACCESS_KEY", "test") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { env::set_var("AWS_REGION", "us-east-1") };
 
         // Configure S3Backend to use LocalStack endpoint
         // Use 127.0.0.1 instead of localhost for better compatibility
@@ -292,11 +286,13 @@ mod s3_localstack_tests {
 
         let result = backend.get("nonexistent/object").await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .to_lowercase()
-            .contains("not found"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .to_lowercase()
+                .contains("not found")
+        );
     }
 
     /// Test empty key validation

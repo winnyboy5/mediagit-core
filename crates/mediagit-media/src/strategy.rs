@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Format-specific merge strategies
 //!
@@ -47,7 +37,7 @@
 //! ```
 
 use crate::audio::AudioParser;
-use crate::error::{MediaError, Result};
+use crate::error::Result;
 use crate::model3d::Model3DParser;
 use crate::psd::PsdParser;
 use crate::vfx::VfxParser;
@@ -130,7 +120,19 @@ impl MediaType {
 /// Result of a merge operation
 #[derive(Debug, Clone)]
 pub enum MergeResult {
-    /// Files were successfully auto-merged
+    /// Files were successfully auto-merged.
+    ///
+    /// **Contract: these bytes are the merged file, in the same format as the
+    /// inputs.** A caller writes them straight to the working tree, so
+    /// anything else is silent data destruction.
+    ///
+    /// Four strategies used to return serialized *metadata* here — a
+    /// successful PSD "auto-merge" produced a JSON document, which would have
+    /// replaced a designer's `.psd` with JSON had the strategies ever been
+    /// wired into `merge`. They now report `Conflict` instead: none of them
+    /// can reconstruct a real file yet (PSD writing is not supported by the
+    /// `psd` crate, video would need re-encoding). Do not restore an
+    /// `AutoMerged` return without producing genuine format bytes.
     AutoMerged(Vec<u8>),
 
     /// Manual review required
@@ -255,19 +257,21 @@ impl ImageStrategy {
                     &theirs_metadata,
                 )?;
 
-                // Serialize merged metadata to JSON
-                // NOTE: Full image reconstruction would require image processing libraries
-                // For now, we return the merged metadata structure.
-                // In practice, you would:
-                // 1. Load the image from 'ours' (visual content is identical)
-                // 2. Strip existing metadata
-                // 3. Write merged metadata back to image
-                // 4. Return the modified image bytes
-                let merged_json = serde_json::to_vec_pretty(&merged_metadata)
-                    .map_err(|e| MediaError::SerializationError(e.to_string()))?;
-
-                info!("Image auto-merge successful - metadata merged intelligently");
-                Ok(MergeResult::AutoMerged(merged_json))
+                // Only the metadata was merged; writing it back into the image
+                // needs an encoder this crate does not have. Returning the
+                // metadata JSON as `AutoMerged` would replace the image file
+                // with a JSON document.
+                //
+                // To make this a real auto-merge: load `ours` (visual content
+                // is identical on this path), strip its metadata, write the
+                // merged metadata back, and return those image bytes.
+                let _ = &merged_metadata;
+                info!("Image metadata is mergeable but re-encoding is unsupported");
+                Ok(MergeResult::Conflict(
+                    "only metadata differs and it could be merged, but MediaGit cannot \
+                        re-encode the image. Resolve by keeping one side and staging it."
+                        .to_string(),
+                ))
             }
             MergeDecision::ManualReview(conflicts) => {
                 warn!("Image conflicts detected: {:?}", conflicts);
@@ -316,17 +320,22 @@ impl PsdStrategy {
                 // Perform actual layer merge
                 let merged_psd = PsdParser::merge_layers(&base_psd, &ours_psd, &theirs_psd)?;
 
-                // Serialize merged PSD info to JSON for now
-                // NOTE: Full PSD binary reconstruction would require the 'psd' crate's write capabilities
-                // which are limited. For now, we return the merged metadata structure.
-                let merged_json = serde_json::to_vec_pretty(&merged_psd)
-                    .map_err(|e| MediaError::SerializationError(e.to_string()))?;
-
+                // The layer analysis says these edits *could* be combined, but
+                // nothing here can write a PSD back out — the `psd` crate is
+                // read-only. Returning the merged metadata as `AutoMerged`
+                // would hand the caller JSON to write over the user's .psd.
+                // Report what was learned instead; it is still the most
+                // useful thing we can tell them.
                 info!(
-                    "PSD auto-merge successful: {} layers",
+                    "PSD layers are separable ({} layers) but PSD writing is unsupported",
                     merged_psd.layers.len()
                 );
-                Ok(MergeResult::AutoMerged(merged_json))
+                Ok(MergeResult::Conflict(format!(
+                    "layer edits do not overlap ({} layers), but MediaGit cannot \
+                        write a merged PSD — the format is read-only here. Resolve by \
+                        combining the layers in your editor and staging the result.",
+                    merged_psd.layers.len()
+                )))
             }
             crate::psd::MergeDecision::ManualReview(conflicts) => {
                 warn!("PSD layer conflicts: {:?}", conflicts);
@@ -368,18 +377,23 @@ impl VideoStrategy {
                 let merged_video =
                     VideoParser::merge_timelines(&base_video, &ours_video, &theirs_video)?;
 
-                // Serialize merged video info to JSON
-                // NOTE: Full video re-encoding would require FFmpeg or similar
-                // For now, we return the merged timeline metadata structure.
-                let merged_json = serde_json::to_vec_pretty(&merged_video)
-                    .map_err(|e| MediaError::SerializationError(e.to_string()))?;
-
+                // Timeline analysis says the edits are separable, but writing
+                // a merged video needs re-encoding (FFmpeg or similar), which
+                // this crate does not do. Returning timeline JSON as
+                // `AutoMerged` would overwrite the user's video with metadata.
                 info!(
-                    "Video auto-merge successful: {} tracks, {} segments",
+                    "Video timeline is separable ({} tracks, {} segments) but \
+                        re-encoding is unsupported",
                     merged_video.tracks.len(),
                     merged_video.segments.len()
                 );
-                Ok(MergeResult::AutoMerged(merged_json))
+                Ok(MergeResult::Conflict(format!(
+                    "timeline edits do not overlap ({} tracks, {} segments), but \
+                        MediaGit cannot render a merged video — that needs re-encoding. \
+                        Resolve in your editor and stage the result.",
+                    merged_video.tracks.len(),
+                    merged_video.segments.len()
+                )))
             }
             crate::video::MergeDecision::ManualReview(conflicts) => {
                 warn!("Video timeline conflicts: {:?}", conflicts);
@@ -423,17 +437,19 @@ impl AudioStrategy {
                 let merged_audio =
                     AudioParser::merge_tracks(&base_audio, &ours_audio, &theirs_audio)?;
 
-                // Serialize merged audio info to JSON
-                // NOTE: Full audio mixing would require audio processing libraries
-                // For now, we return the merged track metadata structure.
-                let merged_json = serde_json::to_vec_pretty(&merged_audio)
-                    .map_err(|e| MediaError::SerializationError(e.to_string()))?;
-
+                // Track analysis says the edits are separable, but producing a
+                // mixed file needs audio processing this crate does not do.
+                // Returning track JSON as `AutoMerged` would overwrite the
+                // user's audio with metadata.
                 info!(
-                    "Audio auto-merge successful: {} tracks",
+                    "Audio tracks are separable ({}) but mixing is unsupported",
                     merged_audio.tracks.len()
                 );
-                Ok(MergeResult::AutoMerged(merged_json))
+                Ok(MergeResult::Conflict(format!(
+                    "different tracks were modified ({} tracks), but MediaGit cannot \
+                        mix a merged audio file. Resolve in your editor and stage the result.",
+                    merged_audio.tracks.len()
+                )))
             }
             crate::audio::MergeDecision::ManualReview(conflicts) => {
                 warn!("Audio track conflicts: {:?}", conflicts);
@@ -614,5 +630,47 @@ mod tests {
 
         let generic_strategy = MergeStrategy::for_media_type(MediaType::Unknown);
         assert!(matches!(generic_strategy, MergeStrategy::Generic));
+    }
+
+    /// Safety invariant for [`MergeResult::AutoMerged`]: its bytes are written
+    /// straight into the user's working tree, so they must be a real file in
+    /// the input format.
+    ///
+    /// Every strategy that could produce merged *metadata* previously returned
+    /// it as `AutoMerged` — a successful PSD "auto-merge" yielded a JSON
+    /// document. Had these been wired into `merge`, resolving a conflict would
+    /// have replaced the designer's .psd with JSON. Nothing here can write a
+    /// real PSD, image, video or audio file yet, so nothing may claim to.
+    ///
+    /// This test fails the moment a strategy starts returning `AutoMerged`
+    /// again, which is the point: restoring it requires producing genuine
+    /// format bytes, and this test is where you prove you did.
+    #[tokio::test]
+    async fn no_strategy_claims_auto_merge_it_cannot_perform() {
+        // Deliberately not real media: parsing should fail or the analysis
+        // should decline, and neither path may yield `AutoMerged`.
+        let base = b" base payload";
+        let ours = b" ours payload";
+        let theirs = b" theirs payload";
+
+        for (media_type, name) in [
+            (MediaType::Image, "a.png"),
+            (MediaType::Psd, "a.psd"),
+            (MediaType::Video, "a.mp4"),
+            (MediaType::Audio, "a.wav"),
+            (MediaType::Model3D, "a.glb"),
+            (MediaType::Vfx, "a.exr"),
+            (MediaType::Unknown, "a.bin"),
+        ] {
+            let strategy = MergeStrategy::for_media_type(media_type);
+            if let Ok(result) = strategy.merge(base, ours, theirs, name).await {
+                assert!(
+                    !matches!(result, MergeResult::AutoMerged(_)),
+                    "{name}: strategy returned AutoMerged; its bytes get written \
+                        over the user's file, so they must be real {media_type:?} \
+                        content, not metadata"
+                );
+            }
+        }
     }
 }

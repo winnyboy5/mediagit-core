@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Audit logging integration tests
 //!
@@ -17,7 +7,7 @@
 //! security events are properly logged.
 
 use axum::http::StatusCode;
-use mediagit_server::{create_router_with_rate_limit, AppState, RateLimitConfig};
+use mediagit_server::{AppState, RateLimitConfig, create_router_with_rate_limit};
 use reqwest::Client;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -90,6 +80,7 @@ impl Drop for TestServer {
 #[tokio::test]
 async fn test_audit_path_traversal_attempt() {
     let server = TestServer::new().await;
+    mediagit_protocol::ensure_crypto_provider();
     let client = Client::new();
 
     // Attempt path traversal - should trigger audit log
@@ -113,6 +104,7 @@ async fn test_audit_path_traversal_attempt() {
 #[tokio::test]
 async fn test_audit_absolute_path_attempt() {
     let server = TestServer::new().await;
+    mediagit_protocol::ensure_crypto_provider();
     let client = Client::new();
 
     // Attempt absolute path - should trigger audit log
@@ -134,6 +126,7 @@ async fn test_audit_absolute_path_attempt() {
 #[tokio::test]
 async fn test_audit_invalid_characters() {
     let server = TestServer::new().await;
+    mediagit_protocol::ensure_crypto_provider();
     let client = Client::new();
 
     // Repository name with invalid characters - should trigger audit log
@@ -179,6 +172,7 @@ async fn test_audit_rate_limit_violation() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
+    mediagit_protocol::ensure_crypto_provider();
     let client = Client::new();
     let url = format!("http://{}/test-repo/info/refs", addr);
 
@@ -201,6 +195,7 @@ async fn test_audit_rate_limit_violation() {
 #[tokio::test]
 async fn test_audit_oversized_request() {
     let server = TestServer::new().await;
+    mediagit_protocol::ensure_crypto_provider();
     let client = Client::new();
 
     // Create a request with content-length exceeding the limit (2GB)
@@ -223,6 +218,7 @@ async fn test_audit_oversized_request() {
 #[tokio::test]
 async fn test_audit_normal_request_no_log() {
     let server = TestServer::new().await;
+    mediagit_protocol::ensure_crypto_provider();
     let client = Client::new();
 
     // Normal request to non-existent repo - should NOT trigger security audit logs
@@ -242,6 +238,7 @@ async fn test_audit_normal_request_no_log() {
 #[tokio::test]
 async fn test_audit_multiple_violations() {
     let server = TestServer::new().await;
+    mediagit_protocol::ensure_crypto_provider();
     let client = Client::new();
 
     // Multiple different security violations

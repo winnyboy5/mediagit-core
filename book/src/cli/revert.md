@@ -36,7 +36,9 @@ Allows inspection and editing before committing.
 Override the auto-generated revert commit message.
 
 #### `--continue`
-Continue reverting after manually resolving conflicts.
+Continue reverting after manually resolving conflicts. Not listed in the `Options:` section of
+`revert --help` (it's omitted from that listing), but it is fully functional and shown in
+`revert --help`'s own `EXAMPLES:` section.
 
 #### `--abort`
 Abort a multi-commit revert in progress and restore pre-revert state.
@@ -46,6 +48,23 @@ Skip the current commit during a multi-commit revert sequence.
 
 #### `-q`, `--quiet`
 Suppress output.
+
+#### `-v`, `--verbose`
+Enable verbose output.
+
+#### `--color <WHEN>`
+Colored output: `always`, `auto`, or `never`. Default: `auto`. Global option, shared by every
+`mediagit` subcommand.
+
+#### `-C`, `--repository <PATH>`
+Run as if `revert` was started in `<PATH>` instead of the current directory. Global option, shared
+by every `mediagit` subcommand.
+
+#### `-h`, `--help`
+Print help for `revert` and exit.
+
+#### `-V`, `--version`
+Print the `mediagit` version and exit.
 
 ## Examples
 
@@ -104,9 +123,9 @@ $ mediagit revert --abort
 
 | Situation | Command |
 |-----------|---------|
-| Undo commits that haven't been pushed | `reset --hard` |
+| Undo commits that haven't been pushed | [`reset`](./reset.md) |
 | Undo pushed commits (preserve history) | `revert` |
-| Keep the change but remove from branch | `reset --soft` |
+| Keep the change but remove from branch | [`reset`](./reset.md) |
 | Undo a specific old commit in history | `revert <hash>` |
 
 ## Exit Status

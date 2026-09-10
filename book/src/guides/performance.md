@@ -20,7 +20,7 @@ mediagit add --no-parallel assets/
 **Expected throughput** (validated benchmarks, release build):
 | File type | Throughput | Notes |
 |-----------|-----------|-------|
-| PSD (72–181 MB) | 72–119 MB/s | Zstd Best; layer data compresses well |
+| PSD (72–181 MB) | 72–119 MB/s | Zstd Default; creative-container params |
 | MP4/MOV (5–398 MB) | 146–174 MB/s | Pre-compressed; store-mode, zero CPU overhead |
 | GLB (14–25 MB) | 3.0–5.2 MB/s | GLB parser + CDC chunking + Zstd |
 | WAV (55–57 MB) | 2.1–3.6 MB/s | RIFF parser + chunking (CPU-bound) |
@@ -44,24 +44,27 @@ MediaGit never wastes CPU re-compressing already-compressed formats:
 
 | Format | Strategy | Reason |
 |--------|----------|--------|
-| JPEG, PNG, WebP | Store (level 0) | Already compressed |
+| JPEG, PNG, WebP | Store | Already compressed |
 | MP4, MOV, AVI | Store | Already compressed |
 | ZIP, DOCX, XLSX | Store | ZIP container |
-| PDF, AI, InDesign | Store | Contains compressed streams |
-| PSD | Zstd Best | Raw layer data compresses well |
-| OBJ, FBX, GLB, STL | Zstd Best | Binary 3D data |
-| WAV, FLAC | Zstd Default | Uncompressed audio |
-| Text, JSON, TOML | Zstd Default | Highly compressible |
+| AI, InDesign | Store | Contains compressed streams; re-zstd would expand it |
+| PDF, SVG, PSD | Zstd Default | PDF/SVG are documents; PSD is a creative-container format handled at Default, not Best |
+| TIFF, RAW, EXR (uncompressed images) | Zstd Best | Raw pixel data compresses well |
+| OBJ, FBX, GLB, STL (3D interchange) | Zstd Best | Binary/text mesh data |
+| WAV, AIFF | Zstd Best | Uncompressed PCM audio |
+| FLAC, ALAC | Zstd Default | Already entropy-coded; Best over Default measured ~0.1% gain |
+| Text, JSON, TOML | Brotli Default | Best ratio on structured text; falls back to Zstd above 500 MB |
 
 ### Delta Encoding
 
 For versioned files that change incrementally (e.g., evolving PSD files), MediaGit uses delta encoding to store only the differences between versions:
 
 ```toml
-# Similarity thresholds (in smart_compressor.rs — not yet configurable via TOML)
-# AI/PDF files: 15% similarity → try delta encoding
-# Office docs: 20% similarity → try delta encoding
-# General: 80% similarity threshold
+# Similarity thresholds — NOT yet configurable via TOML.
+# Set in crates/mediagit-versioning/src/similarity.rs (by file extension):
+#   AI/PDF/PSD: 0.15   Office docs: 0.20   Images: 0.70   Text: 0.85   Config: 0.95
+# and crates/mediagit-versioning/src/odb/mod.rs (by codec):
+#   ProRes/DNxHR/J2K: 0.60   Subtitles/metadata: 0.90   Default: 0.80
 ```
 
 Delta chains are capped at depth 10 to prevent slow reads on deeply-chained objects.
@@ -70,14 +73,23 @@ Delta chains are capped at depth 10 to prevent slow reads on deeply-chained obje
 
 Large files are split into chunks for efficient deduplication and parallel transfer. MediaGit uses different chunkers per file type:
 
-| File size / type | Chunker | Typical chunk count |
-|------------------|---------|---------------------|
-| < 10 MB | FastCDC (small) | 2–10 |
-| 10–100 MB | FastCDC (medium) | 10–100 |
-| > 100 MB | StreamCDC | 100–2000 |
-| MP4 / MKV / WebM | Video container-aware | 1 per GOP |
-| WAV | Audio-aware | Fixed-size segments |
-| PSD | Layer-aware | 1 per layer group |
+For formats without a dedicated parser, FastCDC's average chunk size scales
+with file size:
+
+| File size | Average chunk (range) |
+|-----------|------------------------|
+| < 100 MB | 1 MB (512 KB – 4 MB) |
+| 100 MB – 10 GB | 2 MB (1 – 8 MB) |
+| 10 GB – 100 GB | 4 MB (1 – 16 MB) |
+| > 100 GB | 8 MB (1 – 32 MB) |
+
+Formats with a dedicated structure-aware parser split at container
+boundaries instead: MP4/MOV (atom/box-aware), MKV/WebM (Matroska
+EBML-aware), AVI (RIFF-aware), GLB/glTF/OBJ/STL/PLY/FBX (3D-model
+structure-aware), and Blender (`.blend`, BHEAD block walker). PSD does not
+have a dedicated chunker — it uses generic FastCDC with small
+creative-container params (1 MB avg / 512 KB–4 MB) for faster re-sync after
+an embedded-stream shift.
 
 **Deduplication**: Identical chunks across files or versions are stored only once. For a 6 GB CSV dataset, this yielded 83% storage savings in testing.
 
@@ -122,6 +134,49 @@ For workstations with < 8 GB RAM, reduce to 256 MB:
 ```toml
 max_size = 268435456  # 256 MB
 ```
+
+## Clone Behaviour
+
+Clone downloads repository data and then materializes your working tree. Two
+things about that are worth knowing.
+
+### The working tree is written while media is still downloading
+
+Small files are complete as soon as the initial transfer finishes, so MediaGit
+writes them immediately instead of waiting for large media to finish arriving.
+Only files backed by chunked media wait for their own chunks.
+
+This is on by default. To turn it off — to compare timings, or to rule it out
+while diagnosing something:
+
+```bash
+MEDIAGIT_CLONE_OVERLAP=0 mediagit clone http://server:3000/my-project
+```
+
+Both settings produce an identical working tree; only the order of writes
+differs.
+
+### An interrupted clone resumes
+
+If a clone fails partway through, or you interrupt it with Ctrl-C, the partial
+directory is **kept**. Re-run the same `clone` command against the same URL and
+branch, and it skips everything already downloaded:
+
+```bash
+mediagit clone http://server:3000/my-project    # interrupted at 90%
+mediagit clone http://server:3000/my-project    # resumes; re-downloads only what is missing
+```
+
+Details worth knowing:
+
+- Resume works at chunk granularity. A chunk interrupted mid-download is
+  re-fetched whole, not from a byte offset.
+- A clone that fails during *setup* — bad URL, bad credentials, no such
+  repository — still cleans up after itself. There is nothing to resume, and
+  leaving a stub directory behind would just make the next attempt fail.
+- MediaGit will only resume into a directory it can prove it created, and only
+  for the same URL and branch. Any other existing directory is refused, as
+  before. To start over, delete the directory.
 
 ## Repository Maintenance
 

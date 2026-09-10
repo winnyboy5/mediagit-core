@@ -4,16 +4,31 @@ Strategies for handling very large files — video masters, high-resolution imag
 
 ## How MediaGit Handles Large Files
 
-MediaGit automatically adapts its behavior based on file size:
+MediaGit automatically adapts its behavior based on file size and type. For
+formats without a dedicated parser, content-defined chunking (FastCDC) scales
+its average chunk size with the file size:
 
-| File size | Chunker | Typical chunks | Strategy |
-|-----------|---------|----------------|----------|
-| < 10 MB | FastCDC (small params) | 2–10 | Single-threaded |
-| 10–100 MB | FastCDC (medium params) | 10–100 | Single-threaded |
-| > 100 MB | StreamCDC | 100–2000 | Parallel workers |
-| MP4 / MKV / WebM | Video container-aware | 1 per GOP | Per-format |
-| PSD | Layer-aware | 1 per layer group | Per-format |
-| WAV | FastCDC | Adaptive by size | Per-format |
+| File size | Average chunk (range) |
+|-----------|------------------------|
+| < 100 MB | 1 MB (512 KB – 4 MB) |
+| 100 MB – 10 GB | 2 MB (1 – 8 MB) |
+| 10 GB – 100 GB | 4 MB (1 – 16 MB) |
+| > 100 GB | 8 MB (1 – 32 MB) |
+
+Formats with a dedicated structure-aware parser split at container
+boundaries instead of the generic size tiers above:
+
+| Format | Chunker |
+|--------|---------|
+| MP4 / MOV / M4V | Atom/box-aware (splits around `moov`/`mdat`) |
+| MKV / WebM | Matroska EBML-aware |
+| AVI | RIFF-aware |
+| GLB / glTF / OBJ / STL / PLY / FBX | 3D-model structure-aware |
+| Blender (`.blend`) | BHEAD block walker |
+| PSD / AI / PDF / EPS / INDD | Generic FastCDC, but with small creative-container params (1 MB avg / 512 KB–4 MB) so re-sync after an embedded-stream shift stays quick |
+
+Structure-aware parsers fall back to plain FastCDC above
+`MEDIAGIT_CONTAINER_CHUNK_CAP_MB` (default 100 MB) or if parsing fails.
 
 No configuration is required. MediaGit detects file size and type automatically.
 
@@ -34,13 +49,13 @@ mediagit add --jobs 8 assets/
 mediagit add --no-parallel assets/
 ```
 
-**Expected throughput (validated benchmarks):**
+**Expected throughput (release build, measured staging throughput):**
 
-| File type | Sequential | Parallel (16 cores) |
-|-----------|-----------|---------------------|
-| PSD (71 MB) | ~2 MB/s | ~35 MB/s |
-| MP4 (500 MB) | ~3 MB/s | ~20 MB/s |
-| Pre-compressed (JPEG) | ~80 MB/s | ~200 MB/s |
+| File type | Throughput |
+|-----------|-----------|
+| Pre-compressed (MP4, MOV, JPEG, USDZ) | 25–240 MB/s — store-mode, zero CPU overhead |
+| Compressible (PSD, TIFF, WAV) | 2–120 MB/s — Zstd compression + optional chunking |
+| Chunked large files (GLB, FLAC, AI) | 1.9–5.2 MB/s — CDC chunking + delta encoding |
 
 For very large files (10–100 GB), I/O tends to be the bottleneck rather than CPU. Use SSDs and tune `--jobs` to match your disk's sequential read throughput divided by average chunk size.
 
@@ -161,7 +176,7 @@ mediagit gc
 For maximum reclamation (slower):
 
 ```bash
-mediagit gc --aggressive
+mediagit gc --repack
 ```
 
 ---

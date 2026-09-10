@@ -20,8 +20,8 @@ The script auto-detects ARM64 architecture and downloads the correct binary from
 sudo apt update && sudo apt upgrade
 
 # Install MediaGit
-wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-aarch64-linux.tar.gz
-tar -xzf mediagit-0.2.8-beta.1-aarch64-linux.tar.gz
+wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-aarch64-linux.tar.gz
+tar -xzf mediagit-0.3.0-rc.5-aarch64-linux.tar.gz
 sudo mv mediagit /usr/local/bin/
 sudo chmod +x /usr/local/bin/mediagit
 
@@ -32,38 +32,32 @@ mediagit --version
 ### Raspberry Pi 4/5 Optimization
 
 ```toml
-# ~/.mediagit/config.toml
+# .mediagit/config.toml
 [performance]
-worker_threads = 4  # Raspberry Pi 4/5 has 4 cores
-chunk_size = "4MB"  # Optimize for limited RAM
+max_concurrency = 4          # Raspberry Pi 4/5 has 4 cores
+upload_concurrency = 4
+download_concurrency = 4
 
 [compression]
 algorithm = "zstd"
-level = "fast"  # Less CPU intensive
+level = 1                    # lowest CPU cost; level is an integer, not a name
 ```
 
 ## ARM Server Installation
 
 ### Ubuntu Server ARM64
 
-```bash
-# Add MediaGit repository
-curl -fsSL https://apt.mediagit.dev/gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/mediagit-archive-keyring.gpg
-echo "deb [arch=arm64 signed-by=/usr/share/keyrings/mediagit-archive-keyring.gpg] https://apt.mediagit.dev stable main" | sudo tee /etc/apt/sources.list.d/mediagit.list
-
-# Install
-sudo apt update
-sudo apt install mediagit-core
-```
+> **Not published.** There is no APT repository at `apt.mediagit.dev`. On ARM64,
+> use the install script or the `aarch64-linux` tarball shown above.
 
 ### Amazon Linux 2 (Graviton)
 
 ```bash
 # Download ARM64 build
-wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-aarch64-linux.tar.gz
+wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-aarch64-linux.tar.gz
 
 # Install
-tar -xzf mediagit-0.2.8-beta.1-aarch64-linux.tar.gz
+tar -xzf mediagit-0.3.0-rc.5-aarch64-linux.tar.gz
 sudo mv mediagit /usr/local/bin/
 sudo chmod +x /usr/local/bin/mediagit
 ```
@@ -78,17 +72,18 @@ Optimized for AWS Graviton processors:
 # Install
 curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 
-# Configure for Graviton
-mediagit config set performance.worker_threads $(nproc)
-mediagit config set compression.algorithm zstd
+# Configure for Graviton. `config set` accepts only author.name, author.email,
+# performance.upload_concurrency and performance.download_concurrency —
+# everything else is edited in .mediagit/config.toml directly.
+mediagit config set performance.upload_concurrency $(nproc)
 ```
 
 ### Oracle Cloud Ampere
 
 ```bash
-# Install on Oracle Cloud ARM instances
-sudo dnf config-manager --add-repo https://rpm.mediagit.dev/mediagit.repo
-sudo dnf install mediagit-core
+# Install on Oracle Cloud ARM instances. There is no rpm.mediagit.dev
+# repository, so use the install script.
+curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 ```
 
 ### Azure ARM VMs
@@ -102,10 +97,10 @@ curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/instal
 
 ```bash
 # Download ARM64 binary
-wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-aarch64-linux.tar.gz
+wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-aarch64-linux.tar.gz
 
 # Extract and install
-tar -xzf mediagit-0.2.8-beta.1-aarch64-linux.tar.gz
+tar -xzf mediagit-0.3.0-rc.5-aarch64-linux.tar.gz
 sudo mv mediagit /usr/local/bin/
 sudo chmod +x /usr/local/bin/mediagit
 
@@ -118,31 +113,46 @@ mediagit --version
 ### Memory-Constrained Devices (1-2GB RAM)
 
 ```toml
-# ~/.mediagit/config.toml
+# .mediagit/config.toml
 [performance]
-worker_threads = 2
-chunk_size = "2MB"
-cache_size = "256MB"
+max_concurrency = 2          # keep peak memory down on a 1-2GB board
+upload_concurrency = 4
+download_concurrency = 4
+buffer_size = 65536          # bytes
+
+[performance.cache]
+enabled = true
+max_size = 268435456         # bytes — 256 MiB
 
 [compression]
-level = "fast"
-parallel = false
+algorithm = "zstd"
+level = 1                    # 1 is the cheapest zstd level; 22 is the slowest
 ```
 
 ### High-Performance ARM Servers (Graviton 3, Ampere Altra)
 
 ```toml
-# ~/.mediagit/config.toml
+# .mediagit/config.toml
 [performance]
-worker_threads = 64  # Full core utilization
-chunk_size = "16MB"
-cache_size = "4GB"
+max_concurrency = 64
+upload_concurrency = 32
+download_concurrency = 24
+pack_workers = 8
+buffer_size = 1048576        # bytes — 1 MiB
+
+[performance.cache]
+enabled = true
+max_size = 4294967296        # bytes — 4 GiB
 
 [compression]
+algorithm = "zstd"
 level = 3
-parallel = true
-threads = 8
 ```
+
+Sizes are raw **bytes**, and `level` is an **integer** (zstd 1-22, brotli 0-11).
+Unrecognised keys in `config.toml` are silently discarded, so a value written in
+the wrong shape — `"256MB"`, or `level = "fast"` — is indistinguishable from
+never having written it at all.
 
 ## System Requirements
 
@@ -151,16 +161,14 @@ threads = 8
 - **Disk**: 100MB for binaries
 - **OS**: Linux kernel 4.4+
 
-### Verified ARM Platforms
+### Build Environment
 
-| Platform | Version | Status |
-|----------|---------|--------|
-| Raspberry Pi 4 | 8GB | ✅ Tested |
-| Raspberry Pi 5 | 4GB, 8GB | ✅ Tested |
-| AWS Graviton 2/3 | All instance types | ✅ Tested |
-| Oracle Ampere A1 | All shapes | ✅ Tested |
-| Azure ARM64 VMs | Dpsv5, Epsv5 series | ✅ Tested |
-| Ampere Altra | All SKUs | ✅ Tested |
+The `aarch64-unknown-linux-gnu` release binary is cross-compiled in CI
+(`.github/workflows/release.yml`), not built or run on real ARM hardware.
+It should work on any AArch64 Linux meeting the requirements above, but none
+of Raspberry Pi, AWS Graviton, Oracle Ampere, Azure ARM64 VMs, or Ampere
+Altra specifically has been verified — treat those as untested rather than
+confirmed.
 
 ## Troubleshooting
 
@@ -179,15 +187,20 @@ uname -m  # Should output: aarch64
 ### Out of Memory on Raspberry Pi
 
 ```toml
-# Reduce memory usage
+# Reduce memory usage — .mediagit/config.toml
 [performance]
-worker_threads = 1
-chunk_size = "1MB"
-cache_size = "128MB"
+max_concurrency = 1
+upload_concurrency = 2
+download_concurrency = 2
+buffer_size = 32768          # bytes — 32 KiB
+
+[performance.cache]
+enabled = true
+max_size = 134217728         # bytes — 128 MiB
 
 [compression]
-level = "fast"
-parallel = false
+algorithm = "zstd"
+level = 1
 ```
 
 ### Slow Performance

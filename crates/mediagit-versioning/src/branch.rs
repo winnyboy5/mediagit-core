@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Branch operations and management
 //!
@@ -164,14 +154,12 @@ impl BranchManager {
         }
 
         // Check if it's the current branch
-        if let Ok(head) = self.refdb.read("HEAD").await {
-            if head.ref_type == RefType::Symbolic {
-                if let Some(target) = head.target {
-                    if target == ref_path {
-                        anyhow::bail!("Cannot delete current branch: {}", branch_name);
-                    }
-                }
-            }
+        if let Ok(head) = self.refdb.read("HEAD").await
+            && head.ref_type == RefType::Symbolic
+            && let Some(target) = head.target
+            && target == ref_path
+        {
+            anyhow::bail!("Cannot delete current branch: {}", branch_name);
         }
 
         self.refdb.delete(&ref_path).await?;
@@ -192,26 +180,26 @@ impl BranchManager {
         let mut branches = Vec::new();
 
         for ref_path in branch_paths {
-            if let Ok(r) = self.refdb.read(&ref_path).await {
-                if let Some(oid) = r.oid {
-                    // Extract the short branch name from the path
-                    let branch_name = ref_path
-                        .strip_prefix("refs/heads/")
-                        .unwrap_or(&ref_path)
-                        .to_string();
+            if let Ok(r) = self.refdb.read(&ref_path).await
+                && let Some(oid) = r.oid
+            {
+                // Extract the short branch name from the path
+                let branch_name = ref_path
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(&ref_path)
+                    .to_string();
 
-                    let is_current = current_branch
-                        .as_ref()
-                        .map(|cb| cb == &branch_name)
-                        .unwrap_or(false);
+                let is_current = current_branch
+                    .as_ref()
+                    .map(|cb| cb == &branch_name)
+                    .unwrap_or(false);
 
-                    branches.push(BranchInfo {
-                        name: branch_name,
-                        ref_path,
-                        oid,
-                        is_current,
-                    });
-                }
+                branches.push(BranchInfo {
+                    name: branch_name,
+                    ref_path,
+                    oid,
+                    is_current,
+                });
             }
         }
 
@@ -287,14 +275,12 @@ impl BranchManager {
         self.refdb.delete(&old_ref).await?;
 
         // If it was current branch, update HEAD
-        if let Ok(head) = self.refdb.read("HEAD").await {
-            if head.ref_type == RefType::Symbolic {
-                if let Some(target) = head.target {
-                    if target == old_ref {
-                        self.refdb.update_symbolic("HEAD", &new_ref).await?;
-                    }
-                }
-            }
+        if let Ok(head) = self.refdb.read("HEAD").await
+            && head.ref_type == RefType::Symbolic
+            && let Some(target) = head.target
+            && target == old_ref
+        {
+            self.refdb.update_symbolic("HEAD", &new_ref).await?;
         }
 
         info!(old_name = %old_name, new_name = %new_name, "Branch renamed");

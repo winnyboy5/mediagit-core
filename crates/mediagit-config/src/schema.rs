@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -67,6 +57,62 @@ pub struct Config {
     /// Custom user-defined settings
     #[serde(default)]
     pub custom: HashMap<String, serde_json::Value>,
+
+    /// Per-repo content-defined chunking (CDC) seed. `0` (the default for
+    /// repos without this field, e.g. pre-existing configs) reproduces the
+    /// original unseeded chunk boundaries exactly. Generated once at `mediagit
+    /// init` for new repos and propagated to clones via protocol capabilities.
+    #[serde(default)]
+    pub cdc_seed: u64,
+
+    /// Per-repo storage namespace (layout v2). All object keys are prefixed
+    /// `"<repo_namespace>/"` by `NamespacedBackend` so one storage
+    /// root/bucket can safely host multiple repos. `None` for pre-v2 repos
+    /// (never written) — the storage factory falls back to a sanitized
+    /// basename of the repo root at open time. Set once at `init`/`clone`
+    /// and never changed afterward (changing it would silently orphan every
+    /// existing key under the old namespace).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_namespace: Option<String>,
+
+    /// Physical storage layout version. `1` = pre-namespace flat layout
+    /// (implicit, absent from old configs); `2` = per-repo namespace +
+    /// true hash fanout (this cycle). Mirrored in the `LAYOUT` marker file
+    /// at the storage root so a repo opened with the wrong client version
+    /// fails fast instead of silently corrupting the physical layout.
+    #[serde(default = "default_layout_version")]
+    pub layout_version: u32,
+
+    /// Unique identifier for *this* repository, distinct from
+    /// `repo_namespace` (which defaults to a sanitized directory basename
+    /// and can collide across independently-created repos sharing a
+    /// storage root/bucket). Generated once at `init`/`clone` and recorded
+    /// in the `LAYOUT` marker so a namespace collision is a hard error
+    /// instead of silently merging two repos' key spaces. `None` for
+    /// configs written before this field existed (adopted into the marker
+    /// on first open after this fix — see `check_or_write_layout_marker`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_id: Option<String>,
+
+    /// Config schema version (distinct from `layout_version`, which tracks
+    /// the on-disk *object storage* layout and is authoritative via the
+    /// `LAYOUT` marker — this field is config.toml's own schema version,
+    /// migrated by `crate::migration::MigrationManager`). Missing on any
+    /// config.toml written before this field existed, which is exactly what
+    /// `#[serde(default)]` (-> 0) is for: an absent field means "v0".
+    #[serde(default)]
+    pub config_version: u32,
+}
+
+/// Current on-disk layout version new repos are initialized with.
+pub const CURRENT_LAYOUT_VERSION: u32 = 2;
+
+fn default_layout_version() -> u32 {
+    // Configs written before this field existed predate layout v2 entirely
+    // (v1 had no namespace, no `LAYOUT` marker) — default to 1, not
+    // `CURRENT_LAYOUT_VERSION`, so a pre-existing repo's config doesn't
+    // silently claim to be on a layout it was never written with.
+    1
 }
 
 impl Config {
@@ -108,8 +154,18 @@ impl Config {
     }
 
     /// Load config from repository root
+    ///
+    /// If the loaded config's `config_version` is behind
+    /// `migration::CONFIG_VERSION`, runs `MigrationManager` to bring it up to
+    /// date, backs up the original to `config.toml.bak`, and writes the
+    /// migrated config back before returning it. This never touches object
+    /// storage layout (`layout_version` / the `LAYOUT` marker) — only the
+    /// config.toml schema.
     pub async fn load(repo_root: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
         use crate::ConfigLoader;
+        use crate::migration::{
+            CONFIG_VERSION, MigrationManager, MigrationV0ToV1, MigrationV1ToV2, MigrationV2ToV3,
+        };
         let config_path = repo_root.as_ref().join(".mediagit/config.toml");
 
         if !config_path.exists() {
@@ -118,7 +174,51 @@ impl Config {
         }
 
         let loader = ConfigLoader::new();
-        Ok(loader.load_file(&config_path).await?)
+        let config: Config = loader.load_file(&config_path).await?;
+
+        if config.config_version >= CONFIG_VERSION {
+            return Ok(config);
+        }
+
+        tracing::info!(
+            from_version = config.config_version,
+            to_version = CONFIG_VERSION,
+            path = %config_path.display(),
+            "Migrating config.toml to current schema version"
+        );
+
+        let backup_path = config_path.with_file_name(format!(
+            "{}.bak",
+            config_path
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("Invalid config path: {}", config_path.display()))?
+                .to_string_lossy()
+        ));
+        std::fs::copy(&config_path, &backup_path).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to back up config.toml to {} before migration: {}",
+                backup_path.display(),
+                e
+            )
+        })?;
+
+        let mut manager = MigrationManager::new();
+        manager.register(Box::new(MigrationV0ToV1));
+        manager.register(Box::new(MigrationV1ToV2));
+        manager.register(Box::new(MigrationV2ToV3));
+
+        let value = serde_json::to_value(&config)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize config for migration: {}", e))?;
+        let migrated_value = manager
+            .migrate(value, config.config_version, CONFIG_VERSION)
+            .map_err(|e| anyhow::anyhow!("Config migration failed: {}", e))?;
+        let mut migrated: Config = serde_json::from_value(migrated_value)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize migrated config: {}", e))?;
+        migrated.config_version = CONFIG_VERSION;
+
+        migrated.save(repo_root.as_ref())?;
+
+        Ok(migrated)
     }
 
     /// Save config to repository root
@@ -131,7 +231,35 @@ impl Config {
         }
 
         let toml_str = toml::to_string_pretty(self)?;
-        std::fs::write(&config_path, toml_str)?;
+
+        // Atomic: this file holds the author identity and every remote, so a
+        // torn write (crash, ENOSPC) leaves a repository that cannot resolve
+        // its own remote or commit. Same defect class as the index and pack
+        // manifests. Written to a process/thread-unique temp file in the same
+        // directory, fsynced, then renamed, so a reader sees either the old
+        // contents or the complete new ones.
+        let unique = format!(
+            "{}.{}.{:?}.tmp",
+            config_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("config.toml"),
+            std::process::id(),
+            std::thread::current().id(),
+        );
+        let tmp_path = config_path.with_file_name(unique);
+
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&tmp_path)?;
+            f.write_all(toml_str.as_bytes())?;
+            f.sync_all()?;
+        }
+
+        if let Err(e) = std::fs::rename(&tmp_path, &config_path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e.into());
+        }
         Ok(())
     }
 
@@ -287,26 +415,59 @@ pub struct S3Storage {
     /// Object prefix
     #[serde(default)]
     pub prefix: String,
-
-    /// Enable server-side encryption
-    #[serde(default)]
-    pub encryption: bool,
-
-    /// Encryption algorithm (AES256, aws:kms)
-    #[serde(default = "default_encryption_algorithm")]
-    pub encryption_algorithm: String,
 }
+
+/// How to authenticate to Azure Blob Storage.
+///
+/// A tagged enum so exactly one credential is representable. The previous flat
+/// shape had `account_key` and `connection_string` as independent `Option`s,
+/// which made "neither" and "both" expressible and pushed the check into
+/// runtime validation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AzureAuth {
+    /// Shared account key — the classic Azure Storage credential.
+    AccountKey {
+        /// Storage account name.
+        account_name: String,
+        /// Storage account key.
+        account_key: String,
+    },
+    /// Full `DefaultEndpointsProtocol=...;AccountName=...;AccountKey=...`
+    /// string. Parsed by the storage backend, not by us.
+    ConnectionString {
+        /// The connection string verbatim.
+        value: String,
+    },
+    /// A pre-minted Shared Access Signature. First-class rather than something
+    /// smuggled through a connection string.
+    Sas {
+        /// Storage account name.
+        account_name: String,
+        /// SAS token, with or without a leading `?`.
+        token: String,
+    },
+    /// Local Azurite emulator, using the well-known development credentials.
+    ///
+    /// Explicit, where it used to be *inferred* from connection-string
+    /// contents — which is why the emulator path was historically the least
+    /// obvious code in the Azure backend.
+    Emulator,
+}
+
+/// Azurite's published development connection string.
+///
+/// These are the emulator's fixed, publicly-documented credentials — they are
+/// not a secret and are identical on every Azurite install. Defined once here
+/// so the `Emulator` auth variant resolves the same way in every consumer.
+pub const AZURITE_DEV_CONNECTION_STRING: &str = "DefaultEndpointsProtocol=http;\
+AccountName=devstoreaccount1;\
+AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;\
+BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;";
 
 /// Azure Blob Storage configuration
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AzureStorage {
-    /// Storage account name
-    pub account_name: String,
-
-    /// Storage account key (can be overridden via env)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub account_key: Option<String>,
-
     /// Container name
     pub container: String,
 
@@ -314,9 +475,40 @@ pub struct AzureStorage {
     #[serde(default)]
     pub prefix: String,
 
-    /// Connection string (alternative to account_name/account_key)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Credential. `None` only when reading a pre-v3 config; validation turns
+    /// that into an actionable migration error rather than a bare serde
+    /// "missing field" message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<AzureAuth>,
+
+    /// Fields from the pre-v3 flat shape, kept solely so a stale config is
+    /// *recognised* and reported precisely. Never written back out.
+    #[serde(flatten, default)]
+    pub legacy: LegacyAzureFields,
+}
+
+/// Pre-`config_version` 3 Azure fields. Retained for detection and migration
+/// only — see [`AzureAuth`] for the current shape.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct LegacyAzureFields {
+    /// Old top-level `account_name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_name: Option<String>,
+    /// Old top-level `account_key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_key: Option<String>,
+    /// Old top-level `connection_string`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_string: Option<String>,
+}
+
+impl LegacyAzureFields {
+    /// Whether any pre-v3 field was present in the parsed config.
+    pub fn is_present(&self) -> bool {
+        self.account_name.is_some()
+            || self.account_key.is_some()
+            || self.connection_string.is_some()
+    }
 }
 
 /// Google Cloud Storage configuration
@@ -571,14 +763,14 @@ pub struct SecurityConfig {
     #[serde(default)]
     pub cors_origins: Vec<String>,
 
-    /// Enable encryption at rest
-    #[serde(default)]
-    pub encryption_at_rest: bool,
-
-    /// Encryption key path (can be overridden via env)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub encryption_key_path: Option<String>,
-
+    // `encryption_at_rest` and `encryption_key_path` used to live here, and
+    // several documents described them as the server's at-rest encryption
+    // switch. Nothing ever read them: the server loads its own `ServerConfig`,
+    // and this type's `validate()` is never called on the server path either,
+    // so even the "key path must exist" check never ran. The real switch is
+    // `[encryption]` in `mediagit-server`'s config. Removed rather than left in
+    // place, because a setting that looks like it enables encryption and
+    // silently does not is worse than no setting.
     /// Rate limiting configuration
     pub rate_limiting: RateLimitConfig,
 }
@@ -600,6 +792,20 @@ pub struct RemoteConfig {
     /// Default fetch flag
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_fetch: Option<bool>,
+
+    /// JWT bearer token for this remote (client auth, M2). Lowest-precedence
+    /// credential source — `MEDIAGIT_TOKEN`/`MEDIAGIT_API_KEY` env vars and
+    /// the OS keychain are checked first (see `resolve_credentials` in
+    /// `mediagit-cli/src/repo.rs`). Stored in plaintext in `config.toml`; a
+    /// world/group-readable config file triggers a warning when this is read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+
+    /// API key for this remote (client auth, M2). Same precedence and
+    /// plaintext-storage caveat as `token`; only one of `token`/`api_key`
+    /// should be set per remote (`token` wins if both are).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
 }
 
 impl RemoteConfig {
@@ -610,6 +816,8 @@ impl RemoteConfig {
             fetch: None,
             push: None,
             default_fetch: Some(true),
+            token: None,
+            api_key: None,
         }
     }
 
@@ -747,10 +955,6 @@ fn default_file_permissions() -> String {
     "0644".to_string()
 }
 
-fn default_encryption_algorithm() -> String {
-    "AES256".to_string()
-}
-
 fn default_max_concurrency() -> usize {
     num_cpus::get().max(4)
 }
@@ -823,12 +1027,16 @@ fn default_metrics_interval() -> u64 {
     60
 }
 
+// Sized for bulk media transfer: the limiter covers the data plane, and a
+// large push falls back to one request per chunk when packs are
+// unavailable. Keyed per-identity (not per-IP), so this is one user's
+// budget. See mediagit-server::security::RateLimitConfig.
 fn default_rps() -> u32 {
-    100
+    1000
 }
 
 fn default_burst() -> u32 {
-    200
+    2000
 }
 
 impl Default for Config {
@@ -845,6 +1053,11 @@ impl Default for Config {
             branches: HashMap::new(),
             protected_branches: HashMap::new(),
             custom: HashMap::new(),
+            cdc_seed: 0,
+            repo_namespace: None,
+            layout_version: default_layout_version(),
+            repo_id: None,
+            config_version: crate::migration::CONFIG_VERSION,
         }
     }
 }
@@ -967,8 +1180,6 @@ impl Default for SecurityConfig {
             api_key: None,
             auth_enabled: false,
             cors_origins: vec!["http://localhost:3000".to_string()],
-            encryption_at_rest: false,
-            encryption_key_path: None,
             rate_limiting: RateLimitConfig::default(),
         }
     }
@@ -978,8 +1189,8 @@ impl Default for RateLimitConfig {
     fn default() -> Self {
         RateLimitConfig {
             enabled: false,
-            requests_per_second: 100,
-            burst_size: 200,
+            requests_per_second: 1000,
+            burst_size: 2000,
         }
     }
 }
@@ -1003,5 +1214,28 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(config, deserialized);
+    }
+
+    #[test]
+    fn test_config_without_cdc_seed_defaults_to_zero() {
+        // Existing configs written before this field existed must still parse,
+        // with cdc_seed defaulting to 0 (legacy/unseeded chunking).
+        let toml_str = r#"
+[app]
+[storage]
+backend = "filesystem"
+base_path = "./data"
+[compression]
+[performance]
+[performance.cache]
+[performance.connection_pool]
+[performance.timeouts]
+[observability]
+[observability.metrics]
+[security]
+[security.rate_limiting]
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.cdc_seed, 0);
     }
 }

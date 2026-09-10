@@ -16,31 +16,36 @@ If `PATH` is not specified, initializes the repository in the current directory.
 
 ## Options
 
-### `--storage-backend <BACKEND>`
-Storage backend to use for the object database.
-
-- **Values**: `local`, `s3`, `azure`, `gcs`, `minio`, `b2`, `spaces`
-- **Default**: `local`
-
-### `--compression <ALGORITHM>`
-Compression algorithm for storing objects.
-
-- **Values**: `zstd`, `brotli`, `none`
-- **Default**: `zstd`
-
-### `--compression-level <LEVEL>`
-Compression level to use.
-
-- **Values**: `fast`, `default`, `best`
-- **Default**: `default`
-
-### `-b, --initial-branch <BRANCH>`
+### `--initial-branch <BRANCH>`
 Name of the initial branch.
 
 - **Default**: `main`
 
 ### `--bare`
-Create a bare repository without a working directory.
+Compatibility alias. MediaGit repositories always use the `.mediagit` layout,
+so this creates exactly the same structure as a plain `init`. Commonly used
+when seeding a server-side repository directory
+(`mediagit init --bare <data-dir>/<repo>`).
+
+### `-q, --quiet`
+Quiet mode - minimal output.
+
+### `-v, --verbose`
+Enable verbose output.
+
+### `--color <WHEN>`
+Colored output: `always`, `auto`, or `never`. Default: `auto`. Global option, shared by every
+`mediagit` subcommand.
+
+### `-C, --repository <PATH>`
+Run as if `init` was started in `<PATH>` instead of the current directory. Global option, shared
+by every `mediagit` subcommand.
+
+### `-h, --help`
+Print help for `init` and exit.
+
+### `-V, --version`
+Print the `mediagit` version and exit.
 
 ## Examples
 
@@ -56,24 +61,11 @@ $ mediagit init my-media-project
 ✓ Initialized empty MediaGit repository in my-media-project/.mediagit/
 ```
 
-### Initialize with S3 backend
-```bash
-$ mediagit init --storage-backend s3
-✓ Initialized empty MediaGit repository in .mediagit/
-✓ Configured AWS S3 storage backend
-```
-
 ### Initialize with custom initial branch
 ```bash
 $ mediagit init --initial-branch develop
 ✓ Initialized empty MediaGit repository in .mediagit/
 ✓ Created initial branch: develop
-```
-
-### Initialize bare repository
-```bash
-$ mediagit init --bare repo.git
-✓ Initialized bare MediaGit repository in repo.git/
 ```
 
 ## Repository Structure
@@ -98,7 +90,7 @@ The generated `config.toml` contains the full default configuration. Key section
 ```toml
 [app]
 name = "mediagit"
-version = "0.2.8-beta.1"   # matches current binary version
+version = "0.3.0-rc.5"   # matches current binary version
 environment = "development"
 port = 8080
 
@@ -140,4 +132,4 @@ The `[compression]` section is written for reference but is not read at runtime.
 
 - [mediagit add](./add.md) - Add files to the staging area
 - [mediagit commit](./commit.md) - Record changes to the repository
-- [mediagit config](./config.md) - Get and set repository options
+- [Configuration Reference](../reference/config.md) - Repository configuration options

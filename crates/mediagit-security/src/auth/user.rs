@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! User model and management
 
@@ -51,6 +41,18 @@ pub struct User {
 
     /// Last login timestamp
     pub last_login: Option<i64>,
+
+    /// AU-11: account suspended without being deleted.
+    ///
+    /// Deletion was previously the only way to stop someone signing in, which
+    /// forces a choice between leaving access open and destroying the record
+    /// of who did what. Offboarding, a suspected compromise and a dispute all
+    /// want "stop this account now, keep its history".
+    ///
+    /// Checked on every request rather than at token issue, so disabling takes
+    /// effect immediately instead of when the token happens to expire.
+    #[serde(default)]
+    pub disabled: bool,
 }
 
 impl User {
@@ -63,7 +65,13 @@ impl User {
             role,
             created_at: chrono::Utc::now().timestamp(),
             last_login: None,
+            disabled: false,
         }
+    }
+
+    /// AU-11: may this account authenticate right now?
+    pub fn is_active(&self) -> bool {
+        !self.disabled
     }
 
     /// Get user permissions based on role

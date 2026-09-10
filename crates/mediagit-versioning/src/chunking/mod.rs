@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Content-based chunking for efficient media storage
 //!
@@ -52,7 +42,7 @@ use tracing::{debug, info, warn};
 pub(crate) mod chunker;
 pub(crate) mod formats;
 
-/// Chunk identifier (SHA-256 hash of chunk content)
+/// Chunk identifier (BLAKE3 hash of chunk content)
 pub type ChunkId = Oid;
 
 /// Chunking strategy selection
@@ -205,6 +195,8 @@ pub(super) const TAGS_ID: u32 = 0x1254C367; // Tags (metadata)
 pub(super) const ATTACHMENTS_ID: u32 = 0x1941A469; // Attachments
 pub(super) const VOID_ID: u32 = 0xEC; // Void (padding, skip)
 pub(super) const CRC32_ID: u32 = 0xBF; // CRC-32 (skip)
+pub(super) const TRACK_ENTRY_ID: u32 = 0xAE; // TrackEntry (child of Tracks)
+pub(super) const CODEC_ID_ID: u32 = 0x86; // CodecID string (child of TrackEntry)
 
 /// Get optimal chunk parameters based on file size
 ///
@@ -251,9 +243,224 @@ fn get_creative_chunk_params(_file_size: u64) -> (usize, usize, usize) {
     (MB, 512 * 1024, 4 * MB)
 }
 
+/// Chunk params for the audio tier.
+///
+/// Compressed audio benefits from smaller chunks than the generic size
+/// tiers: 256 KB avg / 64 KB min / 1 MB max keeps boundaries tight enough to
+/// re-sync after small edits (trims, metadata tag rewrites) without the
+/// manifest overhead of per-sample chunking.
+///
+/// Spec'd for WAV/AIFF/FLAC/OGG/MP3, but currently wired to MP3/OGG only
+/// (see the deviation comment on the `flac` match arm in chunker.rs):
+/// measured on the dedup_report corpus, applying this tier to WAV/FLAC
+/// regressed total add_ms by ~140% for <1pp dedup gain, driven by
+/// SmartCompressor's large fixed per-call cost multiplied by ~4x more
+/// unique chunks on those two large-by-volume formats.
+fn get_audio_chunk_params(_file_size: u64) -> (usize, usize, usize) {
+    (256 * 1024, 64 * 1024, 1024 * 1024)
+}
+
+static CONTAINER_CHUNK_CAP_BYTES: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+// ponytail: the format-aware container walkers (chunk_avi/chunk_mp4/
+// chunk_matroska/...) accumulate every ContentChunk — each owning a Vec<u8>
+// copy of its bytes — into one Vec before any chunk is forwarded to the
+// caller (see fill_coverage_gaps in formats.rs, which re-sorts the whole Vec
+// for gap-patching and can't run incrementally without becoming a cursor-based
+// rewrite of boundary-adjacent logic). So peak heap for that path scales with
+// file size. Rather than risk touching that logic under time pressure, cap
+// it: above this size, container-format files fall back to the already-
+// memory-bounded StreamCDC path (same one non-container files always use).
+// Upgrade path: make fill_coverage_gaps track a running cursor instead of
+// re-scanning the full Vec, then thread a channel sender through the walkers
+// so they can stream chunks out as found, removing this cap entirely.
+//
+/// Byte-size ceiling above which container-format chunking (mmap + the
+/// format-aware walker) is skipped in favor of `StreamCDC`, to bound peak
+/// heap use for the container path.
+///
+/// Controlled by `MEDIAGIT_CONTAINER_CHUNK_CAP_MB` (default: 100, matching
+/// the existing medium-file tier boundary in `chunk_file_streaming`). Set to
+/// `0` to disable the cap (unbounded, pre-existing behavior).
+fn container_chunk_cap_bytes() -> u64 {
+    *CONTAINER_CHUNK_CAP_BYTES.get_or_init(|| {
+        container_chunk_cap_from_env(
+            std::env::var("MEDIAGIT_CONTAINER_CHUNK_CAP_MB")
+                .ok()
+                .as_deref(),
+        )
+    })
+}
+
+/// Split out from [`container_chunk_cap_bytes`] so tests can exercise the
+/// parsing logic directly without touching the process-wide `OnceLock`.
+fn container_chunk_cap_from_env(var: Option<&str>) -> u64 {
+    let mb = var.and_then(|v| v.parse::<u64>().ok()).unwrap_or(100);
+    if mb == 0 { u64::MAX } else { mb * 1024 * 1024 }
+}
+
 /// Content-based chunker
 pub struct ContentChunker {
     pub(super) strategy: ChunkStrategy,
+    /// Per-repo CDC seed for gear-hash mixing. `0` reproduces the original
+    /// (pre-seed) chunk boundaries exactly — this is the legacy/default value.
+    pub(super) seed: u64,
+}
+
+/// Resolve the effective CDC seed for chunking.
+///
+/// Priority: `MEDIAGIT_CDC_SEED` env var (parsed as u64; overrides everything,
+/// including `0` which forces legacy unseeded boundaries) > `repo_seed` (the
+/// repo's persisted `cdc_seed` config, `0` if absent) > `0`.
+///
+/// A seed mismatch between two clones of the same repo only degrades
+/// deduplication (different chunk boundaries) — it never affects correctness,
+/// since chunk storage remains content-addressed.
+pub fn resolve_cdc_seed(repo_seed: u64) -> u64 {
+    std::env::var("MEDIAGIT_CDC_SEED")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(repo_seed)
+}
+
+static CODEC_DETECT_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Parse the `MEDIAGIT_CODEC_DETECT` value into an enabled/disabled flag.
+/// Split out from [`codec_detect_enabled`] so tests can exercise the parsing
+/// logic directly without touching the process-wide `OnceLock` (which, once
+/// initialized by any test in the same process, can no longer be changed).
+fn codec_detect_enabled_from_env(var: Option<&str>) -> bool {
+    var.map(|v| v != "0").unwrap_or(true)
+}
+
+/// Whether container-aware codec detection is enabled.
+///
+/// Controlled by `MEDIAGIT_CODEC_DETECT` (default: enabled). Set to `0` to
+/// force every `CodecHint` to `Unknown` — byte-for-byte the pre-detection
+/// chunking behavior. Read once and cached (never per-chunk/per-byte).
+fn codec_detect_enabled() -> bool {
+    *CODEC_DETECT_ENABLED.get_or_init(|| {
+        codec_detect_enabled_from_env(std::env::var("MEDIAGIT_CODEC_DETECT").ok().as_deref())
+    })
+}
+
+// Per-format kill knobs for the P3a structure-aware walkers (FBX/blend/STL/PLY)
+// and the audio chunk tier. Each reads its env var once (OnceLock) and shares
+// the same "0 disables, anything else (including unset) enables" parsing as
+// `codec_detect_enabled_from_env` above — value `0` restores exact pre-P3a
+// chunking behavior for that format.
+static CHUNK_FBX_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static CHUNK_BLEND_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static CHUNK_STL_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static CHUNK_PLY_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static AUDIO_TIER_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+fn chunk_fbx_enabled() -> bool {
+    // Default OFF, unlike the other walkers. Two measured strikes:
+    // (1) byte-insert pair: LOST 3.79pp dedup vs generic CDC (the insert
+    //     breaks the EndOffset chain, so v1/v2 take different cut paths);
+    // (2) fair trial on a structure-VALID edit (duplicated subtree, all
+    //     offsets fixed up): +0.003pp — statistically nothing, because real
+    //     FBX files are one giant `Objects` node (~98% of bytes) and the
+    //     top-level walker collapses to whole-span CDC anyway.
+    // Beating CDC would require descending INTO Objects (per-Model/Geometry
+    // cuts) — a different design. Until someone builds that, this stays off;
+    // opt in with MEDIAGIT_CHUNK_FBX=1.
+    *CHUNK_FBX_ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("MEDIAGIT_CHUNK_FBX").ok().as_deref(),
+            Some("1")
+        )
+    })
+}
+
+fn chunk_blend_enabled() -> bool {
+    *CHUNK_BLEND_ENABLED.get_or_init(|| {
+        codec_detect_enabled_from_env(std::env::var("MEDIAGIT_CHUNK_BLEND").ok().as_deref())
+    })
+}
+
+fn chunk_stl_enabled() -> bool {
+    *CHUNK_STL_ENABLED.get_or_init(|| {
+        codec_detect_enabled_from_env(std::env::var("MEDIAGIT_CHUNK_STL").ok().as_deref())
+    })
+}
+
+fn chunk_ply_enabled() -> bool {
+    *CHUNK_PLY_ENABLED.get_or_init(|| {
+        codec_detect_enabled_from_env(std::env::var("MEDIAGIT_CHUNK_PLY").ok().as_deref())
+    })
+}
+
+fn audio_tier_enabled() -> bool {
+    *AUDIO_TIER_ENABLED.get_or_init(|| {
+        codec_detect_enabled_from_env(std::env::var("MEDIAGIT_AUDIO_TIER").ok().as_deref())
+    })
+}
+
+/// Video-group codec hints (matches the classification `odb::to_chunk_codec_hint`
+/// and `odb::delta_ratio_threshold` use for compression/delta strategy).
+fn is_video_codec_hint(hint: CodecHint) -> bool {
+    matches!(
+        hint,
+        CodecHint::H264
+            | CodecHint::H265
+            | CodecHint::VP9
+            | CodecHint::AV1
+            | CodecHint::ProRes
+            | CodecHint::DNxHR
+            | CodecHint::Jpeg2000
+            | CodecHint::RawVideo
+    )
+}
+
+/// Audio-group codec hints.
+fn is_audio_codec_hint(hint: CodecHint) -> bool {
+    matches!(
+        hint,
+        CodecHint::AAC
+            | CodecHint::Opus
+            | CodecHint::MP3
+            | CodecHint::Vorbis
+            | CodecHint::PCM
+            | CodecHint::FLAC
+            | CodecHint::ALAC
+    )
+}
+
+/// Pick the "dominant" codec hint out of the per-track/per-sample-entry hints
+/// found while scanning container metadata (MP4 `stsd`, MKV `Tracks`, AVI
+/// `strl`). Video dominates a container's byte content (mdat/Cluster/movi),
+/// so the first video hint wins; falls back to the first audio hint when the
+/// file has no video track. Empty/subtitle-only input yields `Unknown`.
+pub(super) fn dominant_codec_hint(hints: &[CodecHint]) -> CodecHint {
+    hints
+        .iter()
+        .copied()
+        .find(|h| is_video_codec_hint(*h))
+        .or_else(|| hints.iter().copied().find(|h| is_audio_codec_hint(*h)))
+        .unwrap_or(CodecHint::Unknown)
+}
+
+/// Overwrite `codec_hint` on every chunk, honoring the `MEDIAGIT_CODEC_DETECT`
+/// kill switch and leaving chunks untouched when `hint` is `Unknown`.
+pub(super) fn apply_codec_hint(chunks: Vec<ContentChunk>, hint: CodecHint) -> Vec<ContentChunk> {
+    apply_codec_hint_if(chunks, hint, codec_detect_enabled())
+}
+
+/// Same as [`apply_codec_hint`] but takes the enabled flag explicitly, so
+/// tests can exercise both branches without racing the shared `OnceLock`.
+fn apply_codec_hint_if(
+    mut chunks: Vec<ContentChunk>,
+    hint: CodecHint,
+    enabled: bool,
+) -> Vec<ContentChunk> {
+    if enabled && hint != CodecHint::Unknown {
+        for chunk in &mut chunks {
+            chunk.codec_hint = hint;
+        }
+    }
+    chunks
 }
 
 /// Chunk store for managing chunk-level deduplication
@@ -356,7 +563,7 @@ pub struct ChunkStoreStats {
 /// Chunk reference in manifest (minimal metadata for reconstruction)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkRef {
-    /// Chunk identifier (SHA-256 hash)
+    /// Chunk identifier (BLAKE3 hash)
     pub id: ChunkId,
     /// Offset in original file
     pub offset: u64,
@@ -368,6 +575,13 @@ pub struct ChunkRef {
     #[serde(default)]
     pub codec_hint: CodecHint,
 }
+
+/// Magic bytes identifying a chunk manifest envelope (distinct from bare postcard bodies).
+const MANIFEST_MAGIC: &[u8; 4] = b"MGCM";
+
+/// Current chunk manifest format version. Bump when the body layout changes,
+/// and teach `ChunkManifest::from_bytes` how to read the new version.
+const MANIFEST_VERSION: u8 = 1;
 
 /// Chunk manifest for reconstructing chunked objects
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -381,6 +595,57 @@ pub struct ChunkManifest {
 }
 
 impl ChunkManifest {
+    /// Serialize to the on-disk envelope: `MAGIC (4 bytes) | VERSION (1 byte) | postcard body`.
+    ///
+    /// The envelope lets a future reader detect a manifest format change before
+    /// postcard (a non-self-describing, positional format) attempts to parse it.
+    pub fn to_bytes(&self) -> anyhow::Result<Vec<u8>> {
+        let body = crate::format::serialize(self)?;
+        let mut out = Vec::with_capacity(MANIFEST_MAGIC.len() + 1 + body.len());
+        out.extend_from_slice(MANIFEST_MAGIC);
+        out.push(MANIFEST_VERSION);
+        out.extend_from_slice(&body);
+        Ok(out)
+    }
+
+    /// Deserialize from the on-disk envelope, validating magic and version
+    /// before touching the postcard body. Unknown magic or a version newer
+    /// than this build supports is a hard error, never a silent fallback.
+    pub fn from_bytes(data: &[u8]) -> anyhow::Result<Self> {
+        let header_len = MANIFEST_MAGIC.len() + 1;
+        if data.len() < header_len {
+            anyhow::bail!(
+                "ChunkManifest data too short: expected at least {} header bytes, got {}",
+                header_len,
+                data.len()
+            );
+        }
+        let (magic, rest) = data.split_at(MANIFEST_MAGIC.len());
+        if magic != MANIFEST_MAGIC {
+            anyhow::bail!(
+                "ChunkManifest magic mismatch: expected {:?}, got {:?} (not a chunk manifest, or corrupted)",
+                MANIFEST_MAGIC,
+                magic
+            );
+        }
+        let version = rest[0];
+        if version > MANIFEST_VERSION {
+            anyhow::bail!(
+                "ChunkManifest version {} is newer than the highest version this build supports ({}); \
+                upgrade mediagit to read this repository",
+                version,
+                MANIFEST_VERSION
+            );
+        }
+        crate::format::deserialize(&rest[1..]).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to deserialize chunk manifest body (version {}): {}",
+                version,
+                e
+            )
+        })
+    }
+
     /// Create manifest from chunks
     pub fn from_chunks(chunks: Vec<ContentChunk>, filename: Option<String>) -> Self {
         let total_size = chunks.iter().map(|c| c.size as u64).sum();
@@ -410,8 +675,67 @@ impl ChunkManifest {
 
 #[cfg(test)]
 mod tests {
-    use super::formats::{parse_ebml_elements, parse_mp4_atoms, read_ebml_id, read_ebml_size};
+    use super::formats::{
+        mkv_codec_id_to_hint, parse_ebml_elements, parse_mp4_atoms, read_ebml_id, read_ebml_size,
+    };
     use super::*;
+
+    #[test]
+    fn test_manifest_envelope_roundtrip() {
+        let manifest = ChunkManifest {
+            chunks: vec![ChunkRef {
+                id: Oid::hash(b"chunk-a"),
+                offset: 0,
+                size: 42,
+                chunk_type: ChunkType::Generic,
+                codec_hint: CodecHint::default(),
+            }],
+            total_size: 42,
+            filename: Some("test.bin".to_string()),
+        };
+
+        let bytes = manifest.to_bytes().unwrap();
+        let decoded = ChunkManifest::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.total_size, manifest.total_size);
+        assert_eq!(decoded.filename, manifest.filename);
+        assert_eq!(decoded.chunks.len(), manifest.chunks.len());
+        assert_eq!(decoded.chunks[0].id, manifest.chunks[0].id);
+    }
+
+    #[test]
+    fn test_manifest_envelope_truncated() {
+        let manifest = ChunkManifest {
+            chunks: vec![],
+            total_size: 0,
+            filename: None,
+        };
+        let bytes = manifest.to_bytes().unwrap();
+        assert!(ChunkManifest::from_bytes(&bytes[..3]).is_err());
+    }
+
+    #[test]
+    fn test_manifest_envelope_bad_magic() {
+        let manifest = ChunkManifest {
+            chunks: vec![],
+            total_size: 0,
+            filename: None,
+        };
+        let mut bytes = manifest.to_bytes().unwrap();
+        bytes[0] = b'X';
+        assert!(ChunkManifest::from_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn test_manifest_envelope_future_version_rejected() {
+        let manifest = ChunkManifest {
+            chunks: vec![],
+            total_size: 0,
+            filename: None,
+        };
+        let mut bytes = manifest.to_bytes().unwrap();
+        bytes[MANIFEST_MAGIC.len()] = MANIFEST_VERSION + 1;
+        assert!(ChunkManifest::from_bytes(&bytes).is_err());
+    }
 
     #[tokio::test]
     async fn test_fixed_chunking() {
@@ -465,6 +789,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_fastcdc_handles_input_smaller_than_min_size() {
+        // Depended on by emit_coalesced_node_chunks/chunk_stl/chunk_ply,
+        // which always run FastCDC regardless of segment size: confirms it
+        // degrades to a single whole-input chunk rather than panicking or
+        // misbehaving when data.len() < min_size.
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let data = vec![7u8; 1000]; // 1000 bytes, well below min_size
+        let chunks = chunker
+            .chunk_fastcdc(&data, 1024 * 1024, 512 * 1024, 4 * 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(chunks.iter().map(|c| c.size).sum::<usize>(), 1000);
+    }
+
+    #[tokio::test]
     async fn test_fastcdc_deterministic() {
         // FastCDC should produce the same chunk boundaries for the same data
         let data = (0..50_000).map(|i| (i % 256) as u8).collect::<Vec<u8>>();
@@ -499,6 +838,91 @@ mod tests {
             chunks1[0].id, chunks3[0].id,
             "Different content should produce different chunks"
         );
+    }
+
+    /// Deterministic pseudo-random bytes (LCG) — avoids the periodicity of a
+    /// simple `i % 256` ramp, which repeats every 256 bytes and can make
+    /// same-length chunk boundaries hash identically regardless of seed.
+    fn pseudo_random_bytes(len: usize, mut state: u32) -> Vec<u8> {
+        (0..len)
+            .map(|_| {
+                state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                (state >> 16) as u8
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_cdc_seed_changes_boundaries() {
+        // Same data, seed=0 vs. a nonzero seed, should produce different chunk
+        // boundaries (gear table is XORed with the seed before hashing).
+        let data = pseudo_random_bytes(50_000, 42);
+
+        let unseeded = ContentChunker::with_seed(
+            ChunkStrategy::Rolling {
+                avg_size: 8192,
+                min_size: 4096,
+                max_size: 16384,
+            },
+            0,
+        );
+        let seeded = ContentChunker::with_seed(
+            ChunkStrategy::Rolling {
+                avg_size: 8192,
+                min_size: 4096,
+                max_size: 16384,
+            },
+            0xDEAD_BEEF,
+        );
+
+        let chunks_unseeded = unseeded.chunk(&data, "test.bin").await.unwrap();
+        let chunks_seeded = seeded.chunk(&data, "test.bin").await.unwrap();
+
+        assert!(
+            chunks_unseeded.len() > 3,
+            "test data should produce more than 3 chunks"
+        );
+
+        let ids_unseeded: std::collections::HashSet<_> =
+            chunks_unseeded.iter().map(|c| c.id).collect();
+        let ids_seeded: std::collections::HashSet<_> = chunks_seeded.iter().map(|c| c.id).collect();
+        assert_ne!(
+            ids_unseeded, ids_seeded,
+            "seed=0 and seed=0xDEADBEEF should produce different chunk boundaries"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cdc_seed_deterministic_across_instances() {
+        // Same data, same nonzero seed, two separate chunker instances should
+        // produce byte-identical boundaries (seed only affects the gear table,
+        // not any per-instance state).
+        let data = pseudo_random_bytes(50_000, 42);
+
+        let chunker1 = ContentChunker::with_seed(
+            ChunkStrategy::Rolling {
+                avg_size: 8192,
+                min_size: 4096,
+                max_size: 16384,
+            },
+            0x1234_5678,
+        );
+        let chunker2 = ContentChunker::with_seed(
+            ChunkStrategy::Rolling {
+                avg_size: 8192,
+                min_size: 4096,
+                max_size: 16384,
+            },
+            0x1234_5678,
+        );
+
+        let chunks1 = chunker1.chunk(&data, "test.bin").await.unwrap();
+        let chunks2 = chunker2.chunk(&data, "test.bin").await.unwrap();
+
+        assert_eq!(chunks1.len(), chunks2.len());
+        for (c1, c2) in chunks1.iter().zip(chunks2.iter()) {
+            assert_eq!(c1.id, c2.id, "Same seed should be deterministic");
+        }
     }
 
     #[test]
@@ -909,7 +1333,7 @@ mod tests {
         // Large Cluster: header + 5MB of data (triggers CDC subdivision at >4MB)
         let cluster_content_size: usize = 5 * 1024 * 1024;
         mkv.extend_from_slice(&[0x1F, 0x43, 0xB6, 0x75]); // Cluster ID
-                                                          // Encode size as 4-byte VINT: marker bit in first byte
+        // Encode size as 4-byte VINT: marker bit in first byte
         let size_val = cluster_content_size as u32;
         mkv.push(0x10 | ((size_val >> 24) & 0x0F) as u8); // 4-byte VINT marker
         mkv.push((size_val >> 16) as u8);
@@ -1225,5 +1649,911 @@ mod tests {
             assert_eq!(min, 512 * 1024, "creative min drifted at size={}", size);
             assert_eq!(max, 4 * MB, "creative max drifted at size={}", size);
         }
+    }
+
+    // ==================== P2: Codec Detection Tests ====================
+
+    /// Build a `size(4 BE) + fourcc(4) + content` MP4-style atom.
+    fn mp4_atom_bytes(fourcc: &[u8; 4], content: &[u8]) -> Vec<u8> {
+        let size = (8 + content.len()) as u32;
+        let mut out = Vec::with_capacity(size as usize);
+        out.extend_from_slice(&size.to_be_bytes());
+        out.extend_from_slice(fourcc);
+        out.extend_from_slice(content);
+        out
+    }
+
+    /// Build a minimal MP4 (ftyp + moov→trak→mdia→minf→stbl→stsd + mdat) whose
+    /// `stsd` has a single sample entry with `entry_count` claimed vs. `entries`
+    /// actually present — pass `entries` empty to simulate a truncated/garbage
+    /// stsd (claims entries, has none).
+    fn make_mp4_with_stsd(entry_count: u32, entries: &[[u8; 4]]) -> Vec<u8> {
+        let mut stsd_content = vec![0, 0, 0, 0]; // version + flags
+        stsd_content.extend_from_slice(&entry_count.to_be_bytes());
+        for fourcc in entries {
+            stsd_content.extend_from_slice(&mp4_atom_bytes(fourcc, &[]));
+        }
+        let stsd = mp4_atom_bytes(b"stsd", &stsd_content);
+        let stbl = mp4_atom_bytes(b"stbl", &stsd);
+        let minf = mp4_atom_bytes(b"minf", &stbl);
+        let mdia = mp4_atom_bytes(b"mdia", &minf);
+        let trak = mp4_atom_bytes(b"trak", &mdia);
+        let moov = mp4_atom_bytes(b"moov", &trak);
+        let ftyp = mp4_atom_bytes(b"ftyp", b"isom\x00\x00\x00\x01isom");
+        let mdat = mp4_atom_bytes(b"mdat", &[0xABu8; 32]);
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&ftyp);
+        data.extend_from_slice(&moov);
+        data.extend_from_slice(&mdat);
+        data
+    }
+
+    #[tokio::test]
+    async fn test_mp4_avc1_stsd_yields_h264_on_mdat() {
+        let data = make_mp4_with_stsd(1, &[*b"avc1"]);
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk(&data, "test.mp4").await.unwrap();
+
+        let mdat_chunk = chunks
+            .iter()
+            .find(|c| c.chunk_type == ChunkType::VideoStream)
+            .expect("mdat should produce a VideoStream chunk");
+        assert_eq!(mdat_chunk.codec_hint, CodecHint::H264);
+
+        // Boundaries must be unaffected by codec detection.
+        let total: usize = chunks.iter().map(|c| c.size).sum();
+        assert_eq!(
+            total,
+            data.len(),
+            "chunking must still fully cover the file"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mp4_truncated_stsd_no_panic_unknown_hint() {
+        // entry_count claims 5 entries but zero are actually present.
+        let data = make_mp4_with_stsd(5, &[]);
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk(&data, "test.mp4").await.unwrap();
+
+        let mdat_chunk = chunks
+            .iter()
+            .find(|c| c.chunk_type == ChunkType::VideoStream)
+            .expect("mdat should still produce a VideoStream chunk");
+        assert_eq!(mdat_chunk.codec_hint, CodecHint::Unknown);
+
+        let total: usize = chunks.iter().map(|c| c.size).sum();
+        assert_eq!(
+            total,
+            data.len(),
+            "chunking must still fully cover the file"
+        );
+    }
+
+    #[test]
+    fn test_mkv_codec_id_to_hint_mapping() {
+        assert_eq!(mkv_codec_id_to_hint("V_MPEG4/ISO/AVC"), CodecHint::H264);
+        assert_eq!(mkv_codec_id_to_hint("V_MPEGH/ISO/HEVC"), CodecHint::H265);
+        assert_eq!(mkv_codec_id_to_hint("V_VP9"), CodecHint::VP9);
+        assert_eq!(mkv_codec_id_to_hint("V_AV1"), CodecHint::AV1);
+        assert_eq!(mkv_codec_id_to_hint("V_PRORES"), CodecHint::ProRes);
+        assert_eq!(mkv_codec_id_to_hint("V_UNCOMPRESSED"), CodecHint::RawVideo);
+        assert_eq!(mkv_codec_id_to_hint("A_AAC"), CodecHint::AAC);
+        assert_eq!(mkv_codec_id_to_hint("A_AAC/MPEG4/LC"), CodecHint::AAC);
+        assert_eq!(mkv_codec_id_to_hint("A_OPUS"), CodecHint::Opus);
+        assert_eq!(mkv_codec_id_to_hint("A_VORBIS"), CodecHint::Vorbis);
+        assert_eq!(mkv_codec_id_to_hint("A_FLAC"), CodecHint::FLAC);
+        assert_eq!(mkv_codec_id_to_hint("A_PCM/INT/LIT"), CodecHint::PCM);
+        assert_eq!(mkv_codec_id_to_hint("A_MPEG/L3"), CodecHint::MP3);
+        assert_eq!(mkv_codec_id_to_hint("A_ALAC"), CodecHint::ALAC);
+        assert_eq!(mkv_codec_id_to_hint("S_TEXT/UTF8"), CodecHint::TextSub);
+        assert_eq!(mkv_codec_id_to_hint("S_HDMV/PGS"), CodecHint::BitmapSub);
+        assert_eq!(mkv_codec_id_to_hint("S_VOBSUB"), CodecHint::BitmapSub);
+        assert_eq!(mkv_codec_id_to_hint("X_UNKNOWN_CODEC"), CodecHint::Unknown);
+    }
+
+    #[tokio::test]
+    async fn test_mkv_truncated_tracks_no_panic_unknown_hint() {
+        let mut mkv = vec![];
+        mkv.extend_from_slice(&[0x1A, 0x45, 0xDF, 0xA3, 0x80]); // EBML header, size 0
+        mkv.extend_from_slice(&[0x18, 0x53, 0x80, 0x67, 0xFF]); // Segment, unknown size
+
+        // Tracks → TrackEntry claims data_size=10 but only 2 bytes of body
+        // actually follow — garbage the CodecID scan must not choke on.
+        let tracks_content: Vec<u8> = vec![0xAE, 0x8A, 0x01, 0x02];
+        mkv.extend_from_slice(&[0x16, 0x54, 0xAE, 0x6B]); // Tracks ID
+        mkv.push(0x80 | tracks_content.len() as u8); // Tracks size
+        mkv.extend_from_slice(&tracks_content);
+
+        // Cluster + size 4 + 4 bytes content
+        mkv.extend_from_slice(&[0x1F, 0x43, 0xB6, 0x75, 0x84, 0x00, 0x00, 0x00, 0x00]);
+
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk(&mkv, "test.mkv").await.unwrap();
+
+        let cluster_chunk = chunks
+            .iter()
+            .find(|c| c.chunk_type == ChunkType::VideoStream)
+            .expect("Cluster should still produce a VideoStream chunk");
+        assert_eq!(cluster_chunk.codec_hint, CodecHint::Unknown);
+
+        let total: usize = chunks.iter().map(|c| c.size).sum();
+        assert_eq!(total, mkv.len(), "chunking must still fully cover the file");
+    }
+
+    /// Build a minimal AVI with a `hdrl→strl→strh(+strf)` describing a single
+    /// `vids` stream, plus a small `movi` payload.
+    fn make_avi_with_strh(fcc_handler: &[u8; 4], strf: Option<&[u8]>) -> Vec<u8> {
+        let mut strh_content = Vec::new();
+        strh_content.extend_from_slice(b"vids");
+        strh_content.extend_from_slice(fcc_handler);
+        strh_content.extend_from_slice(&[0u8; 40]); // rest of AVISTREAMHEADER (unused by parser)
+
+        let mut strl_content = Vec::new();
+        strl_content.extend_from_slice(b"strh");
+        strl_content.extend_from_slice(&(strh_content.len() as u32).to_le_bytes());
+        strl_content.extend_from_slice(&strh_content);
+
+        if let Some(strf_data) = strf {
+            strl_content.extend_from_slice(b"strf");
+            strl_content.extend_from_slice(&(strf_data.len() as u32).to_le_bytes());
+            strl_content.extend_from_slice(strf_data);
+            if !strf_data.len().is_multiple_of(2) {
+                strl_content.push(0);
+            }
+        }
+
+        let mut list_strl = Vec::new();
+        list_strl.extend_from_slice(b"LIST");
+        list_strl.extend_from_slice(&((4 + strl_content.len()) as u32).to_le_bytes());
+        list_strl.extend_from_slice(b"strl");
+        list_strl.extend_from_slice(&strl_content);
+
+        let mut list_hdrl = Vec::new();
+        list_hdrl.extend_from_slice(b"LIST");
+        list_hdrl.extend_from_slice(&((4 + list_strl.len()) as u32).to_le_bytes());
+        list_hdrl.extend_from_slice(b"hdrl");
+        list_hdrl.extend_from_slice(&list_strl);
+
+        let mut movi_content = Vec::new();
+        movi_content.extend_from_slice(b"00dc");
+        let video_payload = vec![0xAAu8; 16];
+        movi_content.extend_from_slice(&(video_payload.len() as u32).to_le_bytes());
+        movi_content.extend_from_slice(&video_payload);
+
+        let mut list_movi = Vec::new();
+        list_movi.extend_from_slice(b"LIST");
+        list_movi.extend_from_slice(&((4 + movi_content.len()) as u32).to_le_bytes());
+        list_movi.extend_from_slice(b"movi");
+        list_movi.extend_from_slice(&movi_content);
+
+        let body_size = (list_hdrl.len() + list_movi.len()) as u32;
+        let file_size = 4 + body_size;
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&file_size.to_le_bytes());
+        out.extend_from_slice(b"AVI ");
+        out.extend_from_slice(&list_hdrl);
+        out.extend_from_slice(&list_movi);
+        out
+    }
+
+    #[tokio::test]
+    async fn test_avi_unrecognized_fcc_handler_no_strf_yields_unknown_hint() {
+        // fccType=vids but fccHandler is unrecognized and there is no strf —
+        // must fall back to Unknown, never panic.
+        let avi = make_avi_with_strh(b"XXXX", None);
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk(&avi, "test.avi").await.unwrap();
+
+        let video_chunk = chunks
+            .iter()
+            .find(|c| c.chunk_type == ChunkType::VideoStream)
+            .expect("movi should still produce a VideoStream chunk");
+        assert_eq!(video_chunk.codec_hint, CodecHint::Unknown);
+
+        let mut sorted = chunks.clone();
+        sorted.sort_unstable_by_key(|c| c.offset);
+        let reconstructed: Vec<u8> = sorted.iter().flat_map(|c| c.data.iter().copied()).collect();
+        assert_eq!(
+            reconstructed, avi,
+            "chunk reconstruction must be byte-exact"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_avi_h264_fcc_handler_yields_h264_hint() {
+        let avi = make_avi_with_strh(b"H264", None);
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk(&avi, "test.avi").await.unwrap();
+
+        let video_chunk = chunks
+            .iter()
+            .find(|c| c.chunk_type == ChunkType::VideoStream)
+            .expect("movi should still produce a VideoStream chunk");
+        assert_eq!(video_chunk.codec_hint, CodecHint::H264);
+    }
+
+    #[test]
+    fn test_codec_detect_env_parsing() {
+        assert!(
+            !codec_detect_enabled_from_env(Some("0")),
+            "\"0\" must disable detection"
+        );
+        assert!(codec_detect_enabled_from_env(Some("1")));
+        assert!(
+            codec_detect_enabled_from_env(None),
+            "unset env var defaults to enabled"
+        );
+    }
+
+    #[test]
+    fn test_apply_codec_hint_if_respects_kill_switch() {
+        let chunk = ContentChunk {
+            id: Oid::hash(b"x"),
+            data: b"x".to_vec(),
+            offset: 0,
+            size: 1,
+            chunk_type: ChunkType::Generic,
+            perceptual_hash: None,
+            codec_hint: CodecHint::Unknown,
+        };
+
+        let disabled = apply_codec_hint_if(vec![chunk.clone()], CodecHint::PCM, false);
+        assert_eq!(
+            disabled[0].codec_hint,
+            CodecHint::Unknown,
+            "disabled must leave hints as Unknown (exact pre-detection behavior)"
+        );
+
+        let enabled = apply_codec_hint_if(vec![chunk], CodecHint::PCM, true);
+        assert_eq!(
+            enabled[0].codec_hint,
+            CodecHint::PCM,
+            "enabled must apply the hint"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires test-files directory
+    async fn test_chunk_mkv_real_fixture_roundtrip_h264() {
+        let path = std::path::Path::new("../../test-files/video-variants/bbb-5s-h264.mkv");
+        if !path.exists() {
+            eprintln!("Skipping test: fixture not found at {:?}", path);
+            return;
+        }
+        let data = std::fs::read(path).expect("Failed to read MKV fixture");
+
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker
+            .chunk(&data, "bbb-5s-h264.mkv")
+            .await
+            .expect("chunking must succeed");
+
+        let mut sorted = chunks.clone();
+        sorted.sort_unstable_by_key(|c| c.offset);
+        let reconstructed: Vec<u8> = sorted.iter().flat_map(|c| c.data.iter().copied()).collect();
+        assert_eq!(
+            reconstructed, data,
+            "chunk reconstruction must be byte-exact"
+        );
+
+        let has_h264 = chunks.iter().any(|c| c.codec_hint == CodecHint::H264);
+        assert!(has_h264, "expected at least one chunk with H264 codec hint");
+    }
+
+    // ---- P3a structure-aware walkers: FBX / .blend / STL / PLY / audio tier ----
+
+    /// Sort chunks by offset and assert: (1) concat(chunks) == original bytes,
+    /// (2) coverage is contiguous with no gap/overlap (every chunk's offset
+    /// equals the running total of preceding sizes), and (3) sum(sizes)
+    /// equals the original length. This is the integrity contract every new
+    /// walker below must satisfy.
+    fn assert_concat_and_coverage(chunks: &[ContentChunk], original: &[u8]) {
+        let mut sorted = chunks.to_vec();
+        sorted.sort_unstable_by_key(|c| c.offset);
+
+        let mut covered = 0u64;
+        for c in &sorted {
+            assert_eq!(
+                c.offset, covered,
+                "gap or overlap: expected next chunk at offset {covered}, found {}",
+                c.offset
+            );
+            covered += c.size as u64;
+        }
+        assert_eq!(
+            covered,
+            original.len() as u64,
+            "sum(sizes) must equal original length"
+        );
+
+        let reconstructed: Vec<u8> = sorted.iter().flat_map(|c| c.data.iter().copied()).collect();
+        assert_eq!(
+            reconstructed, original,
+            "concat(chunks) must equal original file bytes"
+        );
+    }
+
+    // ---- FBX ----
+
+    /// Build a synthetic FBX binary: header + a run of top-level node
+    /// records (EndOffset walked, payload content otherwise opaque) + a NULL
+    /// record terminator + trailing footer bytes.
+    fn make_fbx_binary(version: u32, node_payloads: &[Vec<u8>], footer: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"Kaydara FBX Binary  \x00"); // 21 bytes
+        buf.extend_from_slice(&[0u8, 0u8]); // 2 reserved bytes -> 23
+        buf.extend_from_slice(&version.to_le_bytes()); // -> 27 (HEADER_LEN)
+
+        let off_width = if version >= 7500 { 8 } else { 4 };
+        for payload in node_payloads {
+            let record_start = buf.len();
+            let end_offset = (record_start + off_width + payload.len()) as u64;
+            if off_width == 8 {
+                buf.extend_from_slice(&end_offset.to_le_bytes());
+            } else {
+                buf.extend_from_slice(&(end_offset as u32).to_le_bytes());
+            }
+            buf.extend_from_slice(payload);
+        }
+
+        // NULL record: the walker only reads the EndOffset field, so
+        // off_width zero bytes is sufficient to signal termination.
+        buf.extend(std::iter::repeat_n(0u8, off_width));
+        buf.extend_from_slice(footer);
+        buf
+    }
+
+    #[tokio::test]
+    async fn test_fbx_synthetic_roundtrip_and_coverage() {
+        let node_payloads = vec![
+            vec![0xAAu8; 1000],            // small - coalesced with neighbors
+            vec![0xBBu8; 2000],            // small - coalesced with neighbors
+            vec![0xCCu8; 5 * 1024 * 1024], // > 4MB - FastCDC sub-split
+            vec![0xDDu8; 100],             // small trailing node
+        ];
+        let footer = b"trailing-footer-bytes";
+        let data = make_fbx_binary(7400, &node_payloads, footer);
+
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk_fbx_walker(&data).await.unwrap();
+
+        assert_concat_and_coverage(&chunks, &data);
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.chunk_type == ChunkType::Metadata && c.offset == 0),
+            "expected the 27-byte header as a Metadata chunk at offset 0"
+        );
+        // The 5MB node must have been split into more than one chunk.
+        assert!(
+            chunks.len() > 3,
+            "expected the large node to be FastCDC-subdivided, got {} chunks",
+            chunks.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fbx_wide_offsets_version_7500() {
+        // Version >= 7500 uses 8-byte EndOffset fields.
+        let node_payloads = vec![vec![0x11u8; 300], vec![0x22u8; 300]];
+        let data = make_fbx_binary(7500, &node_payloads, b"");
+
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk_fbx_walker(&data).await.unwrap();
+        assert_concat_and_coverage(&chunks, &data);
+    }
+
+    #[tokio::test]
+    async fn test_fbx_corrupt_node_offsets_falls_back_no_panic() {
+        // Valid magic + version, but the first "EndOffset" is garbage
+        // (points backward), which must fail the monotonic sanity check and
+        // fall back to legacy header+CDC rather than panicking.
+        let mut data = Vec::new();
+        data.extend_from_slice(b"Kaydara FBX Binary  \x00");
+        data.extend_from_slice(&[0u8, 0u8]);
+        data.extend_from_slice(&7400u32.to_le_bytes());
+        data.extend_from_slice(&1u32.to_le_bytes()); // EndOffset < current pos (27) -> invalid
+        data.extend_from_slice(&[0xFFu8; 500]); // garbage payload
+
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk_fbx_walker(&data).await.unwrap();
+        assert_concat_and_coverage(&chunks, &data);
+    }
+
+    #[tokio::test]
+    async fn test_fbx_truncated_short_data_no_panic() {
+        let data = vec![0u8; 10]; // shorter than the 27-byte header
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk_fbx_walker(&data).await.unwrap();
+        assert_concat_and_coverage(&chunks, &data);
+    }
+
+    #[tokio::test]
+    async fn test_fbx_legacy_reproduces_header_plus_cdc() {
+        // Pins the MEDIAGIT_CHUNK_FBX=0 behavior directly (bypassing the
+        // process-wide OnceLock kill-switch, same rationale as
+        // apply_codec_hint_if's test above): header must stay a standalone
+        // 27-byte Metadata chunk, exactly like the pre-P3a implementation.
+        let data = make_fbx_binary(7400, &[vec![0x55u8; 4096]], b"");
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk_fbx_legacy(&data, 27).await.unwrap();
+
+        assert_concat_and_coverage(&chunks, &data);
+        assert_eq!(chunks[0].offset, 0);
+        assert_eq!(chunks[0].size, 27);
+        assert_eq!(chunks[0].chunk_type, ChunkType::Metadata);
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires test-files directory
+    async fn test_fbx_real_fixture_roundtrip() {
+        let path = std::path::Path::new("../../test-files/56-fbx/fbx/Dragon 2.5_fbx.fbx");
+        if !path.exists() {
+            eprintln!("Skipping test: fixture not found at {:?}", path);
+            return;
+        }
+        let data = std::fs::read(path).expect("Failed to read FBX fixture");
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker
+            .chunk(&data, "Dragon 2.5_fbx.fbx")
+            .await
+            .expect("chunking must succeed");
+        assert_concat_and_coverage(&chunks, &data);
+    }
+
+    // ---- Blender .blend ----
+
+    /// Build a synthetic uncompressed little-endian .blend: 12-byte header +
+    /// a run of BHEAD blocks + trailing footer bytes.
+    fn make_blend(ptr_size: u8, blocks: &[(&[u8; 4], Vec<u8>)], footer: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"BLENDER");
+        buf.push(if ptr_size == 8 { b'-' } else { b'_' });
+        buf.push(b'v'); // little-endian
+        buf.extend_from_slice(b"300"); // version digits, unused by the walker
+
+        for (code, body) in blocks {
+            buf.extend_from_slice(*code);
+            buf.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            buf.extend(std::iter::repeat_n(0u8, ptr_size as usize)); // old ptr
+            buf.extend_from_slice(&0u32.to_le_bytes()); // SDNAnr
+            buf.extend_from_slice(&0u32.to_le_bytes()); // nr
+            buf.extend_from_slice(body);
+        }
+        buf.extend_from_slice(footer);
+        buf
+    }
+
+    #[tokio::test]
+    async fn test_blend_synthetic_roundtrip_and_coverage() {
+        let blocks: Vec<(&[u8; 4], Vec<u8>)> = vec![
+            (b"DATA", vec![0xABu8; 1000]),
+            // > 4MB and non-constant: constant bytes give the gear hash no
+            // variation, so FastCDC would only cut at max_size (2 sub-chunks).
+            (b"DATA", pseudo_random_bytes(6 * 1024 * 1024, 7)),
+            (b"DNA1", vec![0xEFu8; 200]),
+            (b"ENDB", vec![]),
+        ];
+        let data = make_blend(4, &blocks, b"");
+
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk_blend(&data).await.unwrap();
+
+        assert_concat_and_coverage(&chunks, &data);
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.chunk_type == ChunkType::Metadata && c.offset == 0),
+            "expected the 12-byte header as a Metadata chunk at offset 0"
+        );
+        assert!(
+            chunks.len() > 3,
+            "expected the large block to be FastCDC-subdivided, got {} chunks",
+            chunks.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_blend_8byte_pointers_roundtrip() {
+        let blocks: Vec<(&[u8; 4], Vec<u8>)> =
+            vec![(b"DATA", vec![0x77u8; 500]), (b"ENDB", vec![])];
+        let data = make_blend(8, &blocks, b"");
+
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk_blend(&data).await.unwrap();
+        assert_concat_and_coverage(&chunks, &data);
+    }
+
+    #[tokio::test]
+    async fn test_blend_non_blender_magic_falls_back() {
+        // e.g. gzip-compressed .blend (Blender's older default save format).
+        let data = vec![0x1Fu8, 0x8B, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0xAA, 0xBB];
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk_blend(&data).await.unwrap();
+        assert_concat_and_coverage(&chunks, &data);
+    }
+
+    #[tokio::test]
+    async fn test_blend_bigendian_falls_back() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"BLENDER");
+        data.push(b'_');
+        data.push(b'V'); // big-endian marker
+        data.extend_from_slice(b"300");
+        data.extend_from_slice(&[0u8; 100]);
+
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk_blend(&data).await.unwrap();
+        assert_concat_and_coverage(&chunks, &data);
+    }
+
+    #[tokio::test]
+    async fn test_blend_truncated_falls_back_no_panic() {
+        // Valid header, but the declared block length runs past EOF.
+        let mut data = Vec::new();
+        data.extend_from_slice(b"BLENDER");
+        data.push(b'_');
+        data.push(b'v');
+        data.extend_from_slice(b"300");
+        data.extend_from_slice(b"DATA");
+        data.extend_from_slice(&(1_000_000u32).to_le_bytes()); // body way past EOF
+        data.extend_from_slice(&[0u8; 12]); // old-ptr(4) + SDNAnr(4) + nr(4)
+        data.extend_from_slice(&[0xEEu8; 20]); // truncated body
+
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk_blend(&data).await.unwrap();
+        assert_concat_and_coverage(&chunks, &data);
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires test-files directory
+    async fn test_blend_real_fixture_roundtrip() {
+        let path = std::path::Path::new(
+            "../../test-files/27-blender/blender/Dragon_2.5_For_Animations.blend",
+        );
+        if !path.exists() {
+            eprintln!("Skipping test: fixture not found at {:?}", path);
+            return;
+        }
+        let data = std::fs::read(path).expect("Failed to read blend fixture");
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker
+            .chunk(&data, "Dragon_2.5_For_Animations.blend")
+            .await
+            .expect("chunking must succeed");
+        // This fixture is gzip-compressed (older Blender default save format),
+        // so it must exercise the non-BLENDER-magic CDC fallback path.
+        assert_concat_and_coverage(&chunks, &data);
+    }
+
+    // ---- STL ----
+
+    fn make_stl_binary(triangle_count: usize) -> Vec<u8> {
+        let mut buf = vec![0u8; 80];
+        buf.extend_from_slice(&(triangle_count as u32).to_le_bytes());
+        // Pseudo-random (not a periodic ramp) so FastCDC has real content
+        // signal to find cut points on, matching pseudo_random_bytes' doc note.
+        buf.extend(pseudo_random_bytes(triangle_count * 50, 99));
+        buf
+    }
+
+    #[tokio::test]
+    async fn test_stl_binary_small_roundtrip_and_coverage() {
+        let data = make_stl_binary(10);
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk_stl(&data).await.unwrap();
+        assert_concat_and_coverage(&chunks, &data);
+        assert_eq!(chunks.len(), 1, "small STL fits in a single chunk");
+    }
+
+    #[tokio::test]
+    async fn test_stl_binary_large_is_content_defined_subdivided() {
+        // ~50000 triangles * 50 bytes = ~2.4MB -> multiple ~1MB CDC chunks.
+        let data = make_stl_binary(50_000);
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk_stl(&data).await.unwrap();
+
+        assert_concat_and_coverage(&chunks, &data);
+        assert!(
+            chunks.len() > 1,
+            "expected the triangle array to be CDC-subdivided into multiple chunks"
+        );
+        assert_eq!(
+            chunks[0].offset, 0,
+            "first chunk must start at offset 0 (header folded in)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stl_edit_recovers_dedup_after_insertion() {
+        // Regression pin for the fixed-position-cut bug this walker started
+        // with: inserting bytes at ~25% offset must NOT invalidate every
+        // chunk after the insertion point. Content-defined cuts re-sync, so
+        // v1 and v2 must still share chunk IDs over the unedited remainder
+        // (fixed-position cuts, as originally implemented, shared zero).
+        // Operates on the triangle array directly (the same bytes chunk_stl
+        // feeds to FastCDC) to isolate the re-sync property being pinned.
+        let full_v1 = make_stl_binary(40_000); // ~2MB
+        let triangle_v1 = &full_v1[84..];
+        let insert_at = triangle_v1.len() / 4;
+        let mut triangle_v2 = triangle_v1[..insert_at].to_vec();
+        triangle_v2.extend(std::iter::repeat_n(0xEEu8, 4096));
+        triangle_v2.extend_from_slice(&triangle_v1[insert_at..]);
+
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks_v1 = chunker
+            .chunk_fastcdc(triangle_v1, 1024 * 1024, 512 * 1024, 4 * 1024 * 1024)
+            .await
+            .unwrap();
+        let chunks_v2 = chunker
+            .chunk_fastcdc(&triangle_v2, 1024 * 1024, 512 * 1024, 4 * 1024 * 1024)
+            .await
+            .unwrap();
+
+        let ids_v1: std::collections::HashSet<_> = chunks_v1.iter().map(|c| c.id).collect();
+        let shared = chunks_v2.iter().filter(|c| ids_v1.contains(&c.id)).count();
+        assert!(
+            shared > 0,
+            "expected at least some chunk IDs to survive a mid-file insertion via CDC re-sync"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stl_ascii_falls_back_no_panic() {
+        let data = b"solid test\nfacet normal 0 0 0\nendsolid test\n".to_vec();
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk_stl(&data).await.unwrap();
+        assert_concat_and_coverage(&chunks, &data);
+    }
+
+    #[tokio::test]
+    async fn test_stl_size_mismatch_falls_back_no_panic() {
+        // Header claims 100 triangles but the file is truncated.
+        let mut data = vec![0u8; 80];
+        data.extend_from_slice(&100u32.to_le_bytes());
+        data.extend_from_slice(&[0u8; 200]); // way short of 100*50 bytes
+
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk_stl(&data).await.unwrap();
+        assert_concat_and_coverage(&chunks, &data);
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires test-files directory
+    async fn test_stl_real_fixture_roundtrip() {
+        let path = std::path::Path::new("../../test-files/39-stl/stl/Dragon 2.5_stl.stl");
+        if !path.exists() {
+            eprintln!("Skipping test: fixture not found at {:?}", path);
+            return;
+        }
+        let data = std::fs::read(path).expect("Failed to read STL fixture");
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker
+            .chunk(&data, "Dragon 2.5_stl.stl")
+            .await
+            .expect("chunking must succeed");
+        assert_concat_and_coverage(&chunks, &data);
+    }
+
+    // ---- PLY ----
+
+    /// vertex properties: float x, y, z (12-byte stride).
+    fn make_ply_binary(vertex_count: usize, face_block: &[u8]) -> Vec<u8> {
+        let header = format!(
+            "ply\nformat binary_little_endian 1.0\nelement vertex {vertex_count}\nproperty float x\nproperty float y\nproperty float z\nelement face 0\nproperty list uchar int vertex_indices\nend_header\n"
+        );
+        let mut buf = header.into_bytes();
+        for i in 0..vertex_count {
+            let v = i as f32;
+            buf.extend_from_slice(&v.to_le_bytes());
+            buf.extend_from_slice(&v.to_le_bytes());
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        buf.extend_from_slice(face_block);
+        buf
+    }
+
+    #[tokio::test]
+    async fn test_ply_binary_small_roundtrip_and_coverage() {
+        let data = make_ply_binary(100, &[0x01, 0x02, 0x03, 0x04]);
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk_ply(&data).await.unwrap();
+        assert_concat_and_coverage(&chunks, &data);
+    }
+
+    #[tokio::test]
+    async fn test_ply_large_vertex_block_is_content_defined_subdivided() {
+        // 100_000 vertices * 12 bytes = ~1.14MB -> multiple CDC chunks.
+        let data = make_ply_binary(100_000, &[]);
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk_ply(&data).await.unwrap();
+
+        assert_concat_and_coverage(&chunks, &data);
+        let generic_count = chunks
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::Generic)
+            .count();
+        assert!(
+            generic_count > 1,
+            "expected the vertex block to be CDC-subdivided into multiple chunks"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ply_large_face_block_is_subdivided() {
+        let face_block = vec![0x99u8; 5 * 1024 * 1024]; // > 4MB
+        let data = make_ply_binary(10, &face_block);
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk_ply(&data).await.unwrap();
+        assert_concat_and_coverage(&chunks, &data);
+        assert!(
+            chunks.len() > 3,
+            "expected the >4MB face block to be FastCDC-subdivided"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ply_ascii_falls_back_no_panic() {
+        let data = b"ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nend_header\n1.0\n"
+            .to_vec();
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk_ply(&data).await.unwrap();
+        assert_concat_and_coverage(&chunks, &data);
+    }
+
+    #[tokio::test]
+    async fn test_ply_list_property_in_vertex_falls_back_no_panic() {
+        // A `list` property inside the vertex element makes the stride
+        // variable - must fall back rather than mis-align cuts.
+        let data = b"ply\nformat binary_little_endian 1.0\nelement vertex 1\nproperty list uchar int foo\nend_header\n\x01\x00\x00\x00\x00".to_vec();
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk_ply(&data).await.unwrap();
+        assert_concat_and_coverage(&chunks, &data);
+    }
+
+    #[tokio::test]
+    async fn test_ply_truncated_vertex_block_falls_back_no_panic() {
+        // Header claims far more vertices than the file actually has.
+        let header = "ply\nformat binary_little_endian 1.0\nelement vertex 1000000\nproperty float x\nproperty float y\nproperty float z\nend_header\n";
+        let mut data = header.as_bytes().to_vec();
+        data.extend_from_slice(&[0u8; 12]); // just one vertex's worth of bytes
+
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk_ply(&data).await.unwrap();
+        assert_concat_and_coverage(&chunks, &data);
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires test-files directory
+    async fn test_ply_real_fixture_roundtrip() {
+        let path = std::path::Path::new("../../test-files/93-ply/ply/Dragon 2.5_ply.ply");
+        if !path.exists() {
+            eprintln!("Skipping test: fixture not found at {:?}", path);
+            return;
+        }
+        let data = std::fs::read(path).expect("Failed to read PLY fixture");
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker
+            .chunk(&data, "Dragon 2.5_ply.ply")
+            .await
+            .expect("chunking must succeed");
+        // This fixture is ASCII PLY, so it must exercise the chunk_3d_text fallback.
+        assert_concat_and_coverage(&chunks, &data);
+    }
+
+    // ---- Audio tier ----
+
+    #[test]
+    fn test_audio_chunk_params_values() {
+        for &size in &[0u64, 1024, 10 * 1024 * 1024, 10 * 1024 * 1024 * 1024] {
+            assert_eq!(
+                get_audio_chunk_params(size),
+                (256 * 1024, 64 * 1024, 1024 * 1024)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_wav_does_not_use_audio_tier_by_default() {
+        // Deviation pin: WAV/FLAC/AIFF stay on the pre-P3a generic tier (see
+        // the deviation comment on the "flac" arm in chunker.rs) — a measured
+        // add_ms regression on the dedup_report corpus, not an oversight.
+        let data = pseudo_random_bytes(2 * 1024 * 1024, 1);
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk(&data, "test.wav").await.unwrap();
+
+        assert_concat_and_coverage(&chunks, &data);
+        assert!(chunks.iter().all(|c| c.codec_hint == CodecHint::PCM));
+        let avg = data.len() as f64 / chunks.len() as f64;
+        assert!(
+            avg > 600_000.0,
+            "expected the generic tier (~1MB avg), got avg chunk size {avg} \
+             (looks like the audio tier is being applied to wav again)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mp3_routes_through_audio_tier_cdc_by_default() {
+        let data = pseudo_random_bytes(2 * 1024 * 1024, 2);
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk(&data, "test.mp3").await.unwrap();
+
+        assert_concat_and_coverage(&chunks, &data);
+        assert!(chunks.iter().all(|c| c.codec_hint == CodecHint::MP3));
+        assert!(
+            chunks.len() > 1,
+            "audio-tier CDC should split a 2MB mp3 into multiple chunks \
+             (pre-P3a fixed-chunking produced exactly 1)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ogg_routes_through_audio_tier_cdc_by_default() {
+        let data = pseudo_random_bytes(2 * 1024 * 1024, 3);
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let chunks = chunker.chunk(&data, "test.ogg").await.unwrap();
+
+        assert_concat_and_coverage(&chunks, &data);
+        assert!(chunks.iter().all(|c| c.codec_hint == CodecHint::Vorbis));
+        assert!(
+            chunks.len() > 1,
+            "audio-tier CDC should split a 2MB ogg into multiple chunks \
+             (pre-P3a fixed-chunking produced exactly 1)"
+        );
+    }
+
+    #[test]
+    fn test_container_chunk_cap_env_parsing() {
+        assert_eq!(container_chunk_cap_from_env(None), 100 * 1024 * 1024);
+        assert_eq!(container_chunk_cap_from_env(Some("1")), 1024 * 1024);
+        assert_eq!(container_chunk_cap_from_env(Some("0")), u64::MAX);
+        assert_eq!(
+            container_chunk_cap_from_env(Some("garbage")),
+            100 * 1024 * 1024
+        );
+    }
+
+    /// Below the cap, `collect_file_chunks_blocking` must still route through
+    /// the format-aware AVI walker (proven by the Metadata RIFF-header chunk
+    /// it emits, which StreamCDC never produces) and must reproduce the same
+    /// chunk set as calling `chunk()` directly — the cap check must not
+    /// change behavior for files it doesn't affect.
+    #[tokio::test]
+    async fn test_collect_file_chunks_blocking_below_cap_matches_direct_chunk() {
+        let mut data = b"RIFF".to_vec();
+        data.extend_from_slice(&(2 * 1024 * 1024u32).to_le_bytes());
+        data.extend_from_slice(b"AVI ");
+        data.extend_from_slice(&pseudo_random_bytes(2 * 1024 * 1024, 7));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clip.avi");
+        std::fs::write(&path, &data).unwrap();
+
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let direct = chunker.chunk(&data, "clip.avi").await.unwrap();
+        assert!(
+            direct.iter().any(|c| c.chunk_type == ChunkType::Metadata),
+            "direct chunk() should use the AVI walker (Metadata header chunk)"
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let chunker2 = ContentChunker::new(ChunkStrategy::MediaAware);
+        let path2 = path.clone();
+        let handle =
+            tokio::task::spawn_blocking(move || chunker2.collect_file_chunks_blocking(path2, tx));
+        let mut streamed = Vec::new();
+        while let Some(chunk) = rx.recv().await {
+            streamed.push(chunk);
+        }
+        handle.await.unwrap().unwrap();
+
+        assert_eq!(
+            direct.iter().map(|c| c.id).collect::<Vec<_>>(),
+            streamed.iter().map(|c| c.id).collect::<Vec<_>>(),
+            "below the cap, streaming collection must match direct chunk() byte-for-byte"
+        );
     }
 }

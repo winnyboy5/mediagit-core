@@ -32,11 +32,19 @@ storage:
 #   encryption_algorithm: AES256          # Options: AES256, aws:kms, aws:kms:key-id
 
 # Azure Blob Storage Configuration (Uncomment to use)
+# Credentials go under `auth` with an explicit `type`: exactly one credential
+# is representable. The pre-config_version-3 flat form (account_name/
+# account_key directly under storage) is migrated automatically on first load.
 # storage:
 #   backend: azure
-#   account_name: mediagitaccount
-#   account_key: YOUR_ACCOUNT_KEY         # Or use MEDIAGIT_AZURE_ACCOUNT_KEY env var
 #   container: media
+#   auth:
+#     type: account_key
+#     account_name: mediagitaccount
+#     account_key: YOUR_ACCOUNT_KEY
+#   # or: { type: connection_string, value: "..." }
+#   # or: { type: sas, account_name: ..., token: "sv=..." }
+#   # or: { type: emulator }   # local Azurite
 #   prefix: files/
 #   connection_string: ...                # Alternative to account_key
 

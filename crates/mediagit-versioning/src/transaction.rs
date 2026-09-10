@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Transaction model for atomic pack processing
 //!
@@ -162,62 +152,6 @@ impl Drop for PackTransaction {
     }
 }
 
-/// Report from transaction recovery process
-#[derive(Debug, Default)]
-pub struct RecoveryReport {
-    pub rolled_back: usize,
-    pub errors: Vec<String>,
-}
-
-/// Recover incomplete transactions on ODB initialization
-pub async fn recover_incomplete_transactions(
-    storage_path: &Path,
-) -> anyhow::Result<RecoveryReport> {
-    let mut report = RecoveryReport::default();
-
-    let temp_root = storage_path.join("temp");
-    if !temp_root.exists() {
-        return Ok(report);
-    }
-
-    let mut entries = fs::read_dir(&temp_root).await?;
-
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-
-        if !path.is_dir() {
-            continue;
-        }
-
-        // Check for transaction marker
-        let marker_path = path.join(".transaction_marker");
-        if marker_path.exists() {
-            // Incomplete transaction found - rollback
-            match fs::remove_dir_all(&path).await {
-                Ok(_) => {
-                    info!(transaction_dir = %path.display(), "Rolled back incomplete transaction");
-                    report.rolled_back += 1;
-                }
-                Err(e) => {
-                    let error_msg = format!("Failed to rollback {}: {}", path.display(), e);
-                    warn!("{}", error_msg);
-                    report.errors.push(error_msg);
-                }
-            }
-        }
-    }
-
-    if report.rolled_back > 0 {
-        info!(
-            rolled_back = report.rolled_back,
-            errors = report.errors.len(),
-            "Transaction recovery complete"
-        );
-    }
-
-    Ok(report)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,47 +198,5 @@ mod tests {
 
         // Verify object does NOT exist in final storage
         assert!(!storage.exists(&oid.to_hex()).await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn test_transaction_recovery() {
-        let temp = TempDir::new().unwrap();
-        let storage = Arc::new(LocalBackend::new(temp.path()).await.unwrap());
-
-        // Create temp subdirectory for transactions (matching recovery expectations)
-        let temp_subdir = temp.path().join("temp");
-        std::fs::create_dir_all(&temp_subdir).unwrap();
-
-        // Create incomplete transaction in temp subdir and capture the transaction dir path
-        let tx_dir: PathBuf;
-        {
-            let mut tx = PackTransaction::new(storage.clone(), &temp_subdir).unwrap();
-            tx_dir = temp_subdir.join(format!("tx_{}", tx.id()));
-            tx.add_object(Oid::hash(b"data1"), ObjectType::Blob, b"data1")
-                .await
-                .unwrap();
-            // Don't commit - simulate crash by std::mem::forget
-            std::mem::forget(tx);
-        }
-
-        // Verify the transaction directory and marker exist before recovery
-        assert!(
-            tx_dir.exists(),
-            "Transaction dir should exist: {:?}",
-            tx_dir
-        );
-        assert!(
-            tx_dir.join(".transaction_marker").exists(),
-            "Marker should exist"
-        );
-
-        // Run recovery (looks in storage_path/temp)
-        let report = recover_incomplete_transactions(temp.path()).await.unwrap();
-
-        assert_eq!(report.rolled_back, 1);
-        assert_eq!(report.errors.len(), 0);
-
-        // Verify transaction directory was cleaned up
-        assert!(!tx_dir.exists(), "Transaction dir should be removed");
     }
 }

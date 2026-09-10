@@ -1,0 +1,24 @@
+metric	value
+undocumented_knobs	3
+# 8 -> 3 on 2026-09-10. Four real knobs were documented in env-knobs.md that
+# gate run, each with its default read from the parsing code rather than a
+# nearby comment:
+#   MEDIAGIT_AUTO_GC_INTERVAL              default 100   auto_gc.rs:158
+#   MEDIAGIT_PACK_VERIFY_CONCURRENCY       default 16    handlers/repo.rs:1163
+#   MEDIAGIT_PACK_VERIFY_PACK_CONCURRENCY  default 1     handlers/repo.rs:1485
+#   MEDIAGIT_PACK_VERIFY_BUDGET_SECS       default 300   handlers/repo.rs:1448
+# (MEDIAGIT_ALLOW_MULTI_INSTANCE was added in the same pass.)
+#
+# THE REMAINING 3 ARE FALSE POSITIVES of a lexical scan, verified individually:
+#   MEDIAGIT_APP_  MEDIAGIT_AUTHOR_  MEDIAGIT_COMMIT_EDITMSG_
+# Each is a FAMILY STEM captured without its suffix, not a variable anyone can
+# set. Documenting them would mean inventing three knobs to satisfy a metric.
+#
+# NOTE, and this is the interesting part: this gate asks whether a knob is
+# DOCUMENTED, never whether it WORKS. On the same day it sat at 8, env-knobs.md
+# was listing 14 knobs as "stable" that are read only inside
+# `apply_env_overrides` -- a function with no live caller. Fully documented,
+# entirely inert, and green here throughout. See the blind-spot note in
+# 14_docs_surface.ps1.
+#
+# If this number RISES, a knob was added without documenting it.

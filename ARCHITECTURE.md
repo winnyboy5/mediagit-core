@@ -1,5 +1,7 @@
 # MediaGit Architecture
 
+**Version**: 0.3.0-rc.5
+
 > **Media-first version control** built on Git semantics with intelligent compression,
 > content-defined chunking, delta encoding, and media-aware merging.
 
@@ -9,7 +11,7 @@
 
 ```mermaid
 graph TD
-    subgraph CLI["mediagit-cli (28 commands)"]
+    subgraph CLI["mediagit-cli (35 commands)"]
         ADD["add"]
         COMMIT["commit"]
         PUSH["push"]
@@ -26,7 +28,7 @@ graph TD
 
     subgraph Infra["Infrastructure"]
         STORE["mediagit-storage<br/>Local · S3 · Azure<br/>GCS · B2 · MinIO"]
-        SEC["mediagit-security<br/>AES-256-GCM · JWT<br/>TLS · Audit · KDF"]
+        SEC["mediagit-security<br/>XAES-256-GCM · JWT<br/>TLS · Audit · KDF"]
         PROTO["mediagit-protocol<br/>Client · Packs<br/>Chunk Transfer"]
     end
 
@@ -34,8 +36,6 @@ graph TD
         CFG["mediagit-config"]
         OBS["mediagit-observability"]
         MET["mediagit-metrics"]
-        GIT["mediagit-git"]
-        MIG["mediagit-migration"]
         TEST["mediagit-test-utils"]
     end
 
@@ -54,28 +54,54 @@ graph TD
 
 ---
 
-## Workspace Crates (14+)
+## Workspace Crates (12)
 
 | Crate | Role | Key Modules |
 |-------|------|-------------|
-| **mediagit-cli** | CLI binary (28 commands) | `commands/`, main entry |
+| **mediagit-cli** | CLI binary (35 commands) | `commands/`, main entry |
 | **mediagit-versioning** | Core VCS engine | `odb/` & `chunking/` (submodules), index, refs, tree, commit, delta, similarity, cloud packs (`streaming_pack`, `streaming_index`, `pack`, `transaction`) |
 | **mediagit-compression** | Smart compression | Zstd, Brotli, Zlib, Store; `SmartCompressor` with type+size awareness |
 | **mediagit-media** | Media parsing & merging | Image, PSD, Video, Audio, 3D, VFX parsers & merge strategies |
 | **mediagit-storage** | Storage abstraction | `StorageBackend` trait + 7 implementations |
 | **mediagit-protocol** | Network protocol | `client/` (submodule), pack reader/writer, streaming pack, chunk transfer, cloud-pack transfer |
 | **mediagit-server** | HTTP server | Axum routes, `handlers/` (submodule), auth middleware, rate limiting, security |
-| **mediagit-security** | Security layer | Encryption (AES-256-GCM), Auth (JWT + API keys), TLS, audit, KDF |
+| **mediagit-security** | Security layer | Encryption (XAES-256-GCM), Auth (JWT + API keys), TLS, audit, KDF |
 | **mediagit-config** | Configuration | TOML config file management |
 | **mediagit-observability** | Logging/tracing | Structured tracing with env-filter |
 | **mediagit-metrics** | Prometheus metrics | Operation stats, dedup ratios |
-| **mediagit-git** | Git interop | FUTURE MILESTONE — git/git-lfs → MediaGit migration (not wired to CLI) |
-| **mediagit-migration** | Migration tools | Git → MediaGit migration |
 | **mediagit-test-utils** | Test utilities | Shared test helpers |
+
+### Workspace Dependency Graph
+
+```mermaid
+graph TD
+    CLI["mediagit-cli"] --> CFG["mediagit-config"]
+    CLI --> STORE["mediagit-storage"]
+    CLI --> VER["mediagit-versioning"]
+    CLI --> OBS["mediagit-observability"]
+    CLI --> PROTO["mediagit-protocol"]
+    CLI --> MEDIA["mediagit-media"]
+    CLI --> SEC["mediagit-security"]
+    CLI --> TU["mediagit-test-utils"]
+    CLI --> SRV["mediagit-server"]
+
+    SRV --> PROTO
+    SRV --> VER
+    SRV --> COMP["mediagit-compression"]
+    SRV --> STORE
+    SRV --> CFG
+    SRV --> SEC
+    SRV --> MET["mediagit-metrics"]
+
+    PROTO --> VER
+    VER --> STORE
+    VER --> COMP
+    TU --> STORE
+```
 
 ---
 
-## CLI Commands (28)
+## CLI Commands (35)
 
 ### Core Workflow
 | Command | Description |
@@ -100,6 +126,11 @@ graph TD
 | `bisect` | Binary search for bug-introducing commit |
 | `reflog` | Show reference logs (when branch tips were updated) |
 
+### File Locking
+| Command | Description |
+|---------|-------------|
+| `lock` | Manage server-enforced file locks (`create`/`unlock`/`list`) |
+
 ### Remote Operations
 | Command | Description |
 |---------|-------------|
@@ -108,6 +139,14 @@ graph TD
 | `pull` | Fetch and merge remote changes |
 | `fetch` | Fetch all remote refs without merging |
 | `remote` | Manage remote repositories |
+| `download` | Download a single file from a remote repository by path |
+| `auth` | Manage authentication with a MediaGit server |
+
+### Media & Sparse Checkout
+| Command | Description |
+|---------|-------------|
+| `media` | Inspect media file metadata (image/video/audio/PSD/3D) |
+| `sparse-checkout` | Manage sparse checkout (partial working tree) |
 
 ### File & History Operations
 | Command | Description |
@@ -122,12 +161,23 @@ graph TD
 | `fsck` | Verify object database integrity |
 | `verify` | Quick commit and signature verification |
 | `stats` | Show repository statistics (storage, files, compression, dedup) |
+| `config` | Get and set repository configuration |
+| `key` | Manage this repository's at-rest encryption key |
 | `completions` | Generate shell completions |
 | `version` | Show version information |
 
-### Git Interop Crate
-The `mediagit-git` crate (workspace member) provides Git/git-lfs migration tooling.
-It is **not** wired into the CLI binary — migration commands are a future milestone.
+### Importing from Git or git-lfs — not available
+There is **no supported path** for importing an existing git or git-lfs
+repository into MediaGit. Two crates (`mediagit-git`, `mediagit-migration`)
+claimed to provide one and were deleted in 0.3.0-rc.4; neither had ever been
+wired to the CLI, and `mediagit-git`'s clean filter replaced file content with a
+pointer **without storing the content anywhere**, logging success. Configured as
+a real git filter, it would have destroyed every file it touched.
+
+MediaGit is a standalone VCS for media, not a git front-end, so an importer has
+to reconstruct history through MediaGit's own object model rather than reuse
+git's. That work has not been done. Recorded here so the gap is a known absence
+rather than a broken feature someone finds by trying it.
 
 ---
 
@@ -369,7 +419,7 @@ Each media format has a dedicated parser that understands the container structur
 
 ### FastCDC Integration
 
-MediaGit uses the **`fastcdc` crate v3.2** (specifically `fastcdc::v2020`, the 2020 algorithm revision) for all content-defined chunking. FastCDC replaces traditional rolling hash with a **gear table-based hash** that achieves **O(1) boundary detection per byte** — approximately **10× faster** than Buzhash or Rabin fingerprint.
+MediaGit uses the **`fastcdc` crate v4.0** (specifically `fastcdc::v2020`, the 2020 algorithm revision) for all content-defined chunking. FastCDC replaces traditional rolling hash with a **gear table-based hash** that achieves **O(1) boundary detection per byte** — approximately **10× faster** than Buzhash or Rabin fingerprint.
 
 #### Two Modes of Operation
 
@@ -457,11 +507,11 @@ The `get_chunk_params(file_size)` function selects FastCDC parameters:
 
 ## Delta Compression
 
-**Crate**: `mediagit-versioning` · **Key files**: `delta.rs` (~290 lines), `similarity.rs` (524 lines)
+**Crate**: `mediagit-versioning` · **Key files**: `delta.rs` (424 lines), `similarity.rs` (573 lines)
 
 ### Delta Encoder — Zstd Dictionary Mode
 - **Algorithm**: Zstd dictionary compression — base chunk serves as the raw dictionary
-- **Encoder**: `zstd::bulk::Compressor::with_dictionary(19, base_bytes)`
+- **Encoder**: `zstd::bulk::Compressor::with_dictionary(level, base_bytes)`, level defaults to `19` and is tunable via `MEDIAGIT_DELTA_LEVEL` (1–22; out-of-range values warn and fall back to the default)
 - **Decoder**: `zstd::bulk::Decompressor::with_dictionary(base_bytes)`
 - **Wire format**: `[0x5A, 0x44]` magic ("ZD") + varint(base_size) + varint(result_size) + zstd-compressed bytes
 - **Max chain depth**: 10 (then re-stored as full object)
@@ -500,12 +550,12 @@ graph TD
 
 | File Type | Threshold | Rationale |
 |-----------|-----------|-----------|
-| Creative/PDF (AI, InDesign) | 0.15 | Embedded compressed streams shift boundaries |
+| Creative/PDF (AI, InDesign, PSD) | 0.15 | Embedded compressed streams shift boundaries |
 | Office (DOCX, XLSX) | 0.20 | ZIP containers with shared structure |
 | Video (MP4, MKV) | 0.50 | Metadata/timeline changes significant |
 | Audio (WAV, MP3) | 0.65 | Medium structural similarity |
-| Images (JPEG, PSD) | 0.70 | Perceptual similarity |
-| 3D Models (FBX, Blend) | 0.70 | Geometric data similarity |
+| Images (JPEG, PNG) | 0.70 | Perceptual similarity |
+| 3D Models (FBX, glTF) | 0.70 | Geometric data similarity |
 | Text/Code | 0.85 | Small changes matter |
 | Config (JSON, YAML) | 0.95 | Near-exact matches preferred |
 | Default | 0.30 | Conservative baseline |
@@ -539,7 +589,7 @@ graph TD
 
 ## Media Merge Strategies
 
-**Crate**: `mediagit-media` · **Key file**: `strategy.rs` (619 lines)
+**Crate**: `mediagit-media` · **Key file**: `strategy.rs` (676 lines)
 
 ```mermaid
 graph TD
@@ -590,7 +640,7 @@ Six format-specific merge strategies with automatic conflict detection:
 
 ## Staging & Index
 
-**Crate**: `mediagit-versioning` · **Key file**: `index.rs` (296 lines)
+**Crate**: `mediagit-versioning` · **Key file**: `index.rs` (349 lines)
 
 ### IndexEntry Fields
 ```rust
@@ -713,6 +763,21 @@ graph TD
 
 ---
 
+## Server-Enforced File Locking
+
+**Crate**: `mediagit-server` · **Key file**: `locks.rs` · **CLI**: `crates/mediagit-cli/src/commands/lock.rs`
+
+Path-based locks let a team reserve non-mergeable binary assets (e.g. a PSD or a level file) so two people don't clobber each other's work.
+
+- **Keying**: locks are keyed by repo-relative path, not object id.
+- **Storage**: the in-memory map on `AppState` is the hot-path source of truth; it's mirrored to `<repo>/.mediagit/locks.jsonl` (`{"v":1}` header, tmp+rename writes) purely so locks survive a server restart.
+- **Enforcement point**: `check_push_locks` runs at push time. It walks the commits between the ref's old and new OID (`TreeDiffer`) to compute touched paths, then rejects the push if any touched path is locked by someone other than the pusher.
+- **Identity**: the authenticated pusher's `user_id` is compared against the lock owner. On a no-auth server there's no provable identity at push time, so any touched, locked path always rejects the push.
+- **CLI**: `mediagit lock create <path> [--owner <name>]`, `mediagit lock unlock <path>|--id <LOCK_ID> [--force]` (`--force` releases someone else's lock and requires `repo:admin`), `mediagit lock list [--json]`.
+- **Env knobs**: `MEDIAGIT_LOCKS_ENFORCE=0` disables enforcement entirely; `MEDIAGIT_LOCKS_MAX_COMMITS` (default 1000) caps how many commits the touched-paths walk will traverse — exceeding it fails **open** (warns and allows the push) rather than stalling a large push on lock computation.
+
+---
+
 ## Cloud Packs
 
 **Crate**: `mediagit-versioning` · **Key files**: `streaming_pack.rs` (`StreamingPackWriter` / `StreamingPackReader`, `CloudPackResult`, `finalize_cloud()`, `PackKind::CloudObject`), `streaming_index.rs` (`StreamingPackIndex`, O(1) memory), `pack.rs`, `transaction.rs` (`PackTransaction`) · **Server**: `handlers/transfer.rs`, `chunks.rs`, `repo.rs`
@@ -785,7 +850,7 @@ flowchart TD
 
 | Module | Files | Purpose |
 |--------|-------|---------|
-| **Encryption** | `encryption.rs` | AES-256-GCM at-rest encryption |
+| **Encryption** | `encryption.rs`, `envelope.rs` | XAES-256-GCM primitives + the `MGEN` v2 object envelope. Wired into `SmartCompressor`. Key management (`mediagit key init/status/recover/rotate-master`; passphrase+Argon2id, OS keychain, or keyfile-env). Push and clone work via key escrow (DC-7 D4): the client hands its repo key to the server, which wraps it under a server master key in `<repo>/.mediagit/key.json`. Encryption is enabled at creation only — `key init` refuses on a repository that already holds objects |
 | **KDF** | `kdf.rs` | Key derivation (Argon2/PBKDF2) |
 | **Auth** | `auth/jwt.rs`, `auth/apikey.rs`, `auth/credentials.rs` | JWT tokens + API keys |
 | **Middleware** | `auth/middleware.rs` | Axum auth extraction |
@@ -793,6 +858,72 @@ flowchart TD
 | **User** | `auth/user.rs` | User model and permissions |
 | **TLS** | `tls/cert.rs`, `tls/config.rs` | Certificate management |
 | **Audit** | `audit.rs` | Security event logging |
+
+### Path-Traversal Hardening
+
+`validate_object_key()` (`crates/mediagit-storage/src/lib.rs:662-701`) is the single choke point every `StorageBackend` implementation and wrapper (`NamespacedBackend`, `local::LocalBackend`) must call before turning a caller-supplied key into a filesystem path or remote object key. It rejects absolute paths, Windows drive/UNC prefixes, and `..`/`..\` traversal components (normalizing backslashes first so the check is platform-independent) — without it, a user-controlled chunk/pack id containing `..` could escape the repo's storage root or, once namespaced, escape into another tenant's namespace. Server handlers add a second layer of hex-id guards on untrusted path segments (e.g. `crates/mediagit-server/src/handlers/chunks.rs:646,656` reject any `chunk_id`/delta-base header that isn't exactly 64 hex characters) before those ids ever reach the storage layer.
+
+---
+
+## Authentication & Authorization
+
+**Crate**: `mediagit-security` (JWT/API keys) · **Server**: `crates/mediagit-server/src/handlers/mod.rs`
+
+- **Bootstrap**: `mediagit-server init --enable-auth` wizard writes the server config, generates a random JWT secret, and creates the first admin in one step (offline equivalent: `mediagit-server admin create`). `enable_auth` is OFF by default, matching the product default.
+- **Roles**: `Read`, `Write`, `Admin` (wire form capitalized, e.g. `"Write"`). `Read` = `repo:read`; `Write` = `repo:read` + `repo:write` (self-registration default); `Admin` = all of the above + `repo:admin` + `user:manage` (the marker permission for admin-only routes).
+- **Tokens**: JWT access tokens (HS256, 24h TTL, self-contained claims — a password change does **not** revoke existing tokens) + refresh tokens (30d); API keys (64 hex chars, id `ak_<32hex>`) as a long-lived alternative for machine clients, created/listed/revoked via `mediagit auth key`.
+- **Persistence**: users, API keys, and per-repo grants are persisted to `users.jsonl` / `api_keys.jsonl` / `grants.jsonl` under `auth_store_dir`. Writes are atomic (tmp file + rename); each file starts with a `{"v":1}` version header, and a corrupt file is a **hard load-time error** — never silently dropped or reset.
+- **Per-repo grants**: `GrantLevel` is ordered `Read < Write < Admin`. `check_permission()` (`crates/mediagit-server/src/handlers/mod.rs:67-141`) checks in order:
+  1. Auth disabled → allow everything.
+  2. No authenticated user → reject.
+  3. Admin role (flat `user:manage` permission) → always allowed, regardless of grants.
+  4. Zero-grants deployment, or `MEDIAGIT_GRANTS_ENFORCE=0` → fall back to the flat role-permission check (pre-grants behavior). `MEDIAGIT_GRANTS_ENFORCE=strict` does the opposite — forces per-repo grant enforcement even for a repo with no grants recorded, so an ungranted repo denies rather than falling back.
+  5. Otherwise, per-repo grant lookup: the user's grant level for the repo must be at or above the level implied by the required permission.
+- **Admin routes**: `/auth/users`, `/auth/users/{id}/grants`, `/auth/keys` — user and grant management, gated on the admin role.
+- **Env knobs**: `MEDIAGIT_AUTH_PERSIST` (enable disk persistence), `MEDIAGIT_GRANTS_ENFORCE` (`0` disables per-repo grant checks and falls back to flat roles; `strict` forces per-repo enforcement everywhere, including repos with no grants recorded).
+
+```mermaid
+flowchart TD
+    A["Request with permission requirement"] --> B{"Auth disabled?"}
+    B -->|"Yes"| C["Allow"]
+    B -->|"No"| D{"Authenticated user?"}
+    D -->|"No"| E["Reject"]
+    D -->|"Yes"| F{"Role = Admin?<br/>(user:manage)"}
+    F -->|"Yes"| C
+    F -->|"No"| G{"Zero-grants deployment<br/>or MEDIAGIT_GRANTS_ENFORCE=0?"}
+    G -->|"Yes"| H["Flat role check<br/>(Read < Write < Admin)"]
+    G -->|"No"| I["Per-repo grant lookup"]
+    H --> J{"Permission covered<br/>by role?"}
+    J -->|"Yes"| C
+    J -->|"No"| E
+    I --> K{"Grant level ≥<br/>required level?"}
+    K -->|"Yes"| C
+    K -->|"No"| E
+```
+
+### Client Credential Resolution
+
+The CLI resolves a credential for a remote in this order, caching env/config
+hits to the OS keychain after the first successful request:
+
+```mermaid
+flowchart LR
+    A["mediagit needs a<br/>credential for a remote"] --> B{"MEDIAGIT_TOKEN or<br/>MEDIAGIT_API_KEY set?"}
+    B -->|"Yes"| C["Use env credential"]
+    B -->|"No"| D{"remotes.name.token<br/>or api_key in config.toml?"}
+    D -->|"Yes"| E["Use config credential"]
+    D -->|"No"| F{"OS keychain entry<br/>for this origin?<br/>(skip with MEDIAGIT_NO_KEYRING)"}
+    F -->|"Yes"| G["Use keychain credential"]
+    F -->|"No"| H["No credential"]
+    C -.->|"cache after success"| KC["OS keychain<br/>(keyed by origin)"]
+    E -.->|"cache after success"| KC
+    G --> I{"401 response?"}
+    I -->|"Yes"| J["Invalidate keychain entry, retry"]
+```
+
+JWT (from `mediagit auth login`) and API keys (from `mediagit auth key
+create`) are interchangeable at this layer — both resolve to a bearer
+credential the server authenticates the same way.
 
 ---
 
@@ -992,26 +1123,51 @@ flowchart TD
 
 - `--dry-run` mode reports what would be deleted without touching data
 - Chunks are **content-addressed** — a chunk stays alive if ANY reachable manifest references it
-- The `--aggressive` flag performs deeper sweeps and pack recompaction
+- A hidden `--aggressive` flag exists on the struct (reserved for a future deeper-sweep/recompaction mode) but is **not implemented**: passing it makes `gc` fail immediately with "gc --aggressive is not yet implemented." Use `--repack` for pack recompaction today.
+
+---
+
+## Reachability Bitmaps
+
+**Crate**: `mediagit-versioning` · **Key file**: `bitmap.rs`
+
+A Roaring-bitmap-backed reachability index that speeds up pack negotiation, `gc`, and `fsck` on large repos.
+
+- **Purpose**: persists a commit's full object closure — everything `walk_reachable` would visit from it (commits/trees/blobs) — as a compact, versioned artifact under the `bitmaps/` storage namespace. When a valid bitmap exists for a commit tip, callers skip the BFS walk (one ODB read per object) entirely.
+- **Correctness contract**: this is **derived data** — a pure speedup, never a correctness dependency. Any miss, staleness, corruption, or format-version mismatch silently falls back to `walk_reachable`; it must never error the caller. `gc` may prune bitmaps for commits no longer reachable, and a missing/stale bitmap is never treated as a corruption signal.
+- **Format versioning**: `BITMAP_FORMAT_VERSION` is bumped whenever the on-disk format changes; readers reject any other version by falling back to BFS rather than erroring.
+- **Env knob**: `MEDIAGIT_BITMAP` (default ON) — set to `0`/`false`/`off` to disable both generation and consumption; every caller then falls back to BFS.
+- **Scope**: the id space is local to a single bitmap file (per-commit), not a global cross-commit numbering — sufficient for today's single-bitmap lookups; multi-bitmap set algebra (cheap AND/OR across commits) is future scope.
+
+```mermaid
+flowchart TD
+    A["gc / fsck / pack negotiation<br/>needs commit's reachable set"] --> B{"Valid bitmap for<br/>this commit tip?<br/>(BITMAP_FORMAT_VERSION matches)"}
+    B -->|"Yes"| C["Load bitmap<br/>(O(1) vs. per-object walk)"]
+    B -->|"No / stale / corrupt /<br/>MEDIAGIT_BITMAP=0"| D["walk_reachable()<br/>BFS, one ODB read per object"]
+    D --> E["Optionally persist new bitmap<br/>under bitmaps/ namespace"]
+    C --> F["Reachable OID set"]
+    E --> F
+```
 
 ---
 
 ## Configuration
 
-**File**: `.mediagit/config.toml`
+**File**: `.mediagit/config.toml`. See [`CONFIGURATION.md`](CONFIGURATION.md) for the full, field-by-field reference (client + server + environment variables); this is an illustrative excerpt only, not the schema.
 
 ```toml
-[core]
-compression = true          # Enable smart compression
-chunk_strategy = "rolling"  # fixed | rolling | media_aware
-delta_enabled = true        # Enable delta compression
+[storage]
+backend = "filesystem"
+base_path = "./.mediagit/objects"
 
-[remote "origin"]
+[compression]
+enabled = true
+algorithm = "zstd"
+
+[remotes.origin]
 url = "http://localhost:3000"
-push_url = ""               # Optional separate push URL
-auth_method = "bearer"
 
-[branch "main"]
+[branches.main]
 remote = "origin"
 merge = "refs/heads/main"
 ```
@@ -1020,51 +1176,17 @@ merge = "refs/heads/main"
 
 ## Build & Distribution
 
-- **MSRV**: Rust 1.92.0
-- **License**: AGPL-3.0
+- **MSRV**: Rust 1.97
+- **License**: BUSL-1.1 (Business Source License 1.1)
 - **Release profile**: `opt-level = 3`, LTO, `codegen-units = 1`
-- **Distribution**: cargo-dist (v0.26.0) with GitHub CI
+- **Distribution**: cargo-dist (v0.32.0) with GitHub CI
 - **Installers**: Shell, PowerShell, Homebrew, MSI
-- **Targets**: x86_64 + aarch64 for Linux, macOS, Windows
+- **Targets**: x86_64 + aarch64 for Linux and macOS; x86_64 only for Windows (no aarch64-windows target)
 
 ---
 
-## Performance Benchmarks (v0.2.7-beta.1)
+## Performance Benchmarks
 
-> Measured via deep test suite on Windows, release build, 23 formats, 459/459 tests. Last run: 2026-05-25 (AWS/Azure/GCS backends).
-
-### Storage Savings by Category
-
-| Category | Best Format | Savings | Ratio |
-|----------|-------------|---------|-------|
-| 3D Text (DAE/FBX-ascii) | FBX-ascii (16MB) | 81.0% | 5.27x |
-| Vector (SVG) | cave-model.svg | 80.8% | 5.20x |
-| Creative (PSD) | PSD-xl (213MB) | 70.9% | 3.44x |
-| 3D Mesh (PLY/STL) | PLY (2.3MB) | 72.9% | 3.69x |
-| Audio (uncompressed) | WAV (54MB) | 54.1% | 2.18x |
-| 3D Binary (GLB) | GLB (13MB) | 50.6% | 2.03x |
-| Video/Archive (compressed) | MP4/MKV/ZIP | 0% (Store) | 1.00x |
-
-### Delta Efficiency
-
-| Format | Delta Efficiency | Overhead |
-|--------|-----------------|----------|
-| GLB (13–24MB) | 100% | 3–4 KB |
-| AI-lg (123MB) | 100% | 4.5 KB |
-| PSD-xl (213MB) | 99.8% | 424 KB |
-| WAV (54MB) | 99.8% | 139 KB |
-| Archive ZIP (656MB) | 99.9% | 569 KB |
-
-### Test Coverage
-
-| Phase | Result |
-|-------|--------|
-| Unit / integration tests | 1,529 |
-| GCS deep test (end-to-end) | 75/75 |
-| Azure deep test (end-to-end) | 75/75 |
-| MinIO deep test (end-to-end) | 62/62 |
-| Format tests | 36/36 |
-| Video deep (MKV EBML, MOV Atom, ProRes+PCM) | 9/9 |
-| Audio deep (WAV, FLAC, OGG) | 3/3 |
-| Server push/clone/fetch/pull | 4/4 |
-| .mediagitignore | 7/7 |
+See **[BENCHMARKS.md](BENCHMARKS.md)** for current storage-savings and cross-backend
+throughput measurements, methodology, and reproduction steps — measured on the
+v0.3.0-rc.4 tree (SCALE QA campaign, 220 gates, 0 failures, August 18 2026).

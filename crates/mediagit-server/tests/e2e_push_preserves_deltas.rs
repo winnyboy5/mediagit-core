@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Regression test: push must ship chunk-deltas as deltas, not rematerialized
 //! full chunks.
@@ -116,7 +106,7 @@ async fn push_preserves_chunk_deltas_on_server() {
     // chunk-deltas/<delta>{,.meta} — which the clone-side /chunk-deltas/check
     // endpoint walks, so it must run with packing disabled. Packed delta
     // preservation is covered separately by the F-series cloud-pack tests.
-    std::env::set_var("MEDIAGIT_CLOUD_PACKS", "0");
+    mediagit_test_utils::set_var("MEDIAGIT_CLOUD_PACKS", "0");
 
     // ── Client ──────────────────────────────────────────────────────────
     let client_temp = TempDir::new().unwrap();
@@ -144,15 +134,28 @@ async fn push_preserves_chunk_deltas_on_server() {
 
     // ── Push ────────────────────────────────────────────────────────────
     let client_odb = open_odb(&client_mediagit).await;
-    let uploaded = client
+    let (uploaded, _bytes) = client
         .upload_chunked_objects(&client_odb, &[blob_oid], |_, _| {})
         .await
         .expect("upload_chunked_objects");
     assert_eq!(uploaded, 2, "expected both chunks to be uploaded");
 
     // ── Assert server layout ────────────────────────────────────────────
-    let server_storage: Arc<dyn StorageBackend> =
+    // The server received these objects over HTTP through its own
+    // `build_storage_backend`, which wraps in `NamespacedBackend` (layout
+    // v2) namespaced by the sanitized repo-directory basename (this test
+    // repo carries no config.toml, so the server falls back to that
+    // default). This verification read must use the same wrap to find them.
+    let server_inner: Arc<dyn StorageBackend> =
         Arc::new(LocalBackend::new(&server_mediagit).await.unwrap());
+    let server_ns = mediagit_storage::sanitize_namespace(
+        &server_repo
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    );
+    let server_storage: Arc<dyn StorageBackend> =
+        Arc::new(mediagit_storage::NamespacedBackend::new(server_inner, server_ns).unwrap());
 
     let base_key = format!("chunks/{}", base_id.to_hex());
     assert!(
@@ -195,7 +198,7 @@ async fn push_preserves_chunk_deltas_on_server() {
     // ── Idempotence: a second push must not rematerialize (server's
     // /chunks/check now treats delta-form as present, so the client
     // should skip re-uploading everything).
-    let uploaded_again = client
+    let (uploaded_again, _bytes_again) = client
         .upload_chunked_objects(&client_odb, &[blob_oid], |_, _| {})
         .await
         .expect("second upload_chunked_objects");

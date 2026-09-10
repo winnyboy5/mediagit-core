@@ -28,7 +28,8 @@ backend = "s3"
 bucket = "my-media-bucket"
 region = "us-east-1"
 prefix = "repos/my-project"
-encryption = true
+access_key_id = "..."
+secret_access_key = "..."
 
 [compression]
 enabled = true
@@ -65,6 +66,46 @@ prevent_deletion = true
 require_reviews = true
 min_approvals = 1
 ```
+
+---
+
+## Top-Level — Repository Identity & Layout
+
+Written once at `mediagit init`/`clone`; not meant to be edited by hand.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `cdc_seed` | u64 | `0` | Per-repo content-defined chunking seed. Generated at `init`, propagated to clones via protocol capabilities. `0` reproduces legacy unseeded chunk boundaries (pre-existing repos). |
+| `repo_namespace` | string | *(derived)* | Per-repo storage namespace (layout v2): every object key is prefixed `<repo_namespace>/` so one bucket/root can host multiple repos. Absent on pre-v2 repos (falls back to sanitized repo-dir basename). Never change it after init — existing keys would be orphaned. |
+| `layout_version` | u32 | `2` | Physical storage layout version (`1` = flat pre-namespace, `2` = namespaced + hash fanout). Mirrored in the storage root's `LAYOUT` marker; a mismatched client fails fast. |
+| `repo_id` | string | *(generated)* | Unique repo identifier recorded in the `LAYOUT` marker so a namespace collision between independent repos is a hard error instead of a silent key-space merge. |
+| `config_version` | u32 | `0` | config.toml schema version, migrated automatically (distinct from `layout_version`). |
+
+---
+
+## `[security]` — Schema-Only (not read at runtime)
+
+This section exists in the config schema but is **not read by the CLI or by
+`mediagit-server`** — actual server security settings live in
+`mediagit-server.toml` (see `CONFIGURATION.md` Part 2 at the repo root, and
+[Authentication](./authentication.md) for the auth model). The keys below are
+documented for schema completeness only.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `auth_enabled` | bool | `false` | Enable JWT/API-key authentication. The JWT secret comes from `MEDIAGIT_JWT_SECRET` (required when enabled). |
+| `https_enabled` | bool | `false` | Serve TLS (enables HTTP/2) |
+| `tls_cert_path` / `tls_key_path` | string | — | Certificate/key files for TLS |
+| `api_key` | string | — | Static API key (legacy single-key mode) |
+| `cors_origins` | array | `[]` | Allowed CORS origins |
+| `rate_limiting` | table | — | Rate-limit configuration for auth and data routes |
+
+> `encryption_at_rest` / `encryption_key_path` used to be documented here.
+> They were removed from `SecurityConfig` entirely — nothing ever read them,
+> even the "key path must exist" check never ran — and the real at-rest
+> encryption switch is `[encryption]` in `mediagit-server`'s own config. If
+> your `config.toml` still has them, they parse without complaint and do
+> nothing; remove them.
 
 ---
 
@@ -110,9 +151,8 @@ backend = "s3"
 bucket = "my-bucket"
 region = "us-east-1"
 prefix = ""
-encryption = false
-encryption_algorithm = "AES256"
-# access_key_id and secret_access_key from env vars or IAM role
+access_key_id = "..."
+secret_access_key = "..."
 ```
 
 | Key | Type | Default | Description |
@@ -120,32 +160,43 @@ encryption_algorithm = "AES256"
 | `backend` | string | — | Must be `"s3"` |
 | `bucket` | string | — | **Required.** S3 bucket name |
 | `region` | string | — | **Required.** AWS region |
-| `access_key_id` | string | env | AWS access key (prefer env var) |
-| `secret_access_key` | string | env | AWS secret key (prefer env var) |
-| `endpoint` | string | — | Custom endpoint for S3-compatible services |
+| `access_key_id` | string | — | **Required for real AWS/MinIO/S3-compatible.** No env var or IAM-role fallback; defaults to empty if unset. |
+| `secret_access_key` | string | — | **Required for real AWS/MinIO/S3-compatible.** Same caveat as `access_key_id`. |
+| `endpoint` | string | — | Custom endpoint for S3-compatible services (e.g. MinIO) |
 | `prefix` | string | `""` | Object key prefix |
-| `encryption` | bool | `false` | Enable server-side encryption |
-| `encryption_algorithm` | string | `"AES256"` | SSE algorithm: `AES256` or `aws:kms` |
+
+> **Warning**: `encryption` and `encryption_algorithm` are not real keys —
+> `S3Storage` has no such fields. A config carrying them parses without
+> complaint and the values are silently ignored. If you copied them from an
+> older doc, remove them; they do not enable server-side encryption.
 
 ### Azure Blob Storage
 
 ```toml
 [storage]
 backend = "azure"
-account_name = "mystorageaccount"
 container = "media-container"
 prefix = ""
-# account_key from env AZURE_STORAGE_KEY or use connection_string
+auth = { type = "account_key", account_name = "mystorageaccount", account_key = "..." }
 ```
+
+Credentials are a tagged `auth` block (`config_version` 3+), exactly one of:
+`account_key` (`account_name` + `account_key`), `connection_string` (`value`),
+`sas` (`account_name` + `token`), or `emulator` (no fields). A pre-v3 flat
+config is migrated on first open; if migration cannot decide (both credentials
+present, or neither) it fails with the exact `auth` block to write.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `backend` | string | — | Must be `"azure"` |
-| `account_name` | string | — | **Required.** Storage account name |
 | `container` | string | — | **Required.** Blob container name |
-| `account_key` | string | env | Storage account key (prefer env var) |
-| `connection_string` | string | env | Full connection string (alternative to account_name/key) |
+| `auth` | tagged table | — | **Required.** The credential — see the variants above. |
 | `prefix` | string | `""` | Blob path prefix |
+
+> **Note:** `account_name`, `account_key` and `connection_string` are **not**
+> top-level keys. They live *inside* the `auth` table. Writing them directly
+> under `[storage]` is the pre-v3 layout and is rejected with a migration error.
+> There is no environment-variable fallback for any of them.
 
 ### Google Cloud Storage
 
@@ -155,7 +206,8 @@ backend = "gcs"
 bucket = "my-gcs-bucket"
 project_id = "my-gcp-project"
 prefix = ""
-# credentials_path from GOOGLE_APPLICATION_CREDENTIALS env var
+# credentials_path is optional; omit it to use Application Default Credentials,
+# which honour GOOGLE_APPLICATION_CREDENTIALS or a gcloud login session.
 ```
 
 | Key | Type | Default | Description |
@@ -163,7 +215,7 @@ prefix = ""
 | `backend` | string | — | Must be `"gcs"` |
 | `bucket` | string | — | **Required.** GCS bucket name |
 | `project_id` | string | — | **Required.** GCP project ID |
-| `credentials_path` | string | env | Path to service account JSON key |
+| `credentials_path` | string | unset | Path to a service-account JSON key. **Optional** — when unset, Application Default Credentials are used, which honour `GOOGLE_APPLICATION_CREDENTIALS` or a `gcloud auth application-default login` session. GCS is the only backend with a credential path outside this file. |
 | `prefix` | string | `""` | Object prefix |
 
 ---
@@ -180,9 +232,10 @@ prefix = ""
 | `min_size` | integer | `1024` | (Informational) Not currently enforced |
 
 **Automatic algorithm selection by file type** (always active, cannot be overridden via config):
-- Already-compressed formats (JPEG, MP4, ZIP, docx, AI, PDF): stored as-is (`none`)
-- PSD, raw formats, 3D models: `zstd` at `Best` level (level 22)
-- Text, JSON, TOML: `zstd` at `Default` level (level 3)
+- Already-compressed formats (JPEG, MP4, ZIP, docx, AI/InDesign): stored as-is (`none`) — PDF is *not* in this group, see below
+- Raw/uncompressed image formats (TIFF, RAW, EXR) and 3D interchange formats (OBJ/FBX/GLB/STL/PLY): `zstd` at `Best` level (level 19 — levels 20-22 are deliberately never used, they OOM under parallel adds for <0.5% extra ratio)
+- PSD and other creative project files (After Effects, Premiere, Blender, Maya, ...), plus PDF/SVG: `zstd` at `Default` level (level 3)
+- Text, JSON, TOML: `brotli` at `Default` level (falls back to `zstd` above 500 MB)
 - ML checkpoints: `zstd` at `Fast` level (level 1)
 
 ---
@@ -192,6 +245,10 @@ prefix = ""
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `max_concurrency` | integer | CPU count (min 4) | Max parallel operations |
+| `upload_concurrency` | integer | unset | Override for client-side parallel chunk uploads. Falls back to `MEDIAGIT_UPLOAD_CONCURRENCY` / internal default (`32`) when unset. |
+| `download_concurrency` | integer | unset | Override for client-side parallel chunk downloads. Falls back to `MEDIAGIT_DOWNLOAD_CONCURRENCY` / internal default (`24`) when unset. |
+| `pack_workers` | integer | unset | Override for server-side concurrent pack-write workers. Falls back to `MEDIAGIT_PACK_WORKERS` / internal default (`8`) when unset. |
+| `chunk_write_concurrency` | integer | unset | Override for parallel chunk write concurrency during `add`. Falls back to `MEDIAGIT_CHUNK_WRITE_CONCURRENCY` / internal default (`num_cpus`) when unset. |
 | `buffer_size` | integer | `65536` | I/O buffer size in bytes (64 KB) |
 
 ### `[performance.cache]`

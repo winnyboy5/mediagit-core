@@ -136,7 +136,7 @@ cargo test --test '*' -- --ignored --nocapture
 # Start LocalStack
 docker-compose up -d localstack
 
-# Run S3 tests (21 test cases)
+# Run S3 tests (16 test cases)
 cargo test --test s3_localstack_tests -- --ignored
 
 # Run specific test
@@ -148,7 +148,7 @@ cargo test --test s3_localstack_tests test_localstack_put_and_get -- --ignored
 # Start Azurite
 docker-compose up -d azurite
 
-# Run Azure tests (21 test cases)
+# Run Azure tests (18 test cases)
 cargo test --test azure_azurite_tests -- --ignored
 
 # Run specific test
@@ -160,7 +160,7 @@ cargo test --test azure_azurite_tests test_azurite_chunked_upload -- --ignored
 # Start GCS emulator
 docker-compose up -d gcs-emulator
 
-# Run GCS tests (24 test cases)
+# Run GCS tests (19 test cases)
 cargo test --test gcs_emulator_tests -- --ignored
 
 # Run specific test
@@ -172,7 +172,7 @@ cargo test --test gcs_emulator_tests test_gcs_emulator_resumable_upload -- --ign
 # Start MinIO and initialization
 docker-compose up -d minio minio-init
 
-# Run MinIO tests (23 test cases)
+# Run MinIO tests (18 test cases)
 cargo test --test minio_docker_tests -- --ignored
 
 # Run specific test
@@ -194,7 +194,7 @@ cargo test --lib b2_spaces::tests
 
 ## Test Coverage
 
-### S3 LocalStack (21 tests)
+### S3 LocalStack (16 tests)
 - ✅ Basic CRUD operations (PUT, GET, EXISTS, DELETE)
 - ✅ Large file uploads (10MB, multipart testing)
 - ✅ Concurrent operations (10 writers, 100 readers)
@@ -208,8 +208,11 @@ cargo test --lib b2_spaces::tests
 - ✅ Overwrite operations
 - ✅ Non-existent object errors
 - ✅ Backend clonability
+- ✅ Configuration validation
+- ✅ Error handling
+- ✅ Multipart upload handling
 
-### Azure Azurite (21 tests)
+### Azure Azurite (18 tests)
 - ✅ Basic CRUD operations
 - ✅ Chunked uploads (4MB chunks, 10MB files)
 - ✅ Concurrent operations (10 writers, 100 readers)
@@ -222,8 +225,14 @@ cargo test --lib b2_spaces::tests
 - ✅ Binary data
 - ✅ Empty blob handling
 - ✅ Validation and error handling
+- ✅ Configuration variants
+- ✅ Prefix handling
+- ✅ Retry logic
+- ✅ Concurrent access patterns
+- ✅ Authentication edge cases
+- ✅ Metadata operations
 
-### GCS Emulator (24 tests)
+### GCS Emulator (19 tests)
 - ✅ Basic CRUD operations
 - ✅ Resumable uploads (>5MB, 256KB chunks)
 - ✅ Concurrent operations (10 writers, 100 readers)
@@ -236,8 +245,15 @@ cargo test --lib b2_spaces::tests
 - ✅ Binary data
 - ✅ Empty object handling
 - ✅ Validation and error handling
+- ✅ Streaming operations
+- ✅ Range requests
+- ✅ Project configuration
+- ✅ Bucket operations
+- ✅ Multipart handling
+- ✅ Timeout handling
+- ✅ Error recovery
 
-### MinIO Docker (23 tests)
+### MinIO Docker (18 tests)
 - ✅ Basic CRUD operations
 - ✅ Large file uploads (10MB)
 - ✅ Concurrent operations (10 writers, 100 readers)
@@ -250,8 +266,14 @@ cargo test --lib b2_spaces::tests
 - ✅ Binary data
 - ✅ Empty file handling
 - ✅ Backend clonability
+- ✅ Endpoint configuration
+- ✅ Credential validation
+- ✅ Bucket operations
+- ✅ Object metadata
+- ✅ Concurrent uploads
+- ✅ Error handling
 
-### Total: 89 Integration Tests + 62 Unit Tests = 151 Tests
+### Total: 71 Integration Tests + 62 Unit Tests = 133 Tests
 
 ## Troubleshooting
 

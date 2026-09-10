@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Integration tests for GCS backend using fake-gcs-server emulator
 //!
@@ -44,14 +34,16 @@
 //! - All tests marked with `#[ignore]` until emulator support is available
 
 #[cfg(test)]
+#[allow(unsafe_code)] // edition-2024: test-only env::set_var/remove_var requires unsafe
 mod gcs_emulator_tests {
-    use mediagit_storage::{gcs::GcsBackend, StorageBackend};
+    use mediagit_storage::{StorageBackend, gcs::GcsBackend};
     use std::env;
 
     /// Helper function to create a test GCS backend connected to emulator
     async fn create_test_backend() -> GcsBackend {
         // Set emulator endpoint environment variable
-        env::set_var("STORAGE_EMULATOR_HOST", "http://localhost:4443");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { env::set_var("STORAGE_EMULATOR_HOST", "http://localhost:4443") };
 
         // Use minimal credentials file for emulator (emulator doesn't validate)
         let temp_creds = create_temp_credentials();
@@ -441,10 +433,14 @@ mod gcs_emulator_tests {
         let temp_creds = create_temp_credentials();
 
         // Set environment variables
-        env::set_var("GCS_PROJECT_ID", "test-project");
-        env::set_var("GCS_BUCKET_NAME", "test-bucket");
-        env::set_var("GOOGLE_APPLICATION_CREDENTIALS", &temp_creds);
-        env::set_var("STORAGE_EMULATOR_HOST", "http://localhost:4443");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { env::set_var("GCS_PROJECT_ID", "test-project") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { env::set_var("GCS_BUCKET_NAME", "test-bucket") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { env::set_var("GOOGLE_APPLICATION_CREDENTIALS", &temp_creds) };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { env::set_var("STORAGE_EMULATOR_HOST", "http://localhost:4443") };
 
         let backend = GcsBackend::from_env()
             .await
@@ -455,10 +451,14 @@ mod gcs_emulator_tests {
         assert_eq!(backend.get("env/test.txt").await.unwrap(), b"env test");
 
         // Cleanup env vars
-        env::remove_var("GCS_PROJECT_ID");
-        env::remove_var("GCS_BUCKET_NAME");
-        env::remove_var("GOOGLE_APPLICATION_CREDENTIALS");
-        env::remove_var("STORAGE_EMULATOR_HOST");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { env::remove_var("GCS_PROJECT_ID") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { env::remove_var("GCS_BUCKET_NAME") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { env::remove_var("GOOGLE_APPLICATION_CREDENTIALS") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { env::remove_var("STORAGE_EMULATOR_HOST") };
     }
 
     /// Test retry logic with transient failures

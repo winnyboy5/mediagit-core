@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Comprehensive CLI Status, Log, Diff, Show Command Tests
 //!
@@ -23,7 +13,15 @@ use tempfile::TempDir;
 
 #[allow(deprecated)]
 fn mediagit() -> Command {
-    Command::cargo_bin("mediagit").unwrap()
+    {
+        // `commit` refuses an unconfigured identity (UX-6) instead of
+        // authoring as `Unknown <unknown@localhost>`, so tests declare one
+        // the way a real user would.
+        let mut c = Command::cargo_bin("mediagit").unwrap();
+        c.env("MEDIAGIT_AUTHOR_NAME", "Test User")
+            .env("MEDIAGIT_AUTHOR_EMAIL", "test@example.com");
+        c
+    }
 }
 
 fn init_repo(dir: &Path) {
@@ -155,6 +153,43 @@ fn test_status_porcelain() {
         .current_dir(temp_dir.path())
         .assert()
         .success();
+}
+
+#[test]
+fn test_status_porcelain_no_emoji() {
+    let temp_dir = TempDir::new().unwrap();
+    init_repo(temp_dir.path());
+
+    fs::write(temp_dir.path().join("file.txt"), "Content").unwrap();
+
+    let output = mediagit()
+        .arg("status")
+        .arg("--porcelain")
+        .current_dir(temp_dir.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "porcelain status should succeed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Verify first line exists and contains no emoji characters
+    if !stdout.is_empty() {
+        let first_line = stdout.lines().next().unwrap_or("");
+
+        // Common emoji indicators (looser check that catches most common emojis)
+        // Porcelain format should be: "A  file.txt" or "M  file.txt", etc.
+        // No decorative headers or emoji should be present
+        assert!(
+            !first_line.contains("✓")
+                && !first_line.contains("✗")
+                && !first_line.contains("→")
+                && !first_line.contains("⚠")
+                && !first_line.contains("Repository Status"),
+            "porcelain first line should not contain emoji or decorative headers: {}",
+            first_line
+        );
+    }
 }
 
 #[test]
@@ -435,12 +470,15 @@ fn test_show_stat() {
 
     add_and_commit(temp_dir.path(), "file.txt", "Content", "Initial commit");
 
+    // UX-5: `show --stat` was never read — this asserted `.success()` and
+    // passed only because the flag did nothing. It now refuses and points at
+    // `diff --stat`, which does work.
     mediagit()
         .arg("show")
         .arg("--stat")
         .current_dir(temp_dir.path())
         .assert()
-        .success();
+        .failure();
 }
 
 #[test]

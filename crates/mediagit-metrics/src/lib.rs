@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 #![allow(missing_docs)]
 //! MediaGit Metrics Module
@@ -55,12 +45,10 @@
 //! }
 //! ```
 
-pub mod collector;
 pub mod registry;
 pub mod server;
 pub mod types;
 
-pub use collector::MediaGitCollector;
 pub use registry::MetricsRegistry;
 pub use server::MetricsServer;
 pub use types::{CompressionAlgorithm, MetricsConfig, StorageBackend};

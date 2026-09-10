@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Integration tests for GCS backend
 //!
@@ -17,9 +7,10 @@
 //! They use the GCS emulator for testing without requiring GCP credentials.
 
 #[cfg(test)]
+#[allow(unsafe_code)] // edition-2024: test-only env::remove_var requires unsafe
 mod gcs_tests {
-    use mediagit_storage::gcs::{GcsBackend, GcsConfig};
     use mediagit_storage::StorageBackend;
+    use mediagit_storage::gcs::{GcsBackend, GcsConfig};
 
     /// Test configuration for GCS backend
     #[tokio::test]
@@ -119,10 +110,12 @@ mod gcs_tests {
         let result = backend.get("").await;
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("key cannot be empty"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("key cannot be empty")
+        );
     }
 
     /// Test that empty keys are rejected in put()
@@ -135,10 +128,12 @@ mod gcs_tests {
         let result = backend.put("", b"data").await;
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("key cannot be empty"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("key cannot be empty")
+        );
     }
 
     /// Test that empty keys are rejected in exists()
@@ -151,10 +146,12 @@ mod gcs_tests {
         let result = backend.exists("").await;
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("key cannot be empty"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("key cannot be empty")
+        );
     }
 
     /// Test that empty keys are rejected in delete()
@@ -167,10 +164,12 @@ mod gcs_tests {
         let result = backend.delete("").await;
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("key cannot be empty"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("key cannot be empty")
+        );
     }
 
     /// Test list_objects returns empty vec by default (stub implementation)
@@ -192,9 +191,12 @@ mod gcs_tests {
     #[tokio::test]
     async fn test_gcs_from_env_missing_vars() {
         // Clear environment variables if they exist
-        std::env::remove_var("GCS_PROJECT_ID");
-        std::env::remove_var("GCS_BUCKET_NAME");
-        std::env::remove_var("GOOGLE_APPLICATION_CREDENTIALS");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("GCS_PROJECT_ID") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("GCS_BUCKET_NAME") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("GOOGLE_APPLICATION_CREDENTIALS") };
 
         let result = GcsBackend::from_env().await;
         assert!(result.is_err());

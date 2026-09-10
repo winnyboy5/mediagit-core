@@ -15,6 +15,37 @@ Thank you for your interest in contributing to MediaGit-Core! This document prov
 - [Documentation](#documentation)
 - [Release Process](#release-process)
 
+## Licensing and the CLA
+
+**Read this before you write code.** MediaGit is [source available under
+BUSL-1.1](LICENSE) and is also offered under a
+[commercial licence](LICENSE-COMMERCIAL.md).
+
+Offering the same code under two sets of terms is only possible while one party
+holds the rights to all of it. So **every outside pull request requires agreement
+to the [Contributor License Agreement](CLA.md)** before it can be merged. A bot
+will ask you on the pull request; it takes one comment.
+
+It does **not** take your copyright away — you keep it, and you may reuse your own
+contribution anywhere. What it grants is permission to distribute your
+contribution under both licences.
+
+If we merged a contribution without this, that code could never appear in a
+commercially licensed build, permanently, and there would be no way to undo it
+short of rewriting it from scratch.
+
+Every `.rs` file must begin with:
+
+```rust
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
+```
+
+Both CI and the pre-commit hook enforce this, over `git ls-files '*.rs'`.
+
+Questions about licensing: **licensing@mediagit.dev**. See also
+[NOTICE-PROVENANCE.md](NOTICE-PROVENANCE.md).
+
 ## Code of Conduct
 
 This project adheres to a Code of Conduct that all contributors are expected to follow. Please read [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) before contributing.
@@ -23,7 +54,7 @@ This project adheres to a Code of Conduct that all contributors are expected to 
 
 ### Prerequisites
 
-- **Rust**: 1.92.0 or later
+- **Rust**: 1.97.1 or later
 - **Cargo**: Comes with Rust
 - **Git**: For version control
 - **Docker**: For integration tests (optional)
@@ -76,19 +107,20 @@ cargo build -p mediagit-cli
 mediagit-core/
 ├── crates/
 │   ├── mediagit-cli/          # Command-line interface
+│   ├── mediagit-server/        # Axum REST API server
 │   ├── mediagit-storage/       # Storage abstraction and backends
 │   ├── mediagit-versioning/    # Object database, commits, branches
+│   ├── mediagit-protocol/      # Network push/pull/clone protocol
 │   ├── mediagit-compression/   # Compression algorithms
 │   ├── mediagit-media/         # Media-aware merging
 │   ├── mediagit-config/        # Configuration management
 │   ├── mediagit-observability/ # Logging and tracing
-│   ├── mediagit-git/           # Git integration layer
 │   ├── mediagit-security/      # Encryption and security
 │   ├── mediagit-metrics/       # Prometheus metrics
-│   └── mediagit-migration/     # Storage backend migration
-├── benches/                    # Performance benchmarks
+│   └── mediagit-test-utils/    # Shared test utilities
+├── crates/*/benches/            # Per-crate performance benchmarks
 ├── book/                       # User documentation (mdBook)
-├── docs/                       # Developer documentation
+├── docs/                       # gitignored, local-only working notes (not in a fresh clone)
 ├── .github/                    # GitHub Actions CI/CD
 ├── Cargo.toml                  # Workspace configuration
 └── README.md
@@ -360,14 +392,12 @@ Releases are managed by maintainers. The process is:
 
 ## Getting Help
 
-- **Discord**: Join our [Discord server](https://discord.gg/mediagit)
 - **GitHub Discussions**: Ask questions in [Discussions](https://github.com/winnyboy5/mediagit-core/discussions)
 - **Issue Tracker**: Report bugs in [Issues](https://github.com/winnyboy5/mediagit-core/issues)
 
 ## Recognition
 
 Contributors are recognized in:
-- `CONTRIBUTORS.md` file
 - Release notes
 - Project README
 

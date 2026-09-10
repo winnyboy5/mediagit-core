@@ -5,7 +5,7 @@ A comprehensive configuration management system for MediaGit Core with support f
 ## Features
 
 - **Multi-Format Support**: Load configuration from TOML, YAML, or JSON files
-- **Environment Variable Overrides**: Override any configuration value using environment variables with `MEDIAGIT_` prefix
+- **Environment Variable Overrides**: `load_with_overrides` applies `MEDIAGIT_`-prefixed overrides. Library API only — neither `mediagit` nor `mediagit-server` uses it (see the note under [Environment Variable Overrides](#environment-variable-overrides))
 - **Comprehensive Validation**: Detailed error messages for invalid configurations
 - **Configuration Migration**: Framework for handling schema version updates
 - **Flexible Storage Backends**: Support for filesystem, AWS S3, Azure Blob, Google Cloud Storage, and multi-backend configurations
@@ -37,9 +37,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```rust
 let config = loader.load_with_overrides("config.toml").await?;
 
-// Environment variables with MEDIAGIT_ prefix will override file settings:
-// export MEDIAGIT_APP_PORT=9000
-// export MEDIAGIT_LOG_LEVEL=debug
+// Layers MEDIAGIT_*-prefixed variables over the file. Library API only:
+// neither `mediagit` nor `mediagit-server` calls this, so those variables
+// have no effect on a real invocation. See "Environment Variable Overrides".
 ```
 
 ### Loading from String
@@ -105,26 +105,31 @@ backend = "s3"
 bucket = "my-bucket"
 region = "us-east-1"
 prefix = "media/"
-encryption = true
-encryption_algorithm = "AES256"  # or "aws:kms"
+access_key_id = "AKIA..."
+secret_access_key = "..."
 ```
 
-Credentials can be provided via environment variables:
-- `MEDIAGIT_S3_ACCESS_KEY_ID`
-- `MEDIAGIT_S3_SECRET_ACCESS_KEY`
+Credentials come from this file only. There are no `MEDIAGIT_S3_*` variables,
+and no IAM-role fallback: the backend rejects an empty access key. (`S3Storage`
+also has no `encryption` / `encryption_algorithm` fields — earlier revisions of
+this README showed them, but the client config is not `deny_unknown_fields`, so
+they parse silently and do nothing.)
 
 ### Azure Blob Storage
 
 ```toml
 [storage]
 backend = "azure"
-account_name = "mystorageaccount"
 container = "media"
 prefix = "files/"
+auth = { type = "account_key", account_name = "mystorageaccount", account_key = "..." }
 ```
 
-Credentials via environment variables:
-- `MEDIAGIT_AZURE_ACCOUNT_KEY`
+Credentials are a tagged `auth` block (`config_version` 3+): one of
+`account_key`, `connection_string { value }`, `sas { account_name, token }`,
+or `emulator` (local Azurite). Pre-v3 flat configs are migrated automatically
+on first open. The credential comes from this block only — no MediaGit code
+path reads `AZURE_STORAGE_KEY` or `AZURE_STORAGE_ACCOUNT`.
 
 ### Google Cloud Storage
 
@@ -136,8 +141,10 @@ project_id = "my-project"
 credentials_path = "/path/to/credentials.json"
 ```
 
-Or use environment variable:
-- `MEDIAGIT_GCS_CREDENTIALS_PATH`
+Leave `credentials_path` unset to use **Application Default Credentials**,
+which resolve `GOOGLE_APPLICATION_CREDENTIALS` from the environment. That is
+the only environment path any backend has. There is no
+`MEDIAGIT_GCS_CREDENTIALS_PATH`.
 
 ## Compression Configuration
 
@@ -206,46 +213,38 @@ tls_key_path = "/path/to/key.pem"
 api_key = "your-secret-key"      # or use MEDIAGIT_API_KEY
 auth_enabled = false
 cors_origins = ["http://localhost:3000"]
-encryption_at_rest = false
 
 [security.rate_limiting]
 enabled = false
-requests_per_second = 100
-burst_size = 200
+requests_per_second = 1000
+burst_size = 2000
 ```
 
 ## Environment Variable Overrides
 
-All configuration values can be overridden using environment variables with the `MEDIAGIT_` prefix.
+This crate exposes `load_with_overrides()`, which layers `MEDIAGIT_*` variables
+onto a parsed config via `apply_env_overrides()` (`loader.rs:282`).
 
-### Common Overrides
+**Nothing calls it.** `load_with_overrides` has no caller in the workspace
+outside this crate's own tests, and the real config path — `Config::load()`
+(`schema.rs:174`) for the client, `ServerConfig` for the server — parses TOML
+directly and never applies the overlay. The fourteen `MEDIAGIT_APP_*` /
+`MEDIAGIT_COMPRESSION_*` / `MEDIAGIT_METRICS_*` / `MEDIAGIT_LOG_LEVEL` /
+`MEDIAGIT_MAX_CONCURRENCY` / `MEDIAGIT_BUFFER_SIZE` / `MEDIAGIT_HTTPS_ENABLED` /
+`MEDIAGIT_AUTH_ENABLED` variables this section used to document are therefore
+**not knobs**, and are no longer listed as such. Wiring the overlay into the real
+config path is tracked for v0.4.0 (FUTURE_TODOS item 22).
 
-```bash
-# App Configuration
-export MEDIAGIT_APP_NAME="my-app"
-export MEDIAGIT_APP_PORT=9000
-export MEDIAGIT_APP_HOST="0.0.0.0"
-export MEDIAGIT_APP_ENVIRONMENT="production"
-export MEDIAGIT_APP_DEBUG=false
+Two variables read by that same dead function are live via other, real read
+sites, and are the only ones worth setting from here:
 
-# Observability
-export MEDIAGIT_LOG_LEVEL=debug
-export MEDIAGIT_METRICS_ENABLED=true
-export MEDIAGIT_METRICS_PORT=9091
+- **`MEDIAGIT_API_KEY`** — read directly at `mediagit-cli/src/repo.rs:187`;
+  supplies the auth token for push/pull.
+- **`MEDIAGIT_CHUNK_WRITE_CONCURRENCY`** — read directly at
+  `mediagit-versioning/src/odb/chunks.rs:646`; sets chunk-write parallelism.
 
-# Compression
-export MEDIAGIT_COMPRESSION_ENABLED=true
-export MEDIAGIT_COMPRESSION_LEVEL=5
-
-# Performance
-export MEDIAGIT_MAX_CONCURRENCY=8
-export MEDIAGIT_BUFFER_SIZE=131072
-
-# Security
-export MEDIAGIT_API_KEY="secret-key"
-export MEDIAGIT_HTTPS_ENABLED=true
-export MEDIAGIT_AUTH_ENABLED=true
-```
+For the full catalogue of variables that actually work, see `env-knobs.md` and
+`CONFIGURATION.md` at the repo root.
 
 ## Validation
 
@@ -410,7 +409,7 @@ match loader.load_file("config.toml").await {
 ## Best Practices
 
 1. **Version Configuration Files**: Keep configuration in version control
-2. **Use Environment Variables in Production**: Override sensitive values via environment
+2. **Keep Secrets Out of Version Control**: credentials live in the repo's own `.mediagit/config.toml`, which is not a file to commit. (Overriding them via environment does not work — see the note above.)
 3. **Validate on Startup**: Always validate configuration after loading
 4. **Provide Example Files**: Include example configurations in documentation
 5. **Document Custom Settings**: Document any custom configuration your application adds
@@ -429,4 +428,4 @@ To extend the configuration system:
 
 ## License
 
-AGPL-3.0 - See LICENSE file for details
+BUSL-1.1 (Business Source License 1.1) - See the LICENSE file at the repository root for details

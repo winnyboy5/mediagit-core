@@ -5,29 +5,46 @@ MediaGit-Core is designed as a modular, extensible version control system optimi
 ## System Architecture
 
 ```mermaid
-graph TB
-    CLI[CLI Layer<br/>clap commands] --> Core[Core Logic Layer]
-    Core --> ODB[Object Database<br/>ODB]
-    Core --> Versioning[Versioning Engine<br/>Merge/LCA]
-    Core --> Media[Media Intelligence<br/>PSD/Video/Audio]
+graph TD
+    subgraph CLI["mediagit-cli (35 commands)"]
+        ADD["add"]
+        COMMIT["commit"]
+        PUSH["push"]
+        PULL["pull"]
+        CLONE["clone"]
+        OTHER["23+ more..."]
+    end
 
-    ODB --> Storage[Storage Abstraction<br/>trait Backend]
-    Versioning --> Storage
+    subgraph Core["Core Libraries"]
+        VER["mediagit-versioning<br/>ODB · Index · Refs<br/>Chunks · Delta · Cloud Packs"]
+        COMP["mediagit-compression<br/>Zstd · Brotli · Zlib<br/>SmartCompressor"]
+        MEDIA["mediagit-media<br/>Image · PSD · Video<br/>Audio · 3D · VFX"]
+    end
 
-    Storage --> Compression[Compression Layer<br/>zstd/brotli/delta]
+    subgraph Infra["Infrastructure"]
+        STORE["mediagit-storage<br/>Local · S3 · Azure<br/>GCS · B2 · MinIO"]
+        SEC["mediagit-security<br/>AES-256-GCM · JWT<br/>TLS · Audit · KDF"]
+        PROTO["mediagit-protocol<br/>Client · Packs<br/>Chunk Transfer"]
+    end
 
-    Compression --> Local[Local Storage]
-    Compression --> S3[Amazon S3]
-    Compression --> Azure[Azure Blob]
-    Compression --> GCS[Google Cloud Storage]
-    Compression --> B2[Backblaze B2]
-    Compression --> MinIO[MinIO]
-    Compression --> Spaces[DigitalOcean Spaces]
+    subgraph Support["Support"]
+        CFG["mediagit-config"]
+        OBS["mediagit-observability"]
+        MET["mediagit-metrics"]
+        TEST["mediagit-test-utils"]
+    end
 
-    style CLI fill:#e1f5ff
-    style Core fill:#fff4e1
-    style Storage fill:#e8f5e9
-    style Compression fill:#f3e5f5
+    subgraph Server["mediagit-server"]
+        AXUM["Axum REST API<br/>Auth · Rate Limit<br/>Security Middleware"]
+    end
+
+    CLI --> Core
+    Core --> Infra
+    Server --> Core
+    Server --> Infra
+    CLI --> Support
+    Server --> Support
+    VER -.->|"cloud packs<br/>(few large objects)"| STORE
 ```
 
 ## Core Components
@@ -44,7 +61,7 @@ graph TB
 - **Location**: `crates/mediagit-versioning/`, `crates/mediagit-media/`
 
 ### 3. Storage Abstraction
-- **Design**: Trait-based abstraction (`Backend` trait)
+- **Design**: Trait-based abstraction (`StorageBackend` trait)
 - **Implementations**: 7 storage backends (local, S3, Azure, GCS, B2, MinIO, Spaces)
 - **Benefits**: Easy backend switching, testability, cloud-agnostic design
 - **Location**: `crates/mediagit-storage/`
@@ -68,7 +85,9 @@ sequenceDiagram
     User->>CLI: mediagit add large-file.psd
     CLI->>ODB: Store object
     ODB->>ODB: Calculate BLAKE3 hash
-    ODB->>Compression: Compress with zstd
+    ODB->>ODB: Chunk (FastCDC / media-aware)
+    ODB->>Compression: Compress each chunk
+    Note over Compression: Codec is chosen per file type:<br/>Store for already-compressed media,<br/>Brotli for text and documents,<br/>Zstd for everything else
     Compression->>Storage: Write to backend
     Storage-->>User: ✓ Object stored
 
@@ -93,12 +112,12 @@ sequenceDiagram
 
 ### Media-Aware Intelligence
 - **Why**: Generic byte-level merging fails for structured media
-- **How**: Format parsers for PSD layers, video tracks, audio channels
-- **Benefit**: Preserve layer hierarchies, avoid corruption
+- **How**: Format parsers inspect PSD layers, video tracks, audio channels to detect whether concurrent edits actually overlap
+- **Benefit**: Avoids corrupting binary files with inline conflict markers; a real conflict is reported instead of silently mangled. This is conflict *detection*, not an auto-merge — see [Media-Aware Merging](./media-merging.md)
 
 ### Trait-Based Abstraction
 - **Why**: Decouple logic from storage implementation
-- **How**: `Backend` trait with 7 implementations
+- **How**: `StorageBackend` trait with 7 implementations
 - **Benefit**: Easy testing (mock backends), cloud provider flexibility
 
 ## Performance Characteristics
@@ -112,10 +131,11 @@ sequenceDiagram
 
 ## Security Model
 
-### Authentication
+### Authentication (to storage backends)
 - Local: File system permissions
-- S3/Azure/GCS: IAM roles, service principals, service accounts
-- B2/MinIO/Spaces: Application keys with bucket-level permissions
+- S3 (and MinIO/B2/Spaces, all built through the S3-compatible path): config-file `access_key_id`/`secret_access_key` only — no IAM role, instance-profile, or environment-variable path
+- Azure: a tagged `auth` credential in `config.toml` (`account_key`, `connection_string`, `sas`, or `emulator`) — no service-principal or environment-variable path
+- GCS: the only backend with a real out-of-config path — falls back to Application Default Credentials (service account key file, `gcloud` login, or workload identity) when `credentials_path` is unset
 
 ### Integrity
 - BLAKE3 content verification on all read operations
@@ -123,14 +143,24 @@ sequenceDiagram
 - `mediagit verify` for repository health checks
 
 ### Encryption
-- At-rest: AES-256-GCM client-side encryption + cloud provider encryption (SSE-S3, Azure SSE)
-- In-transit: TLS 1.3 for all network operations
-- Client-side encryption: Fully implemented with Argon2id key derivation
+- At-rest, MediaGit's own: **implemented and enabled per repository.** The `MGEN` v2
+  object envelope (XAES-256-GCM) is wired into `SmartCompressor`, and `mediagit key init`
+  turns it on -- on an *empty* repository only, since sealing what is already there would
+  mean rewriting every object. Key escrow delivers the key to the client on the
+  presigned-upload path, so encrypted `push` and `clone` both work. With no key
+  configured, output is byte-for-byte identical to a build without the feature.
+  Encrypting an *existing* repository is not supported. See [Security](security.md).
+- At-rest, cloud SSE: **not wired either.** `[storage] encryption` /
+  `encryption_algorithm` are not fields on `S3Storage` at all, and unknown keys are
+  silently discarded rather than rejected — so setting them looks fine and does
+  nothing. No request sets an SSE header. (Bucket-level encryption configured
+  outside MediaGit still applies; it just isn't these keys.)
+- In-transit: TLS 1.3 by default when the server's TLS listener is enabled; `tls_min_version = "1.2"` in `mediagit-server.toml` is an escape hatch for TLS 1.2-only clients/proxies. mTLS is not wired.
 
 ## Scalability
 
 ### Repository Size
-- Tested with repositories up to 500GB
+- Validated with a 58 GB dataset across 27+ file types; single-file scalability tested to 6 GB (see README "Last Validated" for the current campaign numbers) — no evidence found for a 500 GB repository-scale test
 - Object count: Millions of objects supported
 - Recommendation: Use cloud backends for >100GB repos
 
@@ -163,28 +193,26 @@ sequenceDiagram
 
 ## Extension Points
 
-### Custom Merge Strategies
-- Implement `MergeStrategy` trait
-- Register strategy in `MergeEngine`
-- Example: Custom video frame merging
+### Merge Strategies
+
+`MergeStrategy` (`crates/mediagit-versioning/src/merge.rs`) is a closed enum
+— `Recursive` (default), `Ours`, `Theirs` — not a trait, so there is no
+pluggable/third-party merge-strategy mechanism today. Adding a new strategy
+means adding a variant and teaching `MergeEngine` to handle it, not
+implementing an extension point.
 
 ### Storage Backend Development
-- Implement `Backend` trait
-- Provide `get`, `put`, `exists`, `delete`, `list` operations
+- Implement `StorageBackend` trait
+- Provide `get`, `put`, `exists`, `delete`, `list_objects` operations (plus the presign/MPU trio, default no-op)
 - Example: IPFS backend, SFTP backend
-
-### Media Format Support
-- Implement format parser (e.g., FBX, Blender, CAD)
-- Register with `MediaIntelligence` module
-- Example: 3D model layer-aware merging
 
 ## Technology Stack
 
-- **Language**: Rust 1.92.0
+- **Language**: Rust 1.97.1
 - **Async Runtime**: Tokio 1.40+
 - **CLI Framework**: Clap 4.5+
 - **Compression**: zstd, brotli, delta (zstd dictionary)
-- **Cloud SDKs**: aws-sdk-s3, azure_storage, google-cloud-storage
+- **Cloud SDKs**: aws-sdk-s3, opendal (Azure Blob — replaced the EOL `azure_storage_blobs` stack), google-cloud-storage
 - **Testing**: proptest (property-based), criterion (benchmarking)
 
 ## Related Documentation

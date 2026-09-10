@@ -20,6 +20,9 @@ tempfile.workspace = true
 # Path handling
 dunce = "1.0"
 
+# In-memory StorageBackend for unit tests without disk/network
+mediagit-storage = { path = "../mediagit-storage" }
+
 [lib]
 name = "mediagit_test_utils"
 path = "src/lib.rs"

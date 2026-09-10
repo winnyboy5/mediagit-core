@@ -1,23 +1,13 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 #![allow(clippy::unwrap_used)]
 //! Compression benchmarks comparing Zstd vs Brotli vs Adaptive
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use mediagit_compression::{
-    adaptive::AdaptiveCompressor, BrotliCompressor, CompressionLevel, CompressionProfile,
-    Compressor, ObjectType, PerObjectTypeCompressor, TypeAwareCompressor, ZstdCompressor,
+    BrotliCompressor, CompressionLevel, CompressionProfile, Compressor, ObjectType,
+    PerObjectTypeCompressor, TypeAwareCompressor, ZstdCompressor, adaptive::AdaptiveCompressor,
 };
 use std::hint::black_box;
 

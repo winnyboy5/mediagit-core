@@ -1,7 +1,7 @@
 # MediaGit vs. Competitors — Technical Comparison
 
 **Date:** May 2026  
-**MediaGit Version:** 0.2.8-beta.1 (`refactor/god-files-split` branch)  
+**MediaGit Version:** 0.2.8-beta.1 (evidence basis below; current release is `0.3.0-rc.5`)  
 **Evidence basis:** 459 automated deep-tests run 2026-05-25 across AWS S3 (ap-south-1), Azure Blob Storage (South India), and Google Cloud Storage; competitor data from public docs, GitHub issues, and vendor pricing pages as of May 2026.
 
 ---
@@ -28,7 +28,7 @@ MediaGit is the only open-source, self-hosted VCS that combines content-defined 
 | **Branching cost** | ✅ instant ref-based | ✅ (Git) | ⚠️ copy-based | N/A | N/A | Not documented | ✅ (Git) |
 | **File size limit** | No limit (u64) | 5 GB (GitHub.com) | No limit | No limit | Unlimited | No limit | Not documented |
 | **Max file tested** | 398 MB single file; 6 GB scalability | — | 100 GB+ | — | — | 500 GB+ Unreal | — |
-| **Open source** | ✅ AGPL-3.0 | ✅ MIT | ❌ proprietary | ❌ proprietary | ✅ Apache-2.0 | ❌ proprietary | ❌ proprietary |
+| **Source available** | ✅ BUSL-1.1 | ✅ MIT | ❌ proprietary | ❌ proprietary | ✅ Apache-2.0 | ❌ proprietary | ❌ proprietary |
 | **Price** | Free | Free + server | Free ≤5 seats; $39/user/mo cloud | Free tier + Enterprise | Free (lakeFS-acquired) | Beta TBD | $20–$25/user/mo |
 
 ---
@@ -142,7 +142,7 @@ Perforce is synchronous and server-centric. Client staging ("checkout") moves th
 | **Database required** | None (pure filesystem + object store) | None (filesystem) | Proprietary metadata DB |
 | **Setup complexity** | `mediagit-server --config server.toml` | Medium (Git + LFS extension + server + storage) | High (license, server, depot setup) |
 | **OS** | Linux, macOS, Windows | Any (Node.js / Go server) | Linux, Windows (no ARM) |
-| **License cost** | Free (AGPL) | Free (MIT) | Free ≤5 seats; $39/user/mo cloud; enterprise pricing |
+| **License cost** | Free (BUSL-1.1) | Free (MIT) | Free ≤5 seats; $39/user/mo cloud; enterprise pricing |
 | **IAM / Auth** | JWT + API key (built-in) | Configurable per server | Per-connection tickets, auth triggers |
 
 ### Cloud Integration

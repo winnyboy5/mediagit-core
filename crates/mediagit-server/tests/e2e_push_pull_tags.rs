@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Regression test: tags (lightweight and annotated) must round-trip through
 //! push → clone.
@@ -209,6 +199,7 @@ async fn push_and_clone_transfers_tags() {
             .update_refs(RefUpdateRequest {
                 updates: vec![tag_update],
                 force: false,
+                force_with_lease: false,
             })
             .await
             .expect("push tag ref");
@@ -245,6 +236,7 @@ async fn push_and_clone_transfers_tags() {
                 delete: false,
             }],
             force: true,
+            force_with_lease: false,
         })
         .await
         .expect("push tag-meta ref");
@@ -294,10 +286,10 @@ async fn push_and_clone_transfers_tags() {
             if ref_info.name == "refs/tags/v1-annot" {
                 saw_v1_annot = true;
             }
-        } else if let Some(tag_name) = ref_info.name.strip_prefix("refs/tag-meta/") {
-            if tag_name == "v1-annot" {
-                tag_meta_ref = Some(ref_info.oid.clone());
-            }
+        } else if let Some(tag_name) = ref_info.name.strip_prefix("refs/tag-meta/")
+            && tag_name == "v1-annot"
+        {
+            tag_meta_ref = Some(ref_info.oid.clone());
         }
     }
 
@@ -479,6 +471,7 @@ async fn push_positional_tag_name_resolves_to_tag_ref() {
         .update_refs(RefUpdateRequest {
             updates: vec![tag_update],
             force: false,
+            force_with_lease: false,
         })
         .await
         .expect("push tag ref v1.0");
@@ -494,6 +487,7 @@ async fn push_positional_tag_name_resolves_to_tag_ref() {
         .update_refs(RefUpdateRequest {
             updates: vec![annot_update],
             force: false,
+            force_with_lease: false,
         })
         .await
         .expect("push tag ref v2.0-rc");
@@ -520,6 +514,7 @@ async fn push_positional_tag_name_resolves_to_tag_ref() {
                 delete: false,
             }],
             force: true,
+            force_with_lease: false,
         })
         .await
         .expect("push tag-meta ref");

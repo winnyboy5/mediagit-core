@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! E2E tests for presigned-URL chunk download endpoints.
 //!
@@ -21,8 +11,8 @@
 //! - 403 fallback: presigned GET returns 403 → client falls back to proxy
 //!   GET `/chunks/{hex}` → chunk still retrieved correctly.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 
@@ -195,7 +185,7 @@ async fn proxy_put_chunk(
 ///
 /// A mock "bucket" server serves the raw chunk bytes.  The client resolves the
 /// presigned URL, fetches the bytes directly (never hitting the proxy route),
-/// verifies the SHA-256 hash, and writes the chunk into the local ODB.
+/// verifies the BLAKE3 hash, and writes the chunk into the local ODB.
 #[tokio::test]
 async fn presigned_download_happy_path() {
     // ── setup: server-side repo dirs ────────────────────────────────────────
@@ -299,7 +289,7 @@ async fn presigned_download_happy_path() {
     let file_oid = Oid::hash(b"e2e-download-test-file");
 
     let protocol = ProtocolClient::new(format!("{}/{}", server_url, repo));
-    let downloaded = protocol
+    let (downloaded, _net_bytes) = protocol
         .download_chunked_objects(&dl_odb, &[file_oid], |_, _, _| {})
         .await
         .expect("download_chunked_objects should succeed");
@@ -341,6 +331,7 @@ async fn presigned_download_fallback_to_proxy() {
         .unwrap();
 
     // Push a chunk + manifest into the server-side storage via the proxy PUT.
+    mediagit_protocol::ensure_crypto_provider();
     let http_client = reqwest::Client::new();
     let (server_url, _handle) = start_test_server(repos_tmp.path().to_path_buf()).await;
 
@@ -363,8 +354,8 @@ async fn presigned_download_fallback_to_proxy() {
         total_size: chunk_data.len() as u64,
         filename: Some("proxy-test.bin".to_string()),
     };
-    // Serialize and PUT the manifest.
-    let manifest_bytes = postcard::to_allocvec(&manifest).unwrap();
+    // Serialize and PUT the manifest (magic-enveloped, as real clients do).
+    let manifest_bytes = manifest.to_bytes().unwrap();
     let manifest_url = format!("{}/{}/manifests/{}", server_url, repo, file_oid.to_hex());
     let resp = http_client
         .put(&manifest_url)
@@ -386,7 +377,7 @@ async fn presigned_download_fallback_to_proxy() {
     let dl_odb = open_odb(&dl_mg).await;
 
     let protocol = ProtocolClient::new(format!("{}/{}", server_url, repo));
-    let downloaded = protocol
+    let (downloaded, _net_bytes) = protocol
         .download_chunked_objects(&dl_odb, &[file_oid], |_, _, _| {})
         .await
         .expect("proxy-fallback download should succeed");
@@ -495,7 +486,7 @@ async fn presigned_download_403_falls_back_to_proxy() {
     //   2. Attempt direct GET → 403 received → fallback triggered.
     //   3. GET /chunks/{hex} via proxy → chunk bytes returned → ODB written.
     let protocol = ProtocolClient::new(format!("{}/{}", server_url, repo));
-    let downloaded = protocol
+    let (downloaded, _net_bytes) = protocol
         .download_chunked_objects(&dl_odb, &[file_oid], |_, _, _| {})
         .await
         .expect("download should succeed via proxy fallback after 403");

@@ -142,6 +142,34 @@ All stash entries cleared.
 - **0**: Success
 - **1**: No stash entries found or stash index out of range
 
+
+## Subcommand options
+
+`push`:
+- `-m`, `--message <MESSAGE>` — Stash message
+- `-u`, `--include-untracked` — Include untracked files
+
+`show`:
+- `-p`, `--patch` — Show the stash as a patch
+
+`pop` and `apply`:
+- `--index` — Reinstate index (staged) changes as well as the working tree
+- `-f`, `--force` — Overwrite uncommitted changes that differ from the stash.
+  Without it these refuse rather than destroying work that exists nowhere else;
+  for `pop` in particular, which is apply-then-drop, an unguarded clobber would
+  lose both the working edit and the stash entry that could have restored it.
+
+## Common options
+
+Accepted by this command in addition to the options above.
+
+| Flag | Description |
+|---|---|
+| `--color <WHEN>` | Colored output: `always`, `auto`, or `never` (default `auto`) |
+| `-C`, `--repository <PATH>` | Run as if invoked in `PATH` |
+| `-v`, `--verbose` | Enable verbose output |
+| `-h`, `--help` | Print help |
+| `-V`, `--version` | Print version |
 ## See Also
 
 - [mediagit status](./status.md) - Show working tree status

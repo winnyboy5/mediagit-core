@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Week 2 Milestone Integration Test.
 //! Tests: Object Database + Compression + Commits + Trees + Branches + Pack Files.
@@ -45,7 +35,7 @@ async fn test_week2_milestone_end_to_end() {
     let readme_content = b"# MediaGit\n\nA Git for Media Files";
     let readme_oid = odb.write(ObjectType::Blob, readme_content).await.unwrap();
 
-    let license_content = b"AGPL-3.0";
+    let license_content = b"BUSL-1.1";
     let license_oid = odb.write(ObjectType::Blob, license_content).await.unwrap();
 
     // Create tree (directory structure)

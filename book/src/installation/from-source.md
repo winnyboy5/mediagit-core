@@ -11,7 +11,7 @@ Build MediaGit from source when:
 
 ### All platforms
 
-- **Rust 1.92.0 or later** — install via [rustup.rs](https://rustup.rs)
+- **Rust 1.97.1 or later** — install via [rustup.rs](https://rustup.rs)
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   rustup update
@@ -166,10 +166,10 @@ See [Windows ARM64 Installation](./windows-arm64.md).
 
 ## Checking MSRV
 
-MediaGit's Minimum Supported Rust Version (MSRV) is **1.92.0**. Verify compatibility:
+MediaGit's Minimum Supported Rust Version (MSRV) is **1.97.1**. Verify compatibility:
 
 ```bash
-cargo +1.92.0 check --workspace --all-features
+cargo +1.97.1 check --workspace --all-features
 ```
 
 ---
@@ -197,7 +197,6 @@ AWS_SECRET_ACCESS_KEY=minioadmin \
 AWS_ENDPOINT_URL=http://localhost:9000 \
 AWS_REGION=us-east-1 \
 AZURE_STORAGE_CONNECTION_STRING="DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://localhost:10000/devstoreaccount1;" \
-GCS_EMULATOR_HOST=http://localhost:4443 \
 cargo test --ignored -p mediagit-storage -p mediagit-server
 
 docker compose -f docker-compose.test.yml down -v

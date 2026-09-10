@@ -1,23 +1,14 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 use super::super::repo::{create_storage_backend, find_repo_root};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use console::style;
-use mediagit_versioning::{CheckoutManager, ObjectDatabase, Oid, RefDatabase};
-use std::collections::HashSet;
-use std::path::PathBuf;
+use mediagit_versioning::{CheckoutManager, Commit, LcaFinder, ObjectDatabase, Oid, RefDatabase};
+use std::collections::{HashSet, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Find commit that introduced a bug using binary search
 #[derive(Parser, Debug)]
@@ -141,44 +132,33 @@ impl BisectCmd {
 
         let mut state = BisectState {
             original_head: original_head.to_hex(),
-            bad_commits: vec![bad_oid.to_hex()],
-            good_commits: Vec::new(),
-            skip_commits: Vec::new(),
-            current: Some(bad_oid.to_hex()),
+            bad: bad_oid.to_hex(),
+            good: Vec::new(),
+            skip: Vec::new(),
+            current: None,
             log: Vec::new(),
         };
 
         // If good commit provided, mark it and start bisecting
         if let Some(ref good_ref) = opts.good {
             let good_oid = self.resolve_commit(&refdb, &repo_root, good_ref).await?;
-            state.good_commits.push(good_oid.to_hex());
+            state.good.push(good_oid.to_hex());
             state.log_entry(format!(
                 "start: bad={}, good={}",
                 bad_oid.to_hex(),
                 good_oid.to_hex()
             ));
-
-            // Find midpoint and checkout
-            self.find_next_commit(&repo_root, &mut state).await?;
         } else {
             state.log_entry(format!("start: bad={}", bad_oid.to_hex()));
         }
 
+        println!("{} Bisect session started", style("→").cyan());
+
+        // Narrow the range and check out the next midpoint (or declare complete)
+        self.advance(&repo_root, &mut state).await?;
+
         // Save state
         self.save_bisect_state(&mediagit_dir, &state)?;
-
-        println!("{} Bisect session started", style("→").cyan());
-        if opts.good.is_some() {
-            println!(
-                "  {} commits to check",
-                style(self.estimate_remaining(&state)).yellow()
-            );
-        } else {
-            println!(
-                "  Mark a good commit with: {}",
-                style("mediagit bisect good <commit>").yellow()
-            );
-        }
 
         Ok(())
     }
@@ -191,31 +171,23 @@ impl BisectCmd {
         // Load bisect state
         let mut state = self.load_bisect_state(&mediagit_dir)?;
 
-        // Get commit to mark as good
-        let good_oid = if let Some(ref commit_ref) = opts.commit {
-            self.resolve_commit(&refdb, &repo_root, commit_ref).await?
-        } else {
-            // Use current commit
-            refdb.resolve("HEAD").await?
-        };
+        // Get commit to mark as good: an explicit arg, or else the commit
+        // currently checked out for testing (NOT the session-start HEAD).
+        let good_oid = self
+            .resolve_target(&refdb, &repo_root, &opts.commit, &state)
+            .await?;
 
-        state.good_commits.push(good_oid.to_hex());
+        state.good.push(good_oid.to_hex());
         state.log_entry(format!("good: {}", good_oid.to_hex()));
 
         println!(
             "{} Marked {} as good",
             style("✓").green(),
-            style(good_oid.to_hex()).yellow()
+            style(&good_oid.to_hex()[..7]).yellow()
         );
 
-        // Check if we found the bad commit
-        if self.is_bisect_complete(&state) {
-            self.complete_bisect(&repo_root, &state).await?;
-            return Ok(());
-        }
-
-        // Find next commit to test
-        self.find_next_commit(&repo_root, &mut state).await?;
+        // Narrow the range and check out the next midpoint (or declare complete)
+        self.advance(&repo_root, &mut state).await?;
 
         // Save state
         self.save_bisect_state(&mediagit_dir, &state)?;
@@ -231,30 +203,23 @@ impl BisectCmd {
         // Load bisect state
         let mut state = self.load_bisect_state(&mediagit_dir)?;
 
-        // Get commit to mark as bad
-        let bad_oid = if let Some(ref commit_ref) = opts.commit {
-            self.resolve_commit(&refdb, &repo_root, commit_ref).await?
-        } else {
-            refdb.resolve("HEAD").await?
-        };
+        // Get commit to mark as bad: an explicit arg, or else the commit
+        // currently checked out for testing (NOT the session-start HEAD).
+        let bad_oid = self
+            .resolve_target(&refdb, &repo_root, &opts.commit, &state)
+            .await?;
 
-        state.bad_commits.push(bad_oid.to_hex());
+        state.bad = bad_oid.to_hex();
         state.log_entry(format!("bad: {}", bad_oid.to_hex()));
 
         println!(
             "{} Marked {} as bad",
             style("✓").green(),
-            style(bad_oid.to_hex()).yellow()
+            style(&bad_oid.to_hex()[..7]).yellow()
         );
 
-        // Check if we found the bad commit
-        if self.is_bisect_complete(&state) {
-            self.complete_bisect(&repo_root, &state).await?;
-            return Ok(());
-        }
-
-        // Find next commit to test
-        self.find_next_commit(&repo_root, &mut state).await?;
+        // Narrow the range and check out the next midpoint (or declare complete)
+        self.advance(&repo_root, &mut state).await?;
 
         // Save state
         self.save_bisect_state(&mediagit_dir, &state)?;
@@ -270,29 +235,47 @@ impl BisectCmd {
         // Load bisect state
         let mut state = self.load_bisect_state(&mediagit_dir)?;
 
-        // Get commit to skip
-        let skip_oid = if let Some(ref commit_ref) = opts.commit {
-            self.resolve_commit(&refdb, &repo_root, commit_ref).await?
-        } else {
-            refdb.resolve("HEAD").await?
-        };
+        // Get commit to skip: an explicit arg, or else the commit currently
+        // checked out for testing (NOT the session-start HEAD).
+        let skip_oid = self
+            .resolve_target(&refdb, &repo_root, &opts.commit, &state)
+            .await?;
 
-        state.skip_commits.push(skip_oid.to_hex());
+        state.skip.push(skip_oid.to_hex());
         state.log_entry(format!("skip: {}", skip_oid.to_hex()));
 
         println!(
             "{} Skipped {}",
             style("→").cyan(),
-            style(skip_oid.to_hex()).yellow()
+            style(&skip_oid.to_hex()[..7]).yellow()
         );
 
         // Find next commit to test
-        self.find_next_commit(&repo_root, &mut state).await?;
+        self.advance(&repo_root, &mut state).await?;
 
         // Save state
         self.save_bisect_state(&mediagit_dir, &state)?;
 
         Ok(())
+    }
+
+    /// Resolve the commit a bare `good`/`bad`/`skip` (no argument) applies to:
+    /// the commit currently checked out for testing, falling back to HEAD
+    /// only if bisection hasn't checked anything out yet (BUG-ML-3 fix).
+    async fn resolve_target(
+        &self,
+        refdb: &RefDatabase,
+        repo_root: &Path,
+        commit_ref: &Option<String>,
+        state: &BisectState,
+    ) -> Result<Oid> {
+        if let Some(commit_ref) = commit_ref {
+            return self.resolve_commit(refdb, repo_root, commit_ref).await;
+        }
+        if let Some(ref current) = state.current {
+            return Oid::from_hex(current);
+        }
+        refdb.resolve("HEAD").await
     }
 
     async fn reset(&self, opts: &ResetOpts) -> Result<()> {
@@ -315,7 +298,14 @@ impl BisectCmd {
         let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
         let refdb = RefDatabase::new(&mediagit_dir);
 
-        let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
+        // WT-1: bound deletions to tracked paths. Bisect deliberately does not
+        // *refuse* on a dirty tree the way `pull`/`merge` do — it re-checks-out
+        // on every step, so refusing would make the feature unusable — but it
+        // must never take untracked work with it.
+        let head_oid = refdb.resolve("HEAD").await.ok();
+        let tracked =
+            crate::worktree_guard::tracked_paths(&repo_root, &odb, head_oid.as_ref()).await?;
+        let checkout_mgr = CheckoutManager::new(&odb, &repo_root).with_tracked_paths(tracked);
         checkout_mgr.checkout_commit(&reset_oid).await?;
 
         // Update HEAD reference
@@ -330,7 +320,7 @@ impl BisectCmd {
         std::fs::remove_file(&state_path)?;
 
         println!("{} Bisect session ended", style("✓").green());
-        println!("  Reset to {}", style(reset_oid.to_hex()).yellow());
+        println!("  Reset to {}", style(&reset_oid.to_hex()[..7]).yellow());
 
         Ok(())
     }
@@ -415,34 +405,116 @@ impl BisectCmd {
         Ok(())
     }
 
-    async fn find_next_commit(&self, repo_root: &PathBuf, state: &mut BisectState) -> Result<()> {
-        let storage = create_storage_backend(repo_root).await?;
-        let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
-
-        // Get all commits between good and bad
-        let candidates = self.find_candidate_commits(&odb, state).await?;
-
-        if candidates.is_empty() {
-            anyhow::bail!("No commits to test");
+    /// Narrow the suspect range and check out the next midpoint to test, or
+    /// (once the range has collapsed to nothing left between good and bad)
+    /// declare `bad` the first bad commit.
+    ///
+    /// Does nothing but wait if no good commit has been marked yet, since the
+    /// range [good, bad] isn't established (BUG-ML-1 fix: this replaces the
+    /// old heuristic that declared completion as soon as any good+bad pair
+    /// existed, without ever testing intermediate commits).
+    async fn advance(&self, repo_root: &Path, state: &mut BisectState) -> Result<()> {
+        if state.good.is_empty() {
+            state.current = None;
+            println!(
+                "  Mark a good commit with: {}",
+                style("mediagit bisect good <commit>").yellow()
+            );
+            return Ok(());
         }
 
-        // Binary search: choose midpoint
+        let storage = create_storage_backend(repo_root).await?;
+        let odb = Arc::new(ObjectDatabase::with_smart_compression(
+            storage.clone(),
+            1000,
+        ));
+        let lca = LcaFinder::new(odb.clone());
+
+        // WT-1: tracked set for this step, computed once — both checkouts below
+        // are bounded by it so untracked work survives every bisect hop.
+        let bisect_tracked = {
+            let refdb = RefDatabase::new(repo_root.join(".mediagit"));
+            let head_oid = refdb.resolve("HEAD").await.ok();
+            crate::worktree_guard::tracked_paths(repo_root, &odb, head_oid.as_ref()).await?
+        };
+
+        let bad_oid = Oid::from_hex(&state.bad)?;
+        let good_oids: Vec<Oid> = state
+            .good
+            .iter()
+            .map(|h| Oid::from_hex(h))
+            .collect::<Result<_>>()?;
+        let skip_set: HashSet<Oid> = state
+            .skip
+            .iter()
+            .filter_map(|h| Oid::from_hex(h).ok())
+            .collect();
+
+        for good_oid in &good_oids {
+            if !lca.is_ancestor(good_oid, &bad_oid).await? {
+                anyhow::bail!(
+                    "Good commit {} is not an ancestor of bad commit {}; bisect range is invalid",
+                    good_oid.to_hex(),
+                    bad_oid.to_hex()
+                );
+            }
+        }
+
+        // Candidates = ancestors of bad, excluding bad itself, excluding
+        // anything already known good (or an ancestor of a good commit),
+        // and excluding skipped commits.
+        let candidates = Self::compute_candidates(&odb, bad_oid, &good_oids, &skip_set).await?;
+
+        if candidates.is_empty() {
+            // Range has collapsed: bad_oid is the first bad commit.
+            // WT-1: bounded — see `reset` for why bisect bounds but never refuses.
+            let checkout_mgr =
+                CheckoutManager::new(&odb, repo_root).with_tracked_paths(bisect_tracked.clone());
+            checkout_mgr.checkout_commit(&bad_oid).await?;
+            state.current = None;
+
+            println!();
+            println!("{}", style("Bisect complete!").green().bold());
+            println!();
+            println!(
+                "{} is the first bad commit",
+                style(&bad_oid.to_hex()[..7]).red().bold()
+            );
+            println!();
+            println!("{}", style("Bisect log:").bold());
+            for entry in &state.log {
+                println!("  {}", entry);
+            }
+            println!();
+            println!(
+                "  Run {} to return to your original HEAD",
+                style("mediagit bisect reset").yellow()
+            );
+
+            return Ok(());
+        }
+
+        // Binary search: choose midpoint of the remaining candidates
         let midpoint = candidates.len() / 2;
         let next_oid = candidates[midpoint];
 
         // Checkout next commit
-        let checkout_mgr = CheckoutManager::new(&odb, repo_root);
+        // WT-1: bounded — see `reset` for why bisect bounds but never refuses.
+        let checkout_mgr = CheckoutManager::new(&odb, repo_root).with_tracked_paths(bisect_tracked);
         checkout_mgr.checkout_commit(&next_oid).await?;
 
         state.current = Some(next_oid.to_hex());
 
         println!();
         println!(
-            "{} Bisecting: {} revisions left to test after this",
+            "{} Bisecting: {} revision(s) left to test after this",
             style("→").cyan(),
-            style(candidates.len()).yellow()
+            style(candidates.len() - 1).yellow()
         );
-        println!("  Current commit: {}", style(next_oid.to_hex()).yellow());
+        println!(
+            "  Current commit: {}",
+            style(&next_oid.to_hex()[..7]).yellow()
+        );
         println!();
         println!("After testing, mark the commit:");
         println!(
@@ -458,108 +530,52 @@ impl BisectCmd {
         Ok(())
     }
 
-    async fn find_candidate_commits(
-        &self,
-        odb: &ObjectDatabase,
-        state: &BisectState,
-    ) -> Result<Vec<Oid>> {
-        // Build sets of marked commits
-        let bad_set: HashSet<String> = state.bad_commits.iter().cloned().collect();
-        let good_set: HashSet<String> = state.good_commits.iter().cloned().collect();
-        let skip_set: HashSet<String> = state.skip_commits.iter().cloned().collect();
+    /// Breadth-first walk of `start` and all its ancestors (parents,
+    /// grandparents, ...), returned in visitation order (descendant-first).
+    async fn bfs_ancestors_ordered(odb: &ObjectDatabase, start: Oid) -> Result<Vec<Oid>> {
+        let mut visited = HashSet::new();
+        let mut order = Vec::new();
+        let mut queue = VecDeque::new();
+        queue.push_back(start);
+        visited.insert(start);
 
-        // For simplicity, use a linear history traversal
-        // In a real implementation, this would use graph algorithms
-        let mut candidates = Vec::new();
-
-        // Get latest bad commit
-        if let Some(bad_hex) = state.bad_commits.last() {
-            let bad_oid = Oid::from_hex(bad_hex)?;
-            let mut current_oid = bad_oid;
-
-            // Walk back through history
-            for _ in 0..100 {
-                // Limit traversal depth
-                let commit_hex = current_oid.to_hex();
-
-                // Skip if already marked
-                if bad_set.contains(&commit_hex)
-                    || good_set.contains(&commit_hex)
-                    || skip_set.contains(&commit_hex)
-                {
-                    // Move to parent
-                    if let Ok(commit) = mediagit_versioning::Commit::read(odb, &current_oid).await {
-                        if let Some(parent) = commit.parents.first() {
-                            current_oid = *parent;
-                            continue;
-                        }
+        while let Some(current) = queue.pop_front() {
+            order.push(current);
+            if let Ok(commit) = Commit::read(odb, &current).await {
+                for parent in &commit.parents {
+                    if visited.insert(*parent) {
+                        queue.push_back(*parent);
                     }
-                    break;
-                }
-
-                candidates.push(current_oid);
-
-                // Move to parent
-                if let Ok(commit) = mediagit_versioning::Commit::read(odb, &current_oid).await {
-                    if let Some(parent) = commit.parents.first() {
-                        current_oid = *parent;
-                    } else {
-                        break;
-                    }
-                } else {
-                    break;
-                }
-
-                // Stop if we reached a good commit
-                if good_set.contains(&commit_hex) {
-                    break;
                 }
             }
         }
 
+        Ok(order)
+    }
+
+    /// Compute the still-untested commits between `good` and `bad`, ordered
+    /// oldest-first (chronological, good -> bad), excluding `bad` itself
+    /// (already known bad) and any skipped commits.
+    async fn compute_candidates(
+        odb: &ObjectDatabase,
+        bad: Oid,
+        goods: &[Oid],
+        skip: &HashSet<Oid>,
+    ) -> Result<Vec<Oid>> {
+        let bad_order = Self::bfs_ancestors_ordered(odb, bad).await?;
+
+        let mut excluded: HashSet<Oid> = HashSet::new();
+        for good in goods {
+            excluded.extend(Self::bfs_ancestors_ordered(odb, *good).await?);
+        }
+
+        let mut candidates: Vec<Oid> = bad_order
+            .into_iter()
+            .filter(|oid| *oid != bad && !excluded.contains(oid) && !skip.contains(oid))
+            .collect();
+        candidates.reverse();
+
         Ok(candidates)
-    }
-
-    fn is_bisect_complete(&self, state: &BisectState) -> bool {
-        // Bisect is complete when we have narrowed down to a single commit
-        // For now, use simple heuristic
-        !state.bad_commits.is_empty() && !state.good_commits.is_empty() && state.current.is_some()
-    }
-
-    async fn complete_bisect(
-        &self,
-        repo_root: &std::path::Path,
-        state: &BisectState,
-    ) -> Result<()> {
-        let mediagit_dir = repo_root.join(".mediagit");
-
-        println!();
-        println!("{}", style("Bisect complete!").green().bold());
-        println!();
-
-        // Find first bad commit
-        if let Some(first_bad) = state.bad_commits.first() {
-            println!("{} is the first bad commit", style(first_bad).red().bold());
-        }
-
-        // Show bisect log
-        println!();
-        println!("{}", style("Bisect log:").bold());
-        for entry in &state.log {
-            println!("  {}", entry);
-        }
-
-        // Clean up bisect state
-        let state_path = mediagit_dir.join("BISECT_STATE");
-        std::fs::remove_file(&state_path)?;
-
-        Ok(())
-    }
-
-    fn estimate_remaining(&self, state: &BisectState) -> usize {
-        // Simple estimate: log2 of potential commits
-        let potential = (state.bad_commits.len() + state.good_commits.len()).max(1);
-        (potential as f64).log2().ceil() as usize
     }
 
     fn load_bisect_state(&self, mediagit_dir: &std::path::Path) -> Result<BisectState> {
@@ -607,32 +623,15 @@ impl BisectCmd {
         }
 
         // Try short hash prefix matching (e.g., 7-char hashes from `log --oneline`)
+        // via the central resolver, which also matches pack-embedded objects
+        // (post-`gc --repack`, not just loose ones).
         let looks_like_hex = commit_ref.len() >= 4
             && commit_ref.len() < 64
             && commit_ref.chars().all(|c| c.is_ascii_hexdigit());
-        if looks_like_hex {
-            if let Ok(storage) = create_storage_backend(repo_root).await {
-                if let Ok(keys) = storage.list_objects(commit_ref).await {
-                    let matches: Vec<_> = keys
-                        .into_iter()
-                        .filter(|k| k.starts_with(commit_ref) && k.len() == 64)
-                        .collect();
-                    match matches.len() {
-                        1 => {
-                            if let Ok(oid) = Oid::from_hex(&matches[0]) {
-                                return Ok(oid);
-                            }
-                        }
-                        n if n > 1 => {
-                            anyhow::bail!(
-                                "Ambiguous short hash '{}' matches {} objects. Use a longer prefix.",
-                                commit_ref,
-                                n
-                            );
-                        }
-                        _ => {}
-                    }
-                }
+        if looks_like_hex && let Ok(storage) = create_storage_backend(repo_root).await {
+            let odb = ObjectDatabase::with_smart_compression(storage, 1000);
+            if let Ok(oid) = odb.resolve_abbreviated_oid(commit_ref).await {
+                return Ok(oid);
             }
         }
 
@@ -647,9 +646,12 @@ impl BisectCmd {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct BisectState {
     original_head: String,
-    bad_commits: Vec<String>,
-    good_commits: Vec<String>,
-    skip_commits: Vec<String>,
+    /// Current bad bound (narrows to a closer ancestor as `bad` marks land).
+    bad: String,
+    /// Known good commits (bounds); a commit and all its ancestors are good.
+    good: Vec<String>,
+    skip: Vec<String>,
+    /// The commit currently checked out for the user/script to test.
     current: Option<String>,
     log: Vec<String>,
 }

@@ -284,4 +284,4 @@ let config = LogConfig::new()
 
 ## License
 
-AGPL-3.0
+BUSL-1.1

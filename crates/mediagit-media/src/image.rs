@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Image metadata extraction and analysis
 //!
@@ -307,10 +297,10 @@ impl ImageMetadataParser {
     /// Detect image format from data
     fn detect_format(data: &[u8], filename: &str) -> Result<SupportedImageFormat> {
         // Try extension first
-        if let Some(ext) = Path::new(filename).extension() {
-            if let Some(format) = SupportedImageFormat::from_extension(ext.to_str().unwrap_or("")) {
-                return Ok(format);
-            }
+        if let Some(ext) = Path::new(filename).extension()
+            && let Some(format) = SupportedImageFormat::from_extension(ext.to_str().unwrap_or(""))
+        {
+            return Ok(format);
         }
 
         // Detect from magic bytes
@@ -565,22 +555,20 @@ impl ImageMetadataParser {
     fn extract_xmp_field(xmp: &str, field: &str) -> Option<String> {
         // Try attribute format: field="value"
         let attr_pattern = format!(r#"{}="([^"]+)""#, field);
-        if let Ok(re) = regex_lite::Regex::new(&attr_pattern) {
-            if let Some(cap) = re.captures(xmp) {
-                if let Some(m) = cap.get(1) {
-                    return Some(m.as_str().to_string());
-                }
-            }
+        if let Ok(re) = regex_lite::Regex::new(&attr_pattern)
+            && let Some(cap) = re.captures(xmp)
+            && let Some(m) = cap.get(1)
+        {
+            return Some(m.as_str().to_string());
         }
 
         // Try element format: <field>value</field>
         let elem_pattern = format!(r#"<{}[^>]*>([^<]+)</{}>"#, field, field);
-        if let Ok(re) = regex_lite::Regex::new(&elem_pattern) {
-            if let Some(cap) = re.captures(xmp) {
-                if let Some(m) = cap.get(1) {
-                    return Some(m.as_str().to_string());
-                }
-            }
+        if let Ok(re) = regex_lite::Regex::new(&elem_pattern)
+            && let Some(cap) = re.captures(xmp)
+            && let Some(m) = cap.get(1)
+        {
+            return Some(m.as_str().to_string());
         }
 
         None

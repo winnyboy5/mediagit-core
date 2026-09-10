@@ -9,6 +9,12 @@ repository.workspace = true
 homepage.workspace = true
 documentation.workspace = true
 description = "Configuration management system for MediaGit Core"
+# Not published to crates.io: distribution is cargo-dist binaries, Docker
+# images and GitHub releases. This also makes deny.toml's
+# `allow-wildcard-paths` apply to our own path deps (cargo-deny exempts
+# them only for non-public crates). Flip to `true` and add `version = ...`
+# beside every internal `path = ...` if crates.io publishing is turned on.
+publish = false
 
 [dependencies]
 # Serialization and Config
@@ -33,6 +39,7 @@ num_cpus = "1.16"
 [dev-dependencies]
 tokio.workspace = true
 tempfile.workspace = true
+mediagit-test-utils = { path = "../mediagit-test-utils" }
 
 [lints]
 workspace = true

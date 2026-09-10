@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Integration tests for mediagit-protocol.
 //! These tests verify protocol serialization and basic client functionality.
@@ -107,6 +97,7 @@ fn test_ref_update_request() {
             delete: false,
         }],
         force: false,
+        force_with_lease: false,
     };
 
     let json = serde_json::to_string(&request).expect("Failed to serialize");
@@ -202,6 +193,7 @@ fn test_multiple_ref_updates() {
             },
         ],
         force: false,
+        force_with_lease: false,
     };
 
     let json = serde_json::to_string(&request).expect("Failed to serialize");
@@ -223,6 +215,7 @@ fn test_force_push() {
             delete: false,
         }],
         force: true,
+        force_with_lease: false,
     };
 
     let json = serde_json::to_string(&request).expect("Failed to serialize");

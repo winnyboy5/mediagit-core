@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Adaptive compression based on file characteristics
 //!
@@ -349,10 +339,10 @@ impl StrategyCache {
 
     fn insert(&mut self, profile: FileProfile, strategy: CompressionStrategy) {
         // Evict least used if at capacity
-        if self.cache.len() >= self.max_size {
-            if let Some((&least_used, _)) = self.cache.iter().min_by_key(|(_, entry)| entry.hits) {
-                self.cache.remove(&least_used);
-            }
+        if self.cache.len() >= self.max_size
+            && let Some((&least_used, _)) = self.cache.iter().min_by_key(|(_, entry)| entry.hits)
+        {
+            self.cache.remove(&least_used);
         }
 
         self.cache.insert(profile, CacheEntry { strategy, hits: 1 });
@@ -425,13 +415,13 @@ impl AdaptiveCompressor {
         let profile = FileProfile::analyze(data);
 
         // Check cache first
-        if let Ok(mut cache) = self.cache.lock() {
-            if let Some(strategy) = cache.get(&profile) {
-                if let Ok(mut stats) = self.stats.lock() {
-                    stats.cache_hits += 1;
-                }
-                return strategy;
+        if let Ok(mut cache) = self.cache.lock()
+            && let Some(strategy) = cache.get(&profile)
+        {
+            if let Ok(mut stats) = self.stats.lock() {
+                stats.cache_hits += 1;
             }
+            return strategy;
         }
 
         // Compute strategy
@@ -492,12 +482,12 @@ impl Compressor for AdaptiveCompressor {
         };
 
         // Update stats
-        if let Ok(compressed) = &result {
-            if let Ok(mut stats) = self.stats.lock() {
-                stats.total_compressions += 1;
-                stats.total_bytes_processed += data.len();
-                stats.total_bytes_compressed += compressed.len();
-            }
+        if let Ok(compressed) = &result
+            && let Ok(mut stats) = self.stats.lock()
+        {
+            stats.total_compressions += 1;
+            stats.total_bytes_processed += data.len();
+            stats.total_bytes_compressed += compressed.len();
         }
 
         result

@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Integration tests for FSCK (File System Check) functionality
 
@@ -34,9 +24,7 @@ async fn setup_test_repo() -> (TempDir, Arc<LocalBackend>, ObjectDatabase) {
     (temp_dir, storage, odb)
 }
 
-// FIXME: FSCK functionality is under development - tests may fail due to incomplete implementation
 #[tokio::test]
-#[ignore = "FSCK functionality under development"]
 async fn test_fsck_clean_repository() {
     let (_temp_dir, storage, odb) = setup_test_repo().await;
 
@@ -81,15 +69,17 @@ async fn test_fsck_clean_repository() {
 }
 
 #[tokio::test]
-#[ignore = "FSCK functionality under development"]
 async fn test_fsck_detect_corrupted_object() {
     let (_temp_dir, storage, odb) = setup_test_repo().await;
 
     // Write a valid object
     let valid_oid = odb.write(ObjectType::Blob, b"valid content").await.unwrap();
 
-    // Corrupt the object by writing different content at the same location
-    let corrupted_key = format!("objects/{}", valid_oid.to_path());
+    // Corrupt the object by writing different content at the same location.
+    // ODB reads/writes objects by the bare `oid.to_hex()` key (LocalBackend
+    // applies "objects/" + shard-fanout internally when resolving the
+    // physical path) — the logical StorageBackend key has neither.
+    let corrupted_key = valid_oid.to_hex();
     storage
         .put(&corrupted_key, b"corrupted data")
         .await
@@ -105,13 +95,14 @@ async fn test_fsck_detect_corrupted_object() {
 
     let errors = report.issues_by_severity(IssueSeverity::Error);
     assert!(!errors.is_empty());
-    assert!(errors
-        .iter()
-        .any(|e| matches!(e.category, IssueCategory::ChecksumMismatch)));
+    assert!(
+        errors
+            .iter()
+            .any(|e| matches!(e.category, IssueCategory::ChecksumMismatch))
+    );
 }
 
 #[tokio::test]
-#[ignore = "FSCK functionality under development"]
 async fn test_fsck_detect_missing_object() {
     let (_temp_dir, storage, odb) = setup_test_repo().await;
 
@@ -134,7 +125,8 @@ async fn test_fsck_detect_missing_object() {
     storage.put("refs/heads/main", &ref_data).await.unwrap();
 
     // Now delete the tree object that the commit references
-    let tree_key = format!("objects/{}", tree.to_path());
+    // (bare `oid.to_hex()` key — see test_fsck_detect_corrupted_object).
+    let tree_key = tree.to_hex();
     storage.delete(&tree_key).await.unwrap();
 
     // Run FSCK with connectivity check
@@ -151,9 +143,11 @@ async fn test_fsck_detect_missing_object() {
 
     let errors = report.issues_by_severity(IssueSeverity::Error);
     assert!(!errors.is_empty());
-    assert!(errors
-        .iter()
-        .any(|e| matches!(e.category, IssueCategory::MissingObject)));
+    assert!(
+        errors
+            .iter()
+            .any(|e| matches!(e.category, IssueCategory::MissingObject))
+    );
 }
 
 #[tokio::test]
@@ -176,9 +170,11 @@ async fn test_fsck_detect_broken_reference() {
 
     let errors = report.issues_by_severity(IssueSeverity::Error);
     assert!(!errors.is_empty());
-    assert!(errors
-        .iter()
-        .any(|e| matches!(e.category, IssueCategory::BrokenReference)));
+    assert!(
+        errors
+            .iter()
+            .any(|e| matches!(e.category, IssueCategory::BrokenReference))
+    );
 }
 
 #[tokio::test]
@@ -227,9 +223,11 @@ async fn test_fsck_full_mode() {
 
     // blob2 is dangling (not referenced by any commit)
     let info_issues = report.issues_by_severity(IssueSeverity::Info);
-    assert!(info_issues
-        .iter()
-        .any(|e| { matches!(e.category, IssueCategory::DanglingObject) && e.oid == Some(blob2) }));
+    assert!(
+        info_issues.iter().any(|e| {
+            matches!(e.category, IssueCategory::DanglingObject) && e.oid == Some(blob2)
+        })
+    );
 }
 
 #[tokio::test]
@@ -284,7 +282,6 @@ async fn test_fsck_repair_dry_run() {
 }
 
 #[tokio::test]
-#[ignore = "FSCK functionality under development"]
 async fn test_fsck_connectivity_check() {
     let (_temp_dir, storage, odb) = setup_test_repo().await;
 

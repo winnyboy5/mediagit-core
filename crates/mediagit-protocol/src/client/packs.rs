@@ -1,17 +1,103 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 use super::*;
+
+/// Result of one concurrent pack upload, carried back through the in-flight
+/// queue. A struct rather than a wide tuple because every field feeds a
+/// different consumer: progress accounting, `[bench]`, and error rollback.
+struct PackUploadOutcome {
+    result: Result<()>,
+    /// Whether the bytes went out over a presigned PUT rather than the proxy.
+    presigned_direct: bool,
+    /// Compressed bytes that actually crossed the wire.
+    pack_bytes: u64,
+    /// Manifest (uncompressed) bytes, the progress-bar numerator's unit.
+    manifest_bytes: u64,
+    /// Chunks bundled into this pack.
+    chunks: u64,
+    /// Wall time for upload + register.
+    elapsed: std::time::Duration,
+}
+
+/// Decide what the pack phase reports, given how far it got.
+///
+/// Extracted from `push_full_chunks_via_packs` so the one invariant that keeps a
+/// partial pack failure from becoming DATA LOSS can be tested directly.
+///
+/// The caller in `push.rs` runs its per-chunk fallback only when the pack path
+/// did NOT succeed:
+///
+/// ```text
+/// if !full_chunks.is_empty() && !pack_pushed { ...fallback... }
+/// ```
+///
+/// So reporting Ok because "most packs landed" would skip the fallback and leave
+/// the failed pack's chunks uploaded NOWHERE, while the push exits 0. Any pack
+/// failure must therefore surface as Err, no matter how many packs succeeded -
+/// the caller then re-checks what actually exists server-side and uploads only
+/// the genuinely missing chunks.
+fn finish_pack_phase(
+    chunks_done: u32,
+    bytes_done: u64,
+    pack_failure: Option<anyhow::Error>,
+    outcome: Result<()>,
+) -> Result<(u32, u64)> {
+    outcome?;
+    match pack_failure {
+        Some(e) => Err(e),
+        None => Ok((chunks_done, bytes_done)),
+    }
+}
+
+#[cfg(test)]
+mod pack_phase_tests {
+    use super::finish_pack_phase;
+
+    #[test]
+    fn a_partial_pack_failure_is_reported_as_failure_not_partial_success() {
+        // The trap this exists to guard. Before 20260821, one failed pack aborted
+        // every queued pack; now they keep uploading, which makes "lots of packs
+        // succeeded AND one failed" a reachable state for the first time.
+        //
+        // The tempting implementation returns Ok((chunks_done, bytes_done)) here
+        // because real work got done. That sets pack_pushed = true in push.rs,
+        // skips the per-chunk fallback, and silently drops the failed pack's
+        // chunks - a push reporting success with data missing.
+        let out = finish_pack_phase(
+            9_999,
+            8_888,
+            Some(anyhow::anyhow!("pack 7 of 32 exhausted its retry budget")),
+            Ok(()),
+        );
+        assert!(
+            out.is_err(),
+            "a pack failure must surface as Err even when other packs succeeded; \
+             returning Ok skips the caller's fallback and loses that pack's chunks"
+        );
+    }
+
+    #[test]
+    fn a_clean_pack_phase_reports_its_totals() {
+        // The other half: without this, "always Err" would pass the test above
+        // while disabling the fast path entirely.
+        let out = finish_pack_phase(42, 1024, None, Ok(())).expect("clean phase must be Ok");
+        assert_eq!(
+            out,
+            (42, 1024),
+            "a clean phase must report what it uploaded"
+        );
+    }
+
+    #[test]
+    fn a_hard_error_still_wins_over_the_totals() {
+        let out = finish_pack_phase(5, 5, None, Err(anyhow::anyhow!("odb read failed")));
+        assert!(
+            out.is_err(),
+            "an error from the build/upload loop must propagate"
+        );
+    }
+}
 
 impl ProtocolClient {
     // -----------------------------------------------------------------------
@@ -27,29 +113,63 @@ impl ProtocolClient {
         odb: &ObjectDatabase,
         chunk_manifest_sizes: &std::collections::HashMap<Oid, u64>,
         bytes_progress: &Arc<AtomicU64>,
+        bench: Option<&Arc<crate::bench::BenchSession>>,
     ) -> Result<(u32, u64)> {
-        use crate::pack_builder::{upload_and_register, PackBuilder};
+        use crate::pack_builder::{PackBuilder, upload_and_register};
         use futures::stream::{FuturesUnordered, StreamExt};
 
         // Each in-flight pack is read fully into RAM (~MEDIAGIT_PACK_BYTES) for upload,
         // so keep this modest; =1 restores sequential uploads. Default 8 ≈ 512 MiB ceiling.
+        //
+        // ST-4: bounded above as well as below. Peak RAM here is
+        // MEDIAGIT_PACK_BYTES × this value, so leaving the multiplier
+        // unbounded left the product unbounded no matter how the byte cap was
+        // clamped. 64 is already far past the point where more concurrency
+        // buys throughput on a WAN-bound link.
+        const MAX_PACK_UPLOAD_CONCURRENCY: usize = 64;
         let pack_upload_concurrency: usize = std::env::var("MEDIAGIT_PACK_UPLOAD_CONCURRENCY")
             .ok()
             .and_then(|v| v.parse().ok())
             .filter(|&n| n > 0)
+            .map(|n: usize| n.min(MAX_PACK_UPLOAD_CONCURRENCY))
             .unwrap_or(8);
 
         let temp_dir = tempfile::TempDir::new().context("create pack temp dir")?;
         let mut builder = PackBuilder::new(temp_dir.path());
 
-        let direct_client = reqwest::Client::builder()
-            .pool_idle_timeout(std::time::Duration::from_secs(60))
-            .pool_max_idle_per_host(http_pool_max())
-            .tcp_nodelay(true)
-            .timeout(std::time::Duration::from_secs(300))
-            .http1_only()
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        // The bound scales with the pack, because the cost does. A pack BODY is
+        // bounded, but the time to upload it is not: it is (pack size / share of
+        // the link), and packs upload concurrently, so each one's share shrinks
+        // as fan-out grows.
+        //
+        // Measured in 20260821-s5check. Azure moved 2048 MB in 2072s — ~1 MB/s
+        // aggregate — and a 64 MB pack's wall time blew past the 300s ceiling
+        // while it was still PROGRESSING. Only the 2 packs that got through
+        // early survived; the other 30 were killed mid-flight and the push fell
+        // back to the per-chunk path at 0.99 MB/s:
+        //
+        //   [azure] packsOffered=32 packsCompleted=2 perChunkProxyPUTs=724
+        //   cause: "operation timed out" (x3 across azure+aws, x0 HTTP statuses)
+        //
+        // DROPPING `.timeout()` DID NOT FIX THAT, and this comment used to claim
+        // it had. The shared builder's read_timeout took over as the ceiling: it
+        // bounds the gap between bytes RECEIVED, and an upload receives nothing
+        // until the body completes, so it never resets and lands on the same
+        // 300s wall. The same drill reproduced it a fortnight later — azure
+        // 6/32, and four packs dying at EXACTLY 300.0s within one second of each
+        // other, which is a start-time deadline and not four independent stalls.
+        // Raising ONLY that knob to 1800 took the same push from 6/32 in 918.66s
+        // to 32/32 in 368.27s.
+        //
+        // So the fix is the shape, not the number: a total ceiling derived from
+        // the bytes, i.e. "this pack must sustain MIN_UPLOAD_BYTES_PER_SEC". A
+        // dead socket still fails; a slow-but-moving pack is left alone. Passing
+        // the cap (not the actual pack size) keeps every pack on one client, and
+        // the cap is the largest body any of them can hold.
+        let direct_client =
+            super::data_plane_upload_client_builder(mediagit_versioning::pack_bytes_cap())
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new());
 
         let mut chunks_done: u32 = 0;
         let mut bytes_done: u64 = 0;
@@ -57,14 +177,44 @@ impl ProtocolClient {
         // already added to `bytes_progress`. Tracked so we can roll back on error and
         // let the per-chunk fallback re-credit from a clean slate (no double-count).
         let mut credited: u64 = 0;
+        // A pack that exhausts its retry budget used to `?` straight out of the
+        // loop, abandoning every pack still queued. 20260821-ga12 measured the
+        // cost on the AWS arm: 4 packs failed, 1 landed, and 27 were NEVER
+        // ATTEMPTED - packsOffered=32 packsCompleted=1, 361 chunks proxied.
+        //
+        // The per-pack retry (ee80699) made each pack survive a flaky link; it
+        // did nothing about the all-or-nothing structure above it. One pack's
+        // bad luck still cost the whole push its fast path.
+        //
+        // Now a failure is RECORDED and the remaining packs keep going. The
+        // failed pack's chunks are covered by the caller's existing re-check
+        // fallback - see the note on the return value below, which is the part
+        // that must not be got wrong.
+        let mut pack_failure: Option<anyhow::Error> = None;
         let mut current_hashes: Vec<(String, String)> = Vec::new();
         // Σ manifest size of the chunks accumulated into the currently-open pack.
         let mut pending_manifest_bytes: u64 = 0;
         // Boxed so the per-pack and final-pack upload futures (distinct anonymous
         // types) can share one queue.
         let mut inflight: FuturesUnordered<
-            std::pin::Pin<Box<dyn std::future::Future<Output = (Result<()>, u64, u64)> + Send>>,
+            std::pin::Pin<Box<dyn std::future::Future<Output = PackUploadOutcome> + Send>>,
         > = FuturesUnordered::new();
+
+        // Records one completed pack upload against the bench session.
+        //
+        // `record_batch` matters as much as the pack counters: it is what feeds
+        // `throughput_mbs`, and pack mode is the DEFAULT push path. Without it
+        // a pack-mode push reports `chunks=0 total_bytes=0 throughput_mbs=0.00`
+        // and any throughput comparison silently measures nothing.
+        let note_pack = |o: &PackUploadOutcome| {
+            if let Some(b) = bench {
+                b.record_pack(o.pack_bytes);
+                if o.presigned_direct {
+                    b.record_presign_urls(1);
+                }
+                b.record_batch(o.chunks, o.pack_bytes, o.elapsed);
+            }
+        };
 
         // Build packs synchronously; upload them concurrently (bounded). Wrapped so a
         // failure mid-stream can roll back the numerator credits before propagating.
@@ -90,8 +240,10 @@ impl ProtocolClient {
                     let hashes = std::mem::take(&mut current_hashes);
                     let manifest_bytes = std::mem::take(&mut pending_manifest_bytes);
                     let pack_byte_len = result.byte_len;
+                    let pack_chunks = hashes.len() as u64;
                     let direct = direct_client.clone(); // cheap: reqwest::Client is Arc-internal
                     inflight.push(Box::pin(async move {
+                        let t = std::time::Instant::now();
                         let r = upload_and_register(
                             result,
                             &self.base_url,
@@ -100,16 +252,36 @@ impl ProtocolClient {
                             &hashes,
                         )
                         .await;
-                        (r, pack_byte_len, manifest_bytes)
+                        let elapsed = t.elapsed();
+                        let (result, presigned_direct) = match r {
+                            Ok(d) => (Ok(()), d),
+                            Err(e) => (Err(e), false),
+                        };
+                        PackUploadOutcome {
+                            result,
+                            presigned_direct,
+                            pack_bytes: pack_byte_len,
+                            manifest_bytes,
+                            chunks: pack_chunks,
+                            elapsed,
+                        }
                     }));
 
                     // Backpressure: never hold more than N packs in flight.
                     while inflight.len() >= pack_upload_concurrency {
-                        if let Some((r, pb, mb)) = inflight.next().await {
-                            r.context("upload_and_register pack")?;
-                            bytes_done += pb;
-                            bytes_progress.fetch_add(mb, Ordering::Relaxed);
-                            credited += mb;
+                        if let Some(o) = inflight.next().await {
+                            note_pack(&o);
+                            if let Err(e) = o.result {
+                                // Keep the FIRST error: closest to the root
+                                // cause; later ones are usually knock-on.
+                                if pack_failure.is_none() {
+                                    pack_failure = Some(e.context("upload_and_register pack"));
+                                }
+                            } else {
+                                bytes_done += o.pack_bytes;
+                                bytes_progress.fetch_add(o.manifest_bytes, Ordering::Relaxed);
+                                credited += o.manifest_bytes;
+                            }
                         }
                     }
                 }
@@ -121,21 +293,41 @@ impl ProtocolClient {
                 let hashes = std::mem::take(&mut current_hashes);
                 let manifest_bytes = std::mem::take(&mut pending_manifest_bytes);
                 let pack_byte_len = result.byte_len;
+                let pack_chunks = hashes.len() as u64;
                 let direct = direct_client.clone();
                 inflight.push(Box::pin(async move {
+                    let t = std::time::Instant::now();
                     let r =
                         upload_and_register(result, &self.base_url, &self.client, &direct, &hashes)
                             .await;
-                    (r, pack_byte_len, manifest_bytes)
+                    let elapsed = t.elapsed();
+                    let (result, presigned_direct) = match r {
+                        Ok(d) => (Ok(()), d),
+                        Err(e) => (Err(e), false),
+                    };
+                    PackUploadOutcome {
+                        result,
+                        presigned_direct,
+                        pack_bytes: pack_byte_len,
+                        manifest_bytes,
+                        chunks: pack_chunks,
+                        elapsed,
+                    }
                 }));
             }
 
             // Drain remaining uploads.
-            while let Some((r, pb, mb)) = inflight.next().await {
-                r.context("upload_and_register pack")?;
-                bytes_done += pb;
-                bytes_progress.fetch_add(mb, Ordering::Relaxed);
-                credited += mb;
+            while let Some(o) = inflight.next().await {
+                note_pack(&o);
+                if let Err(e) = o.result {
+                    if pack_failure.is_none() {
+                        pack_failure = Some(e.context("upload_and_register pack"));
+                    }
+                } else {
+                    bytes_done += o.pack_bytes;
+                    bytes_progress.fetch_add(o.manifest_bytes, Ordering::Relaxed);
+                    credited += o.manifest_bytes;
+                }
             }
             Ok(())
         }
@@ -143,16 +335,31 @@ impl ProtocolClient {
 
         drop(temp_dir);
 
-        match outcome {
-            Ok(()) => Ok((chunks_done, bytes_done)),
-            Err(e) => {
-                // Roll back our credits so the per-chunk fallback re-credits from zero.
-                if credited > 0 {
-                    bytes_progress.fetch_sub(credited, Ordering::Relaxed);
-                }
-                Err(e)
-            }
+        // A pack failure is reported as Err even though the remaining packs were
+        // uploaded, and that is deliberate - it is the whole safety argument.
+        //
+        // The caller only runs its per-chunk fallback when the pack path did NOT
+        // succeed (`if !full_chunks.is_empty() && !pack_pushed`). Returning Ok
+        // here because "most packs landed" would set pack_pushed = true, skip the
+        // fallback, and leave the FAILED pack's chunks uploaded nowhere - a push
+        // that reports success with chunks missing. That is a data-loss bug, and
+        // a far worse one than the slowdown this change exists to fix.
+        //
+        // Err keeps the existing, proven recovery exactly as it was: the caller
+        // re-checks which chunks actually exist server-side
+        // (`push.rs`: "re-checked existence after partial pack failure"), uploads
+        // only the genuinely missing ones, and re-credits the rest. Chunks in the
+        // packs that DID land are found present and skipped, so the win is real -
+        // the fallback now handles a handful of chunks instead of all of them -
+        // while the correctness path is byte-for-byte the one already in service.
+        //
+        // Credits are rolled back for the same reason: the caller's re-check
+        // re-credits what it finds, so leaving ours in place would double-count.
+        if credited > 0 && (pack_failure.is_some() || outcome.is_err()) {
+            // Roll back our credits so the per-chunk fallback re-credits from zero.
+            bytes_progress.fetch_sub(credited, Ordering::Relaxed);
         }
+        finish_pack_phase(chunks_done, bytes_done, pack_failure, outcome)
     }
 
     // -----------------------------------------------------------------------
@@ -183,16 +390,17 @@ impl ProtocolClient {
         }
 
         let url = format!("{}/chunks/locate", self.base_url);
-        let resp = self
-            .client
-            .post(&url)
-            .json(&Req {
-                chunk_ids,
-                wants_full_repo,
-            })
-            .send()
-            .await
-            .context("POST /chunks/locate")?;
+        let resp = send_with_rate_limit_retry(|| {
+            self.client
+                .post(&url)
+                .json(&Req {
+                    chunk_ids,
+                    wants_full_repo,
+                })
+                .send()
+        })
+        .await
+        .context("POST /chunks/locate")?;
         if !resp.status().is_success() {
             anyhow::bail!("POST /chunks/locate returned {}", resp.status());
         }
@@ -227,12 +435,10 @@ impl ProtocolClient {
         }
         let url = format!("{}/packs/presign-download-urls", self.base_url);
         let result = async {
-            let resp = self
-                .client
-                .post(&url)
-                .json(&Req { pack_ids })
-                .send()
-                .await?;
+            let resp = send_with_rate_limit_retry(|| {
+                self.client.post(&url).json(&Req { pack_ids }).send()
+            })
+            .await?;
             if !resp.status().is_success() {
                 anyhow::bail!(
                     "POST /packs/presign-download-urls returned {}",
@@ -263,6 +469,7 @@ impl ProtocolClient {
         chunk_ids: &[Oid],
         odb: &ObjectDatabase,
         on_progress: Option<std::sync::Arc<dyn Fn(u64) + Send + Sync>>,
+        bench: Option<&Arc<crate::bench::BenchSession>>,
     ) -> Result<std::collections::HashSet<Oid>> {
         use futures::{StreamExt, TryStreamExt};
 
@@ -276,6 +483,33 @@ impl ProtocolClient {
         // upload time via complete_pack; (b) clone-SHA / fsck tests on the pulled working tree.
         // Per-slice hash verification requires storing compressed hashes in the manifest
         // and is deferred as a future improvement.
+        // NOTE: `MEDIAGIT_DOWNLOAD_CONCURRENCY` is read in TWO places with
+        // DIFFERENT defaults - 24 here (pack range-GETs) and 32 in
+        // `pull.rs::pull_streaming` (per-chunk downloads). Setting the env var
+        // makes both agree; leaving it unset does not.
+        //
+        // MEASURED 2026-08-25, and the answer is leave it alone. 384MB / 302
+        // chunks over loopback, `MEDIAGIT_BENCH=1`:
+        //
+        //   conc=1        wall=4.42s  87 MB/s   util_pct=54%
+        //   conc=default  wall=3.67s 105 MB/s   util_pct=2%
+        //   conc=32       wall=3.57s 107 MB/s   util_pct=2%
+        //
+        // The knob is LIVE - conc=1 is measurably slower and util_pct moves
+        // 54% -> 2%, so the value really does reach the download loop. But 24 vs
+        // 32 is 3.67s vs 3.57s, inside run-to-run noise. Unifying the defaults
+        // would be churn with no measurable benefit, so the split stays.
+        //
+        // The load-bearing number is util_pct=2%: at the default the pipeline is
+        // nowhere near saturating even 24 slots, so this path is NOT
+        // concurrency-limited. Anyone chasing the clone-vs-push asymmetry should
+        // read that as "raising download concurrency will not help" - and note
+        // both defaults already exceed the pack UPLOAD concurrency (8, above),
+        // so "clone is less parallel than push" is not the explanation either.
+        //
+        // Caveat on scope: measured over loopback against the filesystem backend.
+        // A WAN/cloud backend has entirely different latency, so re-measure there
+        // before drawing conclusions about cloud clone throughput.
         let download_concurrency: usize = std::env::var("MEDIAGIT_DOWNLOAD_CONCURRENCY")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -327,85 +561,104 @@ impl ProtocolClient {
 
         let pack_ids: Vec<String> = by_pack.keys().cloned().collect();
         let presign_map = self.request_pack_download_urls(&pack_ids).await;
+        // Count URLs actually issued, not packs asked about: a backend that
+        // cannot presign (GCS + ADC) answers with `None` and the fetch quietly
+        // takes the server-proxy path instead.
+        if let Some(b) = bench {
+            b.record_presign_urls(presign_map.values().filter(|o| o.is_some()).count() as u64);
+        }
 
-        let tasks: Vec<_> = by_pack
+        // No presigned GET (e.g. GCS + ADC): batch-fetch via the server proxy
+        // instead of dropping the pack and falling all the way back to one
+        // per-chunk HTTP round-trip each. MEDIAGIT_PACK_PROXY_BATCH=0 restores
+        // the old drop-and-per-chunk-fallback behavior.
+        let use_batch_proxy = std::env::var("MEDIAGIT_PACK_PROXY_BATCH")
+            .map(|v| v != "0")
+            .unwrap_or(true);
+
+        enum PackFetchTask {
+            Presigned {
+                chunks: Vec<(String, u64, u32)>,
+                url: String,
+                pack_oid: String,
+            },
+            Batch {
+                chunks: Vec<(String, u64, u32)>,
+                pack_oid: String,
+            },
+        }
+
+        let tasks: Vec<PackFetchTask> = by_pack
             .into_iter()
             .filter_map(|(pack_oid, mut chunks)| {
-                let url = presign_map
-                    .get(&pack_oid)
-                    .and_then(|o| o.as_ref())
-                    .map(|p| p.url.clone())?;
                 chunks.sort_unstable_by_key(|(_, off, _)| *off);
-                Some((chunks, url, pack_oid))
+                match presign_map.get(&pack_oid).and_then(|o| o.as_ref()) {
+                    Some(p) => Some(PackFetchTask::Presigned {
+                        chunks,
+                        url: p.url.clone(),
+                        pack_oid,
+                    }),
+                    None if use_batch_proxy => Some(PackFetchTask::Batch { chunks, pack_oid }),
+                    None => None,
+                }
             })
             .collect();
 
         let client = self.client.clone();
+        let base_url = self.base_url.clone();
         // Clone odb so it can move into concurrent async tasks (all fields are Arc-wrapped).
         let odb = odb.clone();
 
         let written_set: std::collections::HashSet<Oid> = futures::stream::iter(tasks)
-            .map(|(chunks, url, pack_oid)| {
+            .map(|task| {
                 let client = client.clone();
+                let base_url = base_url.clone();
                 let cmg = coalesce_max_gap;
                 let cmb = coalesce_max_bytes;
                 let comp_hashes = std::sync::Arc::clone(&compressed_hashes);
                 let odb = odb.clone();
                 let progress = on_progress.clone();
+                let bench = bench.cloned();
                 async move {
-                    let ranges = coalesce_chunk_ranges(&chunks, cmg, cmb);
-                    let mut out: Vec<(Oid, Vec<u8>)> = Vec::new();
-
-                    for (range_start, range_end) in ranges {
-                        let hdr = format!("bytes={}-{}", range_start, range_end.saturating_sub(1));
-                        let resp = client
-                            .get(&url)
-                            .header("Range", &hdr)
-                            .send()
-                            .await
-                            .with_context(|| format!("Range-GET {} range {}", pack_oid, hdr))?;
-
-                        let status = resp.status().as_u16();
-                        if status != 200 && status != 206 {
-                            anyhow::bail!("Range-GET returned {} for pack {}", status, pack_oid);
+                    let fetch_start = std::time::Instant::now();
+                    let out: Vec<(Oid, Vec<u8>)> = match task {
+                        PackFetchTask::Presigned {
+                            chunks,
+                            url,
+                            pack_oid,
+                        } => {
+                            fetch_pack_slices_presigned(
+                                &client,
+                                &url,
+                                &pack_oid,
+                                &chunks,
+                                cmg,
+                                cmb,
+                                &comp_hashes,
+                                bench.as_ref(),
+                            )
+                            .await?
                         }
-
-                        let body = resp.bytes().await.context("read Range-GET body")?;
-
-                        for (hex, off, len) in &chunks {
-                            if *off < range_start || *off + *len as u64 > range_end {
-                                continue;
-                            }
-                            let rel = (*off - range_start) as usize;
-                            let slice_end = rel + *len as usize;
-                            if slice_end > body.len() || *len < 5 {
-                                tracing::warn!(chunk = %hex, "pack slice bounds error");
-                                continue;
-                            }
-                            // Pack object layout: type(1) + size(4) + data
-                            let data = &body[rel + 5..slice_end];
-
-                            let oid = match Oid::from_hex(hex) {
-                                Ok(o) => o,
-                                Err(_) => continue,
-                            };
-
-                            // Per-slice compressed-hash verify when manifest includes it.
-                            if let Some(expected) = comp_hashes.get(hex.as_str()) {
-                                let computed = Oid::hash(data).to_hex();
-                                if &computed != expected {
-                                    tracing::warn!(
-                                        chunk = %hex,
-                                        expected = %expected,
-                                        computed = %computed,
-                                        "compressed-hash mismatch on pack slice; skipping"
-                                    );
-                                    continue;
-                                }
-                            }
-
-                            out.push((oid, data.to_vec()));
+                        PackFetchTask::Batch { chunks, pack_oid } => {
+                            fetch_pack_slices_batch(
+                                &client,
+                                &base_url,
+                                &pack_oid,
+                                &chunks,
+                                &comp_hashes,
+                            )
+                            .await?
                         }
+                    };
+                    if let Some(b) = &bench {
+                        let fetched: u64 = out.iter().map(|(_, d)| d.len() as u64).sum();
+                        b.record_pack(fetched);
+                        // Feeds throughput_mbs; pack mode is the default pull
+                        // path, so without this a pack-mode clone reports zero
+                        // throughput. Timed around the fetch only, excluding
+                        // the ODB writes below, to match the push side's
+                        // transfer-only accounting.
+                        b.record_batch(out.len() as u64, fetched, fetch_start.elapsed());
                     }
                     // Write to ODB and report progress as each chunk arrives, without
                     // buffering all pack results first (eliminates the collect().await pattern).
@@ -446,5 +699,385 @@ impl ProtocolClient {
             );
         }
         Ok(written_set)
+    }
+}
+
+/// Whether a Range-GET's HTTP status can be sliced with `rel = off - range_start`.
+///
+/// A compliant server answers a Range request with 206 (partial content). A 200
+/// means it ignored the Range and returned the whole object from offset 0, so
+/// the `off - range_start` math only lands correctly when `range_start == 0`
+/// (body offset 0 == range_start). Any other status/offset combination would
+/// mis-slice — the caller must reject it and fall back to the per-chunk path.
+/// ST-3: decide whether a pack slice may be accepted.
+///
+/// A slice is accepted only when the manifest records a `compressed_hash` for
+/// it *and* the bytes match. The previous rule verified only when a hash
+/// happened to be present and accepted the slice otherwise — fail-open on an
+/// integrity check. `compressed_hash` is `#[serde(default)] Option`, so a
+/// manifest from an older binary, or one with a truncated line, silently
+/// disabled verification for that chunk while still yielding its bytes.
+///
+/// Failing closed is cheap: a refused slice falls through to the per-chunk
+/// download path, which verifies. The cost is throughput on an unverifiable
+/// manifest, never correctness.
+///
+/// Extracted so the Range-GET and batch-get paths cannot drift apart — they
+/// must apply the same rule, and previously each had its own copy of it.
+fn slice_verifies(
+    hex: &str,
+    data: &[u8],
+    comp_hashes: &std::collections::HashMap<String, String>,
+) -> bool {
+    match comp_hashes.get(hex) {
+        Some(expected) => {
+            let computed = Oid::hash(data).to_hex();
+            if &computed != expected {
+                tracing::warn!(
+                    chunk = %hex,
+                    expected = %expected,
+                    computed = %computed,
+                    "compressed-hash mismatch on pack slice; refusing"
+                );
+                return false;
+            }
+            true
+        }
+        None => {
+            tracing::warn!(
+                chunk = %hex,
+                "pack manifest carries no compressed_hash for this chunk; \
+                    refusing the slice unverified and falling back to per-chunk"
+            );
+            false
+        }
+    }
+}
+
+fn range_status_trusted(status: u16, range_start: u64) -> bool {
+    status == 206 || (status == 200 && range_start == 0)
+}
+
+/// Fetch requested (chunk_oid, offset, length) slices out of one pack via
+/// presigned Range-GET requests directly against cloud storage.
+///
+/// Returns the (Oid, compressed_bytes) pairs that passed bounds + per-slice
+/// compressed-hash verification. Entries that fail either check are silently
+/// skipped (logged), not errored — the caller falls back to the per-chunk
+/// path for anything missing from the returned set. A response that cannot be
+/// trusted whole (non-206 for a non-zero-offset range, or a truncated body)
+/// errors instead, so the caller re-fetches the range via per-chunk fallback.
+#[allow(clippy::too_many_arguments)]
+async fn fetch_pack_slices_presigned(
+    client: &reqwest::Client,
+    url: &str,
+    pack_oid: &str,
+    chunks: &[(String, u64, u32)],
+    coalesce_max_gap: u64,
+    coalesce_max_bytes: u64,
+    comp_hashes: &std::collections::HashMap<String, String>,
+    bench: Option<&Arc<crate::bench::BenchSession>>,
+) -> Result<Vec<(Oid, Vec<u8>)>> {
+    let ranges = coalesce_chunk_ranges(chunks, coalesce_max_gap, coalesce_max_bytes);
+    let mut out: Vec<(Oid, Vec<u8>)> = Vec::new();
+
+    for (range_start, range_end) in ranges {
+        // A request is "coalesced" when this one Range covers more than one
+        // logical chunk — the ratio of these is what tells us whether range
+        // merging is actually earning its keep.
+        if let Some(b) = bench {
+            let covered = chunks
+                .iter()
+                .filter(|(_, off, len)| *off >= range_start && *off + *len as u64 <= range_end)
+                .count();
+            b.record_range_get(covered > 1);
+        }
+        let hdr = format!("bytes={}-{}", range_start, range_end.saturating_sub(1));
+        // Presigned direct-to-bucket GET — not routed through
+        // send_with_rate_limit_retry, which only applies to the server's own
+        // 429s and Retry-After semantics.
+        let resp = client
+            .get(url)
+            .header("Range", &hdr)
+            .send()
+            .await
+            .with_context(|| format!("Range-GET {} range {}", pack_oid, hdr))?;
+
+        let status = resp.status().as_u16();
+        if !range_status_trusted(status, range_start) {
+            anyhow::bail!(
+                "Range-GET returned {} (want 206) for pack {} range {}",
+                status,
+                pack_oid,
+                hdr
+            );
+        }
+
+        let body = resp.bytes().await.context("read Range-GET body")?;
+
+        // The requested range maps 1:1 onto real chunk offsets, so a compliant
+        // body is at least `range_end - range_start` long. A shorter body means a
+        // truncated/partial response (a backend degrading under load returns
+        // short reads) — a chunk near the tail would then mis-slice or silently
+        // shrink. Bail to the per-chunk fallback rather than trust it.
+        let expected_len = (range_end - range_start) as usize;
+        if body.len() < expected_len {
+            anyhow::bail!(
+                "Range-GET short body for pack {} range {}: got {} of {} bytes",
+                pack_oid,
+                hdr,
+                body.len(),
+                expected_len
+            );
+        }
+
+        for (hex, off, len) in chunks {
+            if *off < range_start || *off + *len as u64 > range_end {
+                continue;
+            }
+            let rel = (*off - range_start) as usize;
+            let slice_end = rel + *len as usize;
+            if slice_end > body.len() || *len < 5 {
+                tracing::warn!(chunk = %hex, "pack slice bounds error");
+                continue;
+            }
+            // Pack object layout: type(1) + size(4) + data
+            let data = &body[rel + 5..slice_end];
+
+            let oid = match Oid::from_hex(hex) {
+                Ok(o) => o,
+                Err(_) => continue,
+            };
+
+            if !slice_verifies(hex, data, comp_hashes) {
+                continue;
+            }
+
+            out.push((oid, data.to_vec()));
+        }
+    }
+    Ok(out)
+}
+
+/// Fetch requested (chunk_oid, offset, length) slices out of one pack via
+/// the server-proxied `POST /packs/batch-get` endpoint (D2) — used when no
+/// presigned GET URL is available (e.g. GCS + ADC), so pulling a pack's
+/// worth of chunks costs one request instead of one per chunk.
+///
+/// Frame format matches `batch_get_pack_chunks` on the server:
+/// `[chunk_oid: 32 raw bytes][len: u32 LE][data: len bytes]`, one frame per
+/// requested entry in request order. A zero-length frame is a miss (entry
+/// not found in the server's pack index) and is skipped here, falling
+/// through to the per-chunk path same as a presigned-slice verify failure.
+///
+/// On HTTP 404 (server predates this endpoint) returns `Ok(vec![])` rather
+/// than erroring, so only this pack's chunks fall back to per-chunk —
+/// other packs in the same pull are unaffected.
+async fn fetch_pack_slices_batch(
+    client: &reqwest::Client,
+    base_url: &str,
+    pack_oid: &str,
+    chunks: &[(String, u64, u32)],
+    comp_hashes: &std::collections::HashMap<String, String>,
+) -> Result<Vec<(Oid, Vec<u8>)>> {
+    #[derive(serde::Serialize, Clone)]
+    struct Entry<'a> {
+        chunk_oid: &'a str,
+        offset: u64,
+        length: u32,
+    }
+    #[derive(serde::Serialize)]
+    struct Req<'a> {
+        pack_oid: &'a str,
+        entries: Vec<Entry<'a>>,
+    }
+
+    let entries: Vec<Entry> = chunks
+        .iter()
+        .map(|(hex, off, len)| Entry {
+            chunk_oid: hex,
+            offset: *off,
+            length: *len,
+        })
+        .collect();
+
+    let url = format!("{}/packs/batch-get", base_url);
+    let resp = send_with_rate_limit_retry(|| {
+        client
+            .post(&url)
+            .json(&Req {
+                pack_oid,
+                entries: entries.clone(),
+            })
+            .send()
+    })
+    .await
+    .with_context(|| format!("POST /packs/batch-get for pack {}", pack_oid))?;
+
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        tracing::debug!(pack = %pack_oid, "batch-get 404 (old server); pack falls back to per-chunk");
+        return Ok(Vec::new());
+    }
+    if !resp.status().is_success() {
+        anyhow::bail!("batch-get returned {} for pack {}", resp.status(), pack_oid);
+    }
+
+    let body = resp.bytes().await.context("read batch-get body")?;
+    let frames = parse_batch_get_frames(&body, pack_oid);
+
+    let mut out: Vec<(Oid, Vec<u8>)> = Vec::new();
+    for (oid, data) in frames {
+        if data.is_empty() {
+            // Miss frame — entry not in server's pack index. Falls through
+            // to per-chunk fallback for this one chunk.
+            continue;
+        }
+        let hex = oid.to_hex();
+        if !slice_verifies(&hex, &data, comp_hashes) {
+            continue;
+        }
+
+        out.push((oid, data));
+    }
+    Ok(out)
+}
+
+/// Parse a batch-get response body into `(chunk_oid, data)` frames.
+///
+/// Frame format: `[chunk_oid: 32 raw bytes][len: u32 LE][data: len bytes]`,
+/// repeated. A frame with `data` empty is a valid "miss" marker (caller
+/// decides how to treat it). Stops (without erroring) on a truncated
+/// trailing frame — the whole body is untrusted network input.
+fn parse_batch_get_frames(body: &[u8], pack_oid: &str) -> Vec<(Oid, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    while pos + 36 <= body.len() {
+        let oid_bytes: [u8; 32] = body[pos..pos + 32]
+            .try_into()
+            .expect("slice is exactly 32 bytes");
+        let oid = Oid::from_bytes(oid_bytes);
+        pos += 32;
+        let len = u32::from_le_bytes(
+            body[pos..pos + 4]
+                .try_into()
+                .expect("slice is exactly 4 bytes"),
+        ) as usize;
+        pos += 4;
+        if pos + len > body.len() {
+            tracing::warn!(pack = %pack_oid, "batch-get response truncated mid-frame");
+            break;
+        }
+        let data = body[pos..pos + len].to_vec();
+        pos += len;
+        out.push((oid, data));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(oid: &Oid, data: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(oid.as_bytes());
+        buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        buf.extend_from_slice(data);
+        buf
+    }
+
+    #[test]
+    fn range_status_trust_rejects_ignored_range() {
+        // 206 partial is always fine.
+        assert!(range_status_trusted(206, 0));
+        assert!(range_status_trusted(206, 4096));
+        // A 200 (range ignored -> whole object from offset 0) is only safe when
+        // the range started at 0; at any non-zero offset it mis-slices.
+        assert!(range_status_trusted(200, 0));
+        assert!(!range_status_trusted(200, 1));
+        assert!(!range_status_trusted(200, 4096));
+        // Anything else is a hard reject.
+        assert!(!range_status_trusted(416, 0));
+        assert!(!range_status_trusted(500, 0));
+    }
+
+    #[test]
+    fn parses_multiple_frames_including_a_miss() {
+        let oid_a = Oid::hash(b"chunk a");
+        let oid_b = Oid::hash(b"chunk b");
+        let mut body = Vec::new();
+        body.extend_from_slice(&frame(&oid_a, b"payload-a"));
+        body.extend_from_slice(&frame(&oid_b, &[])); // miss frame
+
+        let frames = parse_batch_get_frames(&body, "pack1");
+
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].0, oid_a);
+        assert_eq!(frames[0].1, b"payload-a");
+        assert_eq!(frames[1].0, oid_b);
+        assert!(frames[1].1.is_empty());
+    }
+
+    #[test]
+    fn stops_cleanly_on_truncated_trailing_frame() {
+        let oid_a = Oid::hash(b"chunk a");
+        let mut body = frame(&oid_a, b"full payload");
+        // Append a truncated second frame: valid header, claims 100 bytes,
+        // but the body ends after only a few.
+        let oid_b = Oid::hash(b"chunk b");
+        body.extend_from_slice(oid_b.as_bytes());
+        body.extend_from_slice(&100u32.to_le_bytes());
+        body.extend_from_slice(b"short");
+
+        let frames = parse_batch_get_frames(&body, "pack1");
+
+        // Only the complete first frame is returned; no panic on the truncated tail.
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].0, oid_a);
+        assert_eq!(frames[0].1, b"full payload");
+    }
+
+    #[test]
+    fn empty_body_parses_to_no_frames() {
+        assert!(parse_batch_get_frames(&[], "pack1").is_empty());
+    }
+
+    /// ST-3: an unverifiable slice must be refused, not trusted.
+    #[test]
+    fn slice_without_recorded_hash_is_refused() {
+        let data = b"chunk bytes";
+        let hex = Oid::hash(data).to_hex();
+        let empty = std::collections::HashMap::new();
+
+        assert!(
+            !slice_verifies(&hex, data, &empty),
+            "a manifest with no compressed_hash left the slice unverified and \
+                accepted it — fail-open on an integrity check"
+        );
+    }
+
+    #[test]
+    fn slice_with_matching_hash_is_accepted() {
+        let data = b"chunk bytes";
+        let hex = Oid::hash(data).to_hex();
+        let mut m = std::collections::HashMap::new();
+        // The manifest records BLAKE3 of the compressed bytes as they are
+        // stored; here the "compressed" bytes are the payload itself.
+        m.insert(hex.clone(), Oid::hash(data).to_hex());
+
+        assert!(slice_verifies(&hex, data, &m));
+    }
+
+    #[test]
+    fn slice_with_wrong_hash_is_refused() {
+        let data = b"chunk bytes";
+        let hex = Oid::hash(data).to_hex();
+        let mut m = std::collections::HashMap::new();
+        m.insert(hex.clone(), Oid::hash(b"different").to_hex());
+
+        assert!(
+            !slice_verifies(&hex, data, &m),
+            "a slice whose bytes do not match the manifest was accepted"
+        );
     }
 }

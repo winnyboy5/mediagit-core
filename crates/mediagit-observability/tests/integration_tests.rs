@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Integration tests for logging system
 //!
@@ -53,14 +43,16 @@ fn test_default_config() {
 
 #[test]
 fn test_environment_variable_fallback() {
-    std::env::set_var("RUST_LOG", "trace");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("RUST_LOG", "trace") };
     let config = LogConfig::new().with_format(LogFormat::Compact);
     assert_eq!(config.get_effective_level(), "trace");
 }
 
 #[test]
 fn test_explicit_level_overrides_env() {
-    std::env::set_var("RUST_LOG", "trace");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("RUST_LOG", "trace") };
     let config = LogConfig::new()
         .with_format(LogFormat::Compact)
         .with_level("warn");

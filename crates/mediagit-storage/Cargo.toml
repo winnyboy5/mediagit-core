@@ -9,10 +9,16 @@ repository.workspace = true
 homepage.workspace = true
 documentation.workspace = true
 description = "Unified async storage backend trait and implementations"
+# Not published to crates.io: distribution is cargo-dist binaries, Docker
+# images and GitHub releases. This also makes deny.toml's
+# `allow-wildcard-paths` apply to our own path deps (cargo-deny exempts
+# them only for non-public crates). Flip to `true` and add `version = ...`
+# beside every internal `path = ...` if crates.io publishing is turned on.
+publish = false
 
 [features]
-azure = ["dep:azure_storage", "dep:azure_storage_blobs", "dep:azure_core", "dep:time"]
-gcs = ["dep:google-cloud-storage", "dep:google-cloud-auth", "dep:google-cloud-gax", "dep:http"]
+azure = ["dep:opendal", "dep:reqsign-azure-storage", "dep:reqsign-core", "dep:http", "dep:reqwest", "dep:rustls"]
+gcs = ["dep:google-cloud-storage", "dep:google-cloud-auth", "dep:google-cloud-gax", "dep:http", "dep:serde_json"]
 all = ["azure", "gcs"]
 
 [dependencies]
@@ -23,23 +29,42 @@ thiserror.workspace = true
 tracing.workspace = true
 aws-config.workspace = true
 aws-sdk-s3.workspace = true
-aws-smithy-http-client = { version = "1", features = ["rustls-aws-lc"] }
+aws-smithy-http-client = { version = "1", features = ["rustls-ring"] }
 bytes = "1.7"
 memmap2 = "0.9"
 futures = "0.3"
+getrandom = "0.4"  # OS RNG for per-repo repo_id generation (namespace-collision guard)
 
-azure_storage_blobs = { version = "0.21", optional = true }
-azure_storage = { version = "0.21", optional = true }
-azure_core = { version = "0.21", optional = true }
-time = { version = "0.3", optional = true }
-google-cloud-storage = { version = "1.11", optional = true }
-google-cloud-auth = { version = "1.8", optional = true }
+# default-features = false on both: their shared `default-rustls-provider`
+# default feature links aws-lc-rs (and thus aws-lc-sys, with its cmake/NASM
+# build on Windows). The workspace standardises on ring, installed as the
+# process-level provider in each binary's main(). Dropping the default also
+# drops `default-idtoken-backend`, which we do not use -- GCS auth here is
+# OAuth access tokens via ADC / service-account JSON, not ID tokens.
+google-cloud-storage = { version = "1.16", optional = true, default-features = false }
+google-cloud-auth = { version = "1.14", optional = true, default-features = false }
 # Direct dep for typed access to RPC error codes (Code::NotFound), needed
 # because google-cloud-storage's control plane is gRPC and HTTP-status-based
 # is_not_found checks miss those errors.
-google-cloud-gax = { version = "1.9", optional = true }
+google-cloud-gax = { version = "1.12", optional = true }
 http = { version = "1", optional = true }
 serde.workspace = true
+serde_json = { workspace = true, optional = true }
+
+# OpenDAL replaces the EOL azure_storage_blobs 0.21 stack. Do NOT enable
+# `reqwest-rustls-tls` (OpenDAL's default): it turns on reqwest's `rustls`
+# feature, which hard-wires aws-lc-rs (`__rustls-aws-lc-rs`). This workspace
+# has zero aws-lc and standardises on ring -- `reqwest-rustls-no-provider-tls`
+# is the ring-compatible variant (see mediagit_protocol::ensure_crypto_provider).
+# Signing for the container-create REST call: OpenDAL is data-plane only.
+# Same signer OpenDAL uses internally, so we do not hand-roll Shared Key.
+# Unauthenticated/simple HTTP for the signed container-create call.
+reqwest = { workspace = true, optional = true }
+reqsign-azure-storage = { version = "3.1", optional = true }
+reqsign-core = { version = "3.1", optional = true }
+# Provider install for the reqwest rustls-no-provider policy (see azure.rs).
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std", "tls12", "logging"] }
+opendal = { version = "0.57", optional = true, default-features = false, features = ["services-azblob", "reqwest-rustls-no-provider-tls", "layers-retry", "layers-timeout", "executors-tokio"] }
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -47,6 +72,10 @@ criterion = { version = "0.8", features = ["async_tokio"] }
 
 [[test]]
 name = "azure_azurite_tests"
+required-features = ["azure"]
+
+[[test]]
+name = "reqsign_diag"
 required-features = ["azure"]
 
 [[test]]
@@ -63,3 +92,6 @@ harness = false
 
 [package.metadata.cargo-machete]
 ignored = []
+
+[lints.rust]
+unsafe_code = "deny"

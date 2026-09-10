@@ -2,14 +2,19 @@
 
 MediaGit-Core is optimized for Apple Silicon (M1, M2, M3, M4) processors with native ARM64 binaries.
 
-## Quick Install (Homebrew - Recommended)
+## Quick Install (Recommended)
 
 ```bash
-brew tap mediagit/tap
-brew install mediagit-core
+curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 ```
 
-Homebrew automatically installs the ARM64 version on Apple Silicon Macs.
+The script detects Apple Silicon and fetches the native ARM64 build.
+
+## Homebrew
+
+> **Not published.** There is no `mediagit/tap` and no Homebrew formula in any
+> published feed — `packaging/homebrew/mediagit.rb` in the repo is a build
+> recipe, not a hosted tap. `brew install mediagit-core` will fail.
 
 ## Alternative Installation Methods
 
@@ -17,7 +22,7 @@ Homebrew automatically installs the ARM64 version on Apple Silicon Macs.
 
 ```bash
 # Download latest ARM64 binary
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-aarch64-macos.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-aarch64-macos.tar.gz \
   | sudo tar xz -C /usr/local/bin
 
 # Verify native ARM64
@@ -70,11 +75,8 @@ mediagit completions bash > $(brew --prefix)/etc/bash_completion.d/mediagit
 Add to `~/.zshrc`:
 
 ```bash
-# Optional: Set default backend
-export MEDIAGIT_DEFAULT_BACKEND=local
 
 # Optional: Optimize for Apple Silicon
-export MEDIAGIT_USE_SIMD=1
 
 # Optional: Enable debug logging
 export MEDIAGIT_LOG=info
@@ -92,18 +94,25 @@ MediaGit-Core leverages Apple Silicon features:
 ### Performance Configuration
 
 ```toml
-# ~/.mediagit/config.toml
+# .mediagit/config.toml
 [performance]
-worker_threads = 8  # M1: 8, M2/M3: 8-12, M4: 10-16
-chunk_size = "16MB"
-cache_size = "2GB"  # Leverage unified memory
+max_concurrency = 8          # M1: 8, M2/M3: 8-12, M4: 10-16
+upload_concurrency = 32
+download_concurrency = 24
+buffer_size = 1048576        # bytes — 1 MiB
+
+[performance.cache]
+enabled = true
+max_size = 2147483648        # bytes — 2 GiB, leveraging unified memory
 
 [compression]
 algorithm = "zstd"
 level = 3
-parallel = true
-threads = 4  # Use performance cores
 ```
+
+Cache and buffer sizes are raw **bytes**, and `level` is an **integer** (zstd
+1-22, brotli 0-11). Unrecognised keys are silently discarded, so `"2GB"` or
+`level = "fast"` would be dropped without any error.
 
 ## System Requirements
 
@@ -113,22 +122,14 @@ threads = 4  # Use performance cores
 - **Disk**: 100MB for binaries, SSD recommended
 - **Xcode**: Command Line Tools (optional)
 
-### Verified Chips
+### Build Environment
 
-| Chip | Cores | Status |
-|------|-------|--------|
-| M1 | 4P+4E | ✅ Tested |
-| M1 Pro | 6P+2E, 8P+2E | ✅ Tested |
-| M1 Max | 8P+2E | ✅ Tested |
-| M1 Ultra | 16P+4E | ✅ Tested |
-| M2 | 4P+4E | ✅ Tested |
-| M2 Pro | 6P+4E, 8P+4E | ✅ Tested |
-| M2 Max | 8P+4E | ✅ Tested |
-| M2 Ultra | 16P+8E | ✅ Tested |
-| M3 | 4P+4E | ✅ Tested |
-| M3 Pro | 6P+6E | ✅ Tested |
-| M3 Max | 12P+4E | ✅ Tested |
-| M4 | 4P+6E | ✅ Tested |
+The `aarch64-apple-darwin` release binary is built (and its test suite run)
+on GitHub's `macos-14` runner (`.github/workflows/release.yml`) — one
+specific Apple Silicon chip, not a matrix. It should run on any M-series Mac
+since they share the same architecture, but per-chip testing across
+M1/M2/M3/M4 variants has not been verified; treat that as untested rather
+than confirmed.
 
 ## Verification
 
@@ -137,8 +138,8 @@ threads = 4  # Use performance cores
 mediagit --version
 file $(which mediagit)
 
-# Run self-test
-mediagit fsck --self-test
+# Verify a repository's integrity (run inside a repo)
+mediagit fsck --full
 
 # Create test repo
 mkdir ~/test-mediagit
@@ -148,7 +149,7 @@ mediagit init
 
 Expected output:
 ```
-mediagit-core 0.2.8-beta.1
+mediagit-core 0.3.0-rc.5
 /opt/homebrew/bin/mediagit: Mach-O 64-bit executable arm64
 ✓ All checks passed
 ✓ Initialized empty MediaGit repository in .mediagit/
@@ -164,11 +165,10 @@ If you accidentally installed the Intel version:
 # Check if running under Rosetta
 sysctl sysctl.proc_translated
 
-# If output is 1, you're using Intel binary
-# Uninstall and reinstall ARM64 version
-brew uninstall mediagit-core
-brew cleanup
-arch -arm64 brew install mediagit-core
+# If output is 1, you have the Intel binary. Remove it and re-run the
+# install script, which selects the native ARM64 build.
+rm -f /usr/local/bin/mediagit /usr/local/bin/mediagit-server
+curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 ```
 
 ### "mediagit" cannot be opened
@@ -195,11 +195,11 @@ source ~/.zshrc
 ### Permission Issues
 
 ```bash
-# Fix Homebrew permissions
-sudo chown -R $(whoami) /opt/homebrew
+# The install script writes to /usr/local/bin; make sure it is writable.
+sudo chown -R $(whoami) /usr/local/bin
 
-# Retry installation
-brew install mediagit-core
+# Retry
+curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 ```
 
 ## Performance Benchmarks
@@ -224,21 +224,13 @@ brew upgrade mediagit-core
 ### Manual Update
 
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-aarch64-macos.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-aarch64-macos.tar.gz \
   | sudo tar xz -C /usr/local/bin
 ```
 
 ## Uninstalling
 
-### Via Homebrew
-
-```bash
-brew uninstall mediagit-core
-brew untap mediagit/tap
-rm -rf ~/.mediagit
-```
-
-### Manual Uninstall
+### Uninstall
 
 ```bash
 sudo rm /usr/local/bin/mediagit

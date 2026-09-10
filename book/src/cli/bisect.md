@@ -156,6 +156,24 @@ Bisect state is stored in `.mediagit/BISECT_HEAD`, `.mediagit/BISECT_LOG`, and
 - **0**: Success / first bad commit found
 - **1**: No active bisect session or commit not found
 
+
+## Subcommand options
+
+`start`:
+- `--reset` — Reset an existing bisect session before starting a new one
+
+## Common options
+
+Accepted by this command in addition to the options above.
+
+| Flag | Description |
+|---|---|
+| `--color <WHEN>` | Colored output: `always`, `auto`, or `never` (default `auto`) |
+| `-C`, `--repository <PATH>` | Run as if invoked in `PATH` |
+| `-q`, `--quiet` | Suppress output |
+| `-v`, `--verbose` | Enable verbose output |
+| `-h`, `--help` | Print help |
+| `-V`, `--version` | Print version |
 ## See Also
 
 - [mediagit log](./log.md) - Browse commit history

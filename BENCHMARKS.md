@@ -1,0 +1,397 @@
+# Storage Savings Benchmarks
+
+**Run date:** August 18, 2026 | **Build:** mediagit 0.3.0-rc.3 (the untagged pre-release that ships as 0.3.0-rc.4) | **CDC Seed:** 20260716 (pinned for determinism)
+**Source:** full SCALE QA campaign (220 gates, 0 failures)
+
+> Re-measured on `0.3.0-rc.3`. The previous publication was `0.2.8-beta.1` (July 16, 2026) and
+> claimed the savings pipeline was unchanged since; that claim is now **verified rather than
+> asserted** — 56 of the 57 per-version rows are byte-identical to the earlier run. The two
+> differences are named in the table's footnotes; neither is a pipeline change.
+
+## Clone-streaming cycle (C1-C5, measured 2026-08-27)
+
+**Build:** release at `7b632c3`, `RUSTFLAGS=-D warnings` | **Backend:** local
+filesystem over a loopback server | **Pinned:** `MEDIAGIT_CDC_SEED=20260716`,
+download/upload workers = 16, `MEDIAGIT_CHECKOUT_PARALLELISM=8`,
+`MEDIAGIT_PACK_UPLOAD_CONCURRENCY=4`
+
+Both results below are **A/B measurements with the arms alternated**, not
+before-and-after readings taken at different times on different machines.
+
+### C1 — metadata pack no longer buffered in RAM
+
+The `before` arm is a release build of `9960466`, the last commit without C1.
+Same fixture, same server binary, fresh remote per arm so neither arm gets a
+dedup head start. 8000 x 8 KB files = 62.5 MB, 2 reps.
+
+| | client private bytes | x payload | push wall |
+|---|---:|---:|---:|
+| before (`9960466`) | 315.2 MB | 5.04x | 34.2 s |
+| after (`7b632c3`) | 77.0 MB | **1.23x** | **8.4 s** |
+
+**-75.6% memory and ~4x faster.** The speedup was not predicted; it falls out of
+the same defect, since growing a 315 MB `Vec` by reallocation and then copying it
+twice costs time as well as memory.
+
+Reproducibility was high: 315.2/315.1 MB and 76.8/77.0 MB across the two reps.
+
+**This is not "bounded memory".** Client memory still scales with payload, now at
+~1.23x instead of ~5x. What went away is the multiple, not the proportionality.
+
+**Why not measured by `11_memprofile`:** that phase pushes one 512 MB file. A
+file that size is chunked media and never enters the metadata pack, so it reports
+a large number that is unchanged by C1 in either direction. The workload that
+exercises this fix is many SMALL files.
+
+### C4 — working tree written while media downloads
+
+Same commit, knob flipped: `MEDIAGIT_CLONE_OVERLAP` 0 vs 1. 240 MB of media (3
+files) plus 400 x 24 KB small files, 3 reps, arm order alternated.
+
+| metric | overlap=off | overlap=on | delta |
+|---|---:|---:|---|
+| `[bench] op=checkout` wall | 0.37 s | 0.22 s | **-40.5%** |
+| total clone wall | 4.04 s | 3.87 s | -4.2% |
+
+**Parity: PASS.** All six clones produced one identical tree hash.
+
+**Read the total as "no change."** -4.2% sits inside this project's recorded
+~4.3% run-to-run noise. On a loopback backend the download finishes too fast to
+hide much behind it; the overlap pays off where transfer is slow relative to the
+working-tree write, which this bench is not. The honest claim from this run is
+the checkout collapse and the parity, not a total-time win.
+
+The residual 0.22 s is the three large files, which genuinely cannot be
+overlapped -- their chunks arrive last by construction. What the overlap removed
+is the 400 small files' write cost.
+
+**Scope caveat:** the size of this effect depends on the small/large mix. A repo
+that is almost all chunked media has little in the `ready` batch and gains
+little.
+
+## At-rest encryption cost (DC-7, measured 2026-08-12)
+
+**Build:** `0.3.0-rc.3` release | **Corpus:** 824,415,190 B synthetic VFX, 681 chunks |
+**Pinned:** `MEDIAGIT_CDC_SEED=424242`, pack/upload/download workers = 8 |
+**Backend:** local filesystem over a loopback server | **5 reps, medians, alternating variant order**
+
+Encrypted vs unencrypted, same corpus, same seed. Budget was ≤5% wall.
+
+| Phase | Unencrypted | Encrypted | Delta |
+|---|---|---|---|
+| `add` | 28.67 s | 29.06 s | +1.4% |
+| `commit` | 0.05 s | 0.05 s | below measurement resolution |
+| `push` | 3.55 s | 3.56 s | +0.5% |
+| `clone` | 16.84 s | 17.44 s | +3.6% |
+
+**Storage:** 824,421,710 B → 824,648,429 B = **+0.0275%** envelope overhead. Chunk count
+identical (681 → 681) and delta count identical, so dedup and delta selection are
+unaffected — sealing happens after compression and dedup keys on the plaintext hash.
+
+### Delta savings under encryption (measured 2026-08-12)
+
+The wall-clock run above could say nothing about deltas: its VFX corpus is
+incompressible and produced `deltas=0` in **both** variants. Storage savings is
+the differentiator and every delta path fails *soft* -- `try_store_chunk_as_delta`
+returns `Ok(false)`, pull falls back to a full chunk, repack continues past -- so
+a decrypt failure inside one would drop savings toward zero with the suite green.
+Measured separately, on a corpus that cannot avoid deltas: a 64 MB compressible
+asset, committed, then edited in a distinct 256 KB region and re-committed 14 times.
+
+| | Unencrypted | Encrypted |
+|---|---|---|
+| deltas | 14 | **14** |
+| chunks | 1 | 1 |
+| delta bytes | 3,671,080 | 3,672,606 |
+| on disk | 3,759,267 B | 3,763,745 B (**+0.119%**) |
+| restored byte-exact | yes | **yes** |
+
+960 MB of committed content across 15 commits stored in 3.76 MB, with 97.7% of
+that being delta bytes. Encryption changes the delta count not at all, and the
+reconstruction path returns the asset byte-exact -- which is the check that
+matters, since a decrypt failure mid-chain surfaces as corruption rather than as
+a missing saving.
+
+A second corpus (`fixtures-synthetic/chains`, three versions of six audio assets)
+agreed but was too thin to rely on: dedup absorbed nearly all its redundancy and
+left exactly one delta, whose `delta_bytes` differed by 68 → 113 = one 45-byte
+envelope.
+
+Two notes on method, because both changed the answer:
+
+- **`commit` is not gated.** It lands around 50 ms, where a few ms of jitter reads as a
+  double-digit percentage. A 3-rep run reported −11.8% on it, which measured the clock.
+- **Variant order alternates per rep.** Running unencrypted first every time put the
+  encrypted run on a more-loaded machine each round; with a fixed order, `clone` reported
+  +17.0% that a 5-rep alternating run resolved to +3.6%.
+
+A first pass had `push` at +34%. That was not the crypto: it was a since-reverted change
+halving `PACK_VERIFY_RANGE_CONCURRENCY` from 16 to 8 on encrypted repositories. Pinning
+`MEDIAGIT_PACK_VERIFY_CONCURRENCY=16` for both variants moved `push` to +0.5%, which is
+the number above.
+
+---
+
+MediaGit applies format-aware chunking and zstd-dict deltas to achieve cross-version deduplication across media formats. This document publishes measured storage savings and methodology, with reproducibility as the primary goal.
+
+---
+
+## Summary: Per-Format and Mixed-Corpus Savings
+
+| Format | Latest Version | Raw Size | Stored Size | Saved |
+|--------|---|---:|---:|---|
+| **Audio** | | | | |
+| WAV (audio chain: v1→v5 edits) | v5 | 37.50 MB | 1.76 MB | **95.3%** |
+| FLAC (same source, re-exported) | v5 | 11.16 MB | 11.16 MB | 0% |
+| **3D Models** | | | | |
+| GLB (car model: v1→v3 edits) | v3 | 13.17 MB | 0.00 MB | **100%**[^1] |
+| **Machine Learning** | | | | |
+| Safetensors (model chain: v1→v5 weights) | v5 | 150.00 MB | 81.81 MB | **45.5%** |
+| NPZ (checkpoint chain: v1→v3) | v3 | 50.00 MB | 11.63 MB | **76.7%** |
+| Parquet (dataset v1→v3) | v3 | 21.45 MB | 20.30 MB | 5.4%[^3] |
+| ONNX (inference model: v1→v2) | v2 | 24.82 MB | 22.94 MB | 7.6% |
+| **Design/VFX** | | | | |
+| PSD (Photoshop: v1→v3 edits) | v3 | 340.63 MB | 111.89 MB | **67.2%**[^4] |
+| AI (Illustrator: v1→v3 edits) | v3 | 123.02 MB | 90.64 MB | **26.3%** |
+| **Images** | | | | |
+| PNG (render: v1→v5 edits) | v5 | 1.09 MB | 1.09 MB | 0% |
+| JPG (photo: v1→v5 edits) | v5 | 0.13 MB | 0.13 MB | 0% |
+| SVG (vector: v1→v5 edits) | v5 | 0.03 MB | 0.01 MB | **66.7%**[^2] |
+| **Video** | | | | |
+| Video variants (codec mix: v1→v9) | v9 | 4.89 MB | 4.89 MB | 0% |
+
+**Mixed-corpus aggregate: ~26.5%** — this one figure is **not** from the rc.3 run. It was measured on `0.2.8-beta.1` against the release campaign's mixed real-file corpus, and the SCALE campaign does not rebuild that corpus, so there is no rc.3 counterpart to restate it from. Treat it as the older number it is. It is not derived from the chain table above. Corpus composition drives the aggregate: real repositories are dominated by pre-compressed bytes (video, JPEG/PNG, compressed containers), which dedup at ~0%. The chain fixture set itself totals **49.2%** cumulative savings across all versions (2330.42 MB raw → 1183.42 MB stored; see the Git LFS comparison below).
+
+[^1]: GLB v3 incremental ODB growth rounds to 0.00 MB — the edited model dedups bit-for-bit against prior versions.
+[^2]: SVG stored size rounds to 0.01 MB; percentages are coarse at sub-MB scale.
+[^3]: Parquet is the one row whose **raw** size moved (22.06 → 21.45 MB), so
+    rc.3 is not comparable to the earlier figure: the generated fixture changed
+    between the two runs, not the compressor. The figure given is the rc.3 fixture
+    measured on rc.3.
+[^4]: PSD improved by 1.51 MB (66.7% → 67.2%). Delta-base selection is
+    order-sensitive under concurrent chunk writes, so this row moves by a few
+    tenths of a percent between runs in either direction. Not a pipeline change.
+
+---
+
+## Cross-Backend Throughput
+
+End-to-end throughput on all four supported object stores, release build, run `20260718-cloudbench-123447` (`dev-tests/qa-suite` phase 06 remote matrix). Every operation completed with **byte-identical parity** (clone/pull/download hashes match the source) on all four backends — zero failures, zero skips. Numbers are MB/s.
+
+> `xychart-beta` may not render on GitHub — the table below is the fallback; both show the same 160 MB push/clone numbers.
+
+```mermaid
+xychart-beta
+    title "Push vs Clone throughput, 160 MB payload (MB/s)"
+    x-axis ["MinIO (local)", "AWS S3", "Azure Blob", "GCS"]
+    y-axis "MB/s" 0 --> 160
+    bar "Push" [146.8, 11.8, 13.4, 14.4]
+    bar "Clone" [65.3, 7.3, 10.7, 10.5]
+```
+
+| Backend | Push (160 MB) | Clone (160 MB) | Fetch (4 MB) | Pull (4 MB) | Download (8 MB) |
+|---------|--:|--:|--:|--:|--:|
+| MinIO (local, LAN/loopback) | 146.8 | 65.3 | 30.8 | 9.3 | 200.0 |
+| AWS S3 | 11.8 | 7.3 | 12.5 | 6.7 | 133.3 |
+| Azure Blob | 13.4 | 10.7 | 8.7 | 4.8 | 66.7 |
+| GCS | 14.4 | 10.5 | 4.8 | 3.6 | 100.0 |
+
+> **These numbers predate the clone-streaming cycle (C1–C5, 2026-08-27) and have
+> NOT been re-measured against it.** They are kept because they are what that
+> work was scoped from — in particular the push-vs-clone gap in the MinIO row
+> (146.8 vs 65.3 MB/s) is *why* the cycle targeted clone rather than push.
+>
+> What changed since: the metadata pack no longer buffers in RAM (C1), the
+> server streams chunk downloads instead of buffering each one (C2), media is
+> decompressed once instead of twice (C3), the working tree is written while
+> chunks are still downloading (C4), and an interrupted clone resumes instead of
+> restarting (C5).
+>
+> What HAS been measured against the cycle is in
+> [Clone-streaming cycle](#clone-streaming-cycle-c1-c5-measured-2026-08-27)
+> above — but on a **local** backend only, so it does not update this table.
+>
+> The **cloud** MB/s figures here should NOT move: they are WAN-bound and no
+> code change moves the weather. Re-run phase 06 (see
+> [Reproduction](#reproduction)) before quoting any of this as current.
+
+Reading the numbers honestly:
+
+- **MinIO is local** (loopback S3) and shows the *software* ceiling — ~147 MB/s push, ~65 MB/s clone — with no network in the path.
+- **AWS/Azure/GCS are real cloud over WAN** from the test host, so they are bandwidth-bound, not software-bound (see [AWS WAN-ceiling analysis](#references)). On the 160 MB payload the three cloud backends cluster tightly — push 11.8–14.4, clone 7.3–10.7 MB/s — a ~1.5× spread, well inside the "no backend more than 3× slower than the fastest" parity target.
+- **GCS clone is 10.5 MB/s.** It was historically the outlier at ~0.55 MB/s; the proxy round-trip cut plus streamed `packs/batch-get` closed the gap to within run-to-run jitter of AWS/Azure.
+- The small-payload rows (fetch/pull/download at 4–8 MB) are **latency-dominated**, not bandwidth-dominated — one or two round trips move the MB/s figure a lot, so they are noisier and not directly comparable to the 160 MB push/clone numbers.
+
+Cloud figures carry normal WAN run-to-run variance (±~30%); treat them as order-of-magnitude, not fixed SLAs. Reproduce with the [cloud repro command](#reproduction).
+
+---
+
+## Methodology
+
+### Fixture Chains
+
+Per-format storage economics are measured using **realistic edit chains**: sequences of versions (v1, v2, ..., vN) of the same asset, with cumulative designer/engineer edits.
+
+```mermaid
+flowchart LR
+    A["gen_chain_fixtures.py<br/>(pinned CDC seed 20260716)"] --> B["v1..vN edit chains<br/>per format family"]
+    B --> C["mediagit add + commit<br/>each version in sequence"]
+    C --> D["Measure ODB growth<br/>per version"]
+    D --> E["savedPct = 1 - odbGrowthMB/fileMB"]
+    E --> F["fsck --full +<br/>stats --json vs disk +<br/>compare-dedup gates"]
+    F --> G["economics.tsv / gates.tsv"]
+```
+
+- **Audio (WAV/FLAC):** Source aria track; v2: gain+1.3dB, v3: 3s fade-in added, v4: +2s silence appended, v5: trim 10s head + 5s tail.
+- **3D Models (GLB):** Source car model; v2: node renamed, v3: material factor modified.
+- **Images (JPG/PNG):** Designer edits; v2: color curve, v3: text overlay, v4: crop+resize, v5: slight rotation.
+- **SVG:** Architectural map; cumulative element additions (annotations, labels, attribute changes).
+- **ML Models (Safetensors/NPZ):** Weight chains; incremental fine-tuning and checkpoint saves.
+- **Design files (PSD/AI):** Production files; layer edits, color/text changes, composite modifications.
+- **Parquet/ONNX:** Data table appends; schema column rewrites; inference model variants.
+- **Video:** Multi-codec variants (h.264, VP9, AV1 exports of the same source).
+
+### Computation
+
+For each version added to a repository:
+
+```
+savedPct = (1 − odbGrowthMB / fileMB) × 100
+```
+
+- `fileMB`: raw file size of the version
+- `odbGrowthMB`: incremental ODB (object database) growth after adding that version
+- Reported figure: **latest version's savings** (v_last)
+
+### Integrity Gates
+
+Each family's chain undergoes post-measurement verification:
+
+1. **fsck --full:** Repository consistency check (objects, references, pack integrity).
+2. **stats --json vs. disk:** Reported storage size matched to measured ODB directory (±2% or ±0.05 MB absolute tolerance).
+3. **compare-dedup:** Regression check against baseline dedup_report output (cross-version deduplication stability).
+
+All gates passed (0 failures).
+
+---
+
+## Reproduction
+
+### One-Command Reproduction
+
+Run the full QA-suite economics phase (deterministic, uses pinned CDC seed):
+
+```powershell
+cd <repo root>
+
+# 01 = preflight (generates the deterministic fixtures), 04 = economics measurement
+.\dev-tests\qa-suite\scripts\run_all.ps1 -Phases "01","04"
+
+# Results written to:
+#   dev-tests/qa-suite/logs/<TIMESTAMP>/economics.tsv    (raw data)
+#   dev-tests/qa-suite/logs/<TIMESTAMP>/gates.tsv        (integrity gates)
+```
+
+### Cross-Backend Throughput Reproduction
+
+The throughput table above comes from phase 06 (the remote matrix). It needs a live MinIO plus AWS/Azure/GCS credentials (supplied by `dev-tests/qa-suite/scripts/campaign_env.ps1`):
+
+```powershell
+cd <repo root>\dev-tests\qa-suite
+
+# Credentials for the cloud backends are dot-sourced from campaign_env.ps1;
+# MinIO defaults to http://localhost:9000 (use 127.0.0.1 on Windows if an
+# IPv6 localhost proxy is stale). MG_QA_BACKENDS selects which backends run.
+$env:MG_QA_BACKENDS = "minio,aws,azure,gcs"
+powershell -NoProfile -Command ". .\scripts\campaign_env.ps1; .\scripts\run_all.ps1 -Phases '01','06' -ContinueOnFail"
+
+# Per-backend, per-op results written to:
+#   dev-tests/qa-suite/logs/<TIMESTAMP>/remote_results.tsv
+#     (backend, op, sizeMB, sec, MBps, parity, detail)
+```
+
+Backends without credentials are recorded `SKIP` and the phase still passes — verify the `remote_results.tsv` actually contains the backends you expected rather than trusting a green phase.
+
+### Prerequisites
+
+- **Binary:** `target/release/mediagit.exe` (built via `cargo build --release`)
+- **Test fixtures:** `dev-tests/qa-suite/fixtures-synthetic/` (chains generated deterministically by phase 01 via `gen_chain_fixtures.py`; requires Python with numpy/pyarrow) plus real assets under `test-files/` for the psd/ai/video rows
+- **PowerShell** on Windows; no server or object-storage backend is needed — the economics phase measures local repositories only
+
+### Environment
+
+The economics measurement is environment-independent:
+- Reported savings are **storage-layer metrics** (ODB byte count); unaffected by backend choice (MinIO/S3/Azure/GCS).
+- Throughput results (add/commit times in the TSV) reflect local disk I/O on Windows 11 with standard NTFS; adjust expected values ±50% on different hardware.
+
+---
+
+## Honest Limitations
+
+### Compressed-Container Formats Dedup Poorly
+
+Formats like `.ai` (Illustrator), `.psd` (Photoshop), `.png`, and `.jpg` are **internally compressed streams**. When editors save these files, they often rewrite the entire compressed payload (different compression parameters, timestamp metadata, chunk ordering), defeating chunking across even minor edits.
+
+- **JPG/PNG:** Zero cross-version savings because re-encoding is probabilistic (quantization, encoder tuning).
+- **AI:** ~26% savings — container structure partially survives edits, but the compressed streams inside are rewritten (object renumbering on save churns ~half the container keys).
+- **PSD:** 66.7% savings — layer data is stored less aggressively compressed, so unchanged layers dedup well across edits.
+
+### Video Codec Boundary
+
+Video files (h.264/VP9/AV1) suffer the same fate as raster formats: recompression with different codec parameters yields new bit streams. Zero cross-version savings observed in test variants.
+
+### Architectural Ceiling
+
+The current MediaGit pipeline achieves **~26.5% aggregate savings** on a mixed real-file corpus (audio + ML + design + images + video; campaign report referenced above). This is the measured architectural ceiling with format-aware chunking + zstd-dict deltas, **not** a tuning issue:
+
+- Strong formats (WAV: 95%, GLB: 100%, Safetensors: 45%) establish the upper bound.
+- Pre-compressed formats (JPG/PNG/Video: 0%) dominate real corpora by byte weight and pull the aggregate down.
+
+Two follow-up approaches were measured and rejected before deployment: whole-file decompress-and-recompress normalization (compressed payloads in PNG/AI proved ~100% opaque to it), and stream-keyed delta-base matching (only ~50% of container keys survive an editor save; scored −2.2 pp vs baseline). **Future improvements require format-specific semantic parsing**, not generic codec or delta tuning.
+
+---
+
+## Comparison to Git LFS
+
+| Metric | MediaGit | Git LFS |
+|--------|---|---|
+| **Cross-version dedup** | Yes (delta chunks) | No (each version = full copy) |
+| **Per-version savings, best case** | WAV: 95.3%, GLB: 100% | 0% always |
+| **Per-version savings, worst case** | JPG/PNG/Video: 0% | 0% always |
+
+**Cumulative example** (the full chain fixture set above, all versions of all families, computed from `economics.tsv`):
+- Git LFS stores every version in full: **2,331.9 MB**
+- MediaGit total ODB after the same adds: **1,188.2 MB**
+- **49.2% less storage** across the version history
+
+Per-family cumulative highlights: WAV chain 201.1 → 42.3 MB (79.0% less), GLB 39.5 → 7.8 MB (80.2% less), safetensors 750.0 → 410.0 MB (45.3% less), PSD 624.4 → 197.7 MB (68.3% less). Pre-compressed formats (JPG/PNG/video) store the same bytes as LFS would.
+
+---
+
+## Environment Details
+
+**Test environment:** Windows 11 Home (build 26200), local NTFS repositories (no network backend involved in this measurement).
+
+**Reproducibility:** Measurements use `MEDIAGIT_CDC_SEED=20260716` (pinned FastCDC seed) to ensure deterministic chunk boundaries across runs. Unpinned behavior spans ±2–4 pp due to boundary alignment sensitivity (documented in v11 deep-test RCA).
+
+---
+
+## Regression Thresholds
+
+The following per-format anchor gates are embedded in the QA suite (`dev-tests/qa-suite/scripts/04_economics.ps1`, line 60):
+
+| Format | Latest-Version Minimum | Rationale |
+|--------|---|---|
+| WAV | 94.0% | Measured floor: 95.3%, tolerance −1.3 pp |
+| GLB | 95.0% | Measured: 100%, tolerance −5 pp (handles fixture regeneration variance) |
+| Safetensors | 44.0% | Measured: 45.5%, tolerance −1.5 pp (rebased 2026-07-16 from prior lucky-seed 48 pp) |
+
+Other formats have no minimum anchor (strong baseline in production if savings regress; weak formats [JPG/PNG/Video] are monitored for unexpected improvement, which would flag a tool malfunction).
+
+---
+
+## References
+
+- **Measurement script:** `dev-tests/qa-suite/scripts/04_economics.ps1`
+- **Fixture generation:** `dev-tests/qa-suite/scripts/gen_chain_fixtures.py`
+- **Architecture guide:** `ARCHITECTURE.md` (chunking strategy, compression pipeline)

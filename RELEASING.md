@@ -6,11 +6,17 @@ This document describes the release process for MediaGit.
 
 MediaGit uses an automated release process powered by GitHub Actions. Releases are triggered by pushing git tags and automatically:
 
-1. Build binaries for all 6 platforms (Linux/macOS/Windows on x86_64/ARM64)
+1. Build binaries for 5 platforms (Linux x86_64/ARM64, macOS x86_64/ARM64,
+   Windows x86_64 — no Windows ARM64 target yet, see FUTURE_TODOS.md)
 2. Generate installation scripts (shell, PowerShell)
 3. Create GitHub Release with all artifacts
-4. Publish to crates.io
-5. Build and publish Docker images to GitHub Container Registry
+4. Build and publish Docker images to GitHub Container Registry
+
+Publishing to crates.io is **not currently automated** — the `publish-crates`
+job in `.github/workflows/release.yml` is present but commented out
+("Crate publishing to crates.io is disabled for now"). Do a manual
+`cargo publish` per crate (see [Manual Release](#manual-release-emergency))
+if you need it published.
 
 ## Prerequisites
 
@@ -23,9 +29,11 @@ MediaGit uses an automated release process powered by GitHub Actions. Releases a
 
 ### 1. Prepare the Release
 
-- [ ] Update version in `Cargo.toml` (workspace.package.version)
-- [ ] Update version in all crate `Cargo.toml` files
-- [ ] Update `CHANGELOG.md` with release notes
+- [ ] Bump the version everywhere: `./scripts/bump-version.sh <new-version>`
+      (updates `Cargo.toml` workspace version — all crates inherit it — plus every
+      hardcoded version string in the docs and example configs)
+- [ ] Update `CHANGELOG.md`: rename the `[Unreleased]` section to the new version
+      with today's date, and add release notes
 - [ ] Run tests: `cargo test --all-features`
 - [ ] Run benchmarks: `cargo bench`
 - [ ] Run security audit: `cargo audit`
@@ -36,15 +44,15 @@ MediaGit uses an automated release process powered by GitHub Actions. Releases a
 > **Note**: Git hooks enforce [Conventional Commits](https://www.conventionalcommits.org/) format (max 72 chars) and run `cargo test --workspace` before push. Commit messages must match: `type(scope): description`
 
 ```bash
-# Update version to 0.2.6-beta.1 (example)
-vim Cargo.toml # Update [workspace.package] version
+# Bump version everywhere (Cargo.toml + all doc/version strings + example configs)
+./scripts/bump-version.sh 0.3.0-rc.5   # example
 
-# Update CHANGELOG.md
+# Rename [Unreleased] -> the new version + add release notes
 vim CHANGELOG.md
 
 # Commit changes (conventional commit format required)
-git add Cargo.toml CHANGELOG.md
-git commit -m "chore: prepare release 0.2.6-beta.1"
+git add -A
+git commit -m "chore: prepare release 0.3.0-rc.5"
 git push origin main
 ```
 
@@ -52,10 +60,10 @@ git push origin main
 
 ```bash
 # Create annotated tag
-git tag -a v0.2.6-beta.1 -m "Release version 0.2.6-beta.1"
+git tag -a v0.3.0-rc.5 -m "Release version 0.3.0-rc.5"
 
 # Push tag to trigger release workflow
-git push origin v0.2.6-beta.1
+git push origin v0.3.0-rc.5
 ```
 
 ### 4. Monitor Release Workflow
@@ -64,11 +72,12 @@ git push origin v0.2.6-beta.1
 2. Watch the "Release" workflow run
 3. Verify all jobs complete successfully:
    - plan
-   - build (all 6 platforms)
+   - build (all 5 platforms)
    - installers
    - release
-   - publish-crates
    - docker
+
+   (`publish-crates` is defined but commented out — see Overview.)
 
 ### 5. Verify Release
 
@@ -84,10 +93,9 @@ After the workflow completes:
   # Windows PowerShell
   iwr -UseBasicParsing https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.ps1 | iex
   ```
-- [ ] Verify crates.io publication: https://crates.io/crates/mediagit-cli
 - [ ] Test Docker image:
   ```bash
-  docker run --rm ghcr.io/winnyboy5/mediagit-core:0.2.6-beta.1 --version
+  docker run --rm ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.5 --version
   ```
 
 ### 6. Post-Release Tasks
@@ -115,13 +123,13 @@ For alpha/beta/rc releases:
 
 ```bash
 # Alpha
-git tag -a v0.2.6-beta.1-alpha.1 -m "Release 0.2.6-beta.1-alpha.1"
+git tag -a v0.3.0-alpha.1 -m "Release 0.3.0-alpha.1"
 
 # Beta
-git tag -a v0.2.6-beta.1-beta.1 -m "Release 0.2.6-beta.1-beta.1"
+git tag -a v0.3.0-beta.1 -m "Release 0.3.0-beta.1"
 
 # Release Candidate
-git tag -a v0.2.6-beta.1-rc.1 -m "Release 0.2.6-beta.1-rc.1"
+git tag -a v0.3.0-rc.5 -m "Release 0.3.0-rc.5"
 ```
 
 Pre-release versions are automatically marked as "Pre-release" on GitHub.
@@ -132,11 +140,11 @@ For urgent bug fixes:
 
 1. Create hotfix branch from the release tag:
    ```bash
-   git checkout -b hotfix/0.2.6-beta.1 v0.2.6-beta.1
+   git checkout -b hotfix/0.3.0 v0.3.0-rc.5
    ```
 
 2. Make and commit the fix
-3. Update version to patch release (0.2.6-beta.1)
+3. Update version to patch release (0.3.0-rc.5)
 4. Create release tag
 5. Cherry-pick fix back to main
 
@@ -158,8 +166,8 @@ If you need to re-release (NOT RECOMMENDED):
 1. Delete the GitHub Release
 2. Delete the git tag locally and remotely:
    ```bash
-   git tag -d v0.2.6-beta.1
-   git push origin :refs/tags/v0.2.6-beta.1
+   git tag -d v0.3.0-rc.5
+   git push origin :refs/tags/v0.3.0-rc.5
    ```
 3. If published to crates.io, you CANNOT unpublish. Must use a new version.
 4. Fix issues and create a new tag
@@ -199,7 +207,7 @@ Package configuration in `packaging/chocolatey/`:
 1. Update version in `mediagit.nuspec`
 2. Update checksums in `tools/chocolateyinstall.ps1`
 3. Test locally: `choco pack`
-4. Submit to Chocolatey Community: `choco push mediagit.0.2.6-beta.1.nupkg --source https://push.chocolatey.org/`
+4. Submit to Chocolatey Community: `choco push mediagit.0.3.0-rc.5.nupkg --source https://push.chocolatey.org/`
 
 ### APT (Debian/Ubuntu)
 

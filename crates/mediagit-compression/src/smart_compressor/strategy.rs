@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 use super::*;
 
@@ -71,9 +61,14 @@ impl CompressionStrategy {
                 CompressionStrategy::Store
             }
 
-            // Uncompressed/lossless audio: Zstd best
-            ObjectType::Flac | ObjectType::Wav | ObjectType::Aiff | ObjectType::Alac => {
-                CompressionStrategy::Zstd(CompressionLevel::Best)
+            // Uncompressed PCM audio: Zstd best
+            ObjectType::Wav | ObjectType::Aiff => CompressionStrategy::Zstd(CompressionLevel::Best),
+
+            // Lossless-compressed audio (FLAC/ALAC is already entropy-coded;
+            // measured gain from Best over Default is ~0.1%): cheap Zstd only.
+            // Matches the chunk-level ChunkCodecHint::LosslessAudio routing.
+            ObjectType::Flac | ObjectType::Alac => {
+                CompressionStrategy::Zstd(CompressionLevel::Default)
             }
 
             // Documents: Zstd default
@@ -173,10 +168,10 @@ impl CompressionStrategy {
     /// (~10× faster at only ~20% worse ratio) so we switch automatically.
     pub fn for_object_type_with_size(obj_type: ObjectType, data_size: usize) -> Self {
         let base = Self::for_object_type(obj_type);
-        if data_size >= LARGE_TEXT_THRESHOLD {
-            if let CompressionStrategy::Brotli(_) = base {
-                return CompressionStrategy::Zstd(CompressionLevel::Default);
-            }
+        if data_size >= LARGE_TEXT_THRESHOLD
+            && let CompressionStrategy::Brotli(_) = base
+        {
+            return CompressionStrategy::Zstd(CompressionLevel::Default);
         }
         base
     }

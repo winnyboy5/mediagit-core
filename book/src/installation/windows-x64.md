@@ -2,24 +2,28 @@
 
 MediaGit-Core provides native Windows binaries for x64 systems (Windows 10/11).
 
-## Quick Install (Chocolatey - Recommended)
+## Quick Install (Recommended)
+
+Download and extract the release ZIP:
 
 ```powershell
-# Open PowerShell as Administrator
-choco install mediagit-core
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-x86_64-windows.zip" -OutFile mediagit.zip
+Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 ```
+
+Then add `%LOCALAPPDATA%\MediaGit\bin` to your `PATH`.
+
+## Chocolatey and winget
+
+> **Not published.** MediaGit is not on Chocolatey or winget — there is no
+> publishing step for either in `.github/workflows`. `choco install
+> mediagit-core` and `winget install MediaGit.MediaGitCore` will both fail.
 
 ## Alternative Installation Methods
 
-### Windows Package Manager (winget)
-
-```powershell
-winget install MediaGit.MediaGitCore
-```
-
 ### Direct Download
 
-1. Download the latest ZIP from [GitHub Releases](https://github.com/winnyboy5/mediagit-core/releases): `mediagit-0.2.8-beta.1-x86_64-windows.zip`
+1. Download the latest ZIP from [GitHub Releases](https://github.com/winnyboy5/mediagit-core/releases): `mediagit-0.3.0-rc.5-x86_64-windows.zip`
 2. Extract the archive
 3. Move `mediagit.exe` and `mediagit-server.exe` to a directory on your PATH
 
@@ -27,7 +31,7 @@ winget install MediaGit.MediaGitCore
 
 ```powershell
 # Download ZIP archive
-Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-x86_64-windows.zip" -OutFile "mediagit.zip"
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-x86_64-windows.zip" -OutFile "mediagit.zip"
 
 # Extract (contains mediagit.exe + mediagit-server.exe)
 $dest = "$env:LOCALAPPDATA\MediaGit\bin"
@@ -67,15 +71,13 @@ mediagit completions bash > ~/.bash_completion.d/mediagit
 Set via System Properties or PowerShell:
 
 ```powershell
-# Optional: Set default backend
-[Environment]::SetEnvironmentVariable("MEDIAGIT_DEFAULT_BACKEND", "local", "User")
-
-# Optional: Set storage path
-[Environment]::SetEnvironmentVariable("MEDIAGIT_STORAGE_PATH", "$env:USERPROFILE\.mediagit\storage", "User")
-
 # Optional: Enable debug logging
 [Environment]::SetEnvironmentVariable("MEDIAGIT_LOG", "info", "User")
 ```
+
+Backend and storage location are **per repository**, not global: they are
+set in that repo's `.mediagit/config.toml` (written by `mediagit init`).
+There is no environment variable for either.
 
 ## System Requirements
 
@@ -101,8 +103,8 @@ Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile
 # Check version
 mediagit --version
 
-# Run self-test
-mediagit fsck --self-test
+# Verify a repository's integrity (run inside a repo)
+mediagit fsck --full
 
 # Create test repository
 mkdir C:\test-mediagit
@@ -112,7 +114,7 @@ mediagit init
 
 Expected output:
 ```
-mediagit-core 0.2.8-beta.1
+mediagit-core 0.3.0-rc.5
 ✓ All checks passed
 ✓ Initialized empty MediaGit repository in .mediagit/
 ```
@@ -137,16 +139,6 @@ For better performance, exclude MediaGit directories:
 # Run as Administrator
 Add-MpPreference -ExclusionPath "C:\Program Files\MediaGit"
 Add-MpPreference -ExclusionPath "$env:USERPROFILE\.mediagit"
-```
-
-### File System Configuration
-
-```toml
-# %USERPROFILE%\.mediagit\config.toml
-[filesystem]
-case_sensitive = false  # Windows is case-insensitive
-symlinks_enabled = false  # Limited symlink support
-line_endings = "crlf"  # Windows-style line endings
 ```
 
 ## Troubleshooting
@@ -188,12 +180,29 @@ Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile
 
 ### Slow Performance on Network Drives
 
-```toml
-# Disable real-time scanning for MediaGit operations
-[performance]
-disable_indexing = true
-bypass_cache_manager = true
+Real-time antivirus scanning and the Windows search indexer are the usual
+cause: every chunk MediaGit writes is a new file, so an object store is exactly
+the shape that makes both work hardest.
+
+**This is not something MediaGit config can switch off** — earlier revisions of
+this page showed `[performance] disable_indexing` / `bypass_cache_manager`,
+which are not settings and never were. Because unknown keys are silently
+discarded, that block looked like it applied and did nothing at all.
+
+Set the exclusions in Windows instead, for both the repository and its object
+store (elevated PowerShell):
+
+```powershell
+Add-MpPreference -ExclusionPath "C:\path\to\my-media-project"
+Add-MpPreference -ExclusionProcess "mediagit.exe"
 ```
+
+Then exclude the same folder from the search indexer via
+**Settings → Privacy & security → Searching Windows → Exclude folders**.
+
+If the working tree itself lives on a network share, prefer keeping the repo on
+a local disk and pointing the remote at the network location — MediaGit's object
+store does many small writes, which is the worst case for SMB round trips.
 
 ### Chocolatey Not Found
 
@@ -273,7 +282,7 @@ winget upgrade MediaGit.MediaGitCore
 ### Via Chocolatey
 
 ```powershell
-choco uninstall mediagit-core
+Remove-Item -Recurse -Force "$env:LOCALAPPDATA\MediaGit"
 ```
 
 ### Via Windows Settings

@@ -14,7 +14,7 @@ This script automatically detects your architecture and downloads the correct bi
 ### Direct Download (x86_64)
 
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-x86_64-linux.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-x86_64-linux.tar.gz \
   | sudo tar xz -C /usr/local/bin
 mediagit --version
 ```
@@ -27,79 +27,39 @@ The archive contains both `mediagit` and `mediagit-server` binaries.
 
 #### Using APT Repository
 
-```bash
-# Add MediaGit repository
-curl -fsSL https://apt.mediagit.dev/gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/mediagit-archive-keyring.gpg
-echo "deb [signed-by=/usr/share/keyrings/mediagit-archive-keyring.gpg] https://apt.mediagit.dev stable main" | sudo tee /etc/apt/sources.list.d/mediagit.list
+> **Not published.** There is no APT repository at `apt.mediagit.dev`, and no
+> step in `.github/workflows` that would populate one. Use the install script
+> or the tarball below.
 
-# Update and install
-sudo apt update
-sudo apt install mediagit-core
-```
+#### Using a .deb Package
 
-#### Using .deb Package
-
-```bash
-# Download latest release
-wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit_0.2.8-beta.1_amd64.deb
-
-# Install
-sudo dpkg -i mediagit_0.2.8-beta.1_amd64.deb
-
-# Fix dependencies if needed
-sudo apt-get install -f
-```
+> **Not published.** There is no `.deb` in the releases. The release workflow
+> builds five artifacts and none of them is a distro package — see
+> [Manual Installation](#manual-installation) below for the tarball, which is
+> the supported route on Debian and Ubuntu.
 
 ### Fedora / RHEL / CentOS
 
 #### Using DNF/YUM
 
-```bash
-# Add MediaGit repository
-sudo dnf config-manager --add-repo https://rpm.mediagit.dev/mediagit.repo
+> **Not published.** There is no YUM/DNF repository at `rpm.mediagit.dev`. Use
+> the install script or the tarball below.
 
-# Install
-sudo dnf install mediagit-core
+#### Using an .rpm Package
 
-# For older systems using yum
-sudo yum install mediagit-core
-```
-
-#### Using .rpm Package
-
-```bash
-# Download latest release
-wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-1.x86_64.rpm
-
-# Install
-sudo rpm -i mediagit-0.2.8-beta.1-1.x86_64.rpm
-```
+> **Not published.** There is no `.rpm` in the releases, and no repository at
+> `rpm.mediagit.dev`. Use the tarball in
+> [Manual Installation](#manual-installation) instead.
 
 ### Arch Linux
 
-```bash
-# Install from AUR
-yay -S mediagit-core
-
-# Or using paru
-paru -S mediagit-core
-
-# Manual AUR installation
-git clone https://aur.archlinux.org/mediagit-core.git
-cd mediagit-core
-makepkg -si
-```
+> **Not published.** There is no AUR package — `aur.archlinux.org/mediagit-core`
+> does not exist, so `yay -S`, `paru -S` and a manual `makepkg` all fail.
 
 ### openSUSE
 
-```bash
-# Add repository
-sudo zypper addrepo https://download.opensuse.org/repositories/home:mediagit/openSUSE_Tumbleweed/home:mediagit.repo
-
-# Install
-sudo zypper refresh
-sudo zypper install mediagit-core
-```
+> **Not published.** There is no openSUSE build-service repository. Use the
+> install script or the tarball below.
 
 ## Manual Binary Installation
 
@@ -107,14 +67,14 @@ If package managers aren't available, install manually:
 
 ```bash
 # Download archive
-wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-x86_64-linux.tar.gz
+wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-x86_64-linux.tar.gz
 
 # Verify checksum
-wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-x86_64-linux.tar.gz.sha256
-sha256sum -c mediagit-0.2.8-beta.1-x86_64-linux.tar.gz.sha256
+wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-x86_64-linux.tar.gz.sha256
+sha256sum -c mediagit-0.3.0-rc.5-x86_64-linux.tar.gz.sha256
 
 # Extract (contains mediagit + mediagit-server)
-tar -xzf mediagit-0.2.8-beta.1-x86_64-linux.tar.gz
+tar -xzf mediagit-0.3.0-rc.5-x86_64-linux.tar.gz
 
 # Move to bin directory
 sudo mv mediagit mediagit-server /usr/local/bin/
@@ -151,15 +111,15 @@ mediagit completions fish > ~/.config/fish/completions/mediagit.fish
 Add to `~/.bashrc` or `~/.zshrc`:
 
 ```bash
-# Optional: Set default backend
-export MEDIAGIT_DEFAULT_BACKEND=local
 
-# Optional: Set storage path
-export MEDIAGIT_STORAGE_PATH=~/.mediagit/storage
 
 # Optional: Enable debug logging
 export MEDIAGIT_LOG=debug
 ```
+
+Backend and storage location are **per repository**, not global: they are
+set in that repo's `.mediagit/config.toml` (written by `mediagit init`).
+There is no environment variable for either.
 
 ## Verify Installation
 
@@ -167,8 +127,8 @@ export MEDIAGIT_LOG=debug
 # Check version
 mediagit --version
 
-# Run self-test
-mediagit fsck --self-test
+# Verify a repository's integrity (run inside a repo)
+mediagit fsck --full
 
 # Create test repository
 mkdir test-repo
@@ -178,7 +138,7 @@ mediagit init
 
 Expected output:
 ```
-mediagit-core 0.2.8-beta.1
+mediagit-core 0.3.0-rc.5
 ✓ Initialized empty MediaGit repository in .mediagit/
 ```
 
@@ -190,17 +150,14 @@ mediagit-core 0.2.8-beta.1
 - **OS**: Linux kernel 4.4+ (glibc 2.17+)
 - **Dependencies**: None (statically linked)
 
-### Verified Distributions
+### Build and CI Environment
 
-| Distribution | Version | Status |
-|-------------|---------|--------|
-| Ubuntu | 20.04, 22.04, 24.04 | ✅ Tested |
-| Debian | 10, 11, 12 | ✅ Tested |
-| Fedora | 38, 39, 40 | ✅ Tested |
-| RHEL | 8, 9 | ✅ Tested |
-| CentOS | 7, 8, Stream 9 | ✅ Tested |
-| Arch Linux | Rolling | ✅ Tested |
-| openSUSE | Leap 15.5, Tumbleweed | ✅ Tested |
+The release binary is a statically-linked (no runtime distro dependencies)
+x86_64 build produced on `ubuntu-22.04` in CI (`.github/workflows/release.yml`),
+and CI itself only runs `ubuntu-latest`/`windows-latest` — there is no
+per-distribution test matrix. It should run on any glibc 2.17+ Linux, but
+"tested on Debian/Fedora/RHEL/CentOS/Arch/openSUSE" specifically has not been
+verified; treat those as untested rather than confirmed.
 
 ## Troubleshooting
 
@@ -253,16 +210,6 @@ sudo dnf install ca-certificates
 
 ## Updating
 
-### APT/DNF Repository
-
-```bash
-# Ubuntu/Debian
-sudo apt update && sudo apt upgrade mediagit-core
-
-# Fedora/RHEL
-sudo dnf update mediagit-core
-```
-
 ### Manual Update
 
 ```bash
@@ -270,29 +217,17 @@ sudo dnf update mediagit-core
 curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 
 # Or download specific version manually
-wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-x86_64-linux.tar.gz
-tar -xzf mediagit-0.2.8-beta.1-x86_64-linux.tar.gz
+wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-x86_64-linux.tar.gz
+tar -xzf mediagit-0.3.0-rc.5-x86_64-linux.tar.gz
 sudo mv mediagit mediagit-server /usr/local/bin/
 ```
 
 ## Uninstalling
 
-### APT
+There is no package-manager install path (see [Distribution-Specific Installation](#distribution-specific-installation) above), so uninstalling is manual:
 
 ```bash
-sudo apt remove mediagit-core
-```
-
-### DNF/YUM
-
-```bash
-sudo dnf remove mediagit-core
-```
-
-### Manual
-
-```bash
-sudo rm /usr/local/bin/mediagit
+sudo rm /usr/local/bin/mediagit /usr/local/bin/mediagit-server
 rm -rf ~/.mediagit
 ```
 

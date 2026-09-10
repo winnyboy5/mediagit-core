@@ -182,9 +182,18 @@ mediagit_backend_throughput_bytes_per_second
 
 ## Environment Variables
 
-- `MEDIAGIT_METRICS_PORT` - Override default metrics port (default: 9090)
-- `MEDIAGIT_METRICS_BIND` - Override bind address (default: 127.0.0.1)
-- `MEDIAGIT_METRICS_ENABLED` - Enable/disable metrics (default: false)
+- `MEDIAGIT_METRICS_ADDR` - `host:port` to bind the Prometheus endpoint on.
+  Unset means the metrics server is not started, so this doubles as the
+  on/off switch.
+
+`MEDIAGIT_METRICS_PORT` and `_ENABLED` set nothing. They are *named* in
+`mediagit-config`'s `apply_env_overrides` (`loader.rs:310,313`), but that whole
+path is unreachable: `apply_env_overrides` is called only by
+`load_with_overrides` (`loader.rs:220`), and `load_with_overrides` has no caller
+anywhere in the workspace except a doc-comment example in `lib.rs:30`. A grep
+for the variable name finds a read site and stops one link short — the link
+that decides whether setting the variable does anything. It does not.
+`MEDIAGIT_METRICS_ADDR` is the only knob here that works.
 
 ## Testing
 
@@ -291,8 +300,8 @@ mediagit-metrics/
 
 ## License
 
-AGPL-3.0
+BUSL-1.1
 
 ## Contributors
 
-MediaGit Contributors
+Aswin Krishnamoorthy

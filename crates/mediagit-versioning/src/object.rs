@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Object types for the MediaGit version control system
 
@@ -28,6 +18,9 @@ pub enum ObjectType {
     Tree,
     /// Commit - snapshot metadata with parent references
     Commit,
+    /// Tag - annotated tag metadata pointing at another object (commit, tree,
+    /// blob, or another tag), optionally signed.
+    Tag,
 }
 
 impl ObjectType {
@@ -47,6 +40,7 @@ impl ObjectType {
             ObjectType::Blob => "blob",
             ObjectType::Tree => "tree",
             ObjectType::Commit => "commit",
+            ObjectType::Tag => "tag",
         }
     }
 
@@ -66,6 +60,7 @@ impl ObjectType {
             "blob" => Ok(ObjectType::Blob),
             "tree" => Ok(ObjectType::Tree),
             "commit" => Ok(ObjectType::Commit),
+            "tag" => Ok(ObjectType::Tag),
             _ => anyhow::bail!("Unknown object type: {}", s),
         }
     }
@@ -76,6 +71,7 @@ impl ObjectType {
             ObjectType::Blob => 1,
             ObjectType::Tree => 2,
             ObjectType::Commit => 3,
+            ObjectType::Tag => 4,
         }
     }
 
@@ -85,6 +81,7 @@ impl ObjectType {
             1 => Some(ObjectType::Blob),
             2 => Some(ObjectType::Tree),
             3 => Some(ObjectType::Commit),
+            4 => Some(ObjectType::Tag),
             _ => None,
         }
     }
@@ -124,7 +121,12 @@ mod tests {
 
     #[test]
     fn test_object_type_roundtrip() {
-        for obj_type in [ObjectType::Blob, ObjectType::Tree, ObjectType::Commit] {
+        for obj_type in [
+            ObjectType::Blob,
+            ObjectType::Tree,
+            ObjectType::Commit,
+            ObjectType::Tag,
+        ] {
             let s = obj_type.as_str();
             let parsed = ObjectType::parse(s).unwrap();
             assert_eq!(obj_type, parsed);

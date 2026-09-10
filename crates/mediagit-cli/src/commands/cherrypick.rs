@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 use super::super::repo::{create_storage_backend, find_repo_root};
 use anyhow::{Context, Result};
@@ -17,6 +7,7 @@ use clap::Parser;
 use console::style;
 use mediagit_versioning::{
     CheckoutManager, Commit, Index, MergeEngine, ObjectDatabase, Oid, Ref, RefDatabase, Tree,
+    apply_merge_to_workdir,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -29,7 +20,7 @@ pub struct CherryPickCmd {
     pub commits: Vec<String>,
 
     /// Continue cherry-pick after resolving conflicts
-    #[arg(long)]
+    #[arg(long = "continue", alias = "continue-pick", hide = true)]
     pub continue_pick: bool,
 
     /// Abort cherry-pick operation
@@ -93,6 +84,14 @@ impl CherryPickCmd {
             .await
             .context("Failed to resolve HEAD")?;
 
+        // WT-3: cherry-pick had no pre-flight dirty check at all. Only the
+        // modified half is knowable up front (the target tree is the result
+        // of a merge computed per commit); untracked collisions are handled
+        // by `apply_commit`.
+        crate::worktree_guard::AtRisk::check(repo_root, &odb, Some(&current_oid), None)
+            .await?
+            .ensure_clean("cherry-pick")?;
+
         if !self.quiet {
             println!(
                 "{} Starting cherry-pick on branch at {}",
@@ -121,16 +120,20 @@ impl CherryPickCmd {
                 .apply_commit(&odb, &refdb, repo_root, &commit_oid)
                 .await
             {
-                Ok(()) => {
+                Ok(merged_tree_oid) => {
                     picked_commits.push(commit_oid);
 
                     if !self.no_commit {
-                        // Create commit automatically
+                        // Create commit automatically, using the merged tree
+                        // produced by the 3-way merge above (not an index
+                        // rebuild, which would drop every file not touched
+                        // by this commit).
                         self.create_cherry_pick_commit(
                             odb.as_ref(),
                             &refdb,
                             repo_root,
                             &commit_oid,
+                            Some(merged_tree_oid),
                         )
                         .await?;
                     }
@@ -179,7 +182,7 @@ impl CherryPickCmd {
         refdb: &RefDatabase,
         repo_root: &PathBuf,
         commit_oid: &Oid,
-    ) -> Result<()> {
+    ) -> Result<Oid> {
         // Load the commit
         let commit = Commit::read(odb.as_ref(), commit_oid)
             .await
@@ -193,6 +196,13 @@ impl CherryPickCmd {
         // Get current HEAD
         let current_oid = refdb.resolve("HEAD").await?;
 
+        // WT-1: the merge result can only materialize paths from ours (all
+        // tracked) or theirs, so checking collisions against the picked commit
+        // is exact. Done before any write.
+        crate::worktree_guard::AtRisk::check(repo_root, odb, Some(&current_oid), Some(commit_oid))
+            .await?
+            .ensure_clean("cherry-pick")?;
+
         // Perform three-way merge: current HEAD vs commit being cherry-picked
         let merger = MergeEngine::new(odb.clone());
         let merge_result = merger
@@ -204,27 +214,56 @@ impl CherryPickCmd {
             .await?;
 
         if !merge_result.conflicts.is_empty() {
-            // Write conflict markers to files
-            self.write_conflicts(repo_root, &merge_result)?;
+            // Write conflict markers via the shared, binary-aware writer (matches
+            // merge.rs's continue-merge path) instead of the old bespoke
+            // write_conflicts, which Debug-printed OIDs into files and
+            // corrupted binaries.
+            let ours_commit = Commit::read(odb.as_ref(), &current_oid).await?;
+            let theirs_commit = Commit::read(odb.as_ref(), commit_oid).await?;
+            let ours_tree = Tree::read(odb.as_ref(), &ours_commit.tree).await?;
+            let theirs_tree = Tree::read(odb.as_ref(), &theirs_commit.tree).await?;
+
+            let mut index = Index::load(repo_root)?;
+
+            apply_merge_to_workdir(
+                &merge_result,
+                &ours_tree,
+                &theirs_tree,
+                odb,
+                repo_root,
+                &mut index,
+                *commit_oid,
+                current_oid,
+            )
+            .await?;
+
+            index.save(repo_root)?;
+
             anyhow::bail!("Merge conflicts detected");
         }
 
-        // Checkout the merged tree if merge was successful
-        if let Some(tree_oid) = merge_result.tree_oid {
-            let checkout_mgr = CheckoutManager::new(odb.as_ref(), repo_root);
-            let commit_to_checkout = Commit {
-                tree: tree_oid,
-                parents: vec![current_oid],
-                author: commit.author.clone(),
-                committer: commit.committer.clone(),
-                message: commit.message.clone(),
-            };
-            // Write temporary commit to get OID for checkout
-            let temp_oid = commit_to_checkout.write(odb.as_ref()).await?;
-            checkout_mgr.checkout_commit(&temp_oid).await?;
-        }
+        let tree_oid = merge_result
+            .tree_oid
+            .context("merge produced no tree during cherry-pick")?;
 
-        Ok(())
+        // Checkout the merged tree. WT-1: only files tracked at the current
+        // HEAD may be deleted.
+        let tracked =
+            crate::worktree_guard::tracked_paths(repo_root, odb, Some(&current_oid)).await?;
+        let checkout_mgr =
+            CheckoutManager::new(odb.as_ref(), repo_root).with_tracked_paths(tracked);
+        let commit_to_checkout = Commit {
+            tree: tree_oid,
+            parents: vec![current_oid],
+            author: commit.author.clone(),
+            committer: commit.committer.clone(),
+            message: commit.message.clone(),
+        };
+        // Write temporary commit to get OID for checkout
+        let temp_oid = commit_to_checkout.write(odb.as_ref()).await?;
+        checkout_mgr.checkout_commit(&temp_oid).await?;
+
+        Ok(tree_oid)
     }
 
     async fn create_cherry_pick_commit(
@@ -233,6 +272,7 @@ impl CherryPickCmd {
         refdb: &RefDatabase,
         repo_root: &std::path::Path,
         original_oid: &Oid,
+        merged_tree_oid: Option<Oid>,
     ) -> Result<()> {
         // Load original commit for message
         let original_commit = Commit::read(odb, original_oid).await?;
@@ -246,17 +286,24 @@ impl CherryPickCmd {
             ));
         }
 
-        // Build tree from index
-        let index = Index::load(repo_root)?;
-        let mut tree = Tree::new();
-        for entry in index.entries() {
-            tree.add_entry(mediagit_versioning::TreeEntry::new(
-                entry.path.to_string_lossy().to_string(),
-                mediagit_versioning::FileMode::Regular,
-                entry.oid,
-            ));
-        }
-        let tree_oid = tree.write(odb).await?;
+        // Use the merged tree from the 3-way merge when available. Only fall
+        // back to rebuilding from the index (manual conflict resolution via
+        // `--continue`, where no merge result exists) when it isn't.
+        let tree_oid = match merged_tree_oid {
+            Some(oid) => oid,
+            None => {
+                let index = Index::load(repo_root)?;
+                let mut tree = Tree::new();
+                for entry in index.entries() {
+                    tree.add_entry(mediagit_versioning::TreeEntry::new(
+                        entry.path.to_string_lossy().to_string(),
+                        mediagit_versioning::FileMode::Regular,
+                        entry.oid,
+                    ));
+                }
+                tree.write(odb).await?
+            }
+        };
 
         // Get current HEAD as parent
         let current_oid = refdb.resolve("HEAD").await?;
@@ -315,7 +362,7 @@ impl CherryPickCmd {
 
         if let Some(current) = &state.current_commit {
             let current_oid = Oid::from_hex(current)?;
-            self.create_cherry_pick_commit(&odb, &refdb, repo_root, &current_oid)
+            self.create_cherry_pick_commit(&odb, &refdb, repo_root, &current_oid, None)
                 .await?;
         }
 
@@ -419,8 +466,12 @@ impl CherryPickCmd {
                 refdb.write(&reset_ref).await?;
             }
 
-            // Restore working directory
-            let checkout_mgr = mediagit_versioning::CheckoutManager::new(&odb, repo_root);
+            // Restore working directory. WT-1: an abort must not take
+            // untracked files with it.
+            let tracked =
+                crate::worktree_guard::tracked_paths(repo_root, &odb, Some(&original_oid)).await?;
+            let checkout_mgr = mediagit_versioning::CheckoutManager::new(&odb, repo_root)
+                .with_tracked_paths(tracked);
             checkout_mgr.checkout_commit(&original_oid).await?;
         }
 
@@ -460,36 +511,6 @@ impl CherryPickCmd {
         Ok(())
     }
 
-    fn write_conflicts(
-        &self,
-        repo_root: &std::path::Path,
-        merge_result: &mediagit_versioning::MergeResult,
-    ) -> Result<()> {
-        // Write conflict markers to files
-        for conflict in &merge_result.conflicts {
-            let file_path = repo_root.join(&conflict.path);
-
-            // Build conflict marker content
-            let ours_content = conflict
-                .ours
-                .as_ref()
-                .map(|s| format!("{:?}", s.oid))
-                .unwrap_or_else(|| "(deleted)".to_string());
-            let theirs_content = conflict
-                .theirs
-                .as_ref()
-                .map(|s| format!("{:?}", s.oid))
-                .unwrap_or_else(|| "(deleted)".to_string());
-
-            let conflict_content = format!(
-                "<<<<<<< HEAD\n{}\n=======\n{}\n>>>>>>> cherry-pick\n",
-                ours_content, theirs_content
-            );
-            std::fs::write(&file_path, conflict_content)?;
-        }
-        Ok(())
-    }
-
     async fn resolve_commit(
         &self,
         refdb: &RefDatabase,
@@ -514,32 +535,15 @@ impl CherryPickCmd {
         }
 
         // Try short hash prefix matching (e.g., 7-char hashes from `log --oneline`)
+        // via the central resolver, which also matches pack-embedded objects
+        // (post-`gc --repack`, not just loose ones).
         let looks_like_hex = commit_ref.len() >= 4
             && commit_ref.len() < 64
             && commit_ref.chars().all(|c| c.is_ascii_hexdigit());
-        if looks_like_hex {
-            if let Ok(storage) = create_storage_backend(repo_root).await {
-                if let Ok(keys) = storage.list_objects(commit_ref).await {
-                    let matches: Vec<_> = keys
-                        .into_iter()
-                        .filter(|k| k.starts_with(commit_ref) && k.len() == 64)
-                        .collect();
-                    match matches.len() {
-                        1 => {
-                            if let Ok(oid) = Oid::from_hex(&matches[0]) {
-                                return Ok(oid);
-                            }
-                        }
-                        n if n > 1 => {
-                            anyhow::bail!(
-                                "Ambiguous short hash '{}' matches {} objects. Use a longer prefix.",
-                                commit_ref,
-                                n
-                            );
-                        }
-                        _ => {}
-                    }
-                }
+        if looks_like_hex && let Ok(storage) = create_storage_backend(repo_root).await {
+            let odb = ObjectDatabase::with_smart_compression(storage, 1000);
+            if let Ok(oid) = odb.resolve_abbreviated_oid(commit_ref).await {
+                return Ok(oid);
             }
         }
 
@@ -556,4 +560,115 @@ struct CherryPickState {
     original_head: Option<String>,
     current_commit: Option<String>,
     remaining_commits: Vec<String>,
+}
+
+#[cfg(test)]
+#[allow(unsafe_code)] // edition-2024: test-only env::set_var/remove_var requires unsafe
+mod tests {
+    use super::*;
+    use crate::commands::utils::test_support::{REPO_ENV_LOCK, init_repo_with_commit};
+    use clap::Parser;
+    use tempfile::TempDir;
+
+    fn parse(args: &[&str]) -> Result<CherryPickCmd, clap::Error> {
+        let mut full = vec!["cherry-pick"];
+        full.extend_from_slice(args);
+        CherryPickCmd::try_parse_from(full)
+    }
+
+    #[test]
+    fn parse_basic_commit() {
+        let cmd = parse(&["abc123"]).unwrap();
+        assert_eq!(cmd.commits, vec!["abc123".to_string()]);
+        assert!(!cmd.abort);
+        assert!(!cmd.no_commit);
+    }
+
+    #[test]
+    fn parse_multiple_commits() {
+        let cmd = parse(&["c1", "c2", "c3"]).unwrap();
+        assert_eq!(cmd.commits, vec!["c1", "c2", "c3"]);
+    }
+
+    #[test]
+    fn parse_missing_commits_is_error() {
+        assert!(parse(&[]).is_err());
+    }
+
+    #[test]
+    fn parse_all_flags() {
+        let cmd = parse(&["c1", "-n", "-e", "-x", "-q"]).unwrap();
+        assert!(cmd.no_commit);
+        assert!(cmd.edit);
+        assert!(cmd.append_message);
+        assert!(cmd.quiet);
+    }
+
+    #[test]
+    fn parse_abort_continue_skip() {
+        assert!(parse(&["c1", "--abort"]).unwrap().abort);
+        assert!(parse(&["c1", "--continue-pick"]).unwrap().continue_pick);
+        assert!(parse(&["c1", "--skip"]).unwrap().skip);
+    }
+
+    /// Guards `MEDIAGIT_REPO` across the `.await` points in `execute()`
+    /// (see `REPO_ENV_LOCK` docs).
+    #[allow(clippy::await_holding_lock)]
+    async fn execute_in(repo_path: &std::path::Path, cmd: &CherryPickCmd) -> Result<()> {
+        let _guard = REPO_ENV_LOCK.lock().unwrap();
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MEDIAGIT_REPO", repo_path) };
+        let result = cmd.execute().await;
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MEDIAGIT_REPO") };
+        result
+    }
+
+    #[tokio::test]
+    async fn execute_no_repo_is_error() {
+        let temp = TempDir::new().unwrap();
+        let cmd = parse(&["abc123"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("Not a mediagit repository"));
+    }
+
+    #[tokio::test]
+    async fn execute_unresolvable_commit_is_error() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["does-not-exist"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("Failed to resolve commit"));
+    }
+
+    #[tokio::test]
+    async fn continue_without_cherrypick_in_progress_is_error() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["c1", "--continue-pick"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("No cherry-pick in progress"));
+    }
+
+    #[tokio::test]
+    async fn abort_without_cherrypick_in_progress_is_error() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["c1", "--abort"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("No cherry-pick in progress"));
+    }
+
+    #[tokio::test]
+    async fn skip_without_cherrypick_in_progress_is_error() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["c1", "--skip"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("No cherry-pick in progress"));
+    }
 }

@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! 3D model parsing and analysis
 //!
@@ -40,7 +30,7 @@
 //! let parser = Model3DParser::new();
 //! let info = parser.parse(&model_data, "model.obj").await?;
 //!
-//! println!("Vertices: {}, Faces: {}", info.vertex_count, info.face_count);
+//! println!("Vertices: {:?}, Faces: {:?}", info.vertex_count, info.face_count);
 //! println!("Materials: {}", info.materials.len());
 //! # Ok(())
 //! # }
@@ -57,11 +47,13 @@ pub struct Model3DInfo {
     /// Model format
     pub format: Model3DFormat,
 
-    /// Number of vertices
-    pub vertex_count: u64,
+    /// Number of vertices. `None` when the format's full binary/geometry
+    /// structure isn't parsed (e.g. FBX binary, .blend, USD) — reported
+    /// honestly as unknown rather than a fake `0`.
+    pub vertex_count: Option<u64>,
 
-    /// Number of faces/polygons
-    pub face_count: u64,
+    /// Number of faces/polygons. `None` when not parsed (see `vertex_count`).
+    pub face_count: Option<u64>,
 
     /// Number of objects/meshes
     pub object_count: u32,
@@ -189,6 +181,106 @@ impl Default for BoundingBox {
     }
 }
 
+/// Cap on how many decompressed bytes we read when peeking a compressed
+/// .blend header — we only need the first ~12 bytes ("BLENDER" + version),
+/// not the whole (potentially huge) file.
+const BLEND_HEADER_PEEK_CAP: u64 = 4096;
+
+/// Cap on how many bytes of a GLB's JSON chunk we're willing to read. glTF
+/// JSON chunks describing scene/mesh/accessor structure are normally well
+/// under this even for complex scenes; the actual geometry lives in the
+/// separate binary buffer chunk, not here.
+const GLB_JSON_CHUNK_CAP: usize = 16 * 1024 * 1024;
+
+/// Extract the JSON chunk from a GLB (binary glTF) file, per the glTF 2.0
+/// binary container spec: a 12-byte header followed by one or more
+/// (length, type, data) chunks. Returns `None` if the file is too short or
+/// malformed, or the first chunk isn't the required JSON chunk.
+fn glb_json_chunk(data: &[u8]) -> Option<&[u8]> {
+    // 12-byte header (magic, version, total length) + 8-byte chunk header.
+    if data.len() < 20 {
+        return None;
+    }
+    let chunk_length = u32::from_le_bytes([data[12], data[13], data[14], data[15]]) as usize;
+    let chunk_type = &data[16..20];
+    if chunk_type != b"JSON" {
+        return None;
+    }
+    let start: usize = 20;
+    let end = start
+        .checked_add(chunk_length)?
+        .min(data.len())
+        .min(start + GLB_JSON_CHUNK_CAP);
+    data.get(start..end)
+}
+
+/// Sum vertex/face counts across a parsed glTF JSON document's mesh
+/// primitives. Vertex count comes from each primitive's POSITION accessor;
+/// face count comes from the indices accessor (count/3) when indexed, or
+/// falls back to POSITION count/3 for non-indexed triangle lists.
+fn count_gltf_geometry(json: &serde_json::Value) -> (u64, u64) {
+    fn accessor_count(json: &serde_json::Value, idx: u64) -> Option<u64> {
+        json.get("accessors")?
+            .as_array()?
+            .get(idx as usize)?
+            .get("count")?
+            .as_u64()
+    }
+
+    let mut vertex_count = 0u64;
+    let mut face_count = 0u64;
+    let Some(meshes) = json.get("meshes").and_then(|m| m.as_array()) else {
+        return (0, 0);
+    };
+    for mesh in meshes {
+        let Some(prims) = mesh.get("primitives").and_then(|p| p.as_array()) else {
+            continue;
+        };
+        for prim in prims {
+            let pos_count = prim
+                .get("attributes")
+                .and_then(|a| a.get("POSITION"))
+                .and_then(|v| v.as_u64())
+                .and_then(|idx| accessor_count(json, idx))
+                .unwrap_or(0);
+            vertex_count += pos_count;
+
+            let indices_count = prim
+                .get("indices")
+                .and_then(|v| v.as_u64())
+                .and_then(|idx| accessor_count(json, idx));
+            face_count += indices_count.unwrap_or(pos_count) / 3;
+        }
+    }
+    (vertex_count, face_count)
+}
+
+/// Decompress the start of a gzip-wrapped .blend file (Blender <3.0) far
+/// enough to read the "BLENDER" magic + version bytes.
+fn decompress_blend_header_gzip(data: &[u8]) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    flate2::read::GzDecoder::new(data)
+        .take(BLEND_HEADER_PEEK_CAP)
+        .read_to_end(&mut buf)
+        .map_err(|e| MediaError::InvalidStructure(format!("Invalid gzip Blender file: {}", e)))?;
+    Ok(buf)
+}
+
+/// Decompress the start of a zstd-wrapped .blend file (Blender >=3.0) far
+/// enough to read the "BLENDER" magic + version bytes.
+fn decompress_blend_header_zstd(data: &[u8]) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    let decoder = zstd::stream::read::Decoder::new(data)
+        .map_err(|e| MediaError::InvalidStructure(format!("Invalid zstd Blender file: {}", e)))?;
+    decoder
+        .take(BLEND_HEADER_PEEK_CAP)
+        .read_to_end(&mut buf)
+        .map_err(|e| MediaError::InvalidStructure(format!("Invalid zstd Blender file: {}", e)))?;
+    Ok(buf)
+}
+
 /// 3D model parser
 #[derive(Debug)]
 pub struct Model3DParser;
@@ -254,14 +346,14 @@ impl Model3DParser {
 
                 // Parse vertex coordinates for bounding box
                 let parts: Vec<&str> = trimmed.split_whitespace().collect();
-                if parts.len() >= 4 {
-                    if let (Ok(x), Ok(y), Ok(z)) = (
+                if parts.len() >= 4
+                    && let (Ok(x), Ok(y), Ok(z)) = (
                         parts[1].parse::<f32>(),
                         parts[2].parse::<f32>(),
                         parts[3].parse::<f32>(),
-                    ) {
-                        bounding_box.expand(x, y, z);
-                    }
+                    )
+                {
+                    bounding_box.expand(x, y, z);
                 }
             } else if trimmed.starts_with("f ") {
                 // Face
@@ -303,8 +395,8 @@ impl Model3DParser {
 
         Ok(Model3DInfo {
             format: Model3DFormat::Obj,
-            vertex_count,
-            face_count,
+            vertex_count: Some(vertex_count),
+            face_count: Some(face_count),
             object_count: object_count.max(1), // At least 1 object
             materials: material_infos,
             textures: textures.into_iter().collect(),
@@ -345,8 +437,8 @@ impl Model3DParser {
 
         Ok(Model3DInfo {
             format: Model3DFormat::Fbx,
-            vertex_count: 0, // Would require full parsing
-            face_count: 0,   // Would require full parsing
+            vertex_count: None, // Binary FBX geometry isn't parsed
+            face_count: None,
             object_count: 1,
             materials: Vec::new(),
             textures: Vec::new(),
@@ -375,10 +467,10 @@ impl Model3DParser {
                 vertex_count += 1;
             } else if trimmed.starts_with("Model:") {
                 object_count += 1;
-            } else if trimmed.starts_with("Material:") {
-                if let Some(mat_name) = trimmed.split('"').nth(1) {
-                    materials.insert(mat_name.to_string());
-                }
+            } else if trimmed.starts_with("Material:")
+                && let Some(mat_name) = trimmed.split('"').nth(1)
+            {
+                materials.insert(mat_name.to_string());
             }
         }
 
@@ -400,8 +492,8 @@ impl Model3DParser {
 
         Ok(Model3DInfo {
             format: Model3DFormat::Fbx,
-            vertex_count,
-            face_count: 0, // Would need deeper parsing
+            vertex_count: Some(vertex_count),
+            face_count: None, // Would need deeper parsing
             object_count: object_count.max(1),
             materials: material_infos,
             textures: Vec::new(),
@@ -418,27 +510,41 @@ impl Model3DParser {
         warn!("Blender file parsing using metadata extraction approach");
 
         // .blend is a complex binary format - for MVP we'll provide basic info
-        // Check .blend magic bytes: "BLENDER"
+        // Check .blend magic bytes: "BLENDER". Blender also saves compressed
+        // .blend files: gzip (<3.0) or zstd (>=3.0). Peek a capped amount of
+        // decompressed header to find "BLENDER" inside those too.
         if data.len() < 12 {
             return Err(MediaError::InvalidStructure(
                 "File too small for Blender".to_string(),
             ));
         }
 
-        if &data[0..7] != b"BLENDER" {
+        let header: std::borrow::Cow<[u8]> = if &data[0..7] == b"BLENDER" {
+            std::borrow::Cow::Borrowed(data)
+        } else if data.starts_with(&[0x1F, 0x8B]) {
+            std::borrow::Cow::Owned(decompress_blend_header_gzip(data)?)
+        } else if data.starts_with(&[0x28, 0xB5, 0x2F, 0xFD]) {
+            std::borrow::Cow::Owned(decompress_blend_header_zstd(data)?)
+        } else {
+            return Err(MediaError::InvalidStructure(
+                "Not a valid Blender file".to_string(),
+            ));
+        };
+
+        if header.len() < 10 || &header[0..7] != b"BLENDER" {
             return Err(MediaError::InvalidStructure(
                 "Not a valid Blender file".to_string(),
             ));
         }
 
         // Extract version from header (e.g., "v280" for Blender 2.80)
-        let version = String::from_utf8_lossy(&data[7..10]).to_string();
+        let version = String::from_utf8_lossy(&header[7..10]).to_string();
         debug!("Detected Blender version: {}", version);
 
         Ok(Model3DInfo {
             format: Model3DFormat::Blend,
-            vertex_count: 0, // Would require full parsing
-            face_count: 0,   // Would require full parsing
+            vertex_count: None, // .blend geometry isn't parsed
+            face_count: None,
             object_count: 1,
             materials: Vec::new(),
             textures: Vec::new(),
@@ -461,10 +567,27 @@ impl Model3DParser {
             // GLB binary format
             debug!("Binary GLB detected");
 
+            let (vertex_count, face_count) = match glb_json_chunk(data) {
+                Some(chunk) => match serde_json::from_slice::<serde_json::Value>(chunk) {
+                    Ok(json) => {
+                        let (v, f) = count_gltf_geometry(&json);
+                        (Some(v), Some(f))
+                    }
+                    Err(e) => {
+                        warn!("GLB JSON chunk is not valid JSON: {}", e);
+                        (None, None)
+                    }
+                },
+                None => {
+                    warn!("GLB file has no readable JSON chunk");
+                    (None, None)
+                }
+            };
+
             Ok(Model3DInfo {
                 format: Model3DFormat::Glb,
-                vertex_count: 0,
-                face_count: 0,
+                vertex_count,
+                face_count,
                 object_count: 1,
                 materials: Vec::new(),
                 textures: Vec::new(),
@@ -488,10 +611,22 @@ impl Model3DParser {
                 mesh_count, material_count
             );
 
+            let (vertex_count, face_count) =
+                match serde_json::from_str::<serde_json::Value>(content) {
+                    Ok(json) => {
+                        let (v, f) = count_gltf_geometry(&json);
+                        (Some(v), Some(f))
+                    }
+                    Err(e) => {
+                        warn!("GLTF file is not valid JSON: {}", e);
+                        (None, None)
+                    }
+                };
+
             Ok(Model3DInfo {
                 format: Model3DFormat::Gltf,
-                vertex_count: 0, // Would need JSON parsing
-                face_count: 0,
+                vertex_count,
+                face_count,
                 object_count: mesh_count.max(1),
                 materials: Vec::new(),
                 textures: Vec::new(),
@@ -518,8 +653,8 @@ impl Model3DParser {
 
             Ok(Model3DInfo {
                 format: Model3DFormat::Stl,
-                vertex_count,
-                face_count,
+                vertex_count: Some(vertex_count),
+                face_count: Some(face_count),
                 object_count: 1,
                 materials: Vec::new(),
                 textures: Vec::new(),
@@ -535,8 +670,8 @@ impl Model3DParser {
 
             Ok(Model3DInfo {
                 format: Model3DFormat::Stl,
-                vertex_count,
-                face_count,
+                vertex_count: Some(vertex_count),
+                face_count: Some(face_count),
                 object_count: 1,
                 materials: Vec::new(),
                 textures: Vec::new(),
@@ -572,8 +707,8 @@ impl Model3DParser {
 
         Ok(Model3DInfo {
             format: Model3DFormat::Usd,
-            vertex_count: 0,
-            face_count: 0,
+            vertex_count: None, // USD mesh geometry isn't parsed
+            face_count: None,
             object_count: object_count.max(1),
             materials: Vec::new(),
             textures: Vec::new(),
@@ -622,8 +757,8 @@ impl Model3DParser {
 
         Ok(Model3DInfo {
             format: Model3DFormat::Ply,
-            vertex_count,
-            face_count,
+            vertex_count: Some(vertex_count),
+            face_count: Some(face_count),
             object_count: 1,
             materials: Vec::new(),
             textures: Vec::new(),
@@ -652,16 +787,22 @@ impl Model3DParser {
 
         let mut conflicts = Vec::new();
 
-        // Check for significant vertex count changes
-        let ours_vertex_delta = (ours.vertex_count as i64 - base.vertex_count as i64).abs();
-        let theirs_vertex_delta = (theirs.vertex_count as i64 - base.vertex_count as i64).abs();
+        // Check for significant vertex count changes. Only meaningful when
+        // all three sides actually have a parsed vertex count — formats we
+        // don't fully parse (e.g. FBX binary, .blend, USD) report `None`,
+        // and we can't infer a conflict from data we don't have.
+        if let (Some(base_v), Some(ours_v), Some(theirs_v)) =
+            (base.vertex_count, ours.vertex_count, theirs.vertex_count)
+        {
+            let ours_delta = ours_v as i64 - base_v as i64;
+            let theirs_delta = theirs_v as i64 - base_v as i64;
 
-        if ours_vertex_delta > 0 && theirs_vertex_delta > 0 {
-            conflicts.push(format!(
-                "Both branches modified mesh geometry (ours: {:+} vertices, theirs: {:+} vertices)",
-                ours.vertex_count as i64 - base.vertex_count as i64,
-                theirs.vertex_count as i64 - base.vertex_count as i64
-            ));
+            if ours_delta != 0 && theirs_delta != 0 {
+                conflicts.push(format!(
+                    "Both branches modified mesh geometry (ours: {:+} vertices, theirs: {:+} vertices)",
+                    ours_delta, theirs_delta
+                ));
+            }
         }
 
         // Check for material conflicts
@@ -676,15 +817,14 @@ impl Model3DParser {
         }
 
         // Check bounding box overlap if available
-        if let (Some(our_bbox), Some(their_bbox)) = (&ours.bounding_box, &theirs.bounding_box) {
-            if let Some(base_bbox) = &base.bounding_box {
-                let ours_changed = our_bbox.volume() != base_bbox.volume();
-                let theirs_changed = their_bbox.volume() != base_bbox.volume();
+        if let (Some(our_bbox), Some(their_bbox)) = (&ours.bounding_box, &theirs.bounding_box)
+            && let Some(base_bbox) = &base.bounding_box
+        {
+            let ours_changed = our_bbox.volume() != base_bbox.volume();
+            let theirs_changed = their_bbox.volume() != base_bbox.volume();
 
-                if ours_changed && theirs_changed && our_bbox.overlaps(their_bbox) {
-                    conflicts
-                        .push("Both branches modified overlapping spatial regions".to_string());
-                }
+            if ours_changed && theirs_changed && our_bbox.overlaps(their_bbox) {
+                conflicts.push("Both branches modified overlapping spatial regions".to_string());
             }
         }
 
@@ -802,7 +942,33 @@ usemtl Material_001
         assert!(result.is_ok());
         let info = result.unwrap();
         assert_eq!(info.format, Model3DFormat::Obj);
-        assert_eq!(info.vertex_count, 4);
-        assert_eq!(info.face_count, 1);
+        assert_eq!(info.vertex_count, Some(4));
+        assert_eq!(info.face_count, Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_glb_vertex_and_face_counts() {
+        // One triangle: POSITION accessor (index 0) has 3 vertices, indices
+        // accessor (index 1) has 3 indices -> 1 face.
+        let json = br#"{"accessors":[{"count":3},{"count":3}],"meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1}]}]}"#;
+        let mut json_padded = json.to_vec();
+        while !json_padded.len().is_multiple_of(4) {
+            json_padded.push(b' ');
+        }
+
+        let mut glb = Vec::new();
+        glb.extend_from_slice(b"glTF"); // magic
+        glb.extend_from_slice(&2u32.to_le_bytes()); // version
+        let total_len = 12 + 8 + json_padded.len();
+        glb.extend_from_slice(&(total_len as u32).to_le_bytes()); // total length
+        glb.extend_from_slice(&(json_padded.len() as u32).to_le_bytes()); // chunk length
+        glb.extend_from_slice(b"JSON"); // chunk type
+        glb.extend_from_slice(&json_padded);
+
+        let parser = Model3DParser::new();
+        let info = parser.parse(&glb, "test.glb").await.unwrap();
+        assert_eq!(info.format, Model3DFormat::Glb);
+        assert_eq!(info.vertex_count, Some(3));
+        assert_eq!(info.face_count, Some(1));
     }
 }

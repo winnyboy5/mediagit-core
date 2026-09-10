@@ -6,7 +6,7 @@ A complete guide for setting up MediaGit for development and contribution.
 
 | Tool | Version | Purpose |
 |------|---------|---------|
-| Rust | 1.92.0+ | Language toolchain (MSRV) |
+| Rust | 1.97.1+ | Language toolchain (MSRV) |
 | Docker | 20.10+ | Integration test emulators |
 | Git | 2.x | Source code management |
 
@@ -17,7 +17,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://rustup.rs | sh
 source ~/.cargo/env
 
 # Install the exact MSRV toolchain
-rustup toolchain install 1.92.0
+rustup toolchain install 1.97.1
 rustup component add rustfmt clippy
 ```
 
@@ -53,8 +53,6 @@ mediagit-core/
 │   ├── mediagit-security/     # AES-GCM encryption, argon2 key derivation
 │   ├── mediagit-observability/ # tracing, structured logging
 │   ├── mediagit-metrics/      # Prometheus metrics
-│   ├── mediagit-migration/    # Repository migration utilities
-│   ├── mediagit-git/          # Git interop (smudge/clean filters)
 │   └── mediagit-test-utils/   # Shared test helpers (publish = false)
 ├── book/                      # mdBook documentation source
 ├── docker/                    # Dockerfiles
@@ -80,30 +78,33 @@ cargo test --workspace -- --nocapture
 
 ### Integration Tests (requires Docker)
 
-Integration tests are marked `#[ignore]` and need real storage emulators:
+Integration tests are marked `#[ignore]` and need real storage emulators. The
+emulator-backed tests set up their own credentials against the emulators'
+well-known defaults (`minio_docker_tests.rs`, `azure_azurite_tests.rs`,
+`gcs_emulator_tests.rs`) — no exports needed for those:
 
 ```bash
 # Start emulators
 docker compose -f docker-compose.test.yml up -d
 
 # Run integration tests
-export AWS_ACCESS_KEY_ID=minioadmin
-export AWS_SECRET_ACCESS_KEY=minioadmin
-export AWS_ENDPOINT_URL=http://localhost:9000
-export AWS_REGION=us-east-1
-export AZURE_STORAGE_CONNECTION_STRING="DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://localhost:10000/devstoreaccount1;"
-export GCS_EMULATOR_HOST=http://localhost:4443
-
 cargo test --ignored -p mediagit-storage -p mediagit-server --verbose
 
 # Cleanup
 docker compose -f docker-compose.test.yml down -v
 ```
 
+A separate handful of `#[ignore]` tests instead exercise real cloud accounts
+and skip themselves unless their own env vars are set (see each test's doc
+comment): `AZURE_STORAGE_ACCOUNT` / `AZURE_STORAGE_KEY` /
+`MG_QA_AZURE_CONTAINER` for the real-Azure diagnostic in `reqsign_diag.rs`,
+and `MEDIAGIT_GCS_BUCKET` / `MEDIAGIT_GCS_PROJECT` (or `GOOGLE_CLOUD_PROJECT`)
+plus ADC for the real-GCS round-trip tests in `gcs_integration_tests.rs`.
+
 ### MSRV Check
 
 ```bash
-cargo +1.92.0 check --workspace --all-features
+cargo +1.97.1 check --workspace --all-features
 ```
 
 ## Git Hooks (husky-rs)
@@ -112,7 +113,7 @@ Git hooks are managed by **[husky-rs](https://github.com/pplmx/husky-rs)** and i
 
 | Hook | What it enforces |
 |------|-----------------|
-| `pre-commit` | `cargo fmt --check`, `cargo clippy --workspace`, AGPL license headers, 5MB file size limit, conflict markers |
+| `pre-commit` | `cargo fmt --check`, `cargo clippy --workspace`, BUSL-1.1 license headers, 5MB file size limit, conflict markers |
 | `pre-push` | `cargo test --workspace` — all tests must pass |
 | `commit-msg` | [Conventional Commits](https://www.conventionalcommits.org/) format, max 72 chars |
 
@@ -146,12 +147,20 @@ cargo machete
 
 ### License Headers
 
-All `.rs` files must include an AGPL-3.0 header. Check with:
+All `.rs` files must begin with a two-line SPDX header:
+
+```rust
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
+```
+
+Check with the same glob CI uses — `*.rs`, not `crates/**/*.rs`, so a file added
+outside `crates/` cannot slip past:
 
 ```bash
 while IFS= read -r file; do
-  grep -q "GNU Affero General Public License" "$file" || echo "MISSING: $file"
-done < <(git ls-files 'crates/**/*.rs')
+  grep -q "SPDX-License-Identifier: BUSL-1.1" "$file" || echo "MISSING: $file"
+done < <(git ls-files '*.rs')
 ```
 
 ### Security Audit
@@ -183,7 +192,9 @@ let odb = ObjectDatabase::with_smart_compression(root).await?;
 ```rust
 use mediagit_config::schema::Config;
 let config = Config::load(&repo_root).await?;
-// Author priority: --author CLI > MEDIAGIT_AUTHOR_NAME env > config.toml [author] > $USER
+// Author priority: --author CLI > MEDIAGIT_AUTHOR_NAME env > config.toml [author]
+// (commit refuses rather than guess further; lock and some other commands
+// fall back to $USER as a last resort)
 ```
 
 ### Cross-Platform Paths

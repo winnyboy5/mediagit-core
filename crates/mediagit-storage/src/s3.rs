@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! AWS S3 storage backend implementation
 //!
@@ -88,15 +78,15 @@
 //! Use [`StorageError`](crate::StorageError) for more structured error information.
 
 use crate::StorageBackend;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
+use aws_sdk_s3::Client;
 use aws_sdk_s3::config::retry::RetryConfig;
 use aws_sdk_s3::config::timeout::TimeoutConfig;
-use aws_sdk_s3::Client;
 use bytes::Bytes;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tracing::{debug, warn};
 
@@ -316,9 +306,25 @@ impl S3Backend {
             }
             Client::from_conf(builder.build())
         } else {
-            // Real AWS S3 - use standard config loading (IMDS is expected)
+            // Real AWS S3 - use standard config loading (IMDS is expected).
+            //
+            // The timeout/retry config above applies HERE TOO. It used to be
+            // built and then silently dropped on this branch, so
+            // MEDIAGIT_AWS_CONNECT_TIMEOUT_SECS and MEDIAGIT_AWS_MAX_ATTEMPTS
+            // were documented knobs that did nothing against real S3 — the
+            // client ran on aws-config defaults (3.1s connect, 3 attempts, no
+            // read timeout). A knob that silently does nothing is worse than no
+            // knob: it makes an operator think they have already tried
+            // something.
+            //
+            // Note what this does NOT fix: RetryConfig cannot see an error that
+            // happens after `.send()` has already returned Ok, i.e. once the
+            // body is streaming. That gap is handled inside
+            // `get_streaming_range` — see the resume logic there.
             let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
                 .http_client(crate::http_pool::shared())
+                .timeout_config(timeout_config.clone())
+                .retry_config(RetryConfig::standard().with_max_attempts(max_attempts))
                 .load()
                 .await;
             Client::new(&sdk_config)
@@ -645,24 +651,36 @@ impl StorageBackend for S3Backend {
         // ByteStream does not implement futures::Stream directly; convert to
         // tokio::io::AsyncRead and drive with unfold to yield 64 KiB Bytes chunks.
         let reader = response.body.into_async_read();
-        let stream = futures::stream::unfold((reader, stats), |(mut rdr, stats)| async move {
-            use tokio::io::AsyncReadExt;
-            let mut buf = vec![0u8; 65536];
-            match rdr.read(&mut buf).await {
-                Ok(0) => None,
-                Ok(n) => {
-                    buf.truncate(n);
-                    stats
-                        .total_bytes_downloaded
-                        .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
-                    Some((
-                        Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::from(buf)),
-                        (rdr, stats),
-                    ))
+        // `failed` fuses the stream: after an error we yield it once and stop.
+        // Continuing to poll the same reader could resume mid-object and hand a
+        // consumer a gap-spliced byte sequence that looks like valid data.
+        let stream = futures::stream::unfold(
+            (reader, stats, false),
+            |(mut rdr, stats, failed)| async move {
+                use tokio::io::AsyncReadExt;
+                if failed {
+                    return None;
                 }
-                Err(e) => Some((Err(anyhow!("get_streaming chunk: {}", e)), (rdr, stats))),
-            }
-        });
+                let mut buf = vec![0u8; 65536];
+                match rdr.read(&mut buf).await {
+                    Ok(0) => None,
+                    Ok(n) => {
+                        buf.truncate(n);
+                        stats
+                            .total_bytes_downloaded
+                            .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                        Some((
+                            Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::from(buf)),
+                            (rdr, stats, false),
+                        ))
+                    }
+                    Err(e) => Some((
+                        Err(anyhow!("get_streaming chunk: {}", e)),
+                        (rdr, stats, true),
+                    )),
+                }
+            },
+        );
 
         Ok(Box::pin(stream))
     }
@@ -689,30 +707,149 @@ impl StorageBackend for S3Backend {
             .range(format!("bytes={}-{}", range.start, range.end - 1))
             .send()
             .await
+            // No response was ever received here (e.g. SdkError::DispatchFailure, whose
+            // own docs say "an HTTP response was not received"), so the resume loop
+            // below is structurally unreachable for this class: there is no stream to
+            // resume. Deliberately NOT logged here — the sole caller
+            // (`handlers/repo.rs`, pack verification) already warns on this exact Err
+            // with strictly more context (pack, entry), and a second emit would double
+            // the volume on the dominant failure path. Absence of the "resumed" warn
+            // below is what distinguishes the two cases.
+            //
+            // Not retried here either: the client is built with
+            // `RetryConfig::standard().with_max_attempts(MEDIAGIT_AWS_MAX_ATTEMPTS)`
+            // (default 5), so a dispatch failure surfacing here has ALREADY exhausted
+            // the SDK's retries. Wrapping it again would just multiply the wait.
             .map_err(|e| anyhow!("get_streaming_range {}: {}", key_clone, e))?;
 
         let reader = response.body.into_async_read();
-        let stream = futures::stream::unfold((reader, stats), |(mut rdr, stats)| async move {
-            use tokio::io::AsyncReadExt;
-            let mut buf = vec![0u8; 65536];
-            match rdr.read(&mut buf).await {
-                Ok(0) => None,
-                Ok(n) => {
-                    buf.truncate(n);
-                    stats
-                        .total_bytes_downloaded
-                        .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
-                    Some((
-                        Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::from(buf)),
-                        (rdr, stats),
-                    ))
+
+        // Resume a mid-stream abort by re-issuing a Range GET from the byte we
+        // stopped at, instead of failing the whole read.
+        //
+        // Why this is needed HERE and not for the other backends: once
+        // `.send()` returns Ok the S3 operation is complete as far as the SDK
+        // orchestrator is concerned (200 + headers received), so `RetryConfig`
+        // structurally cannot see an error that happens while the body streams.
+        // Azure gets this for free from opendal's RetryLayer (resume-from-offset,
+        // 3 attempts) and GCS from the storage client's AlwaysRetry + resume;
+        // S3's hand-rolled stream had neither, so the gap is real and this
+        // closes it.
+        //
+        // CORRECTION (2026-08-04): this was originally justified by "93 mid-stream
+        // errors on a 2 GB corpus" from campaign 20260803-scale. That attribution
+        // was WRONG. Re-reading those logs, 100% of the failures carry the
+        // `get_streaming_range {key}: {err}` format emitted at the `.send()` site
+        // above, with `err = dispatch failure` — i.e. no response was ever
+        // received. Per aws-smithy-runtime-api's own docs, DispatchFailure means
+        // no HTTP response arrived, so it cannot occur once the body is streaming
+        // and can never reach this loop. Confirmed empirically: neither of the two
+        // error strings this loop can produce ("after N resume attempt(s)",
+        // "resume at byte N failed") appears anywhere in campaign 20260803-scale
+        // or 20260804-scale-verify2, and neither does the "resumed" warn.
+        //
+        // So this code has never executed in a campaign. It is kept because it is
+        // correct for the class it targets — a connection dropping AFTER headers,
+        // mid-body — which remains possible; it is simply not the failure this
+        // deployment has been hitting. Do not cite the 93-error figure as evidence
+        // that it works.
+        //
+        // Byte-exactness matters more than resilience here: `consumed` counts
+        // only bytes actually yielded downstream, so the resumed request starts
+        // exactly where the consumer left off and the concatenation is
+        // identical to an uninterrupted read. Getting this wrong would corrupt
+        // the digest of every chunk it touched.
+        //
+        // On exhaustion the stream still yields Err and fuses — preserving the
+        // "could not read it all" signal that pack verification turns into
+        // Unreadable (never Corrupt).
+        const MAX_RESUMES: u32 = 3;
+        let start = range.start;
+        let end = range.end;
+        let stream = futures::stream::unfold(
+            (Some(reader), stats, client, bucket, key_clone, 0u64, 0u32),
+            move |(rdr, stats, client, bucket, key, consumed, resumes)| async move {
+                use tokio::io::AsyncReadExt;
+                let mut rdr = rdr?; // None => fused after exhausting resumes
+                let mut consumed = consumed;
+                let mut resumes = resumes;
+                // Loop rather than yielding an empty chunk on resume: an empty
+                // Bytes would be read as EOF by any consumer that does not
+                // happen to skip it, silently truncating the read. (tokio-util's
+                // StreamReader does skip it, but this is a public trait method
+                // and must not depend on that.)
+                loop {
+                    let mut buf = vec![0u8; 65536];
+                    match rdr.read(&mut buf).await {
+                        Ok(0) => return None,
+                        Ok(n) => {
+                            buf.truncate(n);
+                            stats
+                                .total_bytes_downloaded
+                                .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                            consumed += n as u64;
+                            return Some((
+                                Ok::<bytes::Bytes, anyhow::Error>(bytes::Bytes::from(buf)),
+                                (Some(rdr), stats, client, bucket, key, consumed, resumes),
+                            ));
+                        }
+                        Err(e) => {
+                            let resumed_from = start + consumed;
+                            if resumes >= MAX_RESUMES || resumed_from >= end {
+                                return Some((
+                                    Err(anyhow!(
+                                        "get_streaming_range chunk (after {} resume \
+                                         attempt(s), {} of {} bytes read): {}",
+                                        resumes,
+                                        consumed,
+                                        end - start,
+                                        e
+                                    )),
+                                    (None, stats, client, bucket, key, consumed, resumes),
+                                ));
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(250u64 << resumes))
+                                .await;
+                            match client
+                                .get_object()
+                                .bucket(&bucket)
+                                .key(&key)
+                                .range(format!("bytes={}-{}", resumed_from, end - 1))
+                                .send()
+                                .await
+                            {
+                                Ok(resp) => {
+                                    resumes += 1;
+                                    // warn, not debug: the crate's default filter
+                                    // (mediagit_storage=warn) drops debug entirely, which
+                                    // would make a successful resume permanently invisible.
+                                    tracing::warn!(
+                                        key = %key,
+                                        resumed_from,
+                                        attempt = resumes,
+                                        "s3 range read aborted mid-stream; resumed"
+                                    );
+                                    rdr = resp.body.into_async_read();
+                                    continue;
+                                }
+                                Err(re) => {
+                                    return Some((
+                                        Err(anyhow!(
+                                            "get_streaming_range resume at byte {} failed: \
+                                             {} (original error: {})",
+                                            resumed_from,
+                                            re,
+                                            e
+                                        )),
+                                        (None, stats, client, bucket, key, consumed, resumes),
+                                    ));
+                                }
+                            }
+                        }
+                    }
                 }
-                Err(e) => Some((
-                    Err(anyhow!("get_streaming_range chunk: {}", e)),
-                    (rdr, stats),
-                )),
-            }
-        });
+            },
+        );
         Ok(Box::pin(stream))
     }
 
@@ -1175,6 +1312,9 @@ impl S3Backend {
         let part_size = self.config.part_size as usize;
         let mut part_number = 1;
 
+        // part_number feeds the S3 PartNumber (1-indexed); kept as an explicit
+        // counter for clarity in this multipart-upload hot path.
+        #[allow(clippy::explicit_counter_loop)]
         for chunk in data.chunks(part_size) {
             let client = client.clone();
             let bucket = bucket.clone();
@@ -1218,11 +1358,11 @@ impl S3Backend {
             part_handles.push(handle);
 
             // Limit concurrent uploads
-            if part_handles.len() >= self.config.max_concurrent_parts {
-                if let Some(handle) = part_handles.pop() {
-                    let (part_num, etag) = handle.await??;
-                    parts.push((part_num, etag));
-                }
+            if part_handles.len() >= self.config.max_concurrent_parts
+                && let Some(handle) = part_handles.pop()
+            {
+                let (part_num, etag) = handle.await??;
+                parts.push((part_num, etag));
             }
 
             part_number += 1;

@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Record changes to the repository.
 //!
@@ -43,7 +33,7 @@ use mediagit_versioning::{
     mediagit commit --dry-run
 
 SEE ALSO:
-    mediagit-add(1), mediagit-status(1), mediagit-log(1), mediagit-amend(1)")]
+    mediagit-add(1), mediagit-status(1), mediagit-log(1), mediagit-reset(1)")]
 pub struct CommitCmd {
     /// Commit message
     #[arg(short, long, value_name = "MESSAGE")]
@@ -61,9 +51,9 @@ pub struct CommitCmd {
     #[arg(short = 'a', long)]
     pub all: bool,
 
-    /// Add untracked files to index and commit
-    #[arg(long)]
-    pub include: bool,
+    /// Stage listed paths before committing
+    #[arg(long, value_name = "PATHS", num_args = 0..)]
+    pub include: Vec<String>,
 
     /// Override the commit author
     #[arg(long, value_name = "NAME <EMAIL>")]
@@ -98,6 +88,11 @@ impl CommitCmd {
     pub async fn execute(&self) -> Result<()> {
         use crate::output;
 
+        // Wall clock for the `[bench] op=commit` line emitted on the success path
+        // below. Started here rather than after the early-return guards so the
+        // measurement covers the whole command, matching `add`'s.
+        let bench_wall_start = std::time::Instant::now();
+
         // The -a (--all) flag is not supported in MediaGit.
         // MediaGit uses an explicit `add` → `commit` workflow by design,
         // because `add` performs heavy processing (chunking, delta encoding,
@@ -109,24 +104,44 @@ impl CommitCmd {
             ));
         }
 
-        // Validate inputs
-        if self.message.is_none() && !self.edit && self.file.is_none() {
-            return Err(anyhow::anyhow!(
-                "please provide a commit message with -m, -F, or -e"
-            ));
-        }
-
-        let message = self.message.as_deref().unwrap_or("Initial commit");
+        // Determine the commit message with git's precedence: -m wins, then
+        // -F (read from file), then -e (or no source, if a tty) opens an
+        // editor. If none of -m/-F/-e was given and stdin isn't a tty, there
+        // is no way to obtain a message non-interactively.
+        let message: String = if let Some(m) = &self.message {
+            m.clone()
+        } else if let Some(file_path) = &self.file {
+            std::fs::read_to_string(file_path)
+                .with_context(|| format!("Failed to read commit message file: {}", file_path))?
+                .trim_end_matches(['\n', '\r'])
+                .to_string()
+        } else if self.edit || std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            edit_commit_message()?
+        } else {
+            return Err(anyhow::anyhow!("no commit message provided"));
+        };
 
         // Validate empty message (ISS-007 fix)
         if message.trim().is_empty() {
             return Err(anyhow::anyhow!(
-                "aborting commit due to empty commit message"
+                "Aborting commit due to empty commit message"
             ));
         }
 
-        // Find repository root
+        // Find repository root (needed for config loading, signoff identity resolution)
         let repo_root = find_repo_root()?;
+
+        // Stage paths if --include is used
+        if !self.include.is_empty() {
+            let staged_count =
+                super::add::stage_files_for_commit(&self.include, &repo_root).await?;
+            if !self.quiet {
+                output::info(&format!("Staged {} file(s) from --include", staged_count));
+            }
+        }
+
+        // Apply --signoff if requested (after resolving author identity below)
+        // Defer actual appending until after author_name/email are resolved
 
         if self.dry_run {
             output::info("Running in dry-run mode");
@@ -190,8 +205,19 @@ impl CommitCmd {
             }
         }
 
+        // Staged-entry count for the `[bench] op=commit` line. Taken from the index
+        // rather than the finished tree: the tree also carries entries inherited from
+        // the parent commit, which this command did no work for.
+        let bench_files = index.entries().count() as u64;
+
         // Then, add/update entries from index (these override parent entries with same name)
         for entry in index.entries() {
+            let path_str = entry.path.to_string_lossy();
+            // Legacy on-disk indexes from before the merge fix may still
+            // carry ::stageN debris entries; never let them reach a tree.
+            if mediagit_versioning::is_stage_debris_key(&path_str) {
+                continue;
+            }
             let file_mode = if entry.mode & 0o111 != 0 {
                 FileMode::Executable
             } else {
@@ -199,11 +225,7 @@ impl CommitCmd {
             };
 
             // Use full path, not just filename
-            tree.add_entry(TreeEntry::new(
-                entry.path.to_string_lossy().to_string(),
-                file_mode,
-                entry.oid,
-            ));
+            tree.add_entry(TreeEntry::new(path_str.to_string(), file_mode, entry.oid));
         }
 
         let tree_bytes = tree.serialize()?;
@@ -218,34 +240,87 @@ impl CommitCmd {
             .await
             .unwrap_or_default();
 
+        // UX-6: refuse to author a commit as nobody.
+        //
+        // This used to fall back to `$USER`, then to the literal
+        // `Unknown <unknown@localhost>`. Two problems. `$USER` is unset on
+        // Windows (it is `USERNAME` there), so on this project's own primary
+        // platform essentially every unconfigured commit was authored
+        // "Unknown" — and commit authorship is immutable, so the loss is
+        // permanent and shows up only when someone reads the history later.
+        //
+        // The `$USER`-derived form is not a fix either: `alice@localhost` is a
+        // fabricated address that *looks* real, which is worse in a history
+        // than an honest refusal. Identity must be stated, not guessed.
         let (author_name, author_email) = if let Some(author_str) = &self.author {
-            // Parse "Name <email>" format from --author flag
-            if let (Some(lt), Some(gt)) = (author_str.rfind('<'), author_str.rfind('>')) {
-                let name = author_str[..lt].trim().to_string();
-                let email = author_str[lt + 1..gt].trim().to_string();
-                (name, email)
-            } else {
-                (author_str.clone(), "unknown@localhost".to_string())
+            match (author_str.rfind('<'), author_str.rfind('>')) {
+                (Some(lt), Some(gt)) if gt > lt => {
+                    let name = author_str[..lt].trim().to_string();
+                    let email = author_str[lt + 1..gt].trim().to_string();
+                    if name.is_empty() || email.is_empty() {
+                        anyhow::bail!("--author must be \"Name <email>\"; got {author_str:?}");
+                    }
+                    (name, email)
+                }
+                _ => anyhow::bail!(
+                    "--author must be \"Name <email>\"; got {author_str:?}. \
+                        Refusing rather than recording a placeholder address."
+                ),
             }
         } else {
-            let name = std::env::var("MEDIAGIT_AUTHOR_NAME").unwrap_or_else(|_| {
-                // Priority: config.toml [author].name > $USER > fallback
-                config.author.name.clone().unwrap_or_else(|| {
-                    std::env::var("USER").unwrap_or_else(|_| "Unknown".to_string())
-                })
-            });
-            let email = std::env::var("MEDIAGIT_AUTHOR_EMAIL").unwrap_or_else(|_| {
-                config.author.email.clone().unwrap_or_else(|| {
-                    // Derive email from $USER@localhost if available
-                    std::env::var("USER")
-                        .map(|u| format!("{}@localhost", u))
-                        .unwrap_or_else(|_| "unknown@localhost".to_string())
-                })
-            });
-            (name, email)
+            let name = std::env::var("MEDIAGIT_AUTHOR_NAME")
+                .ok()
+                .or_else(|| config.author.name.clone())
+                .filter(|n| !n.trim().is_empty());
+            let email = std::env::var("MEDIAGIT_AUTHOR_EMAIL")
+                .ok()
+                .or_else(|| config.author.email.clone())
+                .filter(|e| !e.trim().is_empty());
+
+            match (name, email) {
+                (Some(n), Some(e)) => (n, e),
+                _ => anyhow::bail!(
+                    "cannot commit: author identity is not configured.
+
+                     Commit authorship cannot be changed afterwards, so MediaGit                      will not guess it.
+
+                     Set it once:
+                     
+    mediagit config set author.name \"Your Name\"
+    mediagit config set author.email you@example.com
+                     
+or for a single command:
+                     
+    MEDIAGIT_AUTHOR_NAME=\"Your Name\"                      MEDIAGIT_AUTHOR_EMAIL=\"you@example.com\" mediagit commit ...
+                     
+or pass --author \"Your Name <you@example.com>\"."
+                ),
+            }
         };
 
-        let signature = Signature::now(author_name.clone(), author_email.clone());
+        // Apply --signoff if requested (append after author identity is resolved)
+        let message = if self.signoff {
+            let signoff_line = format!("Signed-off-by: {} <{}>", author_name, author_email);
+            // Only append if not already present
+            if message.contains(&signoff_line) {
+                message
+            } else {
+                format!("{}\n\n{}", message, signoff_line)
+            }
+        } else {
+            message
+        };
+
+        // Parse --date if provided, otherwise use current time
+        let signature = if let Some(date_str) = &self.date {
+            // Parse RFC3339 date format (e.g., "2026-01-15T10:30:00Z")
+            let date = chrono::DateTime::parse_from_rfc3339(date_str)
+                .with_context(|| format!("Invalid RFC3339 date format: {}", date_str))?;
+            let utc_date = date.with_timezone(&chrono::Utc);
+            Signature::new(author_name.clone(), author_email.clone(), utc_date)
+        } else {
+            Signature::now(author_name.clone(), author_email.clone())
+        };
 
         // Create commit object
         let commit = if let Some(parent) = parent_oid {
@@ -267,13 +342,22 @@ impl CommitCmd {
             .await
             .context("Failed to write commit object")?;
 
-        // Clear the index BEFORE updating refs for atomicity
-        // If ref update fails after this, user can re-stage and retry.
-        // This prevents the issue where ref is updated but index isn't cleared.
-        let mut index = Index::load(&repo_root)?;
-        let index_backup = index.clone();
-        index.clear();
-        index.save(&repo_root).context("Failed to clear index")?;
+        // VC-2: update the ref BEFORE clearing the index.
+        //
+        // This used to be the other way round, to avoid leaving a stale index
+        // if the ref write failed. But between clearing the index and writing
+        // the ref, the new commit/tree/blobs were reachable from *nothing* —
+        // not the index (just cleared) and not any ref (not yet written) — and
+        // gc has no grace period for freshly written objects. auto-gc fires
+        // after `add` and `commit`, so a gc landing in that window deleted the
+        // objects, and the ref write then published a commit whose tree and
+        // blobs no longer existed: an unrecoverable repo.
+        //
+        // Reordered, the failure modes swap for the better. If the ref write
+        // fails the index is untouched, so the user simply retries. If the
+        // index clear fails the commit has already succeeded and is safe; the
+        // index merely still lists entries that are now committed, which is
+        // cosmetic and self-corrects on the next add/commit.
 
         // Update HEAD reference
         let head_ref = refdb.read("HEAD").await?;
@@ -304,16 +388,24 @@ impl CommitCmd {
             _ => Err(anyhow::anyhow!("HEAD is in an invalid state")),
         };
 
-        // If ref update failed, restore the index backup
-        if let Err(e) = ref_update_result {
-            // Attempt to restore index - log but don't fail on restore error
-            if let Err(restore_err) = index_backup.save(&repo_root) {
-                tracing::error!(
-                    "Failed to restore index after ref update failure: {}",
-                    restore_err
+        // Ref write failed: the index was never touched, so the staged state
+        // is intact and the user can simply retry. No restore needed.
+        ref_update_result?;
+
+        // The commit is now durable and reachable. Clearing the index is
+        // bookkeeping — if it fails, warn but do not fail the commit, which
+        // has already succeeded.
+        {
+            let mut index = Index::load(&repo_root)?;
+            index.clear();
+            if let Err(e) = index.save(&repo_root) {
+                tracing::warn!(
+                    "Commit {} succeeded but the index could not be cleared: {}. \
+                     Staged entries will clear on the next add or commit.",
+                    commit_oid.to_hex(),
+                    e
                 );
             }
-            return Err(e);
         }
 
         // Record reflog entry for HEAD and the branch
@@ -329,16 +421,16 @@ impl CommitCmd {
         );
         // Best-effort: don't fail the commit if reflog write fails
         let _ = reflog.append("HEAD", &entry).await;
-        if let Ok(head_ref) = refdb.read("HEAD").await {
-            if let Some(branch) = head_ref.target {
-                let _ = reflog.append(&branch, &entry).await;
-            }
+        if let Ok(head_ref) = refdb.read("HEAD").await
+            && let Some(branch) = head_ref.target
+        {
+            let _ = reflog.append(&branch, &entry).await;
         }
 
         if !self.quiet {
             output::success(&format!("Created commit {}", commit_oid));
             if self.verbose {
-                output::detail("Message", message);
+                output::detail("Message", &message);
                 output::detail("Author", &format!("{} <{}>", author_name, author_email));
             }
         }
@@ -348,6 +440,65 @@ impl CommitCmd {
         let _ =
             crate::auto_gc::maybe_run(&repo_root, crate::auto_gc::TriggerMode::PostCommit).await;
 
+        // Emitted after auto-gc deliberately: it runs on every commit and its cost is
+        // part of what a commit actually charges the user, so excluding it would make
+        // the gate measure something no one experiences. No-op unless MEDIAGIT_BENCH=1.
+        mediagit_protocol::bench::emit_commit_summary(bench_wall_start, bench_files);
+
         Ok(())
     }
+}
+
+/// Open an editor (`$EDITOR`/`%EDITOR%`, else `notepad` on Windows or `vi`
+/// elsewhere) on a temp file seeded with a commented status hint, matching
+/// git's `-e` / no-message-source commit flow. Comment lines (starting with
+/// `#`) are stripped from the result; emptiness is validated by the caller.
+fn edit_commit_message() -> Result<String> {
+    let editor = std::env::var("EDITOR")
+        .or_else(|_| std::env::var("VISUAL"))
+        .unwrap_or_else(|_| {
+            if cfg!(windows) {
+                "notepad".to_string()
+            } else {
+                "vi".to_string()
+            }
+        });
+
+    let tmp_path =
+        std::env::temp_dir().join(format!("MEDIAGIT_COMMIT_EDITMSG_{}", std::process::id()));
+    std::fs::write(
+        &tmp_path,
+        "\n# Please enter the commit message for your changes. Lines starting\n\
+         # with '#' will be ignored, and an empty message aborts the commit.\n",
+    )
+    .context("Failed to create commit message temp file")?;
+
+    let status = std::process::Command::new(&editor)
+        .arg(&tmp_path)
+        .status()
+        .with_context(|| format!("Failed to launch editor: {}", editor));
+    let status = match status {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e);
+        }
+    };
+
+    if !status.success() {
+        let _ = std::fs::remove_file(&tmp_path);
+        anyhow::bail!("Editor exited with an error, aborting commit");
+    }
+
+    let content =
+        std::fs::read_to_string(&tmp_path).context("Failed to read commit message temp file")?;
+    let _ = std::fs::remove_file(&tmp_path);
+
+    let message = content
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Ok(message.trim().to_string())
 }

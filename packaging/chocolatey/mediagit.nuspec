@@ -12,7 +12,11 @@
     <iconUrl>https://mediagit.dev/icon.png</iconUrl>
     <copyright>2025 MediaGit Contributors</copyright>
     <licenseUrl>https://github.com/winnyboy5/mediagit-core/blob/main/LICENSE</licenseUrl>
-    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <!-- true, because BUSL-1.1 is source-available and restricts one class of
+         use (offering MediaGit to third parties as a competing service).
+         Telling the package manager no acceptance is needed while shipping a
+         licence that restricts use would be misleading. -->
+    <requireLicenseAcceptance>true</requireLicenseAcceptance>
     <projectSourceUrl>https://github.com/winnyboy5/mediagit-core</projectSourceUrl>
     <docsUrl>https://winnyboy5.github.io/mediagit-core</docsUrl>
     <bugTrackerUrl>https://github.com/winnyboy5/mediagit-core/issues</bugTrackerUrl>

@@ -22,12 +22,19 @@ For a detailed comparison, see [MediaGit vs Git-LFS](./vs-git-lfs.md).
 
 ## What file sizes are supported?
 
-MediaGit has no hard file size limit. In practice:
+MediaGit has no hard file size limit. Content-defined chunking (FastCDC)
+scales its average chunk size with the file size so chunk *count* stays
+manageable for very large files:
 
-- Files under 10 MB: stored as single objects with FastCDC chunking
-- Files 10–100 MB: split into 10–100 chunks with content-aware FastCDC
-- Files over 100 MB: split with StreamCDC into 100–2000 chunks
-- Files over 10 GB: supported; tested with 100 GB+ video files
+- Under 100 MB: ~1 MB average chunk (512 KB–4 MB range)
+- 100 MB – 10 GB: ~2 MB average chunk (1–8 MB range)
+- 10 GB – 100 GB: ~4 MB average chunk (1–16 MB range)
+- Over 100 GB: ~8 MB average chunk (1–32 MB range)
+
+Format-aware chunkers (MP4, MKV, GLB, STL, PLY, FBX, Blender, ...) use their
+own structure-based split instead of these generic tiers, up to a size cap
+(`MEDIAGIT_CONTAINER_CHUNK_CAP_MB`, default 100 MB) above which they fall
+back to plain content-defined chunking.
 
 Performance for large files benefits from the `--jobs` flag:
 
@@ -58,9 +65,10 @@ For CI/CD environments, use the same region as your runners to minimize latency 
 When you add a new version of a file that already exists in the repository, MediaGit computes a similarity score between the new file's chunks and the stored chunks. If the chunks are sufficiently similar, it stores only the difference (delta) rather than a full copy.
 
 Similarity thresholds vary by file type:
-- AI/PDF files: 15% similarity required
+- AI/PDF/PSD files: 15% similarity required
 - Office documents (docx, xlsx): 20% similarity required
-- General files: 80% similarity required
+- Text/code files (txt, py, rs, js, ...): 85% similarity required
+- Unknown/general files: 30% similarity required
 
 Delta chains are capped at depth 10 to prevent slow reads.
 
@@ -135,9 +143,14 @@ Concurrent writes to the same branch follow a push/pull model similar to Git.
 
 ## What compression algorithm does MediaGit use?
 
-Zstd (level 3 by default) for compressible formats, and Store (no compression) for already-compressed formats like JPEG, MP4, ZIP, PDF, and AI files. The algorithm is selected automatically per file type.
+MediaGit's `SmartCompressor` picks one of four strategies automatically per file type — you don't choose an algorithm yourself:
 
-You can tune the global level in `.mediagit/config.toml`:
+- **Store** (no recompression) for already-compressed formats: JPEG, PNG, MP4, ZIP, AI/InDesign, Office documents
+- **Zstd** (Best or Default level, depending on format) for uncompressed images (TIFF, RAW, EXR), PSD/3D models/creative project files, PDF/SVG, and as the safe fallback for unknown binary data
+- **Brotli** (Default level) for text/code formats (TXT, JSON, XML, YAML, TOML, CSV) — falls back to Zstd above 500 MB, where Brotli's encode cost stops paying off
+- **Zlib** only for internal Git-compatible objects (not used on media files)
+
+You can tune the global fallback level in `.mediagit/config.toml`:
 
 ```toml
 [compression]

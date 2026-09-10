@@ -1,21 +1,11 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 #![allow(missing_docs)]
 //! Versioning and object database for MediaGit
 //!
 //! This crate implements the core version control functionality:
-//! - Content-addressable object database with SHA-256 addressing
+//! - Content-addressable object database with BLAKE3 addressing
 //! - Automatic content deduplication
 //! - LRU caching for performance
 //! - Observable metrics for deduplication efficiency
@@ -24,7 +14,7 @@
 //!
 //! The object database (ODB) provides Git-compatible content-addressable storage:
 //!
-//! - **Content Addressing**: Objects are identified by SHA-256 hash of their content
+//! - **Content Addressing**: Objects are identified by BLAKE3 hash of their content
 //! - **Automatic Deduplication**: Identical content is stored only once
 //! - **LRU Caching**: Frequently accessed objects cached with Moka
 //! - **Pluggable Storage**: Works with any `StorageBackend` implementation
@@ -63,6 +53,9 @@
 
 pub mod hash;
 
+pub mod add_phases;
+pub mod atomic_write;
+mod bitmap;
 mod branch;
 mod checkout;
 pub mod chunking;
@@ -86,13 +79,16 @@ mod reflog;
 mod refs;
 mod revision;
 mod similarity;
+mod sparse;
 mod streaming_index;
 mod streaming_pack;
+mod tag_object;
 mod transaction;
 mod tree;
 
+pub use bitmap::{ReachabilityBitmap, bitmap_enabled, bitmap_key};
 pub use branch::{BranchInfo, BranchManager, DetachedHead};
-pub use checkout::{CheckoutManager, CheckoutStats};
+pub use checkout::{CheckoutManager, CheckoutStats, FreshCheckoutPlan};
 pub use chunking::{
     ChunkId, ChunkManifest, ChunkRef, ChunkStore, ChunkStoreStats, ChunkStrategy, ChunkType,
     CodecHint, ContentChunk, ContentChunker,
@@ -102,26 +98,29 @@ pub use config::{ChunkingStrategyConfig, StorageConfig};
 pub use conflict::{Conflict, ConflictDetector, ConflictSide, ConflictStats, ConflictType};
 pub use delta::{Delta, DeltaDecoder, DeltaEncoder};
 pub use diff::{ModifiedEntry, ThreeWayDiff, TreeDiff, TreeDiffer};
-pub use index::{Index, IndexEntry};
+pub use index::{Index, IndexEntry, is_stage_debris_key};
 pub use lca::{LcaFinder, LcaResult};
-pub use merge::{apply_merge_to_workdir, FastForwardInfo, MergeEngine, MergeResult, MergeStrategy};
+pub use merge::{FastForwardInfo, MergeEngine, MergeResult, MergeStrategy, apply_merge_to_workdir};
 pub use metrics::OdbMetrics;
 pub use object::ObjectType;
 pub use odb::{ObjectDatabase, RepackStats};
 pub use oid::{Oid, StorageKey};
 pub use pack::{
-    PackHeader, PackIndex, PackKind, PackMetadata, PackObjectEntry, PackReader, PackWriter,
+    DEFAULT_PACK_BYTES, DEFAULT_PACK_CHUNKS, PackHeader, PackIndex, PackKind, PackMetadata,
+    PackObjectEntry, PackReader, PackWriter, pack_bytes_cap, pack_chunks_cap,
 };
 pub use reachability::walk_reachable;
 pub use reflog::{Reflog, ReflogEntry};
-pub use refs::{normalize_ref_name, Ref, RefDatabase, RefType};
+pub use refs::{Ref, RefDatabase, RefType, normalize_ref_name};
 pub use revision::resolve_revision;
 pub use similarity::{ObjectMetadata, SimilarityDetector, SimilarityScore};
+pub use sparse::{SparseFilter, SparseMode};
 pub use streaming_index::StreamingPackIndex;
 pub use streaming_pack::{
     CloudChunkLoc, CloudPackResult, StreamingPackReader, StreamingPackWriter,
 };
-pub use transaction::{recover_incomplete_transactions, PackTransaction, RecoveryReport};
+pub use tag_object::Tag;
+pub use transaction::PackTransaction;
 pub use tree::{FileMode, Tree, TreeEntry};
 
 // Re-export fsck module

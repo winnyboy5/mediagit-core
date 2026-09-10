@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Comprehensive CLI Init Command Tests
 //!
@@ -25,7 +15,15 @@ use tempfile::TempDir;
 /// Helper to create mediagit command
 #[allow(deprecated)]
 fn mediagit() -> Command {
-    Command::cargo_bin("mediagit").unwrap()
+    {
+        // `commit` refuses an unconfigured identity (UX-6) instead of
+        // authoring as `Unknown <unknown@localhost>`, so tests declare one
+        // the way a real user would.
+        let mut c = Command::cargo_bin("mediagit").unwrap();
+        c.env("MEDIAGIT_AUTHOR_NAME", "Test User")
+            .env("MEDIAGIT_AUTHOR_EMAIL", "test@example.com");
+        c
+    }
 }
 
 // ============================================================================
@@ -64,7 +62,9 @@ fn test_init_with_path() {
 }
 
 #[test]
-fn test_init_bare_repository() {
+fn test_init_bare_is_compat_alias() {
+    // --bare is a documented compatibility alias (server-repo seeding across
+    // the QA harnesses): same .mediagit layout as a plain init.
     let temp_dir = TempDir::new().unwrap();
 
     mediagit()
@@ -74,8 +74,7 @@ fn test_init_bare_repository() {
         .assert()
         .success();
 
-    // Bare repos have objects directly in repo dir
-    assert!(temp_dir.path().join("objects").exists() || temp_dir.path().join(".mediagit").exists());
+    assert!(temp_dir.path().join(".mediagit").exists());
 }
 
 #[test]
@@ -260,11 +259,9 @@ fn test_init_nested_repos() {
 #[test]
 fn test_init_all_options() {
     let temp_dir = TempDir::new().unwrap();
-    let _template_dir = TempDir::new().unwrap();
 
     mediagit()
         .arg("init")
-        .arg("--bare")
         .arg("--initial-branch")
         .arg("main")
         .arg("--quiet")

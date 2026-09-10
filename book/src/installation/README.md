@@ -15,29 +15,29 @@ The install script automatically detects your OS and architecture and downloads 
 ### Linux (x86_64) — manual
 
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-x86_64-linux.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-x86_64-linux.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 ### macOS (Apple Silicon) — manual
 
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-aarch64-macos.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-aarch64-macos.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 ### Windows (x86_64 — PowerShell)
 
 ```powershell
-Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-x86_64-windows.zip" -OutFile mediagit.zip
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-x86_64-windows.zip" -OutFile mediagit.zip
 Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 ```
 
 ### Docker
 
 ```bash
-docker pull ghcr.io/winnyboy5/mediagit-core:0.2.8-beta.1
-docker run --rm ghcr.io/winnyboy5/mediagit-core:0.2.8-beta.1 mediagit --version
+docker pull ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.5
+docker run --rm ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.5 mediagit --version
 ```
 
 ### All Release Archives
@@ -86,41 +86,59 @@ After installation, verify MediaGit-Core is working:
 # Check version
 mediagit --version
 
-# Should output: mediagit-core 0.2.8-beta.1
+# Should output: mediagit-core 0.3.0-rc.5
 
-# Run self-test
-mediagit fsck --self-test
+# Verify a repository's integrity (run inside a repo)
+mediagit fsck --full
 
-# Should output: All checks passed ✓
+# Should output: ✅ Repository integrity: PERFECT
 ```
 
 ## Cloud Backend Setup (Optional)
 
-If you plan to use cloud storage backends (S3, Azure, GCS, etc.), you'll need:
+If you plan to use cloud storage backends (S3, Azure, GCS), credentials come
+from `.mediagit/config.toml`, not from the environment or a CLI-managed
+credential store — with one exception (GCS). See
+[Configuration Reference](../reference/config.md) for the full schema.
 
-### AWS S3
-```bash
-# Install AWS CLI
-# Configure credentials
-aws configure
+### AWS S3 (and S3-compatible / MinIO)
 
-# MediaGit will use AWS credentials automatically
+`aws configure` has no effect on MediaGit. Put the key and secret directly in
+`config.toml`:
+
+```toml
+[storage]
+backend = "s3"
+bucket = "my-bucket"
+region = "us-east-1"
+access_key_id = "..."
+secret_access_key = "..."
 ```
 
 ### Azure Blob Storage
-```bash
-# Install Azure CLI
-az login
 
-# MediaGit will use Azure credentials automatically
+`az login` has no effect on MediaGit. Put the credential in `config.toml` as
+a tagged `auth` table under `[storage]`, e.g. `account_key`:
+
+```toml
+[storage]
+backend = "azure"
+container = "my-container"
+auth = { type = "account_key", account_name = "...", account_key = "..." }
 ```
 
 ### Google Cloud Storage
+
+GCS is the one backend that genuinely picks up ambient credentials: if
+`credentials_path` is unset, MediaGit falls back to Application Default
+Credentials, which honours `GOOGLE_APPLICATION_CREDENTIALS` and
+`gcloud auth application-default login`.
+
 ```bash
 # Install gcloud CLI
-gcloud auth login
+gcloud auth application-default login
 
-# MediaGit will use gcloud credentials automatically
+# MediaGit will use ADC automatically
 ```
 
 ## Next Steps
@@ -153,5 +171,5 @@ Remove-Item "$env:LOCALAPPDATA\MediaGit" -Recurse -Force
 
 ### Docker
 ```bash
-docker rmi ghcr.io/winnyboy5/mediagit-core:0.2.8-beta.1
+docker rmi ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.5
 ```

@@ -1,22 +1,12 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use aws_sdk_s3::config::SharedHttpClient;
 use aws_smithy_http_client::tls::rustls_provider::CryptoMode;
-use aws_smithy_http_client::{tls, Builder};
+use aws_smithy_http_client::{Builder, tls};
 
 static SHARED_HTTP: OnceLock<SharedHttpClient> = OnceLock::new();
 
@@ -40,7 +30,7 @@ pub fn shared() -> SharedHttpClient {
 
             Builder::new()
                 .pool_idle_timeout(Duration::from_secs(pool_idle_secs))
-                .tls_provider(tls::Provider::Rustls(CryptoMode::AwsLc))
+                .tls_provider(tls::Provider::Rustls(CryptoMode::Ring))
                 .build_https()
         })
         .clone()

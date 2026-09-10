@@ -39,6 +39,10 @@ ehthumbs.db
 coverage/
 **/coverage/
 *.lcov
+# `*.lcov` does not match `lcov.info`, which is what cargo-llvm-cov and
+# grcov actually emit by default. Without this an accidental `git add`
+# could commit a multi-MB coverage report.
+lcov.info
 .nyc_output
 *.tar.gz
 *.zip
@@ -189,10 +193,20 @@ claudedocs/
 .taskmaster/
 .serena/
 .claude/
+.claude-flow/
+.swarm/
+.superpowers/
 .mcp.json
 test-files/
-docs/
-dev-tests/
+docs/*
+dev-tests/*
+!dev-tests/qa-suite/
+!dev-tests/qa-suite/scripts/lib/
+dev-tests/qa-suite/work/
+dev-tests/qa-suite/logs/
+dev-tests/qa-suite/reports/
+dev-tests/qa-suite/fixtures-synthetic/
+dev-tests/qa-suite/.venv/
 test-archives/
 
 # Storage emulator test data
@@ -201,3 +215,32 @@ test-archives/
 **/gcs_data/
 
 # Husky-rs hooks (already in .husky/)
+
+# Compat fixture (format-freeze gate): frozen bytes that MUST be tracked.
+# Overrides both `dev-tests/*` and `**/.mediagit/` above; placed last so these
+# negations win. See dev-tests/compat-fixture/README.md.
+!dev-tests/compat-fixture/
+!dev-tests/compat-fixture/**
+!dev-tests/compat-fixture/repo/.mediagit/
+!dev-tests/compat-fixture/repo/.mediagit/**
+
+# Dedup fixture generator. `dedup-corpus.txt` and `compare_dedup.ps1` are
+# already tracked, but the script that produces the v1/v2 pairs they reference
+# was not — so the manifest named fixtures nobody else could regenerate. The
+# pairs themselves stay ignored (573 MB of binaries); only the recipe is
+# tracked. Placed after `dev-tests/*` so the negation wins.
+!dev-tests/gen_dedup_pairs.py
+
+# Leaked-secret remediation 2026-07-18 — never re-track
+enc_key
+enc_key.pub
+
+# graphify
+graphify-out/
+.graphifyignore
+
+# docs/ is gitignored above, but docs/adr/ (ADRs, created lazily by
+# /domain-modeling) must be tracked. Placed last so this negation wins.
+# docs/agents/ (skill setup config) stays local-only, intentionally.
+!docs/adr/
+!docs/adr/**

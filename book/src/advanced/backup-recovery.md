@@ -8,15 +8,22 @@ A MediaGit repository consists of:
 
 ```
 .mediagit/
-├── objects/          # Content-addressable object database (chunks, trees, commits)
-├── manifests/        # Chunk manifests (postcard format) — index of all chunks per file
-├── refs/             # Branch and tag references
+├── objects/          # Content-addressable object store, namespaced per repo:
+│                     #   objects/<namespace>/objects/<h0:2>/<h2:4>/<hash>  (chunks, trees, commits, blobs)
+│                     #   objects/<namespace>/manifests/<oid>               (chunk manifests, postcard format)
+├── refs/             # Branch and tag references (refs/heads, refs/remotes, refs/tags)
+├── logs/             # Reflog (logs/HEAD, logs/refs/heads/<branch>) — needed to recover deleted branches
 ├── HEAD              # Current branch pointer
-├── config.toml       # Repository configuration
-└── stats/            # Operation statistics (non-critical)
+├── index             # Staging area
+└── config.toml       # Repository configuration
 ```
 
-The `objects/` directory is the most important — it contains all file content. `manifests/` and `refs/` are smaller but required for correct operation.
+There is no top-level `manifests/` or `stats/` directory — manifests live inside
+`objects/` as `manifests/<oid>` keys in the same object store, and repository
+statistics are computed on demand, not persisted
+(`crates/mediagit-cli/src/repo.rs:534-550`, `crates/mediagit-server/src/handlers/chunks.rs:286`).
+
+The `objects/` directory is the most important — it contains all file content. `refs/` and `logs/` are smaller but required for correct operation.
 
 ---
 
@@ -161,17 +168,17 @@ mediagit branch create recovered-branch <commit-hash>
 
 ### Lost-Found Recovery
 
-If objects become dangling (unreferenced) after a failed operation:
+If objects become dangling (unreferenced) after a failed operation, `fsck
+--lost-found` lists them — it does not write anything to disk. There is no
+`.mediagit/lost-found/` directory; nothing in the codebase creates one
+(confirmed: no `"lost-found"` path anywhere in `crates/`). The dangling
+objects are still present in `objects/` (fsck does not delete them); use
+`--lost-found` to see their OIDs, then inspect or re-attach them with
+`mediagit show <oid>` / `mediagit branch create`:
 
 ```bash
-# Find dangling objects
-mediagit fsck --dangling
-
-# Save them to lost-found
+# List dangling objects (printed to stdout, not saved anywhere)
 mediagit fsck --lost-found
-
-# Inspect what was saved
-ls .mediagit/lost-found/
 ```
 
 ---
@@ -193,8 +200,7 @@ For production environments managing large media repositories:
 The backup size equals the repository's stored object size. Check with:
 
 ```bash
-du -sh .mediagit/objects/
-du -sh .mediagit/manifests/
+du -sh .mediagit/objects/   # includes manifests — they live under objects/, not a separate dir
 du -sh .mediagit/   # total
 ```
 

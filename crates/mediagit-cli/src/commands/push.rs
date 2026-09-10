@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 use super::super::repo::{create_storage_backend, find_repo_root};
 use super::utils::validate_ref_name;
@@ -28,13 +18,21 @@ use std::time::Instant;
 /// Pushes local commits to a remote repository, updating the remote
 /// references to point to the new commits. This makes your local changes
 /// available to others.
+///
+/// By default, pushes only the current branch to the remote.
 #[derive(Parser, Debug)]
 #[command(after_help = "EXAMPLES:
-    # Push current branch to origin
+    # Push current branch to origin (default)
     mediagit push
 
     # Push specific branch to origin
     mediagit push origin main
+
+    # Push all branches
+    mediagit push --all
+
+    # Push all tags
+    mediagit push --tags
 
     # Push and set upstream tracking
     mediagit push -u origin feature-branch
@@ -99,6 +97,14 @@ pub struct PushCmd {
     /// Verbose mode
     #[arg(short, long)]
     pub verbose: bool,
+
+    /// Verify remote chunk integrity and force re-upload any chunk the
+    /// server reports as corrupted, using the local repo as the source of
+    /// truth. Runs even if refs are already up to date (that's the case a
+    /// poisoned remote needs). Always runs a full strong verify (BLAKE3
+    /// re-hash) — not gated by MEDIAGIT_STRONG_VERIFY.
+    #[arg(long)]
+    pub repair: bool,
 }
 
 impl PushCmd {
@@ -110,6 +116,7 @@ impl PushCmd {
 
         // Validate repository
         let repo_root = find_repo_root()?;
+
         let storage_path = repo_root.join(".mediagit");
         let storage = create_storage_backend(&repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
@@ -156,9 +163,52 @@ impl PushCmd {
         // Initialize protocol client. Honour [performance] upload_concurrency
         // from the repo config so users can tune parallel chunk fan-out
         // without setting MEDIAGIT_UPLOAD_CONCURRENCY in the env.
-        let mut client = mediagit_protocol::ProtocolClient::new(remote_url);
-        if let Some(n) = config.performance.upload_concurrency {
-            client = client.with_concurrent_uploads(n);
+        let (mut credentials, cred_source) =
+            crate::repo::resolve_credentials_tiered(&repo_root, &config, remote);
+        let build_client = |creds: mediagit_protocol::Credentials| {
+            let mut c =
+                mediagit_protocol::ProtocolClient::new(remote_url.clone()).with_credentials(creds);
+            if let Some(n) = config.performance.upload_concurrency {
+                c = c.with_concurrent_uploads(n);
+            }
+            c
+        };
+        let mut client = build_client(credentials.clone());
+
+        // DC-7/D4: an encrypted repository escrows its key with the remote
+        // before anything is uploaded.
+        //
+        // Push hands object bytes to storage over presigned PUT URLs, a path
+        // the server never sees the bytes on. Without the key it ends up
+        // holding objects it cannot verify, register, or hand back correctly
+        // -- which is why this refused outright until now. It costs one GET,
+        // including for unencrypted repositories: they used to pay nothing
+        // because they were not checked at all, which was the bug.
+        //
+        // Deliberately before the first object leaves: a remote that will not
+        // take the key must stop the push, not fail it halfway through.
+        //
+        // Both directions of mismatch are checked, and the check lives in one
+        // place (`encryption::verify_remote_key_compatible`) shared with fetch,
+        // pull and download -- this used to be push-only logic keyed on the
+        // LOCAL repository holding a key, which meant an unencrypted clone
+        // pushing to a keyed remote skipped it entirely and uploaded plaintext
+        // into a repository the server considered encrypted. Silently.
+        //
+        // A key the remote does not have comes back for escrowing; push is the
+        // only command that acts on that, because it is the only one that
+        // writes.
+        if let Some(key) =
+            crate::encryption::verify_remote_key_compatible(&repo_root, &client).await?
+        {
+            client.put_encryption_key(&key).await?;
+            if !self.quiet {
+                println!(
+                    "{} Escrowed this repository's encryption key with {}",
+                    style("🔑").cyan(),
+                    style(remote).yellow()
+                );
+            }
         }
 
         // Initialize ODB with smart compression for consistent read/write
@@ -181,8 +231,27 @@ impl PushCmd {
                 );
             }
 
-            // Get remote refs to find current OIDs for safety
-            let remote_refs = client.get_refs().await?;
+            // Get remote refs to find current OIDs for safety. First
+            // authenticated call of this command — a cached keychain
+            // credential may have expired; on a 401, invalidate it and
+            // retry once with the next tier (I11).
+            let remote_refs = match client.get_refs().await {
+                Ok(r) => r,
+                Err(e)
+                    if crate::repo::invalidate_on_unauthorized(
+                        &config,
+                        remote,
+                        cred_source,
+                        &e,
+                    ) =>
+                {
+                    credentials = crate::repo::resolve_credentials(&repo_root, &config, remote);
+                    client = build_client(credentials.clone());
+                    client.get_refs().await?
+                }
+                Err(e) => return Err(e),
+            };
+            crate::repo::remember_credentials(&config, remote, &credentials);
 
             let mut updates = Vec::new();
             for ref_name in &self.refspec {
@@ -226,9 +295,11 @@ impl PushCmd {
             let request = mediagit_protocol::RefUpdateRequest {
                 updates: updates.clone(),
                 force: self.force,
+                force_with_lease: self.force_with_lease,
             };
 
             let response = client.update_refs(request).await?;
+            crate::repo::remember_credentials(&config, remote, &credentials);
 
             // Report results
             for result in &response.results {
@@ -250,14 +321,19 @@ impl PushCmd {
                         .ref_name
                         .replace("refs/heads/", &format!("refs/remotes/{}/", remote));
                     if refdb.read(&tracking_ref).await.is_ok() {
-                        if let Err(e) = refdb.delete(&tracking_ref).await {
-                            tracing::warn!(
-                                "Failed to delete local tracking ref {}: {}",
-                                tracking_ref,
-                                e
-                            );
-                        } else if self.verbose {
-                            println!("  Cleaned up local tracking ref: {}", tracking_ref);
+                        match refdb.delete(&tracking_ref).await {
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to delete local tracking ref {}: {}",
+                                    tracking_ref,
+                                    e
+                                );
+                            }
+                            _ => {
+                                if self.verbose {
+                                    println!("  Cleaned up local tracking ref: {}", tracking_ref);
+                                }
+                            }
                         }
                     }
                 } else if !self.quiet {
@@ -342,8 +418,20 @@ impl PushCmd {
             resolved
         };
 
-        // Get remote refs to check current state
-        let remote_refs = client.get_refs().await?;
+        // Get remote refs to check current state (404 = repo not created yet,
+        // treated as empty). First authenticated call of this command — a
+        // cached keychain credential may have expired; on a 401, invalidate
+        // it and retry once with the next tier (I11).
+        let remote_refs = match client.get_refs_or_empty().await {
+            Ok(r) => r,
+            Err(e) if crate::repo::invalidate_on_unauthorized(&config, remote, cred_source, &e) => {
+                credentials = crate::repo::resolve_credentials(&repo_root, &config, remote);
+                client = build_client(credentials.clone());
+                client.get_refs_or_empty().await?
+            }
+            Err(e) => return Err(e),
+        };
+        crate::repo::remember_credentials(&config, remote, &credentials);
 
         // Append tag refs when --tags or --follow-tags is specified
         if self.tags || self.follow_tags {
@@ -354,26 +442,26 @@ impl PushCmd {
                 // Collect branch tips from refs_to_push
                 let mut branch_tips: Vec<mediagit_versioning::Oid> = Vec::new();
                 for branch_ref in &refs_to_push {
-                    if let Ok(r) = refdb.read(branch_ref).await {
-                        if let Some(oid) = r.oid {
-                            branch_tips.push(oid);
-                        }
+                    if let Ok(r) = refdb.read(branch_ref).await
+                        && let Some(oid) = r.oid
+                    {
+                        branch_tips.push(oid);
                     }
                 }
                 for tag_ref in all_tags {
-                    if let Ok(r) = refdb.read(&tag_ref).await {
-                        if let Some(tag_oid) = r.oid {
-                            // Include tag if its target is an ancestor of any branch tip
-                            let mut include = false;
-                            for tip in &branch_tips {
-                                if lca.is_ancestor(&tag_oid, tip).await.unwrap_or(false) {
-                                    include = true;
-                                    break;
-                                }
+                    if let Ok(r) = refdb.read(&tag_ref).await
+                        && let Some(tag_oid) = r.oid
+                    {
+                        // Include tag if its target is an ancestor of any branch tip
+                        let mut include = false;
+                        for tip in &branch_tips {
+                            if lca.is_ancestor(&tag_oid, tip).await.unwrap_or(false) {
+                                include = true;
+                                break;
                             }
-                            if include && !refs_to_push.contains(&tag_ref) {
-                                refs_to_push.push(tag_ref);
-                            }
+                        }
+                        if include && !refs_to_push.contains(&tag_ref) {
+                            refs_to_push.push(tag_ref);
                         }
                     }
                 }
@@ -397,6 +485,11 @@ impl PushCmd {
         // Build list of ref updates, skipping those already up-to-date
         let mut updates = Vec::new();
         let mut skipped_uptodate = 0;
+        // Local OIDs for every ref being pushed, collected regardless of
+        // up-to-date status. --repair needs the FULL set (not just refs with
+        // new commits) because a poisoned remote chunk is, by definition,
+        // one the server already believes it has.
+        let mut repair_commit_oids: Vec<mediagit_versioning::Oid> = Vec::new();
 
         for ref_to_push in &refs_to_push {
             // Validate ref name before pushing
@@ -408,6 +501,10 @@ impl PushCmd {
                 .oid
                 .ok_or_else(|| anyhow::anyhow!("Ref '{}' has no OID", ref_to_push))?;
 
+            if self.repair {
+                repair_commit_oids.push(local_oid);
+            }
+
             let remote_oid = remote_refs
                 .refs
                 .iter()
@@ -417,14 +514,14 @@ impl PushCmd {
             let local_oid_str = local_oid.to_hex();
 
             // Check if already up-to-date
-            if let Some(ref remote) = remote_oid {
-                if remote == &local_oid_str {
-                    skipped_uptodate += 1;
-                    if self.verbose {
-                        println!("  {} already up to date", ref_to_push);
-                    }
-                    continue;
+            if let Some(ref remote) = remote_oid
+                && remote == &local_oid_str
+            {
+                skipped_uptodate += 1;
+                if self.verbose {
+                    println!("  {} already up to date", ref_to_push);
                 }
+                continue;
             }
 
             updates.push(mediagit_protocol::RefUpdate {
@@ -467,6 +564,37 @@ impl PushCmd {
             }
         }
 
+        // --repair: strong-verify every chunk reachable from the pushed refs and
+        // force re-upload any the server reports as corrupted. Runs even when refs
+        // are already up to date - that's exactly the poisoned-remote scenario
+        // (BUG-RM-3), since ordinary push dedup never re-checks content once the
+        // server claims to already have a chunk.
+        if self.repair {
+            if !self.quiet {
+                println!("{} Verifying remote chunk integrity...", style("🔧").cyan());
+            }
+            let report = client
+                .repair_remote(&odb, repair_commit_oids.clone())
+                .await
+                .context("Remote chunk repair failed")?;
+            if !self.quiet {
+                println!(
+                    "  {} verified {} chunk(s): {} repaired, {} unrepairable",
+                    style("✓").green(),
+                    report.verified,
+                    report.repaired,
+                    report.unrepairable.len()
+                );
+                if !report.unrepairable.is_empty() {
+                    println!(
+                        "  {} unrepairable (missing/unreadable locally): {:?}",
+                        style("⚠").yellow(),
+                        &report.unrepairable[..report.unrepairable.len().min(5)]
+                    );
+                }
+            }
+        }
+
         // If all refs are up-to-date, exit early
         if updates.is_empty() {
             if !self.quiet {
@@ -492,59 +620,69 @@ impl PushCmd {
             let upload_pb_cb = Arc::clone(&upload_pb);
 
             let (result, push_stats) = client
-                .push_with_progress(&odb, updates.clone(), self.force, move |progress| {
-                    match progress.phase {
-                        PushPhase::Collecting => {
-                            if let Some(ref sp) = phase_spinner {
-                                let msg = if progress.total > 0 {
-                                    format!(
-                                        "Collecting... {}/{} objects",
-                                        progress.current, progress.total
-                                    )
-                                } else {
-                                    "Collecting objects...".to_string()
-                                };
-                                sp.set_message(msg);
-                            }
-                        }
-                        PushPhase::Packing => {
-                            if let Some(ref sp) = phase_spinner {
-                                let msg = if progress.total > 0 {
-                                    format!(
-                                        "Packing... {}/{} objects",
-                                        progress.current, progress.total
-                                    )
-                                } else {
-                                    "Generating pack...".to_string()
-                                };
-                                sp.set_message(msg);
-                            }
-                        }
-                        PushPhase::Uploading => {
-                            let mut guard = upload_pb_cb.lock().unwrap_or_else(|e| e.into_inner());
-                            if guard.is_none() {
-                                // Finish spinner, create bytes progress bar
+                .push_with_progress(
+                    &odb,
+                    updates.clone(),
+                    self.force,
+                    self.force_with_lease,
+                    move |progress| {
+                        match progress.phase {
+                            PushPhase::Collecting => {
                                 if let Some(ref sp) = phase_spinner {
-                                    sp.finish_and_clear();
+                                    let msg = if progress.total > 0 {
+                                        format!(
+                                            "Collecting... {}/{} objects",
+                                            progress.current, progress.total
+                                        )
+                                    } else {
+                                        "Collecting objects...".to_string()
+                                    };
+                                    sp.set_message(msg);
                                 }
-                                *guard = Some(tracker.push_bar(progress.total));
                             }
-                            if let Some(ref pb) = *guard {
-                                // Grow total dynamically as more objects are checked
-                                if progress.total > pb.length().unwrap_or(0) {
-                                    pb.set_length(progress.total);
+                            PushPhase::Packing => {
+                                if let Some(ref sp) = phase_spinner {
+                                    let msg = if progress.total > 0 {
+                                        format!(
+                                            "Packing... {}/{} objects",
+                                            progress.current, progress.total
+                                        )
+                                    } else {
+                                        "Generating pack...".to_string()
+                                    };
+                                    sp.set_message(msg);
                                 }
-                                // Reset ETA on large jumps (pack seals, object transitions)
-                                // so protocol overhead stalls don't produce "eta 231y".
-                                let prev = pb.position();
-                                if progress.current.saturating_sub(prev) > 1_048_576 {
-                                    pb.reset_eta();
+                            }
+                            PushPhase::Uploading => {
+                                let mut guard =
+                                    upload_pb_cb.lock().unwrap_or_else(|e| e.into_inner());
+                                if guard.is_none() {
+                                    // Finish spinner, create bytes progress bar
+                                    if let Some(ref sp) = phase_spinner {
+                                        sp.finish_and_clear();
+                                    }
+                                    *guard = Some(tracker.push_bar(progress.total));
                                 }
-                                pb.set_position(progress.current);
+                                if let Some(ref pb) = *guard {
+                                    // Grow total dynamically as more objects are checked
+                                    if progress.total > pb.length().unwrap_or(0) {
+                                        pb.set_length(progress.total);
+                                    }
+                                    // RP-3: pack seals *are* the unit of progress
+                                    // here — a pack's bytes are credited when its
+                                    // upload is confirmed, so every credit is a
+                                    // large jump. Resetting the ETA on each one
+                                    // meant the estimate came from a single 64 MiB
+                                    // step over near-zero elapsed time, i.e. the
+                                    // 747 MiB/s reading. Implausible ETAs are now
+                                    // rendered `--` (see progress::format_eta)
+                                    // rather than papered over here.
+                                    pb.set_position(progress.current);
+                                }
                             }
                         }
-                    }
-                })
+                    },
+                )
                 .await?;
 
             // Clean up whichever bar is still active
@@ -560,63 +698,61 @@ impl PushCmd {
                         .join("refs")
                         .join("tags")
                         .join(format!("{}.meta", tag_name));
-                    if meta_path.exists() {
-                        if let Ok(meta_bytes) = std::fs::read(&meta_path) {
-                            // Store meta as a blob in the ODB
-                            match odb.write(ObjectType::Blob, &meta_bytes).await {
-                                Ok(meta_oid) => {
-                                    // Upload the blob bytes to the server before registering
-                                    // the ref — update_refs only records the pointer, it does
-                                    // not transfer object data.
-                                    if let Ok(meta_raw) = odb.read(&meta_oid).await {
-                                        if let Err(e) = client
-                                            .upload_loose_object(
-                                                meta_oid,
-                                                ObjectType::Blob,
-                                                &meta_raw,
-                                            )
-                                            .await
-                                        {
-                                            tracing::warn!(
-                                                "Failed to upload tag meta blob for {}: {}",
-                                                tag_name,
-                                                e
-                                            );
-                                        }
-                                    }
-
-                                    // Push a ref pointing to this blob OID so server stores it
-                                    let meta_ref_name = format!("refs/tag-meta/{}", tag_name);
-                                    let remote_meta_oid = remote_refs
-                                        .refs
-                                        .iter()
-                                        .find(|r| r.name == meta_ref_name)
-                                        .map(|r| r.oid.clone());
-                                    let meta_update = mediagit_protocol::RefUpdate {
-                                        name: meta_ref_name,
-                                        old_oid: remote_meta_oid,
-                                        new_oid: meta_oid.to_hex(),
-                                        delete: false,
-                                    };
-                                    let meta_req = mediagit_protocol::RefUpdateRequest {
-                                        updates: vec![meta_update],
-                                        force: true,
-                                    };
-                                    if let Err(e) = client.update_refs(meta_req).await {
-                                        tracing::warn!(
-                                            "Failed to push tag meta ref for {}: {}",
-                                            tag_name,
-                                            e
-                                        );
-                                    }
-                                }
-                                Err(e) => {
+                    if meta_path.exists()
+                        && let Ok(meta_bytes) = std::fs::read(&meta_path)
+                    {
+                        // Store meta as a blob in the ODB
+                        match odb.write(ObjectType::Blob, &meta_bytes).await {
+                            Ok(meta_oid) => {
+                                // Upload the blob bytes to the server before registering
+                                // the ref — update_refs only records the pointer, it does
+                                // not transfer object data.
+                                if let Ok(meta_raw) = odb.read(&meta_oid).await
+                                    && let Err(e) = client
+                                        .upload_loose_object(meta_oid, ObjectType::Blob, &meta_raw)
+                                        .await
+                                {
                                     tracing::warn!(
-                                        "Failed to store tag meta blob for {}: {}",
+                                        "Failed to upload tag meta blob for {}: {}",
                                         tag_name,
                                         e
                                     );
                                 }
+
+                                // Push a ref pointing to this blob OID so server stores it
+                                let meta_ref_name = format!("refs/tag-meta/{}", tag_name);
+                                let remote_meta_oid = remote_refs
+                                    .refs
+                                    .iter()
+                                    .find(|r| r.name == meta_ref_name)
+                                    .map(|r| r.oid.clone());
+                                let meta_update = mediagit_protocol::RefUpdate {
+                                    name: meta_ref_name,
+                                    old_oid: remote_meta_oid,
+                                    new_oid: meta_oid.to_hex(),
+                                    delete: false,
+                                };
+                                let meta_req = mediagit_protocol::RefUpdateRequest {
+                                    updates: vec![meta_update],
+                                    force: true,
+                                    // Internal sidecar ref, not user-facing;
+                                    // no lease to honour.
+                                    force_with_lease: false,
+                                };
+                                if let Err(e) = client.update_refs(meta_req).await {
+                                    tracing::warn!(
+                                        "Failed to push tag meta ref for {}: {}",
+                                        tag_name,
+                                        e
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to store tag meta blob for {}: {}",
+                                    tag_name,
+                                    e
+                                );
                             }
                         }
                     }
@@ -709,15 +845,20 @@ impl PushCmd {
                     if let Ok(oid) = mediagit_versioning::Oid::from_hex(&update.new_oid) {
                         let tracking_ref =
                             mediagit_versioning::Ref::new_direct(tracking_ref_name.clone(), oid);
-                        if let Err(e) = refdb.write(&tracking_ref).await {
-                            if self.verbose {
-                                println!(
-                                    "  Warning: Failed to update tracking ref {}: {}",
-                                    tracking_ref_name, e
-                                );
+                        match refdb.write(&tracking_ref).await {
+                            Err(e) => {
+                                if self.verbose {
+                                    println!(
+                                        "  Warning: Failed to update tracking ref {}: {}",
+                                        tracking_ref_name, e
+                                    );
+                                }
                             }
-                        } else if self.verbose {
-                            println!("  Updated tracking ref: {}", tracking_ref_name);
+                            _ => {
+                                if self.verbose {
+                                    println!("  Updated tracking ref: {}", tracking_ref_name);
+                                }
+                            }
                         }
                     }
                 }
@@ -794,10 +935,10 @@ impl PushCmd {
         }
 
         // Save stats for later retrieval by stats command
-        if !self.dry_run {
-            if let Err(e) = stats.save(&storage_path) {
-                tracing::warn!("Failed to save operation stats: {}", e);
-            }
+        if !self.dry_run
+            && let Err(e) = stats.save(&storage_path)
+        {
+            tracing::warn!("Failed to save operation stats: {}", e);
         }
 
         Ok(())

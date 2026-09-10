@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Streaming pack file implementation for memory-efficient transfers
 //!
@@ -17,7 +7,7 @@
 //! incrementally without loading entire packs into memory.
 
 use crate::hash::Hasher;
-use crate::pack::{PackHeader, PackKind, PACK_HEADER_SIZE};
+use crate::pack::{PACK_HEADER_SIZE, PackHeader, PackKind};
 use crate::streaming_index::StreamingPackIndex;
 use crate::{ObjectType, Oid};
 use std::io;
@@ -31,6 +21,28 @@ const DELTA_MAGIC: &[u8; 5] = b"DELTA";
 /// Maximum allowed size for a single pack object (2 GB).
 /// Prevents OOM from corrupted or malicious pack data advertising huge sizes.
 const MAX_PACK_OBJECT_SIZE: usize = 2 * 1024 * 1024 * 1024;
+
+/// VC-7: reject an object the 4-byte pack size field cannot describe.
+///
+/// `write_object` stored `data.len() as u32` unchecked. An object at or above
+/// 4 GiB wrapped, so the header understated its length — and since the reader
+/// uses that field to find the *next* object, every subsequent object in the
+/// pack was misparsed. The pack stayed structurally plausible while decoding
+/// to wrong bytes, which is worse than a hard failure.
+///
+/// Takes a length rather than the slice so the bound is testable without
+/// allocating multiple gigabytes.
+fn ensure_writable_object_size(len: usize, oid: &Oid) -> io::Result<()> {
+    if len > MAX_PACK_OBJECT_SIZE {
+        return Err(io::Error::other(format!(
+            "pack object too large: {} bytes exceeds the {} byte limit (object {}). \
+             Writing it would truncate the 4-byte size field and corrupt every \
+             following object in the pack.",
+            len, MAX_PACK_OBJECT_SIZE, oid
+        )));
+    }
+    Ok(())
+}
 
 /// Streaming pack reader that processes objects incrementally
 pub struct StreamingPackReader<R: AsyncRead + Unpin> {
@@ -149,17 +161,12 @@ impl<R: AsyncRead + Unpin> StreamingPackReader<R> {
         }
 
         // Parse object type
-        let obj_type = match type_byte {
-            1 => ObjectType::Blob,
-            2 => ObjectType::Tree,
-            3 => ObjectType::Commit,
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("Invalid object type: {}", type_byte),
-                ))
-            }
-        };
+        let obj_type = ObjectType::from_u8(type_byte).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Invalid object type: {}", type_byte),
+            )
+        })?;
 
         // Calculate OID
         let oid = Oid::hash(&obj_data);
@@ -282,12 +289,23 @@ impl<W: AsyncWrite + Unpin> StreamingPackWriter<W> {
     ) -> io::Result<()> {
         let entry_offset = self.current_offset;
 
-        // Write object header
-        let type_byte: u8 = match obj_type {
-            ObjectType::Blob => 1,
-            ObjectType::Tree => 2,
-            ObjectType::Commit => 3,
-        };
+        // Write object header. `ObjectType::to_u8`/`from_u8` are the single
+        // source of truth for the wire byte value (matches `pack.rs`).
+        let type_byte: u8 = obj_type.to_u8();
+
+        // VC-7: refuse oversized objects instead of silently truncating.
+        //
+        // The size field is 4 bytes, and this was an unchecked `as u32`. An
+        // object at or above 4 GiB wrapped, so the header understated its
+        // length — and because the reader uses that field to find the *next*
+        // object, every subsequent object in the pack was misparsed. The pack
+        // stayed structurally plausible while decoding to wrong bytes, which
+        // is worse than a hard failure.
+        //
+        // The reader already refuses anything over `MAX_PACK_OBJECT_SIZE`
+        // (2 GiB), so enforcing the same bound here keeps writer and reader
+        // agreeing rather than producing packs this build cannot read back.
+        ensure_writable_object_size(data.len(), &oid)?;
 
         let size = data.len() as u32;
         let mut header = Vec::with_capacity(5);
@@ -339,11 +357,12 @@ impl<W: AsyncWrite + Unpin> StreamingPackWriter<W> {
         let chunk_index_offset: u64 = self.current_offset;
 
         // Finalize streaming index to get serialized bytes (count u32 + entries)
-        let index_bytes = if let Some(index) = self.index.take() {
-            index.finalize().await?
-        } else {
-            // Empty index still needs 4-byte count prefix
-            vec![0, 0, 0, 0]
+        let index_bytes = match self.index.take() {
+            Some(index) => index.finalize().await?,
+            _ => {
+                // Empty index still needs 4-byte count prefix
+                vec![0, 0, 0, 0]
+            }
         };
 
         // Write index bytes
@@ -434,10 +453,11 @@ impl StreamingPackWriter<tokio::fs::File> {
         let chunk_index_offset: u64 = self.current_offset;
 
         // Finalize the streaming index to get [count u32][entries 44B×N]
-        let index_bytes = if let Some(index) = self.index.take() {
-            index.finalize().await?
-        } else {
-            vec![0, 0, 0, 0]
+        let index_bytes = match self.index.take() {
+            Some(index) => index.finalize().await?,
+            _ => {
+                vec![0, 0, 0, 0]
+            }
         };
 
         // Write index bytes then chunk_index_offset pointer (no BLAKE3 yet)
@@ -509,15 +529,18 @@ impl StreamingPackWriter<tokio::fs::File> {
         }
 
         // Persist the tempfile so the caller can upload it before dropping.
-        let temp_path: PathBuf = if let Some(named_tf) = self.temp_named_file.take() {
-            let path = named_tf.path().to_path_buf();
-            // Prevent auto-delete: forget the NamedTempFile without running its destructor.
-            std::mem::forget(named_tf);
-            path
-        } else {
-            return Err(io::Error::other(
-                "Missing temp file handle in open-ended writer",
-            ));
+        let temp_path: PathBuf = match self.temp_named_file.take() {
+            Some(named_tf) => {
+                let path = named_tf.path().to_path_buf();
+                // Prevent auto-delete: forget the NamedTempFile without running its destructor.
+                std::mem::forget(named_tf);
+                path
+            }
+            _ => {
+                return Err(io::Error::other(
+                    "Missing temp file handle in open-ended writer",
+                ));
+            }
         };
 
         debug!(
@@ -712,5 +735,91 @@ mod tests {
 
         // Cleanup
         let _ = std::fs::remove_file(&result.temp_path);
+    }
+
+    /// C1: `generate_pack` (mediagit-protocol) moved the metadata pack from
+    /// an in-RAM `PackWriter` to a file-backed `StreamingPackWriter` so a
+    /// history-heavy push does not buffer the whole pack. This pins the two
+    /// producing byte-identical output for the same objects in the same
+    /// order — the uploaded bytes must not change, only how they're built.
+    #[tokio::test]
+    async fn streaming_writer_matches_pack_writer_bytes() {
+        let objects: Vec<(Oid, ObjectType, Vec<u8>)> = vec![
+            (
+                Oid::hash(b"commit-1"),
+                ObjectType::Commit,
+                b"commit-1-body".to_vec(),
+            ),
+            (
+                Oid::hash(b"tree-1"),
+                ObjectType::Tree,
+                b"tree-1-contents".to_vec(),
+            ),
+            (
+                Oid::hash(b"blob-1"),
+                ObjectType::Blob,
+                b"blob-1-contents-a-bit-longer-than-the-others".to_vec(),
+            ),
+        ];
+
+        let mut pack_writer = crate::pack::PackWriter::new();
+        for (oid, obj_type, data) in &objects {
+            pack_writer.add_object(*oid, *obj_type, data);
+        }
+        let expected = pack_writer.finalize();
+
+        let temp_dir = TempDir::new().unwrap();
+        let pack_path = temp_dir.path().join("streamed.pack");
+        let file = File::create(&pack_path).await.unwrap();
+        let mut writer = StreamingPackWriter::new(file, objects.len() as u32, temp_dir.path())
+            .await
+            .unwrap();
+        for (oid, obj_type, data) in &objects {
+            writer.write_object(*oid, *obj_type, data).await.unwrap();
+        }
+        writer.finalize().await.unwrap();
+
+        let actual = tokio::fs::read(&pack_path).await.unwrap();
+        assert_eq!(
+            actual, expected,
+            "streamed pack must be byte-identical to PackWriter output"
+        );
+    }
+
+    /// VC-7: nothing the writer accepts may overflow the 4-byte size field.
+    ///
+    /// Asserted on the bound itself rather than by writing a 4 GiB object,
+    /// which is not a runnable test. Together with the guard in
+    /// `write_object` this is what makes truncation unreachable: raise
+    /// `MAX_PACK_OBJECT_SIZE` past `u32::MAX` and this fails.
+    #[test]
+    fn accepted_object_sizes_always_fit_the_u32_size_field() {
+        assert!(
+            MAX_PACK_OBJECT_SIZE <= u32::MAX as usize,
+            "MAX_PACK_OBJECT_SIZE ({MAX_PACK_OBJECT_SIZE}) exceeds u32::MAX, so an \
+                object passing the size guard would still truncate its header"
+        );
+    }
+
+    #[test]
+    fn oversized_pack_object_is_rejected_rather_than_truncated() {
+        let oid = Oid::hash(b"vc7");
+
+        ensure_writable_object_size(MAX_PACK_OBJECT_SIZE, &oid)
+            .expect("an object at exactly the limit must be writable");
+
+        let err = ensure_writable_object_size(MAX_PACK_OBJECT_SIZE + 1, &oid)
+            .expect_err("an object over the limit must be refused");
+        assert!(
+            err.to_string().contains("pack object too large"),
+            "unexpected error: {err}"
+        );
+
+        // The size that actually motivated the guard: 4 GiB wraps to 0 under
+        // `as u32`, so the header would claim an empty object and every
+        // following object in the pack would be read from the wrong offset.
+        let four_gib = 4usize * 1024 * 1024 * 1024;
+        assert_eq!(four_gib as u32, 0, "premise of the guard");
+        assert!(ensure_writable_object_size(four_gib, &oid).is_err());
     }
 }

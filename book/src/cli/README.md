@@ -2,6 +2,57 @@
 
 MediaGit command-line interface reference documentation.
 
+## Command Taxonomy
+
+```mermaid
+graph LR
+    subgraph Setup
+        init
+        clone
+        remote
+    end
+    subgraph "File Ops"
+        add
+        commit
+        status
+        diff
+        show
+    end
+    subgraph "Branch & History"
+        branch
+        merge
+        rebase
+        cherry-pick
+        log
+        reset
+        revert
+        reflog
+        stash
+        bisect
+        tag
+    end
+    subgraph Remote
+        push
+        pull
+        fetch
+        auth
+    end
+    subgraph "Media & Sparse"
+        media
+        sparse-checkout
+    end
+    subgraph Utility
+        gc
+        fsck
+        verify
+        stats
+        config
+        lock
+        version
+        completions
+    end
+```
+
 ## Command Categories
 
 ### Core Commands
@@ -25,6 +76,7 @@ Working with branches:
 - [reset](./reset.md) - Reset current branch to a commit
 - [revert](./revert.md) - Revert a commit by creating an inverse commit
 - [tag](./tag.md) - Create and manage tags
+- [lock](./lock.md) - Manage server-enforced file locks
 
 ### Remote Operations
 Collaborating with remotes:
@@ -33,6 +85,11 @@ Collaborating with remotes:
 - [fetch](./fetch.md) - Fetch from remote without merging
 - [push](./push.md) - Push changes to remote
 - [pull](./pull.md) - Fetch and merge from remote
+- [download](./download.md) - Download a single file from a remote repository by path
+
+### Media and Working Tree
+- [media](./media.md) - Inspect media file metadata (image/video/audio/PSD/3D)
+- [sparse-checkout](./sparse-checkout.md) - Manage sparse checkout (partial working tree)
 
 ### History and Diagnostics
 Inspecting repository state:
@@ -44,6 +101,34 @@ Repository maintenance:
 - [fsck](./fsck.md) - File system check
 - [verify](./verify.md) - Verify object integrity
 - [stats](./stats.md) - Repository statistics
+
+### Other
+- `version` - Show version information
+- `completions` - Generate shell completions
+
+## Git-Compatibility Shims
+
+MediaGit preprocesses arguments before parsing to provide familiar git muscle-memory
+(`preprocess_args` in `crates/mediagit-cli/src/main.rs`):
+
+| You type | Becomes |
+|----------|---------|
+| `mediagit checkout <ref>` | `mediagit branch switch <ref>` |
+| `mediagit checkout -b <ref>` | `mediagit branch switch -c <ref>` |
+| `mediagit co <ref>` | `mediagit branch switch <ref>` |
+| `mediagit log -5` | `mediagit log -n 5` |
+| `mediagit reflog -5` | `mediagit reflog -n 5` |
+| `mediagit branch` (no args) | `mediagit branch list` |
+| `mediagit tag` (no args) | `mediagit tag list` |
+| `mediagit tag <name>` (unrecognized word) | `mediagit tag create <name>` |
+| `mediagit remote` (no args) | `mediagit remote list` |
+| `mediagit lock` (no args) | `mediagit lock list` |
+| `mediagit lock <path>` (unrecognized word) | `mediagit lock create <path>` |
+
+Note: `mediagit branch <name>` does **not** shim to `branch create <name>` — an
+unrecognized word after `branch` is left untouched and clap rejects it as an
+unrecognized subcommand (fixed as BUG-CLI-B2; `branch <name>` used to silently
+create a branch named after any typo).
 
 ## Global Options
 

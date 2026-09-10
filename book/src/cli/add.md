@@ -33,6 +33,9 @@ Add all modified and new files in the working directory.
 ### `-u, --update`
 Add only modified files that are already tracked (ignore new files).
 
+### `--ignore-removal`
+Stage additions and modifications but skip deleted files (do not stage deletions).
+
 ### `-n, --dry-run`
 Show what would be added without actually adding files.
 
@@ -160,7 +163,7 @@ $ mediagit status
 On branch main
 
 Changes to be committed:
-  (use "mediagit restore --staged <file>..." to unstage)
+  (use "mediagit reset <file>..." to unstage)
         new file:   video.mp4
         new file:   image.jpg
 ```
@@ -240,9 +243,20 @@ $ mediagit add --force important.tmp
 ✓ Staged 1 file(s)
 ```
 
+
+## Common options
+
+Accepted by this command in addition to the options above.
+
+| Flag | Description |
+|---|---|
+| `--color <WHEN>` | Colored output: `always`, `auto`, or `never` (default `auto`) |
+| `-C`, `--repository <PATH>` | Run as if invoked in `PATH` |
+| `-q`, `--quiet` | Suppress output |
+| `-h`, `--help` | Print help |
+| `-V`, `--version` | Print version |
 ## See Also
 
 - [mediagit status](./status.md) - Show the working tree status
 - [mediagit commit](./commit.md) - Record changes to the repository
-- [mediagit restore](./restore.md) - Restore working tree files
 - [mediagit diff](./diff.md) - Show changes between commits

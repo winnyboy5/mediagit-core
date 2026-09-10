@@ -20,7 +20,7 @@ The fast path lets the client upload chunk bytes directly to the storage bucket,
 | Bucket has a VPC-only policy (production default) | Expected on prod — proxy path is correct. No action needed. |
 | Corporate / ISP firewall blocks outbound S3 HTTPS | Use the proxy path (already the fallback). Or open egress to `*.s3.<region>.amazonaws.com:443`. |
 | S3 bucket policy restricts by IP | Add your machine's public IP: `aws s3api put-bucket-policy` with `aws:SourceIp` condition. |
-| MinIO behind private network | Ensure `MEDIAGIT_STORAGE_ENDPOINT` points to a publicly reachable MinIO host, or use proxy path. |
+| MinIO behind private network | Ensure the repo's `[storage] endpoint` in `.mediagit/config.toml` points to a host the client can reach, or use the proxy path. (There is no `MEDIAGIT_STORAGE_ENDPOINT` env var — storage settings are config-file only.) |
 
 **To verify connectivity from your machine:**
 ```bash
@@ -118,28 +118,55 @@ url = "http://media-server.example.com/my-project"
 
 ### S3 upload fails with "Access Denied"
 
-Verify your credentials are set (prefer environment variables over config file):
+Credentials come from `.mediagit/config.toml` — **not** from the environment.
+Exporting `AWS_ACCESS_KEY_ID` and friends does nothing, so if that is what you
+tried, the shell will look correctly configured while the push keeps failing.
+Check the file:
 
-```bash
-export AWS_ACCESS_KEY_ID=your-key
-export AWS_SECRET_ACCESS_KEY=your-secret
-export AWS_REGION=us-east-1
-
-mediagit push
+```toml
+[storage]
+backend = "s3"
+bucket = "my-media-bucket"
+region = "us-east-1"
+access_key_id = "AKIA..."
+secret_access_key = "..."
 ```
 
-For MinIO or other S3-compatible services, set the endpoint:
+Common causes, in the order worth checking:
 
-```bash
-export AWS_ENDPOINT_URL=http://localhost:9000
+1. `access_key_id` / `secret_access_key` absent from `[storage]` — the backend
+   refuses to start with "access key cannot be empty".
+2. Keys present but belonging to an identity without `s3:PutObject` on the
+   bucket or prefix.
+3. `region` not matching the bucket's actual region (SigV4 signs over region,
+   so a mismatch reads as an auth failure rather than a routing one).
+4. A misspelled key name. Unknown keys are **silently discarded**, so
+   `acces_key_id` is indistinguishable from having written nothing at all.
+
+For MinIO or other S3-compatible services, the `endpoint` key is what
+distinguishes them from real AWS — it belongs in the same `[storage]` block,
+not in the environment:
+
+```toml
+endpoint = "http://localhost:9000"
 ```
 
 ### Azure Blob upload fails
 
-```bash
-export AZURE_STORAGE_CONNECTION_STRING="DefaultEndpointsProtocol=https;AccountName=...;AccountKey=...;EndpointSuffix=core.windows.net"
-mediagit push
+`AZURE_STORAGE_CONNECTION_STRING`, `AZURE_STORAGE_ACCOUNT` and
+`AZURE_STORAGE_KEY` are not read. The credential is a tagged `auth` table in
+`.mediagit/config.toml`:
+
+```toml
+[storage]
+backend = "azure"
+container = "my-container"
+auth = { type = "connection_string", value = "DefaultEndpointsProtocol=https;AccountName=...;AccountKey=...;EndpointSuffix=core.windows.net" }
 ```
+
+If the error names the "removed flat format", the config still has
+`account_name` / `account_key` directly under `[storage]`; move them inside an
+`auth` block as above.
 
 ### Push times out on large files
 
@@ -296,11 +323,15 @@ Set the credentials path:
 export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
 ```
 
-For local testing with the fake-gcs-server emulator:
+For local testing with the fake-gcs-server emulator, MediaGit's own GCS
+integration tests set `STORAGE_EMULATOR_HOST` (for the Google SDK's benefit)
+rather than reading it as a documented user-facing knob:
 
 ```bash
-export GCS_EMULATOR_HOST=http://localhost:4443
+export STORAGE_EMULATOR_HOST=http://localhost:4443
 ```
+
+`GCS_EMULATOR_HOST` is not read anywhere in the codebase — setting it has no effect.
 
 ---
 

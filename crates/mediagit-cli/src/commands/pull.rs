@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 use super::super::repo::{collect_local_have, create_storage_backend, find_repo_root};
 use super::rebase::RebaseCmd;
@@ -40,9 +30,6 @@ use std::time::Instant;
     # Preview what would be pulled
     mediagit pull --dry-run
 
-    # Continue pull after resolving conflicts
-    mediagit pull --continue
-
 SEE ALSO:
     mediagit-push(1), mediagit-fetch(1), mediagit-merge(1), mediagit-rebase(1)")]
 pub struct PullCmd {
@@ -70,16 +57,16 @@ pub struct PullCmd {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Quit if conflicts occur
-    #[arg(long)]
+    /// Quit if conflicts occur (not yet implemented)
+    #[arg(long, hide = true)]
     pub no_commit: bool,
 
-    /// Abort pull
-    #[arg(long)]
+    /// Abort pull (not yet implemented; use `mediagit merge --abort`)
+    #[arg(long, hide = true)]
     pub abort: bool,
 
     /// Continue after resolving conflicts
-    #[arg(long)]
+    #[arg(long = "continue", alias = "continue-pull", hide = true)]
     pub continue_pull: bool,
 
     /// Quiet mode
@@ -93,6 +80,22 @@ pub struct PullCmd {
 
 impl PullCmd {
     pub async fn execute(&self) -> Result<()> {
+        // UX-5: both declared, neither read — `--abort` in particular looked
+        // like a way out of a bad pull and did nothing at all.
+        if self.abort {
+            anyhow::bail!(
+                "pull --abort is not yet implemented. A pull that stopped in \
+                    conflict left a merge in progress: use `mediagit merge --abort`."
+            );
+        }
+        if self.no_commit {
+            anyhow::bail!("pull --no-commit is not yet implemented.");
+        }
+        reject_dead_pull_flags(
+            self.continue_pull,
+            self.strategy.as_deref(),
+            self.strategy_option.as_deref(),
+        )?;
         let start_time = Instant::now();
         let mut stats = OperationStats::for_operation("pull");
         let progress = ProgressTracker::new(self.quiet);
@@ -145,13 +148,27 @@ impl PullCmd {
         // Initialize protocol client. Honour [performance] upload_concurrency
         // from the repo config so users can tune parallel chunk fan-out
         // without setting MEDIAGIT_UPLOAD_CONCURRENCY in the env.
-        let mut client = mediagit_protocol::ProtocolClient::new(remote_url);
-        if let Some(n) = config.performance.upload_concurrency {
-            client = client.with_concurrent_uploads(n);
-        }
-        if let Some(n) = config.performance.download_concurrency {
-            client = client.with_concurrent_downloads(n);
-        }
+        let (mut credentials, cred_source) =
+            crate::repo::resolve_credentials_tiered(&repo_root, &config, remote);
+        let build_client = |creds: mediagit_protocol::Credentials| {
+            let mut c =
+                mediagit_protocol::ProtocolClient::new(remote_url.clone()).with_credentials(creds);
+            if let Some(n) = config.performance.upload_concurrency {
+                c = c.with_concurrent_uploads(n);
+            }
+            if let Some(n) = config.performance.download_concurrency {
+                c = c.with_concurrent_downloads(n);
+            }
+            c
+        };
+        let mut client = build_client(credentials.clone());
+
+        // DC-7: refuse before any object moves when this repository and the
+        // remote disagree about encryption. Without it a sealed object arrived
+        // and failed deep in the compressor talking about MGEN envelopes, with
+        // nothing naming the actual problem. The returned key is push's
+        // business only -- read paths have nothing to escrow.
+        let _ = crate::encryption::verify_remote_key_compatible(&repo_root, &client).await?;
 
         // Initialize ODB with smart compression for consistent read/write
         let odb = Arc::new(mediagit_versioning::ObjectDatabase::with_smart_compression(
@@ -185,7 +202,19 @@ impl PullCmd {
         // NOTE: This runs BEFORE the "already up to date" check so users
         // always see new remote branches even when current branch is synced
         // ================================================================
-        let all_remote_refs = client.get_refs().await?;
+        // First authenticated call of this command — a cached keychain
+        // credential may have expired; on a 401, invalidate it and retry
+        // once with the next tier (I11).
+        let all_remote_refs = match client.get_refs().await {
+            Ok(r) => r,
+            Err(e) if crate::repo::invalidate_on_unauthorized(&config, remote, cred_source, &e) => {
+                credentials = crate::repo::resolve_credentials(&repo_root, &config, remote);
+                client = build_client(credentials.clone());
+                client.get_refs().await?
+            }
+            Err(e) => return Err(e),
+        };
+        crate::repo::remember_credentials(&config, remote, &credentials);
         let remote_branches: Vec<_> = all_remote_refs
             .refs
             .iter()
@@ -313,8 +342,7 @@ impl PullCmd {
                 let chunk_pb = progress.download_bar("Downloading large files", 0);
 
                 let chunk_pb_ref = chunk_pb.clone();
-                let mut last_bytes_done = 0u64;
-                let chunks_downloaded = client
+                let (chunks_downloaded, chunk_bytes) = client
                     .download_chunked_objects(
                         &odb,
                         &chunked_oids,
@@ -323,12 +351,16 @@ impl PullCmd {
                                 chunk_pb_ref.set_length(bytes_total);
                                 chunk_pb_ref.reset_eta();
                             }
-                            // Reset ETA on large jumps (end-of-object correction) so
-                            // the 5s inter-object delta-check stall doesn't produce "eta 231y".
-                            if bytes_done.saturating_sub(last_bytes_done) > 1_048_576 {
-                                chunk_pb_ref.reset_eta();
-                            }
-                            last_bytes_done = bytes_done;
+                            // RP-3: no longer resets the ETA on large jumps.
+                            // Progress is credited in pack/object-sized steps
+                            // by design, so a "large jump" is the normal unit
+                            // of progress, not an anomaly — discarding the
+                            // estimator's history on each one left the ETA
+                            // derived from a single huge delta, which is how a
+                            // WAN transfer displayed 747 MiB/s. The "eta 231y"
+                            // this guarded against is now handled where it
+                            // belongs, by rendering an implausible ETA as
+                            // `--` (see progress::format_eta).
                             chunk_pb_ref.set_position(bytes_done);
                             chunk_pb_ref.set_message(msg.to_string());
                         },
@@ -338,6 +370,9 @@ impl PullCmd {
                 chunk_pb.finish_with_message(format!("Downloaded {} chunks", chunks_downloaded));
 
                 stats.objects_received += chunks_downloaded as u64;
+                // RP-2: without this the summary's "↓" never appeared, so a
+                // pull that moved gigabytes reported no transfer at all.
+                stats.bytes_downloaded += chunk_bytes;
 
                 if !self.quiet {
                     println!(
@@ -386,19 +421,6 @@ impl PullCmd {
                 }
             }
 
-            let ref_update =
-                mediagit_versioning::Ref::new_direct(remote_ref.clone(), remote_oid_parsed);
-            refdb.write(&ref_update).await?;
-
-            if !self.quiet {
-                println!(
-                    "{} Updated {} to {}",
-                    style("✓").green(),
-                    remote_ref,
-                    &remote_oid[..8]
-                );
-            }
-
             // Integrate changes (merge or rebase) - ONLY if pulling the current branch
             // Check if we're pulling the current branch or a different one
             let is_pulling_current_branch = match &current_head_target {
@@ -406,7 +428,25 @@ impl PullCmd {
                 None => false, // Detached HEAD - don't auto-merge
             };
 
+            // Only write the local branch ref directly here when it's NOT the
+            // current branch. For the current branch, the local ref must only
+            // move as a RESULT of integration (fast-forward/rebase/merge)
+            // below, never before it -- writing it here would silently
+            // clobber a divergent local commit (BUG-RM-1).
             if !is_pulling_current_branch {
+                let ref_update =
+                    mediagit_versioning::Ref::new_direct(remote_ref.clone(), remote_oid_parsed);
+                refdb.write(&ref_update).await?;
+
+                if !self.quiet {
+                    println!(
+                        "{} Updated {} to {}",
+                        style("✓").green(),
+                        remote_ref,
+                        &remote_oid[..8]
+                    );
+                }
+
                 // Pulled a different branch - just update refs, don't merge into current
                 let branch_short = remote_ref
                     .strip_prefix("refs/heads/")
@@ -422,7 +462,34 @@ impl PullCmd {
             } else if self.rebase {
                 // Rebase integration using the RebaseCmd
                 let head = refdb.read("HEAD").await?;
-                if let Some(head_oid) = head.oid {
+                // HEAD is normally symbolic on a checked-out branch (oid: None,
+                // target: Some("refs/heads/<branch>")). Resolve the real head
+                // OID in that case instead of treating it as "no local commits"
+                // (BUG-RM-1: that wrongly took the fast-forward path and
+                // discarded divergent local commits).
+                let head_oid = match head.oid {
+                    Some(oid) => oid,
+                    None => refdb.resolve("HEAD").await?,
+                };
+
+                let lca_finder = mediagit_versioning::LcaFinder::new(Arc::clone(&odb));
+                if lca_finder
+                    .is_ancestor(&head_oid, &remote_oid_parsed)
+                    .await?
+                {
+                    // Local branch has no divergent commits -- plain fast-forward
+                    fast_forward_to(
+                        &refdb,
+                        &odb,
+                        &repo_root,
+                        &head,
+                        &remote_oid_parsed,
+                        &remote_oid,
+                        self.quiet,
+                        self.verbose,
+                    )
+                    .await?;
+                } else {
                     // Get upstream ref name (e.g., "origin/main" or just "main")
                     let upstream_name = if remote_ref.starts_with("refs/heads/") {
                         // Use remote tracking ref as upstream
@@ -441,9 +508,8 @@ impl PullCmd {
 
                     // Create and execute rebase command
                     let rebase_cmd = RebaseCmd {
-                        upstream: upstream_name,
+                        upstream: Some(upstream_name),
                         branch: None, // Rebase current branch
-                        interactive: false,
                         rebase_merges: false,
                         keep_empty: false,
                         autosquash: false,
@@ -459,8 +525,23 @@ impl PullCmd {
                     if !self.quiet {
                         println!("{} Rebased successfully", style("✓").green().bold());
                     }
-                } else {
-                    // No local commits — fast-forward
+                }
+            } else {
+                // Merge integration - only for CURRENT branch
+                let head = refdb.read("HEAD").await?;
+                // See rebase branch above: resolve symbolic HEAD to its real
+                // OID instead of treating it as "no local commits" (BUG-RM-1).
+                let head_oid = match head.oid {
+                    Some(oid) => oid,
+                    None => refdb.resolve("HEAD").await?,
+                };
+
+                let lca_finder = mediagit_versioning::LcaFinder::new(Arc::clone(&odb));
+                if lca_finder
+                    .is_ancestor(&head_oid, &remote_oid_parsed)
+                    .await?
+                {
+                    // Local branch has no divergent commits -- plain fast-forward
                     fast_forward_to(
                         &refdb,
                         &odb,
@@ -472,21 +553,21 @@ impl PullCmd {
                         self.verbose,
                     )
                     .await?;
-                }
-            } else {
-                // Merge integration - only for CURRENT branch
-                let head = refdb.read("HEAD").await?;
-                if let Some(head_oid) = head.oid {
+                } else {
+                    // WT-3: refuse before the merge writes anything. The merge
+                    // tree does not exist yet, so collisions cannot be checked
+                    // here — `target: None` limits this to uncommitted edits to
+                    // tracked files, which is the hazard a merge introduces.
+                    crate::worktree_guard::AtRisk::check(&repo_root, &odb, Some(&head_oid), None)
+                        .await?
+                        .ensure_clean("merge")?;
+
                     let merge_engine = mediagit_versioning::MergeEngine::new(Arc::clone(&odb));
 
                     if self.verbose {
                         let head_hex = head_oid.to_hex();
                         println!("  Merging {} into {}", &remote_oid[..8], &head_hex[..8]);
                     }
-
-                    // Parse remote OID
-                    let remote_oid_parsed = mediagit_versioning::Oid::from_hex(&remote_oid)
-                        .map_err(|e| anyhow::anyhow!("Invalid remote OID: {}", e))?;
 
                     let merge_result = merge_engine
                         .merge(&head_oid, &remote_oid_parsed, MergeStrategy::Recursive)
@@ -525,8 +606,14 @@ impl PullCmd {
                             refdb.write(&head_ref).await?;
                         }
 
-                        // Checkout working directory to match merge result
-                        let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
+                        // Checkout working directory to match merge result,
+                        // bounded to tracked paths so untracked work survives
+                        // the rewrite (WT-1).
+                        let tracked =
+                            crate::worktree_guard::tracked_paths(&repo_root, &odb, Some(&head_oid))
+                                .await?;
+                        let checkout_mgr =
+                            CheckoutManager::new(&odb, &repo_root).with_tracked_paths(tracked);
                         let files_count = checkout_mgr.checkout_commit(&commit_oid).await?;
                         if self.verbose {
                             println!("  Checked out {} files", files_count);
@@ -543,19 +630,6 @@ impl PullCmd {
                     } else {
                         anyhow::bail!("Merge failed: no tree result");
                     }
-                } else {
-                    // No local commits — fast-forward
-                    fast_forward_to(
-                        &refdb,
-                        &odb,
-                        &repo_root,
-                        &head,
-                        &remote_oid_parsed,
-                        &remote_oid,
-                        self.quiet,
-                        self.verbose,
-                    )
-                    .await?;
                 }
             }
         } else if !self.quiet {
@@ -569,10 +643,10 @@ impl PullCmd {
         }
 
         // Save stats for later retrieval by stats command
-        if !self.dry_run {
-            if let Err(e) = stats.save(&storage_path) {
-                tracing::warn!("Failed to save operation stats: {}", e);
-            }
+        if !self.dry_run
+            && let Err(e) = stats.save(&storage_path)
+        {
+            tracing::warn!("Failed to save operation stats: {}", e);
         }
 
         // Best-effort auto-gc: reclaims stale objects from partial fetches
@@ -599,6 +673,15 @@ async fn fast_forward_to(
     quiet: bool,
     verbose: bool,
 ) -> Result<()> {
+    // WT-1/WT-3: refuse *before* moving the ref. A fast-forward rewrites the
+    // working tree exactly like `merge`/`switch` do, and this is the ordinary
+    // outcome of a routine `pull` — so it was the most reachable path by which
+    // uncommitted edits were overwritten and untracked files deleted.
+    let head_oid = refdb.resolve("HEAD").await.ok();
+    crate::worktree_guard::AtRisk::check(repo_root, odb, head_oid.as_ref(), Some(oid))
+        .await?
+        .ensure_clean("pull")?;
+
     // Update the right ref — symbolic HEAD updates the target branch, detached
     // HEAD updates HEAD directly.
     if let Some(target) = &head.target {
@@ -609,8 +692,11 @@ async fn fast_forward_to(
         refdb.write(&head_ref).await?;
     }
 
-    // Checkout working directory to match new HEAD
-    let checkout_mgr = CheckoutManager::new(odb, repo_root);
+    // Checkout working directory to match new HEAD. Bounded to tracked paths so
+    // untracked work is never collateral, even though the guard above already
+    // refused on collisions (WT-1).
+    let tracked = crate::worktree_guard::tracked_paths(repo_root, odb, head_oid.as_ref()).await?;
+    let checkout_mgr = CheckoutManager::new(odb, repo_root).with_tracked_paths(tracked);
     let files_count = checkout_mgr.checkout_commit(oid).await?;
     if verbose {
         println!("  Checked out {} files", files_count);
@@ -625,4 +711,105 @@ async fn fast_forward_to(
     }
 
     Ok(())
+}
+
+/// Refuse `--continue`, `-s` and `-X` rather than accepting and ignoring them.
+///
+/// UX-5 already caught `--abort` and `--no-commit` here: declared, never read,
+/// and bailing now. These three survived that pass because they are `hide =
+/// true` and so appear in no `--help` output anyone reads - `continue_pull`,
+/// `strategy` and `strategy_option` are each read exactly zero times in this
+/// file.
+///
+/// `--continue` is the dangerous one. `--abort` at least did nothing visible;
+/// `pull --continue` after a conflicted pull performed an ordinary *new* pull
+/// and reported success, so the user believes they resumed the operation they
+/// were in the middle of. The failure is silent and the state is wrong.
+///
+/// `-s`/`-X` mirror the same defect already fixed in `merge`: a user who thinks
+/// they chose which side wins finds out from the merged content.
+///
+/// Extracted from `execute` so it is assertable - `execute` needs a real
+/// repository, and the one behaviour worth pinning is that these REFUSE rather
+/// than silently do nothing. Same reason `merge::reject_strategy_option`
+/// exists.
+fn reject_dead_pull_flags(
+    continue_pull: bool,
+    strategy: Option<&str>,
+    strategy_option: Option<&str>,
+) -> anyhow::Result<()> {
+    if continue_pull {
+        anyhow::bail!(
+            "pull --continue is not implemented in MediaGit.
+             It was accepted but never read, so it performed an ordinary pull
+             rather than resuming the one that stopped in conflict.
+             A pull that hit conflicts left a merge in progress: resolve the
+             files, then run 'mediagit merge --continue'."
+        );
+    }
+    if let Some(o) = strategy_option {
+        anyhow::bail!(
+            "pull -X/--strategy-option is not supported in MediaGit (got '{o}').
+             It was accepted but never applied, so passing it changed nothing."
+        );
+    }
+    if let Some(o) = strategy {
+        anyhow::bail!(
+            "pull -s/--strategy is not supported in MediaGit (got '{o}').
+             It was accepted but never applied, so passing it changed nothing.
+             MediaGit uses a binary-aware merge for media files; to choose a
+             strategy explicitly, merge separately with
+             'mediagit merge -s ours|theirs|recursive'."
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod dead_flag_tests {
+    use super::reject_dead_pull_flags;
+
+    /// The whole point: absent flags must not start failing pulls. Asserted
+    /// first because a guard that rejects everything would pass every test
+    /// below and break every real pull.
+    #[test]
+    fn ordinary_pull_is_unaffected() {
+        assert!(reject_dead_pull_flags(false, None, None).is_ok());
+    }
+
+    /// `--continue` silently performed a fresh pull and reported success, which
+    /// on a resume-after-conflict flag means the user believes the operation
+    /// they were in the middle of was completed.
+    #[test]
+    fn continue_is_refused_and_names_the_alternative() {
+        let e = reject_dead_pull_flags(true, None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("not implemented"), "{e}");
+        assert!(
+            e.contains("merge --continue"),
+            "must point at what does work: {e}"
+        );
+    }
+
+    #[test]
+    fn strategy_option_is_refused_and_echoes_the_value() {
+        let e = reject_dead_pull_flags(false, None, Some("ours"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("--strategy-option"), "{e}");
+        assert!(
+            e.contains("ours"),
+            "echo the value back so the user sees it was read: {e}"
+        );
+    }
+
+    #[test]
+    fn strategy_is_refused_and_echoes_the_value() {
+        let e = reject_dead_pull_flags(false, Some("recursive"), None)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("--strategy"), "{e}");
+        assert!(e.contains("recursive"), "{e}");
+    }
 }

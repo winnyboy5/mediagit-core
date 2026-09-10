@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Comprehensive CLI Stash Command Tests
 //!
@@ -27,7 +17,15 @@ use tempfile::TempDir;
 
 #[allow(deprecated)]
 fn mediagit() -> Command {
-    Command::cargo_bin("mediagit").unwrap()
+    {
+        // `commit` refuses an unconfigured identity (UX-6) instead of
+        // authoring as `Unknown <unknown@localhost>`, so tests declare one
+        // the way a real user would.
+        let mut c = Command::cargo_bin("mediagit").unwrap();
+        c.env("MEDIAGIT_AUTHOR_NAME", "Test User")
+            .env("MEDIAGIT_AUTHOR_EMAIL", "test@example.com");
+        c
+    }
 }
 
 fn init_repo(dir: &Path) {
@@ -271,4 +269,56 @@ fn test_stash_help() {
         .assert()
         .success()
         .stdout(predicate::str::contains("stash"));
+}
+
+// ============================================================================
+// Stash Clear Non-Interactive Safety Tests
+// ============================================================================
+
+#[test]
+fn test_stash_clear_non_interactive_requires_force() {
+    let temp_dir = TempDir::new().unwrap();
+    init_repo(temp_dir.path());
+
+    add_and_commit(
+        temp_dir.path(),
+        "file.txt",
+        "Initial content",
+        "Initial commit",
+    );
+
+    // Create a stash
+    fs::write(temp_dir.path().join("file.txt"), "Modified content").unwrap();
+    mediagit()
+        .arg("stash")
+        .arg("save")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+
+    // Verify stash exists
+    mediagit()
+        .arg("stash")
+        .arg("list")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("stash@{0}"));
+
+    // Try to clear without --force (non-interactive) - should fail
+    mediagit()
+        .arg("stash")
+        .arg("clear")
+        .current_dir(temp_dir.path())
+        .assert()
+        .failure();
+
+    // Verify stash is still intact after failed clear
+    mediagit()
+        .arg("stash")
+        .arg("list")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("stash@{0}"));
 }

@@ -1,0 +1,9 @@
+# QA-suite template - AWS S3. Tokens substituted by scripts\lib\remote.ps1.
+# Copied from dev-tests\dev-server\config.aws.toml with the real bucket/keys that were
+# checked into that file replaced by placeholder tokens (see remote.ps1 for env var names).
+[storage]
+backend = "s3"
+bucket = "{{BUCKET}}"
+region = "{{REGION}}"
+access_key_id = "{{ACCESS_KEY}}"
+secret_access_key = "{{SECRET_KEY}}"

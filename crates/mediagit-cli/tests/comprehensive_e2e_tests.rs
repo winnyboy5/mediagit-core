@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Comprehensive End-to-End Test Suite
 //!
@@ -22,15 +12,29 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
-#[cfg(windows)]
-const TEST_FILES_DIR: &str = "D:\\own\\saas\\mediagit-core\\test-files";
-#[cfg(not(windows))]
-const TEST_FILES_DIR: &str = "/mnt/d/own/saas/mediagit-core/test-files";
-
+// Fixture root. Resolved from the workspace root at runtime by
+// `TestPaths::test_files_dir()` — this used to be two cfg-gated absolute
+// paths baked to one developer's machine (`D:\own\...` /
+// `/mnt/d/own/...`), so on every other machine, CI included, the fixture
+// lookups silently missed and every media assertion below skipped.
+fn test_files_dir() -> std::path::PathBuf {
+    mediagit_test_utils::TestPaths::announce_fixture_root(
+        mediagit_test_utils::TestPaths::test_files_dir(),
+        "test-files/",
+    )
+}
 /// Helper to create mediagit command
 #[allow(deprecated)]
 fn mediagit() -> Command {
-    Command::cargo_bin("mediagit").unwrap()
+    {
+        // `commit` refuses an unconfigured identity (UX-6) instead of
+        // authoring as `Unknown <unknown@localhost>`, so tests declare one
+        // the way a real user would.
+        let mut c = Command::cargo_bin("mediagit").unwrap();
+        c.env("MEDIAGIT_AUTHOR_NAME", "Test User")
+            .env("MEDIAGIT_AUTHOR_EMAIL", "test@example.com");
+        c
+    }
 }
 
 /// Helper to initialize repository
@@ -40,7 +44,7 @@ fn init_repo(dir: &Path) {
 
 /// Copy test file to repository
 fn copy_test_file(test_file: &str, repo_dir: &Path, dest_name: &str) -> PathBuf {
-    let source = Path::new(TEST_FILES_DIR).join(test_file);
+    let source = test_files_dir().join(test_file);
     let dest = repo_dir.join(dest_name);
 
     if source.is_file() {

@@ -11,17 +11,13 @@ mediagit show [OPTIONS] [<object>]
 ## Description
 
 Shows a commit object (defaults to `HEAD`). Displays the commit's author, date,
-message, and a summary of file changes (added, modified, deleted). Use `--stat`
-to include per-file change counts, and `-v`/`--verbose` to include the tree OID
-and parent OIDs.
+message, and a summary of file changes (added, modified, deleted). Use
+`-v`/`--verbose` to include the tree OID and parent OIDs.
 
 ## Options
 
 #### `<object>`
 Object to show (commit OID, abbreviated hash, branch name, tag, or `HEAD`). Defaults to `HEAD`.
-
-#### `--stat`
-Show file change statistics alongside the commit.
 
 #### `-v`, `--verbose`
 Show additional details (tree OID, parent OIDs).
@@ -62,23 +58,6 @@ Date:   2024-01-14 09:15:47
  assets/logo_old.png | deleted
  assets/logo_new.png | new file
  2 file(s) changed, 1 added, 0 modified, 1 deleted
-```
-
-### Show with file statistics
-
-```bash
-$ mediagit show --stat
-commit a3c8f9d2e1b4f6a8c5d7e9f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1
-Author: Alice Developer <alice@example.com>
-Date:   2024-01-15 14:30:22
-
-    Add promotional video assets
-
----
- videos/promo_1080p.mp4 | new file
- videos/promo_4k.mp4    | new file
- metadata.json          | modified
- 3 file(s) changed, 2 added, 1 modified, 0 deleted
 ```
 
 ### Show with verbose detail (tree OID, parents)
@@ -135,6 +114,17 @@ mediagit show main          # branch tip
 MediaGit uses BLAKE3 for all objects. Full OIDs are 64 hexadecimal characters;
 abbreviated forms (first 7+ chars) are accepted wherever an OID is expected.
 
+
+## Common options
+
+Accepted by this command in addition to the options above.
+
+| Flag | Description |
+|---|---|
+| `--color <WHEN>` | Colored output: `always`, `auto`, or `never` (default `auto`) |
+| `-C`, `--repository <PATH>` | Run as if invoked in `PATH` |
+| `-h`, `--help` | Print help |
+| `-V`, `--version` | Print version |
 ## See Also
 
 - [mediagit log](./log.md) - Show commit history

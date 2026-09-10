@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 #![allow(missing_docs)] // internal test helper crate — not part of public API
 
@@ -30,7 +20,25 @@ pub mod repo;
 
 // Re-export commonly used items at crate root
 pub use assertions::*;
-pub use cli::{mediagit, MediagitCommand};
+pub use cli::{MediagitCommand, mediagit};
 pub use fixtures::TestFixtures;
 pub use platform::TestPaths;
 pub use repo::TestRepo;
+
+/// In-memory [`StorageBackend`](mediagit_storage::StorageBackend) for unit
+/// tests that need a storage backend without touching disk or network.
+/// Re-exported from `mediagit-storage` rather than reimplemented here.
+pub use mediagit_storage::mock::MockBackend as MockStorage;
+
+/// Test-only safe wrappers around edition-2024's now-`unsafe` env mutators.
+/// The `unsafe` is contained here so `forbid(unsafe_code)` crates can set env
+/// in tests. Callers MUST still serialize env access (process-global); this
+/// only relocates the unsafe, it does not make concurrent env mutation sound.
+#[allow(unsafe_code)]
+pub fn set_var<K: AsRef<std::ffi::OsStr>, V: AsRef<std::ffi::OsStr>>(key: K, val: V) {
+    unsafe { std::env::set_var(key, val) }
+}
+#[allow(unsafe_code)]
+pub fn remove_var<K: AsRef<std::ffi::OsStr>>(key: K) {
+    unsafe { std::env::remove_var(key) }
+}

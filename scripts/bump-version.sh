@@ -30,6 +30,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Read current version from Cargo.toml
 OLD=$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')
 
+# Escape the `.`s in the semver so the sed patterns below match the version
+# literally — otherwise "0.3.0" would also match "0x3y0". (`-` is literal in a
+# regex outside a bracket expression, so only dots need escaping.)
+OLD_RE="${OLD//./\\.}"
+
 if [ "$OLD" = "$NEW" ]; then
     echo "Version is already $NEW — nothing to do."
     exit 0
@@ -40,7 +45,7 @@ echo "Root: $ROOT"
 echo ""
 
 # 1. Cargo.toml workspace version (the single Rust source of truth)
-sed -i "0,/^version = \"$OLD\"/s//version = \"$NEW\"/" "$ROOT/Cargo.toml"
+sed -i "0,/^version = \"$OLD_RE\"/s//version = \"$NEW\"/" "$ROOT/Cargo.toml"
 echo "  ✓ Cargo.toml workspace version"
 
 # 2. Documentation files — replace version in URLs, archive names, examples
@@ -51,23 +56,35 @@ DOC_FILES=$(find "$ROOT" \
     -not -path '*/target/*' \
     -not -path '*/.git/*' \
     -not -path '*/CHANGELOG.md' \
+    -not -path '*/compat-fixture/*' \
+    -not -path '*/qa-suite/reports/*' \
     -not -path '*/claudedocs/*')
 
 count=0
 for f in $DOC_FILES; do
-    if grep -q "$OLD" "$f" 2>/dev/null; then
-        sed -i "s/$OLD/$NEW/g" "$f"
+    if grep -qF "$OLD" "$f" 2>/dev/null; then
+        sed -i "s/$OLD_RE/$NEW/g" "$f"
         count=$((count + 1))
         echo "  ✓ $(realpath --relative-to="$ROOT" "$f")"
     fi
 done
 echo "  Updated $count doc files"
 
+# 2b. Intra-workspace path dependencies that also carry a `version = "..."` pin.
+#     crates.io needs the pin, and it must track the workspace version — a stale
+#     one shipped in rc.4 prep because this step did not exist.
+for f in "$ROOT"/crates/*/Cargo.toml; do
+    if grep -q "version = \"$OLD\"" "$f" 2>/dev/null; then
+        sed -i "s/version = \"$OLD_RE\"/version = \"$NEW\"/g" "$f"
+        echo "  ✓ $(realpath --relative-to="$ROOT" "$f") (dependency pin)"
+    fi
+done
+
 # 3. Example config files
 EXAMPLE_CONFIGS=$(find "$ROOT/crates" -name '*.toml' -path '*/examples/*' 2>/dev/null || true)
 for f in $EXAMPLE_CONFIGS; do
-    if grep -q "$OLD" "$f" 2>/dev/null; then
-        sed -i "s/$OLD/$NEW/g" "$f"
+    if grep -qF "$OLD" "$f" 2>/dev/null; then
+        sed -i "s/$OLD_RE/$NEW/g" "$f"
         echo "  ✓ $(realpath --relative-to="$ROOT" "$f")"
     fi
 done

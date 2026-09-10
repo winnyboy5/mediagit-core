@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Metrics registry for tracking MediaGit operations
 
@@ -402,66 +392,61 @@ impl MetricsRegistry {
     }
 }
 
+/// Builds a placeholder metric for the [`Default`] fallback registry below.
+/// The hardcoded `"fallback"` name/help is a plain ASCII identifier, which
+/// always satisfies prometheus's metric-name grammar (see
+/// `is_valid_metric_name` in the `prometheus` crate), so construction here
+/// cannot fail in practice. Centralizing that invariant in one `.expect()`
+/// per metric kind — instead of a `.unwrap()` on every field — means the
+/// fallback path itself can never panic.
+fn fallback_counter() -> Counter {
+    Counter::new("fallback", "fallback").expect("hardcoded metric name is always valid")
+}
+
+fn fallback_gauge() -> Gauge {
+    Gauge::new("fallback", "fallback").expect("hardcoded metric name is always valid")
+}
+
+fn fallback_counter_vec(label_names: &[&str]) -> CounterVec {
+    CounterVec::new(Opts::new("fallback", "fallback"), label_names)
+        .expect("hardcoded metric name is always valid")
+}
+
+fn fallback_gauge_vec(label_names: &[&str]) -> GaugeVec {
+    GaugeVec::new(Opts::new("fallback", "fallback"), label_names)
+        .expect("hardcoded metric name is always valid")
+}
+
+fn fallback_histogram_vec(label_names: &[&str]) -> HistogramVec {
+    HistogramVec::new(HistogramOpts::new("fallback", "fallback"), label_names)
+        .expect("hardcoded metric name is always valid")
+}
+
 impl Default for MetricsRegistry {
     fn default() -> Self {
         Self::new().unwrap_or_else(|e| {
             warn!("Failed to create metrics registry: {}", e);
-            // Create a minimal fallback registry
+            // Minimal fallback registry: unregistered no-op metrics so a
+            // metrics failure never aborts the process.
             Self {
                 inner: Arc::new(MetricsRegistryInner {
                     registry: Registry::new(),
-                    dedup_bytes_written: Counter::new("fallback", "fallback").unwrap(),
-                    dedup_bytes_stored: Counter::new("fallback", "fallback").unwrap(),
-                    dedup_writes_avoided: Counter::new("fallback", "fallback").unwrap(),
-                    dedup_ratio: Gauge::new("fallback", "fallback").unwrap(),
-                    compression_ratio: GaugeVec::new(
-                        Opts::new("fallback", "fallback"),
-                        &["algorithm"],
-                    )
-                    .unwrap(),
-                    compression_bytes_saved: CounterVec::new(
-                        Opts::new("fallback", "fallback"),
-                        &["algorithm"],
-                    )
-                    .unwrap(),
-                    compression_original_bytes: CounterVec::new(
-                        Opts::new("fallback", "fallback"),
-                        &["algorithm"],
-                    )
-                    .unwrap(),
-                    compression_compressed_bytes: CounterVec::new(
-                        Opts::new("fallback", "fallback"),
-                        &["algorithm"],
-                    )
-                    .unwrap(),
-                    cache_hits: Counter::new("fallback", "fallback").unwrap(),
-                    cache_misses: Counter::new("fallback", "fallback").unwrap(),
-                    cache_hit_rate: Gauge::new("fallback", "fallback").unwrap(),
-                    operation_duration: HistogramVec::new(
-                        HistogramOpts::new("fallback", "fallback"),
-                        &["operation", "backend"],
-                    )
-                    .unwrap(),
-                    operation_total: CounterVec::new(
-                        Opts::new("fallback", "fallback"),
-                        &["operation", "backend", "status"],
-                    )
-                    .unwrap(),
-                    operation_errors: CounterVec::new(
-                        Opts::new("fallback", "fallback"),
-                        &["operation", "backend", "error_type"],
-                    )
-                    .unwrap(),
-                    backend_latency: HistogramVec::new(
-                        HistogramOpts::new("fallback", "fallback"),
-                        &["backend", "operation"],
-                    )
-                    .unwrap(),
-                    backend_throughput: GaugeVec::new(
-                        Opts::new("fallback", "fallback"),
-                        &["backend", "operation"],
-                    )
-                    .unwrap(),
+                    dedup_bytes_written: fallback_counter(),
+                    dedup_bytes_stored: fallback_counter(),
+                    dedup_writes_avoided: fallback_counter(),
+                    dedup_ratio: fallback_gauge(),
+                    compression_ratio: fallback_gauge_vec(&["algorithm"]),
+                    compression_bytes_saved: fallback_counter_vec(&["algorithm"]),
+                    compression_original_bytes: fallback_counter_vec(&["algorithm"]),
+                    compression_compressed_bytes: fallback_counter_vec(&["algorithm"]),
+                    cache_hits: fallback_counter(),
+                    cache_misses: fallback_counter(),
+                    cache_hit_rate: fallback_gauge(),
+                    operation_duration: fallback_histogram_vec(&["operation", "backend"]),
+                    operation_total: fallback_counter_vec(&["operation", "backend", "status"]),
+                    operation_errors: fallback_counter_vec(&["operation", "backend", "error_type"]),
+                    backend_latency: fallback_histogram_vec(&["backend", "operation"]),
+                    backend_throughput: fallback_gauge_vec(&["backend", "operation"]),
                 }),
             }
         })
@@ -476,6 +461,33 @@ mod tests {
     fn test_registry_creation() {
         let registry = MetricsRegistry::new();
         assert!(registry.is_ok());
+    }
+
+    #[test]
+    fn default_does_not_panic_when_called_twice() {
+        // Duplicate registration is the realistic way `MetricsRegistry::new`
+        // could fail; `Default` must survive that without panicking either
+        // time.
+        let _first = MetricsRegistry::default();
+        let _second = MetricsRegistry::default();
+    }
+
+    #[test]
+    fn fallback_metrics_never_panic() {
+        // Exercises the fallback constructors directly (the code path
+        // `Default::default` falls back to when `MetricsRegistry::new`
+        // errors), verifying they build usable, unregistered metrics
+        // without any `.unwrap()`-style panic.
+        assert_eq!(fallback_counter().get(), 0.0);
+        assert_eq!(fallback_gauge().get(), 0.0);
+        let counter_vec = fallback_counter_vec(&["algorithm"]);
+        assert_eq!(counter_vec.with_label_values(&["zstd"]).get(), 0.0);
+        let gauge_vec = fallback_gauge_vec(&["algorithm"]);
+        assert_eq!(gauge_vec.with_label_values(&["zstd"]).get(), 0.0);
+        let histogram_vec = fallback_histogram_vec(&["operation", "backend"]);
+        histogram_vec
+            .with_label_values(&["store", "fs"])
+            .observe(0.1);
     }
 
     #[test]

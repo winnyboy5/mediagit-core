@@ -1,0 +1,14 @@
+# QA-suite template - MinIO (S3-compatible, local dev). Tokens substituted by scripts\lib\remote.ps1.
+# Source: dev-tests\dev-server config pattern + dev-tests\standalone-deep-v11\scripts\run_remote.ps1.
+[storage]
+backend = "s3"
+bucket = "{{BUCKET}}"
+region = "{{REGION}}"
+access_key_id = "{{ACCESS_KEY}}"
+secret_access_key = "{{SECRET_KEY}}"
+endpoint = "{{ENDPOINT}}"
+# NOTE: `force_path_style` used to be set here and was never a TOML key -
+# S3Storage has no such field, so it was silently discarded. Path-style
+# addressing is switched on in code for any custom endpoint
+# (minio.rs:438 `.force_path_style(config.path_style)`), so MinIO already
+# gets it. Removed so `mediagit` stops warning about an unknown key.

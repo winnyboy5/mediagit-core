@@ -9,6 +9,12 @@ repository.workspace = true
 homepage.workspace = true
 documentation.workspace = true
 description = "Network push/pull/clone protocol implementation"
+# Not published to crates.io: distribution is cargo-dist binaries, Docker
+# images and GitHub releases. This also makes deny.toml's
+# `allow-wildcard-paths` apply to our own path deps (cargo-deny exempts
+# them only for non-public crates). Flip to `true` and add `version = ...`
+# beside every internal `path = ...` if crates.io publishing is turned on.
+publish = false
 
 [dependencies]
 # Workspace dependencies
@@ -20,12 +26,25 @@ tracing = { workspace = true }
 
 # Protocol-specific dependencies
 reqwest = { workspace = true }
+# reqwest uses `rustls-no-provider` (the workspace standardises on ring;
+# reqwest 0.13's plain `rustls` feature hard-wires aws-lc-rs), so a crypto
+# provider must be installed before any Client is built. `ensure_crypto_provider`
+# does that here, so consumers and test binaries cannot forget.
+# default-features = false keeps aws-lc-rs out of the tree.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 bytes = { workspace = true }
 tokio-util = { version = "0.7", features = ["io"] }
 futures = "0.3"
 
 tempfile = { workspace = true }
+hex = { workspace = true }
+# DC-7/D4: the repo key passes through this crate on its way to and from the
+# remote's escrow endpoint; it must not be left in a dropped heap buffer.
+zeroize = "1.8"
 
 # Internal dependencies
 mediagit-versioning = { path = "../mediagit-versioning" }
 
+[dev-dependencies]
+# Synthesising responses for the 429-backoff tests without a live server.
+http = "1"

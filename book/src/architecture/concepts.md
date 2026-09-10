@@ -120,7 +120,7 @@ MediaGit employs intelligent compression based on file type:
 ```
 .psd, .psb → zstd level 3 (preserve layers)
 .mp4, .mov → store (already compressed)
-.txt, .md  → brotli level 6 (high text compression)
+.txt, .md  → brotli level 9 (Default; falls back to zstd above 500 MB)
 .blend     → zstd + delta (frequently updated 3D scenes)
 ```
 
@@ -177,11 +177,16 @@ MediaGit provides multiple merge strategies:
 - **Result**: Merge commit with two parents
 - **Use**: Concurrent work on different files
 
-### 3. Media-Aware Merge
+### 3. Media-Aware Conflict Detection (not an auto-merge)
 - **When**: Merging structured media (PSD, video, audio)
-- **Action**: Parse file format, merge layers/tracks/channels
-- **Result**: Merged media file preserving structure
-- **Use**: Collaborative media editing
+- **Action**: Parse file format, compare layers/tracks/channels to detect whether edits overlap
+- **Result**: A conflict is reported; MediaGit checks out one side into the
+  working tree so the file stays valid (conflict markers can't be inlined
+  into binary content). It cannot **write** a merged file back — PSD writing
+  is unsupported by the parser it uses, and video/audio would need
+  re-encoding. You resolve by producing the file you want and `mediagit add`
+  it.
+- **Use**: Detecting whether concurrent media edits actually conflict, before manual resolution
 
 ### 4. Rebase
 - **When**: Want linear history
@@ -197,18 +202,12 @@ Layer 1: Blue Background
 ```
 
 ### Media Conflicts
-MediaGit detects conflicting layers in PSD files:
-```
-Conflict in large-file.psd:
-  - Layer "Background" modified in both branches
-  - Your version: Blue (#0000FF)
-  - Their version: Red (#FF0000)
-
-Resolution options:
-  1. Keep yours (blue)
-  2. Keep theirs (red)
-  3. Manual merge (open in Photoshop)
-```
+MediaGit's `mediagit media info` can report which PSD layers (or video/audio
+tracks) changed on each side, but `mediagit merge` itself does not present an
+interactive resolution menu. On a conflicting binary file it checks out one
+side into the working tree; you resolve by producing the file you want
+(e.g. by opening it in Photoshop) and running `mediagit add` on it, which
+clears the conflict.
 
 ## Storage Abstraction
 
@@ -216,14 +215,13 @@ MediaGit separates storage interface from implementation:
 
 ```mermaid
 graph TB
-    App[Application Code] --> Trait[Backend Trait]
+    App[Application Code] --> Trait[StorageBackend Trait]
     Trait --> Local[LocalBackend]
     Trait --> S3[S3Backend]
     Trait --> Azure[AzureBackend]
-    Trait --> GCS[GCSBackend]
-    Trait --> B2[B2Backend]
+    Trait --> GCS[GcsBackend]
+    Trait --> B2Spaces[B2SpacesBackend<br/>B2 + DO Spaces]
     Trait --> MinIO[MinIOBackend]
-    Trait --> Spaces[SpacesBackend]
 
     style Trait fill:#e1f5ff
 ```
@@ -231,12 +229,14 @@ graph TB
 ### Backend Trait
 ```rust
 #[async_trait]
-pub trait Backend: Send + Sync {
+pub trait StorageBackend: Send + Sync + Debug {
     async fn get(&self, key: &str) -> Result<Vec<u8>>;
     async fn put(&self, key: &str, data: &[u8]) -> Result<()>;
     async fn exists(&self, key: &str) -> Result<bool>;
     async fn delete(&self, key: &str) -> Result<()>;
-    async fn list(&self, prefix: &str) -> Result<Vec<String>>;
+    async fn list_objects(&self, prefix: &str) -> Result<Vec<String>>;
+    async fn head(&self, key: &str) -> Result<Option<u64>>;
+    // + presign_put / presign_get / MPU trio (default Ok(None), overridden per backend)
 }
 ```
 
@@ -260,15 +260,18 @@ Over time, unreachable objects accumulate (orphaned by branch deletion, rebases,
 3. **Repack Phase**: Optimize delta chains, recompress
 
 ### Safety
-- Preserves recent objects (default: 2 weeks grace period)
-- Dry-run mode to preview deletions
+- Dry-run mode to preview deletions (`mediagit gc --dry-run`)
 - Backup recommended before aggressive GC
+- No time-based prune grace period is implemented — `gc` has no way to tell
+  how recently an object was written, so it relies entirely on reachability
+  from refs/reflog rather than object age. Deleting an object still being
+  written by a concurrent `add`/`push`/rebase is a known, unmitigated race.
 
 ## Repository Structure
 
 ```
 .mediagit/
-├── config                  # Repository configuration
+├── config.toml             # Repository configuration
 ├── HEAD                    # Current branch pointer
 ├── refs/
 │   ├── heads/             # Branch pointers
@@ -276,11 +279,11 @@ Over time, unreachable objects accumulate (orphaned by branch deletion, rebases,
 │   │   └── feature-branch
 │   └── tags/              # Tag pointers
 │       └── v1.0
-├── objects/               # Object database (CAS)
-│   ├── 5a/
-│   │   └── 91b5b522...   # Blob object
-│   └── f3/
-│       └── a5d3c1e8...   # Tree object
+├── objects/               # Object database (CAS), two-level hash fanout
+│   ├── 5a/91/
+│   │   └── b522...        # Blob object
+│   └── f3/a5/
+│       └── d3c1e8...      # Tree object
 └── logs/                  # Reflog (operation history)
     └── HEAD
 ```

@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Custom test assertions for MediaGit tests.
 //!
@@ -104,7 +94,7 @@ pub fn assert_on_branch(repo_path: &Path, branch_name: &str) {
 /// Assert that a mediagit command succeeds.
 #[macro_export]
 macro_rules! assert_mediagit_success {
-    ($repo:expr, $($arg:expr),+ $(,)?) => {
+    ($repo:expr_2021, $($arg:expr_2021),+ $(,)?) => {
         $crate::mediagit()
             $(.arg($arg))+
             .current_dir($repo.path())
@@ -116,7 +106,7 @@ macro_rules! assert_mediagit_success {
 /// Assert that a mediagit command fails.
 #[macro_export]
 macro_rules! assert_mediagit_failure {
-    ($repo:expr, $($arg:expr),+ $(,)?) => {
+    ($repo:expr_2021, $($arg:expr_2021),+ $(,)?) => {
         $crate::mediagit()
             $(.arg($arg))+
             .current_dir($repo.path())
@@ -128,7 +118,7 @@ macro_rules! assert_mediagit_failure {
 /// Assert that a mediagit command output contains a specific string.
 #[macro_export]
 macro_rules! assert_mediagit_output_contains {
-    ($repo:expr, $expected:expr, $($arg:expr),+ $(,)?) => {
+    ($repo:expr_2021, $expected:expr_2021, $($arg:expr_2021),+ $(,)?) => {
         $crate::mediagit()
             $(.arg($arg))+
             .current_dir($repo.path())

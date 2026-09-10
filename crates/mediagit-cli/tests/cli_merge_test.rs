@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Comprehensive CLI Merge Command Tests
 //!
@@ -23,7 +13,15 @@ use tempfile::TempDir;
 
 #[allow(deprecated)]
 fn mediagit() -> Command {
-    Command::cargo_bin("mediagit").unwrap()
+    {
+        // `commit` refuses an unconfigured identity (UX-6) instead of
+        // authoring as `Unknown <unknown@localhost>`, so tests declare one
+        // the way a real user would.
+        let mut c = Command::cargo_bin("mediagit").unwrap();
+        c.env("MEDIAGIT_AUTHOR_NAME", "Test User")
+            .env("MEDIAGIT_AUTHOR_EMAIL", "test@example.com");
+        c
+    }
 }
 
 fn init_repo(dir: &Path) {
@@ -445,4 +443,92 @@ fn test_merge_verbose() {
         .current_dir(temp_dir.path())
         .assert()
         .success();
+}
+
+// ============================================================================
+// QA-002 regression: `merge --continue-merge` must not leave `::stageN`
+// conflict-index debris in the committed tree, and a later branch switch
+// must not try to materialize a `file.bin::stage1`-style colon path (illegal
+// on Windows, os error 123).
+// ============================================================================
+
+#[test]
+fn test_merge_continue_purges_stage_debris_and_branch_switch_round_trips() {
+    let temp_dir = TempDir::new().unwrap();
+    init_repo(temp_dir.path());
+
+    // Base commit on main.
+    add_and_commit(temp_dir.path(), "file.bin", "base content", "base");
+
+    // Diverge on `side`.
+    create_and_switch_branch(temp_dir.path(), "side");
+    add_and_commit(temp_dir.path(), "file.bin", "side content", "side change");
+
+    // Diverge differently on `main` (real 3-way conflict, common base present).
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("main")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    add_and_commit(temp_dir.path(), "file.bin", "main content", "main change");
+
+    // Merging `side` into `main` must conflict.
+    mediagit()
+        .arg("merge")
+        .arg("side")
+        .current_dir(temp_dir.path())
+        .assert()
+        .failure();
+
+    // Resolve and continue the merge.
+    fs::write(temp_dir.path().join("file.bin"), "resolved content").unwrap();
+    mediagit()
+        .arg("add")
+        .arg("file.bin")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("merge")
+        .arg("--continue")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+
+    // The committed merge tree must not contain any `::stageN` debris paths.
+    let show = mediagit()
+        .arg("show")
+        .arg("HEAD")
+        .current_dir(temp_dir.path())
+        .output()
+        .unwrap();
+    let show_text = String::from_utf8_lossy(&show.stdout);
+    assert!(
+        !show_text.contains("::stage"),
+        "committed tree must not contain stage-debris entries: {show_text}"
+    );
+
+    // Branch-switch round trip: away to `side` (no debris in its tree), then
+    // back to `main` (the merge commit's tree). Pre-fix this failed with
+    // "os error 123" trying to materialize `file.bin::stage1/2`.
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("side")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .arg("branch")
+        .arg("switch")
+        .arg("main")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+
+    assert!(temp_dir.path().join("file.bin").exists());
+    assert!(!temp_dir.path().join("file.bin::stage1").exists());
+    assert!(!temp_dir.path().join("file.bin::stage2").exists());
 }

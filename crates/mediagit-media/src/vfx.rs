@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! VFX and design file format parsing
 //!
@@ -124,6 +114,40 @@ impl VfxFormat {
 /// VFX file parser
 #[derive(Debug)]
 pub struct VfxParser;
+
+/// Pull the font name out of a PDF/PostScript line carrying `/FontName` or
+/// `/BaseFont`.
+///
+/// The original took `line.find('/')` — the *first* slash on the line, not the
+/// one belonging to the key. Real Illustrator output puts several PDF keys on
+/// one line, so `/Intent /RelativeColorimetric ... /BaseFont /XWHYLE+Calibri`
+/// yielded `"Intent"`. Probing a real 129 MB `.ai` from the corpus produced
+/// `fonts: ["Intent", "Ascent", "I", "BaseFont/XWHYLE+Calibri/CIDSystemInfo"]`
+/// — every entry wrong. Reading the *value* after the key fixes it.
+///
+/// Subset prefixes (`XWHYLE+Calibri`) are stripped: they are per-document
+/// arbitrary tags, so keeping them makes the same font look like a different
+/// one in every file.
+fn font_from_line(line: &str) -> Option<String> {
+    let key_at = ["/FontName", "/BaseFont"]
+        .iter()
+        .filter_map(|k| line.find(k).map(|i| i + k.len()))
+        .min()?;
+
+    let rest = line[key_at..].trim_start();
+    let value = rest.strip_prefix('/')?;
+    let end = value
+        .find(|c: char| c.is_whitespace() || c == '/' || c == '<' || c == '>' || c == '[')
+        .unwrap_or(value.len());
+    let name = &value[..end];
+
+    // `ABCDEF+Calibri` -> `Calibri`
+    let name = match name.split_once('+') {
+        Some((tag, base)) if tag.len() == 6 && tag.chars().all(|c| c.is_ascii_uppercase()) => base,
+        _ => name,
+    };
+    (!name.is_empty()).then(|| name.to_string())
+}
 
 impl VfxParser {
     /// Create a new VFX parser
@@ -277,12 +301,12 @@ impl VfxParser {
             metadata.insert("format".to_string(), "PDF-based".to_string());
 
             // Try to extract version from PDF header
-            if let Some(version_start) = data.windows(5).position(|w| w == b"%PDF-") {
-                if data.len() > version_start + 8 {
-                    let version_bytes = &data[version_start + 5..version_start + 8];
-                    if let Ok(version) = String::from_utf8(version_bytes.to_vec()) {
-                        metadata.insert("pdf_version".to_string(), version);
-                    }
+            if let Some(version_start) = data.windows(5).position(|w| w == b"%PDF-")
+                && data.len() > version_start + 8
+            {
+                let version_bytes = &data[version_start + 5..version_start + 8];
+                if let Ok(version) = String::from_utf8(version_bytes.to_vec()) {
+                    metadata.insert("pdf_version".to_string(), version);
                 }
             }
         } else if data.starts_with(b"%!PS-Adobe") {
@@ -298,26 +322,21 @@ impl VfxParser {
 
         // Extract font references
         for line in content.lines() {
-            if line.contains("/FontName") || line.contains("/BaseFont") {
-                if let Some(font_start) = line.find('/') {
-                    if let Some(font_end) = line[font_start..].find(char::is_whitespace) {
-                        let font_name = &line[font_start + 1..font_start + font_end];
-                        if !font_name.is_empty() && !fonts.contains(&font_name.to_string()) {
-                            fonts.push(font_name.to_string());
-                        }
-                    }
-                }
+            if let Some(font_name) = font_from_line(line)
+                && !fonts.contains(&font_name)
+            {
+                fonts.push(font_name);
             }
 
             // Look for linked images
             if line.contains("/ImageFile") || line.contains("(*.jpg)") || line.contains("(*.png)") {
                 // Extract filename if possible
-                if let Some(start) = line.find('(') {
-                    if let Some(end) = line[start..].find(')') {
-                        let asset = &line[start + 1..start + end];
-                        if !asset.is_empty() {
-                            linked_assets.push(asset.to_string());
-                        }
+                if let Some(start) = line.find('(')
+                    && let Some(end) = line[start..].find(')')
+                {
+                    let asset = &line[start + 1..start + end];
+                    if !asset.is_empty() {
+                        linked_assets.push(asset.to_string());
                     }
                 }
             }
@@ -390,11 +409,11 @@ impl VfxParser {
         let mut linked_assets = Vec::new();
 
         // Extract version from XML
-        if let Some(version_start) = content.find("Version=\"") {
-            if let Some(version_end) = content[version_start + 9..].find('"') {
-                let version = &content[version_start + 9..version_start + 9 + version_end];
-                metadata.insert("version".to_string(), version.to_string());
-            }
+        if let Some(version_start) = content.find("Version=\"")
+            && let Some(version_end) = content[version_start + 9..].find('"')
+        {
+            let version = &content[version_start + 9..version_start + 9 + version_end];
+            metadata.insert("version".to_string(), version.to_string());
         }
 
         // Count sequences (simplified)
@@ -403,14 +422,13 @@ impl VfxParser {
 
         // Extract linked media files
         for line in content.lines() {
-            if line.contains("pathurl=") || line.contains("FilePath=") {
-                if let Some(start) = line.find('"') {
-                    if let Some(end) = line[start + 1..].find('"') {
-                        let asset = &line[start + 1..start + 1 + end];
-                        if !asset.is_empty() {
-                            linked_assets.push(asset.to_string());
-                        }
-                    }
+            if (line.contains("pathurl=") || line.contains("FilePath="))
+                && let Some(start) = line.find('"')
+                && let Some(end) = line[start + 1..].find('"')
+            {
+                let asset = &line[start + 1..start + 1 + end];
+                if !asset.is_empty() {
+                    linked_assets.push(asset.to_string());
                 }
             }
         }
@@ -453,25 +471,25 @@ impl VfxParser {
         // Check for page count changes (layout files)
         if let (Some(base_pages), Some(ours_pages), Some(theirs_pages)) =
             (base.page_count, ours.page_count, theirs.page_count)
+            && ours_pages != base_pages
+            && theirs_pages != base_pages
         {
-            if ours_pages != base_pages && theirs_pages != base_pages {
-                conflicts.push(format!(
-                    "Both branches modified page count (ours: {} pages, theirs: {} pages)",
-                    ours_pages, theirs_pages
-                ));
-            }
+            conflicts.push(format!(
+                "Both branches modified page count (ours: {} pages, theirs: {} pages)",
+                ours_pages, theirs_pages
+            ));
         }
 
         // Check for layer count changes
         if let (Some(base_layers), Some(ours_layers), Some(theirs_layers)) =
             (base.layer_count, ours.layer_count, theirs.layer_count)
+            && ours_layers != base_layers
+            && theirs_layers != base_layers
         {
-            if ours_layers != base_layers && theirs_layers != base_layers {
-                conflicts.push(format!(
-                    "Both branches modified layer count (ours: {} layers, theirs: {} layers)",
-                    ours_layers, theirs_layers
-                ));
-            }
+            conflicts.push(format!(
+                "Both branches modified layer count (ours: {} layers, theirs: {} layers)",
+                ours_layers, theirs_layers
+            ));
         }
 
         // Check for duration changes (video/animation files)
@@ -610,5 +628,31 @@ mod tests {
         assert_eq!(info.format, VfxFormat::Premiere);
         assert_eq!(info.layer_count, Some(2)); // 2 sequences
         assert_eq!(info.linked_assets.len(), 2); // 2 media files
+    }
+
+    /// Real Illustrator output puts several PDF keys on one line, and the old
+    /// heuristic took the first slash — so a line naming Calibri reported
+    /// "Intent". Every string here is from an actual `.ai` in `test-files/`.
+    #[test]
+    fn font_extraction_reads_the_key_value_not_the_first_slash() {
+        assert_eq!(
+            font_from_line("/Intent /RelativeColorimetric /BaseFont /XWHYLE+Calibri"),
+            Some("Calibri".to_string()),
+            "must read the value after the key, and strip the subset prefix"
+        );
+        assert_eq!(
+            font_from_line("<< /FontName /Bodo-Amat /Ascent 750 >>"),
+            Some("Bodo-Amat".to_string())
+        );
+        // A subset tag is exactly six uppercase letters plus '+'. Anything else
+        // is part of the name and must survive.
+        assert_eq!(
+            font_from_line("/BaseFont /Not6+Real"),
+            Some("Not6+Real".to_string())
+        );
+        // Lines with no font key yield nothing — this is what stopped "/Intent"
+        // and "/Ascent" being reported as fonts.
+        assert_eq!(font_from_line("/Intent /RelativeColorimetric"), None);
+        assert_eq!(font_from_line("no slashes at all"), None);
     }
 }

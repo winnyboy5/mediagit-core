@@ -72,10 +72,8 @@ async fn main() -> anyhow::Result<()> {
 ```rust
 use mediagit_storage::S3Backend;
 
-// From environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION)
-let s3 = S3Backend::from_env("my-bucket").await?;
-
-// Explicit configuration
+// S3 has no from_env(): credentials come from the repository's
+// .mediagit/config.toml, never from AWS_* environment variables.
 let s3 = S3Backend::new("my-bucket").await?;
 ```
 
@@ -253,14 +251,14 @@ cargo test --test minio_docker_tests -- --ignored
 ## Test Coverage
 
 - **Unit Tests**: 62 test cases (configuration, validation, traits)
-- **Integration Tests**: 89 test cases (CRUD, concurrent, edge cases)
-- **Total**: 151 comprehensive tests
+- **Integration Tests**: 71 test cases (CRUD, concurrent, edge cases)
+- **Total**: 133 comprehensive tests
 
 ### Integration Test Breakdown
-- S3 LocalStack: 21 tests
-- Azure Azurite: 21 tests
-- GCS Emulator: 24 tests
-- MinIO Docker: 23 tests
+- S3 LocalStack: 16 tests
+- Azure Azurite: 18 tests
+- GCS Emulator: 19 tests
+- MinIO Docker: 18 tests
 
 ## Performance
 
@@ -311,7 +309,8 @@ mediagit-storage/
 
 ### Backend SDKs
 - `aws-sdk-s3` - AWS S3 SDK
-- `azure_storage_blobs` - Azure SDK
+- `opendal` (services-azblob) - Azure Blob backend (the EOL `azure_storage_blobs` 0.21 SDK was retired 2026-07)
+- `reqsign-azure-storage` - Shared Key signing for container creation
 - `google-cloud-storage` - GCS SDK
 
 ### Optional Dependencies
@@ -320,22 +319,25 @@ mediagit-storage/
 
 ## Environment Variables
 
-### AWS S3
-- `AWS_ACCESS_KEY_ID` - AWS access key
-- `AWS_SECRET_ACCESS_KEY` - AWS secret key
-- `AWS_REGION` - AWS region (e.g., us-east-1)
-- `AWS_SESSION_TOKEN` - Optional session token
+Only three backends expose a `from_env()` constructor, and these are the only
+environment variables this crate reads. Everything else is configured from a
+repository's `.mediagit/config.toml`; **S3 and Azure have no `from_env()` and
+read no environment variables at all.** In particular `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `AWS_SESSION_TOKEN` and the
+`AZURE_STORAGE_*` family are read by no code path here — an earlier revision of
+this section listed all eight, and a CI job copied from it fails with
+"access key cannot be empty".
 
-### Azure Blob Storage
-- `AZURE_STORAGE_ACCOUNT` - Storage account name
-- `AZURE_STORAGE_KEY` - Account key
-- `AZURE_STORAGE_CONNECTION_STRING` - Full connection string
-- `AZURE_STORAGE_SAS_TOKEN` - SAS token
+### MinIO — `MinioBackend::from_env()`
+- `MINIO_ENDPOINT`, `MINIO_BUCKET`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`
 
-### Google Cloud Storage
-- `GCS_PROJECT_ID` - GCP project ID
-- `GCS_BUCKET_NAME` - Bucket name
-- `GOOGLE_APPLICATION_CREDENTIALS` - Path to service account JSON
+### Google Cloud Storage — `GcsBackend::from_env()`
+- `GCS_BUCKET_NAME`, `GCS_PROJECT_ID`, `GOOGLE_CLOUD_PROJECT`
+- `GOOGLE_APPLICATION_CREDENTIALS` - path to service account JSON (ADC)
+
+### Backblaze B2 / DigitalOcean Spaces — `B2SpacesBackend::from_env()`
+- `B2_SPACES_PROVIDER`, `B2_SPACES_BUCKET`, `B2_SPACES_REGION`,
+  `B2_SPACES_ACCESS_KEY`, `B2_SPACES_SECRET_KEY`
 
 ### MinIO
 - `MINIO_ENDPOINT` - MinIO endpoint URL
@@ -421,6 +423,6 @@ Part of the MediaGit project. See LICENSE in repository root.
 
 ---
 
-**Version**: 0.2.6-beta.1
-**Last Updated**: 2026-03-06
+**Version**: 0.3.0-rc.5
+**Last Updated**: 2026-09-10
 **Status**: Production Ready

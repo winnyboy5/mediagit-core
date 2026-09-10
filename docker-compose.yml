@@ -9,7 +9,7 @@ services:
   # MinIO - S3-Compatible Object Storage (Primary)
   # ============================================================================
   minio:
-    image: minio/minio:latest
+    image: pgsty/silo:RELEASE.2026-08-06T00-00-00Z
     container_name: mediagit-minio
     ports:
       - "9000:9000"      # S3 API
@@ -32,7 +32,7 @@ services:
       start_period: 10s
 
   minio-init:
-    image: minio/mc:latest
+    image: pgsty/mc:RELEASE.2026-08-06T00-00-00Z
     container_name: mediagit-minio-init
     depends_on:
       minio:

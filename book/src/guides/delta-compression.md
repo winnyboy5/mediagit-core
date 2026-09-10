@@ -24,11 +24,31 @@ Delta Compression:
 
 ### Automatic Detection
 
-MediaGit automatically applies delta compression based on:
-1. **File size** - Must be >10MB
-2. **File similarity** - Content similarity above threshold
-3. **File type** - Media-aware thresholds
-4. **Savings check** - Delta must be <90% of full size
+Delta is automatic. There is no flag that turns it on, and the decision runs
+in three stages — a candidate has to clear all three:
+
+1. **Is this file type worth trying?** (`should_use_delta`) Decided by
+   extension, not by a global size floor. Uncompressed raster and audio
+   (`psd`, `tif`, `bmp`, `wav`, `aiff`), text and code, and text-based 3D
+   formats (`obj`, `gltf`, `stl`, `step`) are always attempted. Already-
+   compressed formats — `jpg`, `png`, `webp`, `gif`, `zip`, `gz`, `7z` — are
+   always skipped, because there is nothing left to find. A few types are
+   size-conditional: compressed video (`mp4`, `mkv`, `flv`, `wmv`) only above
+   100 MB, and PDF containers (`ai`, `indd`, `idml`, `pdf`) only above 50 MB,
+   where even partial similarity in unchanged embedded images is worth the CPU.
+2. **Is a similar enough base available?** Content similarity must clear the
+   per-type threshold in the table below, *and* the candidate base's overall
+   size must be within a per-type ratio of the target's size
+   (`get_size_ratio_threshold` in `similarity.rs` — a tighter allowance for
+   video/3D-scene/game-engine formats at 0.70, creative-container and ML
+   formats at 0.50, everything else at the same 0.80 default).
+3. **Did it actually help?** The encoded delta must come out below a
+   codec-aware threshold of the full object (`delta_ratio_threshold` in
+   `crates/mediagit-versioning/src/odb/mod.rs`): 0.60 for ProRes/DNxHR/JPEG2000/raw
+   video, 0.90 for subtitle/metadata chunks, **0.80 for everything else**.
+   At or above the threshold the delta is discarded and the object is stored
+   whole — a delta that barely saves anything is not worth the
+   reconstruction cost.
 
 ### Similarity Thresholds by File Type
 
@@ -38,327 +58,171 @@ MediaGit automatically applies delta compression based on:
 | **DOCX/XLSX/PPTX** (Office) | 0.20 | Aggressive (ZIP containers, shared structure) |
 | **MP4/MOV** (Video) | 0.50 | Moderate (metadata/timeline changes) |
 | **WAV/AIF** (Audio) | 0.65 | Medium (clip edits) |
-| **PSD/JPG/PNG** (Images) | 0.70 | Moderate (perceptual similarity) |
-| **FBX/OBJ/BLEND** (3D Models) | 0.70 | Moderate (geometry changes) |
+| **JPG/PNG** (Compressed images) | 0.70 | Moderate — but see the note below |
+| **OBJ/FBX/GLTF/GLB** (3D interchange) | 0.70 | Moderate (geometry changes) |
+| **MA/MB** (Maya) | 0.50 | Moderate |
+| **BLEND/C4D** (3D scenes) | 0.40 | Aggressive (heavy per-edit diffs) |
+| **HIP** (Houdini) | 0.35 | Aggressive |
+| **DRP/FCPBUNDLE/AVB** (NLE projects) | 0.25 | Very aggressive |
+| **PTX/ALS/FLP** (DAW projects) | 0.55 | Medium |
+| **DWG/DXF** (CAD) | 0.45 | Moderate |
+| **RVT/RFA** (Revit) | 0.30 | Aggressive |
 | **TXT/Code** | 0.85 | Conservative (small changes matter) |
-| **JSON/YAML/TOML** (Config) | 0.95 | Very conservative (exact matches preferred) |
+| **JSON/YAML/TOML/XML** (Config) | 0.95 | Very conservative (exact matches preferred) |
 | **Default** | 0.30 | Global minimum (`MIN_SIMILARITY_THRESHOLD`) |
 
 **Lower threshold** = more files use delta compression
 **Higher threshold** = only very similar files use delta
 
+Note **PSD sits with the AI/PDF group at 0.15, not with the images at 0.70**:
+it is a layered container of embedded compressed streams, structurally much
+closer to InDesign than to a flat JPEG. And the 0.70 on JPG/PNG never applies
+in practice — stage 1 skips those types outright.
+
+These thresholds are compile-time constants in
+`crates/mediagit-versioning/src/similarity.rs`. **They are not configurable**,
+by config file or by environment variable; making them so is a tracked backlog
+item, not a current feature.
+
 ## Checking Delta Status
 
-### Show Delta Information
+MediaGit has no per-object delta inspector — no `show --similarity`, no
+`stats --delta-report`, no `verify --check-deltas`. What exists is aggregate
+and repository-wide:
 
 ```bash
-# Show file storage info
-$ mediagit show --stat large-file.psd
+# Compression metrics across the repository
+$ mediagit stats --compression
 
-Object: 5891b5b522d5df086d...
-Type: blob (delta)
-Size: 15.3 MB (delta)
-Base: a3c5d7e2f1b8c9a4d... (500 MB)
-Compression ratio: 96.9%
-Delta chain depth: 3
+# Everything stats knows, as JSON
+$ mediagit stats --all --json
 ```
 
-### List Objects with Delta Info
+To watch the decision for a single file, turn on the log for the add path:
 
 ```bash
-$ mediagit stats --verbose
-
-Object database statistics:
-  Total objects: 8,875
-  Loose objects: 247
-  Packed objects: 8,628
-
-Delta statistics:
-  Objects with deltas: 2,847 (32%)
-  Average chain depth: 4.2
-  Max chain depth: 12
-  Total delta savings: 3.2 GB (78%)
+$ MEDIAGIT_LOG=warn,mediagit=debug mediagit add large-file.psd
 ```
 
-## Configuring Delta Compression
+Keep the leading `warn,` — a bare target directive silences every other
+target, which has produced more than one confusing debugging session in this
+repository.
 
-### Global Configuration
+### Overriding for a single file
 
-Edit `.mediagit/config`:
-
-```toml
-[compression.delta]
-# Enable automatic delta compression
-enabled = true
-
-# Minimum file size for delta consideration
-min_size = "10MB"
-
-# Minimum savings required (10% = 0.1)
-min_savings = 0.1
-
-# Maximum delta chain depth before creating new base
-max_depth = 10
-
-# Per-file-type similarity thresholds
-[compression.delta.thresholds]
-psd = 0.70        # Images (perceptual similarity)
-psb = 0.70        # Large Photoshop documents
-blend = 0.70      # Blender projects
-fbx = 0.70        # FBX 3D models
-obj = 0.70        # OBJ 3D models
-wav = 0.65        # WAV audio
-aif = 0.65        # AIF audio
-mp4 = 0.50        # MP4 video
-mov = 0.50        # QuickTime video
-ai = 0.15         # Creative/PDF containers
-pdf = 0.15        # PDF containers
-default = 0.30    # Global minimum
-```
-
-### Adjust Aggressiveness
+One override exists, and it only goes one way:
 
 ```bash
-# More aggressive (delta more files)
-$ mediagit config set compression.delta.thresholds.default 0.65
-
-# More conservative (fewer deltas, safer)
-$ mediagit config set compression.delta.thresholds.default 0.85
-
-# Disable delta for specific types
-$ mediagit config set compression.delta.thresholds.mp4 1.0
-```
-
-### Override for Single File
-
-```bash
-# Force delta compression
-$ mediagit add --force-delta large-file.blend
-
-# Disable delta for this file
+# Skip delta for this file
 $ mediagit add --no-delta huge-video.mp4
 ```
 
-## Optimizing Delta Chains
+There is no force-on counterpart. If the type gate, the similarity threshold,
+or the benefit gate rejects a file, nothing on the command line overrides
+that — the object is stored whole.
 
-### Understanding Delta Chains
+## Delta Chains
 
 Delta chains form when multiple versions are stored:
 
 ```
-Base (v1) → Δ2 → Δ3 → Δ4 → Δ5
+Base (v1) -> d2 -> d3 -> d4 -> d5
 ```
 
-**Reconstruction** requires applying all deltas in sequence:
-- Chain depth 1-5: Fast reconstruction
-- Chain depth 6-10: Good performance
-- Chain depth >10: New base created automatically
+Reconstruction applies the deltas in sequence, so a deep chain costs more to
+read than a shallow one. MediaGit bounds this for you: `MAX_DELTA_DEPTH` is
+**10**, enforced on both the write and the read side
+(`crates/mediagit-versioning/src/odb/mod.rs`). A chain that would exceed it
+gets a fresh base instead, and `get_chunk` refuses to reconstruct past it.
 
-### Check Chain Depth
+Two consequences:
 
-```bash
-$ mediagit verify --check-deltas
+- **You cannot end up with a depth-50 chain.** Guidance elsewhere about
+  "optimizing chains over 20 deep" describes a situation this cap makes
+  unreachable.
+- **There is no chain-optimization command**, because there is no unbounded
+  chain to optimize. `mediagit gc --repack` consolidates loose objects into
+  packs, which is a storage-layout operation, not a chain one.
 
-Analyzing delta chains...
-
-Long chains detected:
-  assets/scene.blend: depth 52 (slow reconstruction)
-  images/poster.psd: depth 48
-  models/character.fbx: depth 45
-
-Recommendation: Run 'mediagit gc --aggressive' to optimize chains
-```
-
-### Optimize Chains
+To check that chains are actually intact, use the integrity checker:
 
 ```bash
-# Standard GC (optimizes chains >10 depth)
-$ mediagit gc
-
-# Aggressive GC (optimizes chains >20 depth)
-$ mediagit gc --aggressive
-
-# Result:
-Optimizing delta chains...
-  Chains optimized: 23
-  New bases created: 23
-  Average depth reduced: 52 → 8
-  Repository size: 485 MB → 467 MB
+# Full check, including delta chain reconstruction
+$ mediagit fsck --full
 ```
 
 ## Performance Tuning
 
-### Parallel Delta Processing
+Delta has exactly two knobs, both environment variables. There is no
+`[compression.delta]` table — earlier revisions of this guide showed
+`[compression.delta.thresholds]`, `[compression.delta.performance]` and
+`[compression.delta.memory]`, and none of them have ever existed in the config
+schema.
 
-```toml
-[compression.delta.performance]
-# Enable parallel delta encoding
-parallel = true
+| Variable | Default | Effect |
+|---|---|---|
+| `MEDIAGIT_DELTA_LEVEL` | `19` | zstd dictionary compression level for delta encoding. Valid `1`-`22`; outside that range is rejected with a warning and the default used. |
+| `MEDIAGIT_DELTA_ENABLED` | — | Legacy toggle; set to `0`/`false` to force delta off for the whole repo, overriding repo config. Candidacy is otherwise decided per file. |
 
-# Number of threads (0 = auto-detect)
-threads = 0
-
-# Chunk size for large file delta
-chunk_size = "4MB"
-```
-
-### Memory Limits
-
-```toml
-[compression.delta.memory]
-# Maximum memory for delta buffers
-max_buffer_size = "512MB"
-
-# Stream large deltas (reduces memory)
-streaming_threshold = "100MB"
-```
+Parallelism is not delta-specific — it is `add`'s file-level parallelism, and
+the only control is `mediagit add --no-parallel` to turn it off.
 
 ## Troubleshooting
 
-### Delta Compression Not Applied
+### Delta wasn't applied
 
-**Check file size**:
+Work the three stages in order — the first one that rejects is the answer.
+
+**Is the type eligible at all?** `jpg`, `png`, `webp`, `gif`, `zip`, `gz`,
+`7z` and `rar` are skipped unconditionally. This is correct behavior, not a
+failure: those bytes are already compressed, and a delta of compressed data
+finds nothing.
+
+**Is it under a size gate?** `mp4`/`mkv`/`flv`/`wmv` are only attempted above
+100 MB; `ai`/`indd`/`idml`/`pdf` only above 50 MB.
+
+**Did it clear similarity and benefit?** Run the add with logging on:
+
 ```bash
-$ ls -lh large-file.psd
--rw-r--r-- 1 user user 8.5M  # Too small (<10MB)
-```
-**Solution**: Delta only applies to files >10MB by default
-
-**Check similarity**:
-```bash
-$ mediagit show --similarity large-file.psd
-Previous version similarity: 0.42 (threshold: 0.85)
-Reason: File significantly changed, delta not beneficial
-```
-**Solution**: File rewritten, delta won't help
-
-### Slow Reconstruction
-
-**Check delta chain depth**:
-```bash
-$ mediagit show large-file.psd
-Delta chain depth: 87 (very deep!)
+$ MEDIAGIT_LOG=warn,mediagit=debug mediagit add large-file.psd
 ```
 
-**Solution**: Optimize chains
+A file that was genuinely rewritten between versions has low similarity, and a
+delta that fails its stream's benefit threshold is discarded by design — 0.80
+of full size for most content, but 0.60 for intra-only video and 0.90 for
+subtitle/metadata streams (`odb/mod.rs:100-114`).
+
+### Reconstruction feels slow
+
+Chain depth is capped at 10, so it is very unlikely to be the cause. Confirm
+the repository is actually healthy first:
+
 ```bash
-$ mediagit gc --aggressive
+$ mediagit fsck --full
 ```
 
-### High Memory Usage
+If fsck is clean, look at storage-layout and transfer concurrency rather than
+at delta — see [Performance Optimization](./performance.md).
 
-**Check delta streaming**:
-```toml
-[compression.delta.memory]
-# Force streaming for large deltas
-streaming_threshold = "50MB"  # Lower threshold
+### High memory during add
+
+There is no delta-specific memory knob. Reduce concurrency instead:
+
+```bash
+$ mediagit add --no-parallel large-file.psd
 ```
 
 ## Best Practices
 
-### 1. Regular Garbage Collection
-
-```bash
-# Weekly maintenance
-$ mediagit gc
-
-# Monthly aggressive optimization
-$ mediagit gc --aggressive
-```
-
-### 2. Tune for Your Workflow
-
-**Photo/Design Work** (many small edits):
-```toml
-[compression.delta.thresholds]
-psd = 0.80  # More aggressive
-blend = 0.80
-```
-
-**Video/Audio** (large rewrites):
-```toml
-[compression.delta.thresholds]
-mp4 = 1.0  # Disable delta
-mov = 1.0
-wav = 0.95  # Very conservative
-```
-
-### 3. Monitor Delta Effectiveness
-
-```bash
-# Check delta savings
-$ mediagit stats --delta-report
-
-Delta compression effectiveness:
-  File type    | Files | Avg savings | Total saved
-  -------------+-------+-------------+-------------
-  PSD          | 1,247 | 92.3%       | 2.4 GB
-  BLEND        |   389 | 88.7%       | 876 MB
-  FBX          |   156 | 74.2%       | 234 MB
-  WAV          |    89 | 45.1%       |  89 MB
-  Other        |   203 | 67.8%       | 156 MB
-  -------------+-------+-------------+-------------
-  Total        | 2,084 | 85.4%       | 3.75 GB
-```
-
-### 4. Verify After Major Changes
-
-```bash
-# After configuration changes
-$ mediagit verify --check-deltas
-
-# Ensure chains are healthy
-$ mediagit gc --verify
-```
-
-## Advanced Topics
-
-### Custom Similarity Functions
-
-For specific workflows, you can customize similarity detection (requires building from source):
-
-```rust
-// Custom similarity for your file type
-fn custom_similarity(old: &[u8], new: &[u8]) -> f64 {
-    // Your custom similarity logic
-    // Return 0.0-1.0 (0 = completely different, 1 = identical)
-}
-```
-
-### Delta Debugging
-
-Enable detailed delta logging:
-```bash
-$ RUST_LOG=mediagit_compression::delta=debug mediagit add large-file.psd
-
-DEBUG mediagit_compression::delta: Calculating similarity...
-DEBUG mediagit_compression::delta: Similarity: 0.89 (threshold: 0.85) ✓
-DEBUG mediagit_compression::delta: Generating delta...
-DEBUG mediagit_compression::delta: Delta size: 15.3 MB (full: 500 MB)
-DEBUG mediagit_compression::delta: Savings: 96.9% ✓ (min: 10%)
-DEBUG mediagit_compression::delta: Delta compression applied
-```
-
-## Performance Benchmarks
-
-### Delta Encoding Speed
-
-| File Size | Encoding Time | Throughput |
-|-----------|---------------|------------|
-| 10 MB     | 0.1s         | 100 MB/s   |
-| 100 MB    | 0.8s         | 125 MB/s   |
-| 500 MB    | 4.2s         | 119 MB/s   |
-| 1 GB      | 8.7s         | 115 MB/s   |
-
-### Reconstruction Speed
-
-| Chain Depth | File Size | Reconstruction Time |
-|-------------|-----------|---------------------|
-| 1-5         | 500 MB   | 0.5s (1000 MB/s)   |
-| 6-10        | 500 MB   | 1.2s (416 MB/s)    |
-| 11-20       | 500 MB   | 2.8s (178 MB/s)    |
-| 21-50       | 500 MB   | 6.5s (77 MB/s)     |
-| >50         | 500 MB   | 15s+ (33 MB/s)     | ← Optimize!
+1. **Let it decide.** The type gate, similarity thresholds and the benefit
+   gate are all tuned per format. The one useful manual override is `--no-delta`
+   for a file you know was fully rewritten.
+2. **Run `mediagit gc` periodically** to reclaim unreachable objects, and
+   `gc --repack` to consolidate loose objects into packs.
+3. **Run `mediagit fsck --full` after bulk imports**, which is the check that
+   actually reconstructs delta chains.
+4. **Measure with `mediagit stats --compression`** rather than reasoning about
+   what the thresholds should produce.
 
 ## Related Documentation
 

@@ -1,21 +1,11 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 use super::super::repo::{create_storage_backend, find_repo_root};
 use crate::progress::{OperationStats, ProgressTracker};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use mediagit_versioning::{Oid, Ref, RefDatabase, Reflog, ReflogEntry};
+use mediagit_versioning::{LcaFinder, ObjectDatabase, Oid, Ref, RefDatabase, Reflog, ReflogEntry};
 use std::time::Instant;
 
 /// Manage branches
@@ -94,9 +84,10 @@ pub enum BranchSubcommand {
 
     /// Show branch information
     Show(ShowOpts),
-
-    /// Merge a branch
-    Merge(MergeOpts),
+    // `branch merge` was never implemented - it only ever returned an error telling the
+    // user to run `mediagit merge`, which already does the job. Removed rather than
+    // shipped as a subcommand that cannot succeed. Future work if branch-scoped merge
+    // semantics ever diverge from `mediagit merge`.
 }
 
 /// List branches
@@ -161,6 +152,13 @@ pub struct SwitchOpts {
     /// Create and switch to new branch
     #[arg(short, long)]
     pub create: bool,
+
+    /// When used with --create, set up upstream tracking. If `branch` looks
+    /// like `<remote>/<name>` (e.g. `origin/feat-a`), the new local branch
+    /// is named `<name>`, started from the `<remote>/<name>` tracking ref
+    /// instead of HEAD, and set to track it.
+    #[arg(long)]
+    pub track: bool,
 
     /// Force switch even if local changes
     #[arg(short = 'f', long)]
@@ -254,38 +252,6 @@ pub struct ShowOpts {
     pub verbose: bool,
 }
 
-/// Merge a branch
-#[derive(Parser, Debug)]
-pub struct MergeOpts {
-    /// Branch to merge
-    #[arg(value_name = "BRANCH", required = true)]
-    pub branch: String,
-
-    /// Create a merge commit
-    #[arg(long)]
-    pub no_ff: bool,
-
-    /// Perform a fast-forward only merge
-    #[arg(long)]
-    pub ff_only: bool,
-
-    /// Merge message
-    #[arg(short, long, value_name = "MESSAGE")]
-    pub message: Option<String>,
-
-    /// Quit if merge conflicts occur
-    #[arg(long)]
-    pub abort: bool,
-
-    /// Continue after resolving conflicts
-    #[arg(long)]
-    pub continue_merge: bool,
-
-    /// Quiet mode
-    #[arg(short, long)]
-    pub quiet: bool,
-}
-
 impl BranchCmd {
     pub async fn execute(&self) -> Result<()> {
         match &self.subcommand {
@@ -296,7 +262,6 @@ impl BranchCmd {
             BranchSubcommand::Protect(opts) => self.protect(opts).await,
             BranchSubcommand::Rename(opts) => self.rename(opts).await,
             BranchSubcommand::Show(opts) => self.show(opts).await,
-            BranchSubcommand::Merge(opts) => self.merge(opts).await,
         }
     }
 
@@ -416,8 +381,9 @@ impl BranchCmd {
 
         let repo_root = find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
-        let _storage = create_storage_backend(&repo_root).await?;
+        let storage = create_storage_backend(&repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
+        let odb = mediagit_versioning::ObjectDatabase::with_smart_compression(storage, 1000);
 
         // Validate branch name
         if opts.name.contains("..") || opts.name.starts_with('/') || opts.name.ends_with('/') {
@@ -438,7 +404,10 @@ impl BranchCmd {
         // keep working), then fall back to `refs/remotes/<input>` when the
         // user wrote something like `origin/feat-a`.
         let start_oid = if let Some(start_point) = &opts.start_point {
-            match refdb.resolve(start_point).await {
+            // Route through the shared resolver so OIDs (full/abbrev), tags, and
+            // HEAD~N all work as start points (BUG-VFX-2), then keep the
+            // remote-shorthand fallback for `origin/feat` style inputs.
+            match mediagit_versioning::resolve_revision(start_point, &refdb, &odb).await {
                 Ok(oid) => oid,
                 Err(primary_err) => {
                     let looks_like_remote_shorthand = start_point.contains('/')
@@ -473,6 +442,53 @@ impl BranchCmd {
             output::success(&format!("Created branch '{}' at {}", opts.name, start_oid));
         }
 
+        // Upstream tracking (M2 plumbing, consumed by `status` in M4).
+        // Source is `--set-upstream <remote>/<branch>` if given, else the
+        // start point when `--track` was requested (matching git's
+        // "track what you branched from" convention).
+        if !opts.no_track {
+            let track_source = opts
+                .set_upstream
+                .as_deref()
+                .or_else(|| opts.track.then_some(opts.start_point.as_deref()).flatten());
+            if let Some(source) = track_source {
+                match source.split_once('/') {
+                    Some((remote, remote_branch)) => {
+                        let mut config = mediagit_config::Config::load(&repo_root).await?;
+                        config.set_branch_upstream(
+                            &opts.name,
+                            remote,
+                            format!("refs/heads/{}", remote_branch),
+                        );
+                        config.save(&repo_root)?;
+                        if !opts.quiet {
+                            output::info(&format!(
+                                "Branch '{}' set up to track '{}/{}'",
+                                opts.name, remote, remote_branch
+                            ));
+                        }
+                    }
+                    None if opts.set_upstream.is_some() => {
+                        anyhow::bail!(
+                            "--set-upstream expects <remote>/<branch> (got '{}')",
+                            source
+                        );
+                    }
+                    None => {
+                        // --track given but the start point doesn't look like
+                        // <remote>/<branch> (e.g. a bare OID or local ref) —
+                        // nothing to track against; not an error.
+                        if !opts.quiet {
+                            output::warning(&format!(
+                                "--track: start point '{}' doesn't look like <remote>/<branch>; no upstream recorded",
+                                source
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -490,10 +506,21 @@ impl BranchCmd {
         let refdb = RefDatabase::new(&storage_path);
 
         // Strip refs/heads/ prefix if already present
-        let branch_name = opts
+        let stripped = opts
             .branch
             .strip_prefix("refs/heads/")
             .unwrap_or(&opts.branch);
+
+        // `--track` shorthand: `branch switch -c --track origin/feat-a`
+        // creates a local branch named "feat-a" (not "origin/feat-a")
+        // tracking origin/feat-a, started from that remote-tracking ref
+        // instead of HEAD — mirrors `branch create`'s BUG-010 shorthand.
+        let track_shorthand = if opts.create && opts.track {
+            stripped.split_once('/')
+        } else {
+            None
+        };
+        let branch_name = track_shorthand.map(|(_, name)| name).unwrap_or(stripped);
         let branch_ref_name = format!("refs/heads/{}", branch_name);
 
         // OPTIMIZATION: Get current commit BEFORE updating HEAD
@@ -504,21 +531,53 @@ impl BranchCmd {
         if opts.create {
             // Check if branch already exists
             if refdb.read(&branch_ref_name).await.is_ok() {
-                anyhow::bail!("Branch '{}' already exists", opts.branch);
+                anyhow::bail!("Branch '{}' already exists", branch_name);
             }
 
-            // Get current HEAD for start point (resolve symbolic ref)
-            let start_oid = refdb
-                .resolve("HEAD")
-                .await
-                .context("HEAD has no commit yet")?;
+            let start_oid = if let Some((remote, remote_branch)) = track_shorthand {
+                let remote_tracking_ref = format!("refs/remotes/{}/{}", remote, remote_branch);
+                refdb.resolve(&remote_tracking_ref).await.with_context(|| {
+                    format!(
+                        "--track: remote-tracking ref '{}' not found",
+                        remote_tracking_ref
+                    )
+                })?
+            } else {
+                // Get current HEAD for start point (resolve symbolic ref)
+                refdb
+                    .resolve("HEAD")
+                    .await
+                    .context("HEAD has no commit yet")?
+            };
 
             // Create the branch reference
             let branch_ref = Ref::new_direct(branch_ref_name.clone(), start_oid);
             refdb.write(&branch_ref).await?;
 
             if !opts.quiet {
-                output::success(&format!("Created branch '{}'", opts.branch));
+                output::success(&format!("Created branch '{}'", branch_name));
+            }
+
+            // Upstream tracking (M2 plumbing, consumed by `status` in M4).
+            if let Some((remote, remote_branch)) = track_shorthand {
+                let mut config = mediagit_config::Config::load(&repo_root).await?;
+                config.set_branch_upstream(
+                    branch_name,
+                    remote,
+                    format!("refs/heads/{}", remote_branch),
+                );
+                config.save(&repo_root)?;
+                if !opts.quiet {
+                    output::info(&format!(
+                        "Branch '{}' set up to track '{}/{}'",
+                        branch_name, remote, remote_branch
+                    ));
+                }
+            } else if opts.track && !opts.quiet {
+                output::warning(&format!(
+                    "--track: '{}' doesn't look like <remote>/<branch>; no upstream recorded",
+                    opts.branch
+                ));
             }
         } else {
             // Verify branch exists
@@ -534,13 +593,35 @@ impl BranchCmd {
             opts.branch
         ))?;
 
+        let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
+
+        // BUG-CLI-B1 / QA-001, now via the shared guard (WT-2: the old
+        // in-place dirty-check only iterated the top level of the HEAD tree,
+        // so a modified file in any subdirectory was silently overwritten).
+        if !opts.force {
+            crate::worktree_guard::AtRisk::check(
+                &repo_root,
+                &odb,
+                current_commit_oid.as_ref(),
+                Some(&target_commit_oid),
+            )
+            .await?
+            .ensure_clean("branch switch")?;
+        }
+
         // Update HEAD to point to the branch
         let head = Ref::new_symbolic("HEAD".to_string(), branch_ref_name.clone());
         refdb.write(&head).await?;
 
-        // Update working directory to match the target branch's commit
-        let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
-        let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
+        // Update working directory to match the target branch's commit.
+        // WT-1: the `checkout_commit` fallback below (no current commit) would
+        // otherwise delete untracked files that merely happen not to be in the
+        // target tree. `checkout_diff` never cleans, so this only binds the
+        // initial-checkout path.
+        let tracked =
+            crate::worktree_guard::tracked_paths(&repo_root, &odb, current_commit_oid.as_ref())
+                .await?;
+        let checkout_mgr = CheckoutManager::new(&odb, &repo_root).with_tracked_paths(tracked);
 
         let checkout_pb = progress.spinner("Updating working directory");
 
@@ -589,7 +670,7 @@ impl BranchCmd {
         index.save(&repo_root)?;
 
         if !opts.quiet {
-            output::success(&format!("Switched to branch '{}'", opts.branch));
+            output::success(&format!("Switched to branch '{}'", branch_name));
             if files_updated > 0 {
                 output::info(&format!(
                     "Updated {} file(s) in working directory",
@@ -680,6 +761,21 @@ impl BranchCmd {
         let head = refdb.read("HEAD").await?;
         let current_branch = head.target;
 
+        // UX-1: `-d` promises "delete only if merged" but was never read —
+        // it deleted exactly as unconditionally as `-D`. Set up the
+        // reachability check it needs. `-D` still skips it entirely.
+        let merged_check = if opts.delete_merged && !opts.force {
+            let odb = std::sync::Arc::new(ObjectDatabase::with_smart_compression(
+                _storage.clone(),
+                1000,
+            ));
+            let head_oid = refdb.resolve("HEAD").await.ok();
+            Some((LcaFinder::new(odb), head_oid))
+        } else {
+            None
+        };
+        let mut unmerged: Vec<String> = Vec::new();
+
         for branch_name in &opts.branches {
             let branch_ref_name = format!("refs/heads/{}", branch_name);
 
@@ -692,16 +788,33 @@ impl BranchCmd {
             }
 
             // Check branch protection
-            if let Some(protection) = config.get_branch_protection(branch_name) {
-                if protection.prevent_deletion && !opts.force {
-                    if !opts.quiet {
-                        output::warning(&format!(
-                            "Branch '{}' is protected (use --force to override)",
-                            branch_name
-                        ));
-                    }
-                    continue;
+            if let Some(protection) = config.get_branch_protection(branch_name)
+                && protection.prevent_deletion
+                && !opts.force
+            {
+                if !opts.quiet {
+                    output::warning(&format!(
+                        "Branch '{}' is protected (use --force to override)",
+                        branch_name
+                    ));
                 }
+                continue;
+            }
+
+            // UX-1: refuse to drop work that lives nowhere else.
+            if let Some((lca, head_oid)) = &merged_check
+                && let Ok(branch_oid) = refdb.resolve(&branch_ref_name).await
+                && !Self::is_merged(lca, &config, &refdb, branch_name, &branch_oid, *head_oid)
+                    .await?
+            {
+                unmerged.push(branch_name.clone());
+                if !opts.quiet {
+                    output::warning(&format!(
+                        "The branch '{}' is not fully merged (use -D to force delete)",
+                        branch_name
+                    ));
+                }
+                continue;
             }
 
             // Verify branch exists
@@ -723,12 +836,49 @@ impl BranchCmd {
             }
         }
 
-        if !opts.quiet && deleted_count == 0 {
+        if !opts.quiet && deleted_count == 0 && unmerged.is_empty() {
             output::info("No branches were deleted");
+        }
+
+        if !unmerged.is_empty() {
+            anyhow::bail!(
+                "The branch(es) {} are not fully merged; use -D to delete anyway",
+                unmerged.join(", ")
+            );
         }
 
         Ok(())
     }
+
+    /// UX-1: a branch is merged when its tip is reachable from HEAD, or from
+    /// its own upstream (work that has been pushed is not lost by deletion).
+    async fn is_merged(
+        lca: &LcaFinder,
+        config: &mediagit_config::Config,
+        refdb: &RefDatabase,
+        branch_name: &str,
+        branch_oid: &Oid,
+        head_oid: Option<Oid>,
+    ) -> Result<bool> {
+        if let Some(head_oid) = head_oid
+            && lca.is_ancestor(branch_oid, &head_oid).await?
+        {
+            return Ok(true);
+        }
+
+        if let Some((remote, merge_ref)) = config.get_branch_upstream(branch_name) {
+            let short = merge_ref.strip_prefix("refs/heads/").unwrap_or(merge_ref);
+            let upstream_ref = format!("refs/remotes/{}/{}", remote, short);
+            if let Ok(upstream_oid) = refdb.resolve(&upstream_ref).await
+                && lca.is_ancestor(branch_oid, &upstream_oid).await?
+            {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
     async fn protect(&self, opts: &ProtectOpts) -> Result<()> {
         use crate::output;
         use mediagit_config::BranchProtection;
@@ -897,11 +1047,5 @@ impl BranchCmd {
         }
 
         Ok(())
-    }
-
-    async fn merge(&self, _opts: &MergeOpts) -> Result<()> {
-        // NOTE: Branch merge implementation pending (delegates to mediagit merge command)
-        // Requires: conflict check, merge execution, commit creation
-        anyhow::bail!("Branch merge not yet implemented (use 'mediagit merge' instead)")
     }
 }

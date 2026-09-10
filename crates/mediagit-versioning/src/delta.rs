@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Delta compression using zstd dictionary mode
 //!
@@ -29,9 +19,42 @@
 /// Magic bytes identifying zstd-dict delta format
 const ZSTD_DICT_MAGIC: [u8; 2] = [0x5A, 0x44]; // "ZD"
 
-/// Zstd compression level for delta encoding.
-/// Level 19 gives excellent ratio for dictionary mode without extreme CPU cost.
-const ZSTD_DICT_LEVEL: i32 = 19;
+/// Default zstd compression level for delta encoding.
+///
+/// The comment here used to read "excellent ratio for dictionary mode without
+/// extreme CPU cost". The second half was never measured and is false: level 19
+/// costs **238 ms per 1 MB chunk**, which on a 357 MB PSD is 85 s of the 86 s
+/// `add` wall at one worker. zstd's own default is 3, and 19 is two steps off
+/// the 22 maximum.
+///
+/// Left at 19 because storage savings are this project's differentiator and
+/// lowering it silently would trade them away. It is now a knob so the
+/// ratio-versus-CPU curve can be measured on real data instead of asserted.
+const DEFAULT_ZSTD_DICT_LEVEL: i32 = 19;
+
+/// `MEDIAGIT_DELTA_LEVEL` overrides the delta compression level (1-22).
+///
+/// Read once. Out-of-range or unparseable values fall back to the default
+/// rather than failing: a bad knob must not make a repo unwritable, and a
+/// silently clamped level would misreport what a measurement actually ran at.
+fn zstd_dict_level() -> i32 {
+    static LEVEL: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+    *LEVEL.get_or_init(|| {
+        match std::env::var("MEDIAGIT_DELTA_LEVEL")
+            .ok()
+            .and_then(|v| v.trim().parse::<i32>().ok())
+        {
+            Some(n) if (1..=22).contains(&n) => n,
+            Some(bad) => {
+                tracing::warn!(
+                    "MEDIAGIT_DELTA_LEVEL={bad} is outside 1-22; using {DEFAULT_ZSTD_DICT_LEVEL}"
+                );
+                DEFAULT_ZSTD_DICT_LEVEL
+            }
+            None => DEFAULT_ZSTD_DICT_LEVEL,
+        }
+    })
+}
 
 /// Delta encoding result
 #[derive(Debug, Clone)]
@@ -115,7 +138,7 @@ impl DeltaEncoder {
 
     /// Compress target using base as zstd dictionary
     fn compress_with_dict(base: &[u8], target: &[u8]) -> anyhow::Result<Vec<u8>> {
-        let mut encoder = zstd::bulk::Compressor::with_dictionary(ZSTD_DICT_LEVEL, base)?;
+        let mut encoder = zstd::bulk::Compressor::with_dictionary(zstd_dict_level(), base)?;
         let compressed = encoder.compress(target)?;
         Ok(compressed)
     }

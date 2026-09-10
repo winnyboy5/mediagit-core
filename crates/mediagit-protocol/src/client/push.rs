@@ -1,17 +1,71 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 use super::*;
+use std::path::{Path, PathBuf};
+use tempfile::TempDir;
+
+/// Does this presigned URL's signed header set already carry `content-length`?
+///
+/// SigV4 signs `content-length` — it is NOT in aws-sigv4's `excluded_headers`
+/// (only Authorization, User-Agent, X-Ray-Trace-Id and Transfer-Encoding are) —
+/// so whenever the server presigns with a concrete length, `content-length`
+/// lands in `required_headers` and forms part of `SignedHeaders`.
+///
+/// Adding our own on top is not a harmless overwrite:
+/// `reqwest::RequestBuilder::header` calls `HeaderMap::append`, not `insert`, so
+/// it emits a SECOND `content-length` line. A duplicated signed header does not
+/// canonicalize back to the single value that was signed, and S3/MinIO answer
+/// `SignatureDoesNotMatch` — 976 and 748 of them in campaigns 20260803-scale and
+/// 20260804-scale-verify2, all on this per-chunk fallback path. The pack path
+/// (`pack_builder.rs`) never had the bug because it only ever replays
+/// `required_headers`, and it logged none.
+///
+/// `tests/presigned_put_headers.rs` pins this at the socket: hyper does not
+/// collapse the duplicate, so the second instance really does reach the peer.
+///
+/// The server still legitimately presigns unbound URLs (`content_length == 0`),
+/// which carry no signed `content-length`; those DO need one supplied.
+fn signs_content_length(required_headers: &[[String; 2]]) -> bool {
+    required_headers
+        .iter()
+        .any(|h| h[0].eq_ignore_ascii_case("content-length"))
+}
+
+/// Shared status handling for both `upload_pack` and `upload_pack_file`.
+fn handle_pack_upload_response(response: reqwest::Response) -> Result<()> {
+    let status = response.status();
+    if !status.is_success() {
+        // A rejection here is almost always authorization, and "403
+        // Forbidden" on its own does not tell the user what to do about it.
+        let hint = match status.as_u16() {
+            401 => "\n  Not authenticated. Run `mediagit auth login <server>`.",
+            403 => {
+                "\n  Authenticated, but this account cannot push to this repository. \
+                 An admin must grant it write access."
+            }
+            _ => "",
+        };
+        anyhow::bail!("POST /objects/pack failed with status: {status}{hint}");
+    }
+
+    Ok(())
+}
+
+/// A metadata pack written to a temp file instead of an in-RAM `Vec<u8>`.
+/// Keeping the `TempDir` here is what keeps the file alive through
+/// `upload_pack_file`'s retries.
+struct GeneratedPack {
+    _temp_dir: TempDir,
+    path: PathBuf,
+    byte_len: u64,
+}
+
+impl GeneratedPack {
+    fn len(&self) -> usize {
+        self.byte_len as usize
+    }
+}
 
 impl ProtocolClient {
     /// Push local objects and update remote refs
@@ -41,10 +95,10 @@ impl ProtocolClient {
             commit_oids.push(oid);
 
             // If remote has an existing OID, add it to "have" list
-            if let Some(old_oid) = &update.old_oid {
-                if let Ok(oid) = Oid::from_hex(old_oid) {
-                    have_oids.push(oid);
-                }
+            if let Some(old_oid) = &update.old_oid
+                && let Ok(oid) = Oid::from_hex(old_oid)
+            {
+                have_oids.push(oid);
             }
         }
 
@@ -79,14 +133,18 @@ impl ProtocolClient {
             // Only upload if there are new objects
             if !objects.is_empty() {
                 // Generate and upload pack file with new objects only
-                let (pack_data, chunked_oids) = self.generate_pack(odb, objects).await?;
-                stats.bytes_uploaded = pack_data.len();
-                self.upload_pack(&pack_data).await?;
+                let (pack, chunked_oids) = self.generate_pack(odb, objects).await?;
+                stats.bytes_uploaded = pack.len();
+                self.upload_pack_file(&pack.path, pack.byte_len).await?;
 
                 // Upload chunked objects (large files) if any
                 if !chunked_oids.is_empty() {
-                    self.upload_chunked_objects(odb, &chunked_oids, |_, _| {})
+                    let (_chunks, chunk_bytes) = self
+                        .upload_chunked_objects(odb, &chunked_oids, |_, _| {})
                         .await?;
+                    // RP-1: `+=`, not `=` — the metadata pack above is real
+                    // upload too, just a tiny fraction of it.
+                    stats.bytes_uploaded += chunk_bytes as usize;
                 }
             } else {
                 tracing::info!("No new objects to push - remote already has all objects");
@@ -94,7 +152,11 @@ impl ProtocolClient {
         }
 
         // Update refs
-        let request = RefUpdateRequest { updates, force };
+        let request = RefUpdateRequest {
+            updates,
+            force,
+            force_with_lease: false,
+        };
         let response = self.update_refs(request).await?;
         Ok((response, stats))
     }
@@ -108,11 +170,16 @@ impl ProtocolClient {
     /// * `on_progress` - Callback function for progress updates
     ///
     /// Returns the ref update response and push statistics
+    /// `force_with_lease` is a third mode, not a synonym for `force`: it
+    /// waives the server's ancestry requirement while keeping the `old_oid`
+    /// compare-and-swap, so a rewritten history can be pushed but a
+    /// concurrent update by someone else is still refused.
     pub async fn push_with_progress<F>(
         &self,
         odb: &ObjectDatabase,
         updates: Vec<RefUpdate>,
         force: bool,
+        force_with_lease: bool,
         on_progress: F,
     ) -> Result<(RefUpdateResponse, PushStats)>
     where
@@ -129,10 +196,10 @@ impl ProtocolClient {
                 .context(format!("Invalid OID in update: {}", update.new_oid))?;
             commit_oids.push(oid);
 
-            if let Some(old_oid) = &update.old_oid {
-                if let Ok(oid) = Oid::from_hex(old_oid) {
-                    have_oids.push(oid);
-                }
+            if let Some(old_oid) = &update.old_oid
+                && let Ok(oid) = Oid::from_hex(old_oid)
+            {
+                have_oids.push(oid);
             }
         }
 
@@ -172,6 +239,27 @@ impl ProtocolClient {
             message: format!("Found {} objects", stats.objects_count),
         });
 
+        // A7: bound the total wall time spent on network uploads so a mid-push
+        // backend outage fails fast with a clear error instead of hanging on
+        // retries forever. Absolute deadline (not stall-based): the default is
+        // generous enough that a real large push won't trip it; lower
+        // MEDIAGIT_PUSH_DEADLINE_SECS to fail faster on a dead backend.
+        // ponytail: absolute deadline, upgrade to a progress-reset stall
+        // deadline if multi-hour legit pushes ever false-trip it.
+        let push_deadline_secs = std::env::var("MEDIAGIT_PUSH_DEADLINE_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|&s| s > 0)
+            .unwrap_or(3600);
+        let push_deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(push_deadline_secs);
+        let deadline_err = || {
+            anyhow::anyhow!(
+                "push aborted: exceeded MEDIAGIT_PUSH_DEADLINE_SECS ({push_deadline_secs}s) \
+                 uploading to remote; the storage backend may be unavailable"
+            )
+        };
+
         if !objects.is_empty() {
             // Phase 2: Generate pack with progress
             let total_objects = objects.len() as u64;
@@ -182,81 +270,138 @@ impl ProtocolClient {
                 message: "Generating pack...".to_string(),
             });
 
-            let (pack_data, chunked_oids) = self.generate_pack(odb, objects).await?;
-            stats.bytes_uploaded = pack_data.len();
+            let (pack, chunked_oids) = self.generate_pack(odb, objects).await?;
+            stats.bytes_uploaded = pack.len();
 
             on_progress(PushProgress {
                 phase: PushPhase::Packing,
                 current: total_objects,
                 total: total_objects,
-                message: format!(
-                    "Packed {} objects ({} bytes)",
-                    total_objects,
-                    pack_data.len()
-                ),
+                message: format!("Packed {} objects ({} bytes)", total_objects, pack.len()),
             });
 
             // Phase 3: Upload pack with progress
             on_progress(PushProgress {
                 phase: PushPhase::Uploading,
                 current: 0,
-                total: pack_data.len() as u64,
+                total: pack.byte_len,
                 message: "Uploading pack...".to_string(),
             });
 
-            self.upload_pack(&pack_data).await?;
+            tokio::time::timeout_at(
+                push_deadline,
+                self.upload_pack_file(&pack.path, pack.byte_len),
+            )
+            .await
+            .map_err(|_| deadline_err())??;
 
             on_progress(PushProgress {
                 phase: PushPhase::Uploading,
-                current: pack_data.len() as u64,
-                total: pack_data.len() as u64,
+                current: pack.byte_len,
+                total: pack.byte_len,
                 message: "Pack upload complete".to_string(),
             });
 
             // Phase 4: Upload chunked objects (large files)
             if !chunked_oids.is_empty() {
-                self.upload_chunked_objects(odb, &chunked_oids, |bytes_done, bytes_total| {
-                    on_progress(PushProgress {
-                        phase: PushPhase::Uploading,
-                        current: bytes_done,
-                        total: bytes_total,
-                        message: String::new(),
+                let upload =
+                    self.upload_chunked_objects(odb, &chunked_oids, |bytes_done, bytes_total| {
+                        on_progress(PushProgress {
+                            phase: PushPhase::Uploading,
+                            current: bytes_done,
+                            total: bytes_total,
+                            message: String::new(),
+                        });
                     });
-                })
-                .await?;
+                // RP-1: the `??` discarded the upload's own byte count, so
+                // `bytes_uploaded` kept only the metadata pack size assigned
+                // above and the summary under-reported by orders of magnitude.
+                let (_chunks, chunk_bytes) = tokio::time::timeout_at(push_deadline, upload)
+                    .await
+                    .map_err(|_| deadline_err())??;
+                stats.bytes_uploaded += chunk_bytes as usize;
             }
         } else {
             tracing::info!("No new objects to push");
         }
 
         // Update refs
-        let request = RefUpdateRequest { updates, force };
-        let response = self.update_refs(request).await?;
+        let request = RefUpdateRequest {
+            updates,
+            force,
+            force_with_lease,
+        };
+        let response = tokio::time::timeout_at(push_deadline, self.update_refs(request))
+            .await
+            .map_err(|_| deadline_err())??;
         Ok((response, stats))
     }
 
     /// Upload a pack file to the server
-    pub(crate) async fn upload_pack(&self, pack_data: &[u8]) -> Result<()> {
+    ///
+    /// Takes ownership so the caller (a single small object wrapped in a
+    /// pack, e.g. `upload_loose_object`) hands over its buffer instead of
+    /// this function taking its own copy of it.
+    pub(crate) async fn upload_pack(&self, pack_data: Vec<u8>) -> Result<()> {
         let url = format!("{}/objects/pack", self.base_url);
         tracing::debug!("POST {} ({} bytes)", url, pack_data.len());
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/octet-stream")
-            .body(pack_data.to_vec())
-            .send()
-            .await
-            .context("Failed to upload pack file")?;
+        // Bytes so the retry closure below clones a refcount bump, not the
+        // buffer, matching the B5 pattern in pack_builder.rs.
+        let pack_data: bytes::Bytes = pack_data.into();
+        let response = crate::client::send_with_rate_limit_retry(|| {
+            self.client
+                .post(&url)
+                .header("Content-Type", "application/octet-stream")
+                .body(pack_data.clone())
+                .send()
+        })
+        .await
+        .context("Failed to upload pack file")?;
 
-        if !response.status().is_success() {
-            anyhow::bail!(
-                "POST /objects/pack failed with status: {}",
-                response.status()
-            );
-        }
+        handle_pack_upload_response(response)
+    }
 
-        Ok(())
+    /// Upload a metadata pack straight from disk, as a streaming body.
+    ///
+    /// C1: the metadata pack has no size cap (unlike the cloud chunk pack,
+    /// capped at MEDIAGIT_PACK_BYTES), so a history-heavy push must not hold
+    /// it in RAM. `generate_pack` writes it to `pack_path` via
+    /// `StreamingPackWriter`; this streams it back off disk instead.
+    ///
+    /// A streamed body cannot be replayed, so `send_with_rate_limit_retry`
+    /// re-opening the file inside its closure (called fresh on every 429
+    /// retry) is what makes retries safe here.
+    pub(crate) async fn upload_pack_file(&self, pack_path: &Path, byte_len: u64) -> Result<()> {
+        let url = format!("{}/objects/pack", self.base_url);
+        tracing::debug!("POST {} ({} bytes, streamed)", url, byte_len);
+
+        let response = crate::client::send_with_rate_limit_retry(|| async {
+            use futures::stream::TryStreamExt;
+
+            let path = pack_path.to_path_buf();
+            // File is opened lazily inside the stream so a failed open
+            // surfaces as a body error on `send()` rather than needing its
+            // own `reqwest::Result` conversion here.
+            let stream = futures::stream::once(async move {
+                tokio::fs::File::open(path)
+                    .await
+                    .map(tokio_util::io::ReaderStream::new)
+            })
+            .try_flatten();
+
+            self.client
+                .post(&url)
+                .header("Content-Type", "application/octet-stream")
+                .header("Content-Length", byte_len)
+                .body(reqwest::Body::wrap_stream(stream))
+                .send()
+                .await
+        })
+        .await
+        .context("Failed to upload pack file")?;
+
+        handle_pack_upload_response(response)
     }
 
     /// Collect all NEW objects reachable from given commit OIDs
@@ -280,22 +425,7 @@ impl ProtocolClient {
             let mut have_queue = VecDeque::new();
             for oid in have_oids {
                 if visited.insert(oid) {
-                    // Detect actual object type by reading and inspecting the object
-                    let obj_type = if let Ok(obj_data) = odb.read(&oid).await {
-                        // Try to deserialize as each type to detect the actual type
-                        if mediagit_versioning::format::deserialize::<Commit>(&obj_data).is_ok() {
-                            ObjectType::Commit
-                        } else if mediagit_versioning::format::deserialize::<Tree>(&obj_data)
-                            .is_ok()
-                        {
-                            ObjectType::Tree
-                        } else {
-                            ObjectType::Blob
-                        }
-                    } else {
-                        // Object not found locally - assume Commit for remote objects
-                        ObjectType::Commit
-                    };
+                    let obj_type = detect_object_type(odb, &oid).await;
                     have_queue.push_back((oid, obj_type));
                 }
             }
@@ -342,8 +472,15 @@ impl ProtocolClient {
                                 }
                             }
                         }
+                        ObjectType::Tag => {
+                            if let Ok(tag) = Tag::deserialize(&obj_data)
+                                && visited.insert(tag.target)
+                            {
+                                have_queue.push_back((tag.target, tag.target_type));
+                            }
+                        }
                         // Blob is filtered above; this arm satisfies exhaustiveness.
-                        _ => {}
+                        ObjectType::Blob => {}
                     }
                 }
             }
@@ -351,10 +488,14 @@ impl ProtocolClient {
             tracing::debug!("Marked {} objects as already on remote", visited.len());
         }
 
-        // Now collect only NEW objects (not in visited set)
+        // Now collect only NEW objects (not in visited set). Ref-update
+        // targets are usually commits, but can also be annotated Tag
+        // objects (e.g. `push --tags`), so the type must be detected rather
+        // than assumed.
         for oid in commit_oids {
             if visited.insert(oid) {
-                queue.push_back((oid, ObjectType::Commit));
+                let obj_type = detect_object_type(odb, &oid).await;
+                queue.push_back((oid, obj_type));
             }
         }
 
@@ -408,6 +549,19 @@ impl ProtocolClient {
                         }
                     }
                 }
+                ObjectType::Tag => {
+                    let obj_data = odb
+                        .read(&oid)
+                        .await
+                        .context(format!("Failed to read tag {}", oid))?;
+
+                    let tag: Tag = mediagit_versioning::format::deserialize(&obj_data)
+                        .context(format!("Failed to deserialize tag {}", oid))?;
+
+                    if visited.insert(tag.target) {
+                        queue.push_back((tag.target, tag.target_type));
+                    }
+                }
                 ObjectType::Blob => {
                     // Blobs are leaf nodes - no references to follow
                     // Don't read blob content here as it could be huge (20GB chunked files)
@@ -429,7 +583,7 @@ impl ProtocolClient {
         &self,
         odb: &ObjectDatabase,
         objects: Vec<(Oid, ObjectType)>,
-    ) -> Result<(Vec<u8>, Vec<Oid>)> {
+    ) -> Result<(GeneratedPack, Vec<Oid>)> {
         // First, filter out chunked objects
         let mut chunked_objects: Vec<Oid> = Vec::new();
         let mut non_chunked: Vec<(Oid, ObjectType)> = Vec::new();
@@ -450,10 +604,18 @@ impl ProtocolClient {
             );
         }
 
-        // Use standard PackWriter but process objects incrementally
-        // Each object is read, added to pack, then data is dropped before next read
-        // This avoids holding all object data in memory simultaneously
-        let mut pack_writer = PackWriter::new();
+        // C1: stream to a temp file via StreamingPackWriter instead of an
+        // in-RAM PackWriter. Unlike the cloud chunk pack (capped at
+        // MEDIAGIT_PACK_BYTES), this metadata pack has no size cap, so a
+        // history-heavy push grew it in RAM without bound.
+        let temp_dir = TempDir::new().context("create metadata pack temp dir")?;
+        let pack_path = temp_dir.path().join("metadata.pack");
+        let file = tokio::fs::File::create(&pack_path)
+            .await
+            .context("create metadata pack temp file")?;
+        let mut writer = StreamingPackWriter::new(file, non_chunked.len() as u32, temp_dir.path())
+            .await
+            .context("init streaming pack writer")?;
 
         for (oid, obj_type) in non_chunked {
             // Read single object
@@ -463,14 +625,29 @@ impl ProtocolClient {
                 .context(format!("Failed to read object {}", oid))?;
 
             // Add to pack (internally compressed/processed)
-            pack_writer.add_object(oid, obj_type, &obj_data);
+            writer
+                .write_object(oid, obj_type, &obj_data)
+                .await
+                .context(format!("Failed to write object {} to pack", oid))?;
 
             // obj_data is dropped here, freeing memory before next iteration
         }
 
-        // Finalize pack
-        let pack_data = pack_writer.finalize();
-        Ok((pack_data, chunked_objects))
+        // Finalize pack (writes index + checksum)
+        writer.finalize().await.context("finalize metadata pack")?;
+        let byte_len = tokio::fs::metadata(&pack_path)
+            .await
+            .context("stat metadata pack")?
+            .len();
+
+        Ok((
+            GeneratedPack {
+                _temp_dir: temp_dir,
+                path: pack_path,
+                byte_len,
+            },
+            chunked_objects,
+        ))
     }
 
     // ========================================================================
@@ -492,14 +669,18 @@ impl ProtocolClient {
         compressed_delta_bytes: Vec<u8>,
     ) -> Result<()> {
         let url = format!("{}/chunk-deltas/{}", self.base_url, chunk_id.to_hex());
-        let response = self
-            .client
-            .put(&url)
-            .header("x-mediagit-delta-base", base_id.to_hex())
-            .body(compressed_delta_bytes)
-            .send()
-            .await
-            .context(format!("Failed to PUT /chunk-deltas/{}", chunk_id))?;
+        // Bytes outside the closure, .clone() inside — send_with_rate_limit_retry
+        // re-invokes `make` per attempt, and `Fn` cannot move an owned Vec out.
+        let compressed_delta_bytes: bytes::Bytes = compressed_delta_bytes.into();
+        let response = crate::client::send_with_rate_limit_retry(|| {
+            self.client
+                .put(&url)
+                .header("x-mediagit-delta-base", base_id.to_hex())
+                .body(compressed_delta_bytes.clone())
+                .send()
+        })
+        .await
+        .context(format!("Failed to PUT /chunk-deltas/{}", chunk_id))?;
 
         if !response.status().is_success() {
             anyhow::bail!(
@@ -519,13 +700,11 @@ impl ProtocolClient {
     async fn upload_manifest(&self, oid: &Oid, data: &[u8]) -> Result<()> {
         let url = format!("{}/manifests/{}", self.base_url, oid.to_hex());
 
-        let response = self
-            .client
-            .put(&url)
-            .body(data.to_vec())
-            .send()
-            .await
-            .context(format!("Failed to PUT /manifests/{}", oid))?;
+        let response = crate::client::send_with_rate_limit_retry(|| {
+            self.client.put(&url).body(data.to_vec()).send()
+        })
+        .await
+        .context(format!("Failed to PUT /manifests/{}", oid))?;
 
         if !response.status().is_success() {
             anyhow::bail!(
@@ -553,6 +732,7 @@ impl ProtocolClient {
         concurrent_uploads: usize,
         bytes_progress: Arc<AtomicU64>,
         bytes_total_progress: Arc<AtomicU64>,
+        bench: Option<&Arc<crate::bench::BenchSession>>,
     ) -> Result<(u32, u64, u64)> {
         use futures::stream::StreamExt;
         let mut chunks_uploaded: u32 = 0;
@@ -690,6 +870,7 @@ impl ProtocolClient {
                         odb,
                         &chunk_manifest_sizes,
                         &bytes_progress,
+                        bench,
                     )
                     .await
                 {
@@ -705,9 +886,22 @@ impl ProtocolClient {
                     }
                     Err(e) => {
                         pack_had_error = true;
+                        // `?e` not `%e`. `%` renders only the OUTERMOST anyhow
+                        // context, so all eight of these in 20260821-ga11 read
+                        // "upload_and_register pack" and the status code that
+                        // actually explained the failure was discarded — the
+                        // one fact needed to diagnose it. `?` prints the chain.
+                        //
+                        // The consequence is stated too, not just the event: a
+                        // fallback is not a neutral retry, it is the whole push
+                        // dropping to the per-chunk path. In ga11 that was
+                        // 8.69 -> 0.98 MB/s, and nothing told the user why their
+                        // push suddenly took 35 minutes.
                         tracing::warn!(
-                            err = %e,
-                            "pack push failed; falling back to per-chunk path"
+                            err = ?e,
+                            "pack push FAILED after retries; falling back to the per-chunk \
+                             upload path for the rest of this push. This is materially \
+                             slower (measured ~9x on 20260821-ga11); the error above is why"
                         );
                         false
                     }
@@ -750,13 +944,22 @@ impl ProtocolClient {
                 // null → falls through to the server-proxy PUT path.
                 let full_chunk_hexes: Vec<String> =
                     full_chunks.iter().map(|c| c.to_hex()).collect();
-                let chunk_sizes: std::collections::HashMap<String, u64> = manifest
-                    .chunks
-                    .iter()
-                    .filter(|c| missing_set.contains(&c.id.to_hex()))
-                    .filter(|c| full_chunks.iter().any(|fc| fc == &c.id))
-                    .map(|c| (c.id.to_hex(), c.size as u64))
-                    .collect();
+                // Bind the presigned URL's Content-Length to the actual compressed
+                // on-disk size (what will be PUT), not the manifest's uncompressed
+                // size — a mismatch there causes a 403 SignatureDoesNotMatch on
+                // compressible content. `None` (delta/repacked chunk) maps to 0,
+                // matching the server's "unbound URL" contract.
+                let chunk_sizes: std::collections::HashMap<String, u64> = {
+                    let lens = futures::future::join_all(
+                        full_chunks.iter().map(|id| odb.compressed_chunk_len(id)),
+                    )
+                    .await;
+                    full_chunks
+                        .iter()
+                        .zip(lens)
+                        .map(|(id, len)| (id.to_hex(), len.unwrap_or(0)))
+                        .collect()
+                };
                 let presigned_urls = std::sync::Arc::new(
                     self.request_chunk_upload_urls(&full_chunk_hexes, &chunk_sizes)
                         .await,
@@ -779,13 +982,10 @@ impl ProtocolClient {
                 // better raw throughput for large bodies than h2 multiplexing
                 // on a single TCP connection (parallel cwnd > one congestion
                 // window). Pool size via MEDIAGIT_HTTP_POOL_MAX (see http_pool_max()).
-                let direct_client = reqwest::Client::builder()
-                    .pool_idle_timeout(std::time::Duration::from_secs(60))
-                    .pool_max_idle_per_host(http_pool_max())
-                    .tcp_keepalive(std::time::Duration::from_secs(45))
-                    .tcp_nodelay(true)
+                // A bounded chunk body, so a TOTAL request ceiling is safe here and is
+                // kept; the shared builder leaves that call to each site.
+                let direct_client = super::data_plane_client_builder()
                     .timeout(std::time::Duration::from_secs(300))
-                    .http1_only()
                     .build()
                     .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -835,8 +1035,8 @@ impl ProtocolClient {
                                     direct_succeeded = true;
                                 }
                             }
-                            if !direct_succeeded {
-                            if let Some(Some(purl)) = presigned.get(&hex) {
+                            if !direct_succeeded
+                            && let Some(Some(purl)) = presigned.get(&hex) {
                                 let mut current_url = purl.url.clone();
                                 let mut current_headers = purl.required_headers.clone();
                                 let mut resigned = false;
@@ -865,12 +1065,16 @@ impl ProtocolClient {
                                         .await;
                                     }
 
-                                    let mut req = direct_client
-                                        .put(&current_url)
-                                        .header(
+                                    // Only supply content-length when the signature
+                                    // does not already commit to one — see
+                                    // `signs_content_length`.
+                                    let mut req = direct_client.put(&current_url);
+                                    if !signs_content_length(&current_headers) {
+                                        req = req.header(
                                             reqwest::header::CONTENT_LENGTH,
                                             chunk_data.len(),
                                         );
+                                    }
                                     for [k, v] in &current_headers {
                                         req = req.header(k.as_str(), v.as_str());
                                     }
@@ -974,15 +1178,14 @@ impl ProtocolClient {
                                                             .await
                                                             .ok()
                                                             .filter(|r| r.status().is_success());
-                                                        if let Some(r) = refreshed {
-                                                            if let Ok(map) = r
+                                                        if let Some(r) = refreshed
+                                                            && let Ok(map) = r
                                                                 .json::<std::collections::HashMap<
                                                                     String,
                                                                     Option<PresignedPutInfo>,
                                                                 >>()
                                                                 .await
-                                                            {
-                                                                if let Some(Some(np)) = map.get(&hex) {
+                                                                && let Some(Some(np)) = map.get(&hex) {
                                                                     current_url = np.url.clone();
                                                                     current_headers = np.required_headers.clone();
                                                                     resigned = true;
@@ -993,8 +1196,6 @@ impl ProtocolClient {
                                                                     );
                                                                     continue 'direct;
                                                                 }
-                                                            }
-                                                        }
                                                         tracing::warn!(
                                                             chunk = %hex,
                                                             attempt,
@@ -1038,11 +1239,20 @@ impl ProtocolClient {
                                                         body = %body_str,
                                                         request_id = %request_id,
                                                         permanent_failures = fails,
+                                                        body_len = chunk_size,
                                                         "Direct upload rejected \
                                                          (config/auth error); falling back \
                                                          to proxy. See troubleshooting docs \
                                                          for bucket-policy / presigned-URL \
-                                                         setup."
+                                                         setup. If the code is \
+                                                         SignatureDoesNotMatch, compare \
+                                                         body_len against the \
+                                                         Content-Length the server signed \
+                                                         (compressed_chunk_len at presign \
+                                                         time) before suspecting \
+                                                         credentials — they diverge if the \
+                                                         chunk was repacked between \
+                                                         presign and upload."
                                                     );
                                                     if fails >= 3 {
                                                         tracing::warn!(
@@ -1056,12 +1266,35 @@ impl ProtocolClient {
                                             }
                                         }
                                         Err(e) => {
-                                            tracing::debug!(
-                                                chunk = %hex,
-                                                attempt,
-                                                err = %e,
-                                                "Direct upload network error; retrying"
-                                            );
+                                            // A TIMEOUT is never routine: the per-request
+                                            // budget is 300s, so each one burns five
+                                            // minutes, and MAX_ATTEMPTS of them can absorb
+                                            // ~25 minutes on a single chunk. If a later
+                                            // attempt then succeeds we `break 'direct` and
+                                            // nothing above debug is ever emitted, so the
+                                            // user is told only "Push successful" after a
+                                            // 20-minute wait (measured 2026-08-03: an 8 MiB
+                                            // push took 1,188s and printed no diagnostic).
+                                            // Warn on timeouts; keep fast connect/body
+                                            // errors at debug where they belong.
+                                            if e.is_timeout() {
+                                                tracing::warn!(
+                                                    chunk = %hex,
+                                                    attempt,
+                                                    err = %e,
+                                                    "Direct upload timed out after the \
+                                                     per-request budget; retrying (each \
+                                                     timeout costs the full budget, so a \
+                                                     push that looks merely slow is stalling)"
+                                                );
+                                            } else {
+                                                tracing::debug!(
+                                                    chunk = %hex,
+                                                    attempt,
+                                                    err = %e,
+                                                    "Direct upload network error; retrying"
+                                                );
+                                            }
                                             if attempt == MAX_ATTEMPTS - 1 {
                                                 tracing::warn!(
                                                     chunk = %hex,
@@ -1078,7 +1311,6 @@ impl ProtocolClient {
                                         }
                                     }
                                 }
-                            }
                             } // end if !direct_succeeded
 
                             if direct_succeeded {
@@ -1088,18 +1320,16 @@ impl ProtocolClient {
                             // Proxy path: used when no presigned URL was issued, or all
                             // direct attempts for this chunk were exhausted.
                             let url = format!("{}/chunks/{}", base_url, hex);
-                            let resp = client
-                                .put(&url)
-                                .body(chunk_data)
-                                .send()
-                                .await
-                                .map_err(|e| {
-                                    anyhow::anyhow!(
-                                        "Failed to upload chunk {}: {}",
-                                        chunk_id,
-                                        e
-                                    )
-                                })?;
+                            // One control-plane request per chunk: this is the
+                            // path that can outrun the server's rate limiter on
+                            // a large push, so wait out 429 rather than failing.
+                            let resp = crate::client::send_with_rate_limit_retry(|| {
+                                client.put(&url).body(chunk_data.clone()).send()
+                            })
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!("Failed to upload chunk {}: {}", chunk_id, e)
+                            })?;
                             if !resp.status().is_success() {
                                 anyhow::bail!(
                                     "PUT /chunks/{} failed with status: {}",
@@ -1160,12 +1390,15 @@ impl ProtocolClient {
                             let base_url = self.base_url.clone();
                             let odb = odb.clone();
                             async move {
-                                let chunk_data = odb.get_compressed_chunk(&chunk_id).await?;
+                                let chunk_data: bytes::Bytes =
+                                    odb.get_compressed_chunk(&chunk_id).await?.into();
                                 let chunk_size = chunk_data.len() as u64;
                                 let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
-                                let resp = client.put(&url).body(chunk_data).send().await.map_err(
-                                    |e| anyhow::anyhow!("Retry chunk {}: {}", chunk_id, e),
-                                )?;
+                                let resp = crate::client::send_with_rate_limit_retry(|| {
+                                    client.put(&url).body(chunk_data.clone()).send()
+                                })
+                                .await
+                                .map_err(|e| anyhow::anyhow!("Retry chunk {}: {}", chunk_id, e))?;
                                 if !resp.status().is_success() {
                                     anyhow::bail!(
                                         "Retry PUT /chunks/{} failed: {}",
@@ -1193,14 +1426,14 @@ impl ProtocolClient {
 
             // Optional strong verify: decompress + BLAKE3 every chunk server-side.
             // Gated by MEDIAGIT_STRONG_VERIFY=1; endpoint unavailability is non-fatal.
-            // Skipped in pack mode — chunks live at packs/<oid>, not chunks/<hex>.
+            // Runs in pack mode too — the server consults the pack index on a
+            // loose miss, so packed chunks are pack-valid to verify.
             if std::env::var("MEDIAGIT_STRONG_VERIFY").as_deref() == Ok("1")
                 && !full_chunks.is_empty()
-                && !cloud_packs
             {
                 let hexes: Vec<String> = full_chunks.iter().map(|c| c.to_hex()).collect();
                 tracing::debug!(count = hexes.len(), "Running strong chunk integrity verify");
-                match self.strong_verify_chunks(&hexes).await {
+                match self.strong_verify_chunks(&hexes, false).await {
                     Ok(invalid) if !invalid.is_empty() => {
                         anyhow::bail!(
                             "Strong verify found {} chunk(s) with corrupted content: {:?}",
@@ -1254,36 +1487,34 @@ impl ProtocolClient {
                 let _pass_deg_t = std::time::Instant::now();
                 let mut _pass_deg_n = 0u64;
                 let mut _pass_deg_bytes = 0u64;
-                let mut stream =
-                    futures::stream::iter(degraded_ids)
-                        .map(|chunk_id| {
-                            let client = self.client.clone();
-                            let base_url = self.base_url.clone();
-                            let odb = odb.clone();
-                            async move {
-                                let chunk_data = odb.get_compressed_chunk(&chunk_id).await?;
-                                let chunk_size = chunk_data.len() as u64;
-                                let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
-                                let resp = client.put(&url).body(chunk_data).send().await.map_err(
-                                    |e| {
-                                        anyhow::anyhow!(
-                                            "Failed to upload chunk {}: {}",
-                                            chunk_id,
-                                            e
-                                        )
-                                    },
-                                )?;
-                                if !resp.status().is_success() {
-                                    anyhow::bail!(
-                                        "PUT /chunks/{} failed with status: {}",
-                                        chunk_id,
-                                        resp.status()
-                                    );
-                                }
-                                Ok::<(Oid, u64), anyhow::Error>((chunk_id, chunk_size))
+                let mut stream = futures::stream::iter(degraded_ids)
+                    .map(|chunk_id| {
+                        let client = self.client.clone();
+                        let base_url = self.base_url.clone();
+                        let odb = odb.clone();
+                        async move {
+                            let chunk_data: bytes::Bytes =
+                                odb.get_compressed_chunk(&chunk_id).await?.into();
+                            let chunk_size = chunk_data.len() as u64;
+                            let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
+                            let resp = crate::client::send_with_rate_limit_retry(|| {
+                                client.put(&url).body(chunk_data.clone()).send()
+                            })
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!("Failed to upload chunk {}: {}", chunk_id, e)
+                            })?;
+                            if !resp.status().is_success() {
+                                anyhow::bail!(
+                                    "PUT /chunks/{} failed with status: {}",
+                                    chunk_id,
+                                    resp.status()
+                                );
                             }
-                        })
-                        .buffer_unordered(concurrent_uploads);
+                            Ok::<(Oid, u64), anyhow::Error>((chunk_id, chunk_size))
+                        }
+                    })
+                    .buffer_unordered(concurrent_uploads);
 
                 while let Some(result) = stream.next().await {
                     let (chunk_id, chunk_bytes) = result?;
@@ -1312,21 +1543,20 @@ impl ProtocolClient {
                         let client = self.client.clone();
                         let base_url = self.base_url.clone();
                         async move {
+                            let delta_bytes: bytes::Bytes = delta_bytes.into();
                             let delta_size = delta_bytes.len() as u64;
                             let url = format!("{}/chunk-deltas/{}", base_url, chunk_id.to_hex());
-                            let resp = client
-                                .put(&url)
-                                .header("x-mediagit-delta-base", base_id.to_hex())
-                                .body(delta_bytes)
-                                .send()
-                                .await
-                                .map_err(|e| {
-                                    anyhow::anyhow!(
-                                        "Failed to upload chunk-delta {}: {}",
-                                        chunk_id,
-                                        e
-                                    )
-                                })?;
+                            let resp = crate::client::send_with_rate_limit_retry(|| {
+                                client
+                                    .put(&url)
+                                    .header("x-mediagit-delta-base", base_id.to_hex())
+                                    .body(delta_bytes.clone())
+                                    .send()
+                            })
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!("Failed to upload chunk-delta {}: {}", chunk_id, e)
+                            })?;
                             if !resp.status().is_success() {
                                 anyhow::bail!(
                                     "PUT /chunk-deltas/{} failed with status: {}",
@@ -1360,7 +1590,8 @@ impl ProtocolClient {
         }
 
         // Upload manifest last (ensures all chunks exist first)
-        let manifest_data = mediagit_versioning::format::serialize(&manifest)
+        let manifest_data = manifest
+            .to_bytes()
             .context("Failed to serialize manifest")?;
         self.upload_manifest(oid, &manifest_data).await?;
 
@@ -1377,17 +1608,25 @@ impl ProtocolClient {
         odb: &ObjectDatabase,
         chunked_oids: &[Oid],
         mut on_progress: F,
-    ) -> Result<usize>
+    ) -> Result<(usize, u64)>
     where
         F: FnMut(u64, u64),
     {
         use futures::stream::StreamExt;
 
         if chunked_oids.is_empty() {
-            return Ok(0);
+            return Ok((0, 0));
         }
 
         let mut total_chunks_uploaded = 0;
+        // RP-1: chunk payload is the overwhelming majority of a media push, and
+        // it was never counted. `bytes_uploaded` got the metadata pack's size
+        // and nothing else, which is how a 15.53 GiB push reported "↑ 2.71 KiB".
+        // Counted in wire bytes (compressed chunk / pack bytes) to match the
+        // per-chunk and pack paths, and because a rate derived from logical
+        // bytes can exceed link capacity — the same unit error behind the
+        // "747 MiB/s" reading.
+        let mut total_bytes_uploaded: u64 = 0;
         // Concurrency for parallel chunk uploads. buffer_unordered keeps at
         // most N futures active. Default 32 measured 37% faster than 16 on a
         // 2-Mbps upstream to Azure West EU (561s -> 353s for 150 MB cold
@@ -1458,8 +1697,9 @@ impl ProtocolClient {
                     let odb = odb.clone();
                     let bp = bytes_progress.clone();
                     let btp = bytes_total_progress.clone();
+                    let bench = _upload_bench.clone();
                     async move {
-                        self.push_one_object(oid, &odb, per_obj_concurrent, bp, btp)
+                        self.push_one_object(oid, &odb, per_obj_concurrent, bp, btp, bench.as_ref())
                             .await
                     }
                 })
@@ -1477,8 +1717,9 @@ impl ProtocolClient {
                         match result {
                             None => break,
                             Some(r) => {
-                                let (chunks, _bytes_up, _bytes_total_delta) = r?;
+                                let (chunks, bytes_up, _bytes_total_delta) = r?;
                                 total_chunks_uploaded += chunks as usize;
+                                total_bytes_uploaded += bytes_up;
                                 let done = bytes_progress.load(Ordering::Relaxed);
                                 let total = bytes_total_progress.load(Ordering::Relaxed);
                                 on_progress(done, total);
@@ -1500,7 +1741,7 @@ impl ProtocolClient {
             if let Some(b) = &_upload_bench {
                 b.summary();
             }
-            return Ok(total_chunks_uploaded);
+            return Ok((total_chunks_uploaded, total_bytes_uploaded));
         }
 
         for oid in chunked_oids.iter() {
@@ -1613,13 +1854,22 @@ impl ProtocolClient {
                     // null → falls through to the server-proxy PUT path.
                     let full_chunk_hexes: Vec<String> =
                         full_chunks.iter().map(|c| c.to_hex()).collect();
-                    let chunk_sizes: std::collections::HashMap<String, u64> = manifest
-                        .chunks
-                        .iter()
-                        .filter(|c| missing_set.contains(&c.id.to_hex()))
-                        .filter(|c| full_chunks.iter().any(|fc| fc == &c.id))
-                        .map(|c| (c.id.to_hex(), c.size as u64))
-                        .collect();
+                    // Bind the presigned URL's Content-Length to the actual compressed
+                    // on-disk size (what will be PUT), not the manifest's uncompressed
+                    // size — a mismatch there causes a 403 SignatureDoesNotMatch on
+                    // compressible content. `None` (delta/repacked chunk) maps to 0,
+                    // matching the server's "unbound URL" contract.
+                    let chunk_sizes: std::collections::HashMap<String, u64> = {
+                        let lens = futures::future::join_all(
+                            full_chunks.iter().map(|id| odb.compressed_chunk_len(id)),
+                        )
+                        .await;
+                        full_chunks
+                            .iter()
+                            .zip(lens)
+                            .map(|(id, len)| (id.to_hex(), len.unwrap_or(0)))
+                            .collect()
+                    };
                     let presigned_urls = std::sync::Arc::new(
                         self.request_chunk_upload_urls(&full_chunk_hexes, &chunk_sizes)
                             .await,
@@ -1642,13 +1892,10 @@ impl ProtocolClient {
                     // better raw throughput for large bodies than h2 multiplexing
                     // on a single TCP connection (parallel cwnd > one congestion
                     // window). Pool size via MEDIAGIT_HTTP_POOL_MAX (see http_pool_max()).
-                    let direct_client = reqwest::Client::builder()
-                        .pool_idle_timeout(std::time::Duration::from_secs(60))
-                        .pool_max_idle_per_host(http_pool_max())
-                        .tcp_keepalive(std::time::Duration::from_secs(45))
-                        .tcp_nodelay(true)
+                    // A bounded chunk body, so a TOTAL request ceiling is safe here and is
+                    // kept; the shared builder leaves that call to each site.
+                    let direct_client = super::data_plane_client_builder()
                         .timeout(std::time::Duration::from_secs(300))
-                        .http1_only()
                         .build()
                         .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -1698,8 +1945,8 @@ impl ProtocolClient {
                                         direct_succeeded = true;
                                     }
                                 }
-                                if !direct_succeeded {
-                                if let Some(Some(purl)) = presigned.get(&hex) {
+                                if !direct_succeeded
+                                && let Some(Some(purl)) = presigned.get(&hex) {
                                     let mut current_url = purl.url.clone();
                                     let mut current_headers = purl.required_headers.clone();
                                     let mut resigned = false;
@@ -1728,12 +1975,16 @@ impl ProtocolClient {
                                             .await;
                                         }
 
-                                        let mut req = direct_client
-                                            .put(&current_url)
-                                            .header(
+                                        // Only supply content-length when the
+                                        // signature does not already commit to one
+                                        // — see `signs_content_length`.
+                                        let mut req = direct_client.put(&current_url);
+                                        if !signs_content_length(&current_headers) {
+                                            req = req.header(
                                                 reqwest::header::CONTENT_LENGTH,
                                                 chunk_data.len(),
                                             );
+                                        }
                                         for [k, v] in &current_headers {
                                             req = req.header(k.as_str(), v.as_str());
                                         }
@@ -1837,15 +2088,14 @@ impl ProtocolClient {
                                                                 .await
                                                                 .ok()
                                                                 .filter(|r| r.status().is_success());
-                                                            if let Some(r) = refreshed {
-                                                                if let Ok(map) = r
+                                                            if let Some(r) = refreshed
+                                                                && let Ok(map) = r
                                                                     .json::<std::collections::HashMap<
                                                                         String,
                                                                         Option<PresignedPutInfo>,
                                                                     >>()
                                                                     .await
-                                                                {
-                                                                    if let Some(Some(np)) = map.get(&hex) {
+                                                                    && let Some(Some(np)) = map.get(&hex) {
                                                                         current_url = np.url.clone();
                                                                         current_headers = np.required_headers.clone();
                                                                         resigned = true;
@@ -1856,8 +2106,6 @@ impl ProtocolClient {
                                                                         );
                                                                         continue 'direct;
                                                                     }
-                                                                }
-                                                            }
                                                             tracing::warn!(
                                                                 chunk = %hex,
                                                                 attempt,
@@ -1919,12 +2167,29 @@ impl ProtocolClient {
                                                 }
                                             }
                                             Err(e) => {
-                                                tracing::debug!(
-                                                    chunk = %hex,
-                                                    attempt,
-                                                    err = %e,
-                                                    "Direct upload network error; retrying"
-                                                );
+                                                // Same silent-stall gap as the first direct
+                                                // -upload loop above — see its comment. A
+                                                // timeout costs the full per-request budget,
+                                                // so it must not sit at debug.
+                                                if e.is_timeout() {
+                                                    tracing::warn!(
+                                                        chunk = %hex,
+                                                        attempt,
+                                                        err = %e,
+                                                        "Direct upload timed out after the \
+                                                         per-request budget; retrying (each \
+                                                         timeout costs the full budget, so a \
+                                                         push that looks merely slow is \
+                                                         stalling)"
+                                                    );
+                                                } else {
+                                                    tracing::debug!(
+                                                        chunk = %hex,
+                                                        attempt,
+                                                        err = %e,
+                                                        "Direct upload network error; retrying"
+                                                    );
+                                                }
                                                 if attempt == MAX_ATTEMPTS - 1 {
                                                     tracing::warn!(
                                                         chunk = %hex,
@@ -1941,7 +2206,6 @@ impl ProtocolClient {
                                             }
                                         }
                                     }
-                                }
                                 } // end if !direct_succeeded
 
                                 if direct_succeeded {
@@ -1949,20 +2213,21 @@ impl ProtocolClient {
                                 }
 
                                 // Proxy path: used when no presigned URL was issued, or all
-                                // direct attempts for this chunk were exhausted.
+                                // direct attempts for this chunk were exhausted. One
+                                // control-plane request per chunk, so wait out 429
+                                // rather than failing (mirrors the pipelined path).
                                 let url = format!("{}/chunks/{}", base_url, hex);
-                                let resp = client
-                                    .put(&url)
-                                    .body(chunk_data)
-                                    .send()
-                                    .await
-                                    .map_err(|e| {
-                                        anyhow::anyhow!(
-                                            "Failed to upload chunk {}: {}",
-                                            chunk_id,
-                                            e
-                                        )
-                                    })?;
+                                let resp = crate::client::send_with_rate_limit_retry(|| {
+                                    client.put(&url).body(chunk_data.clone()).send()
+                                })
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "Failed to upload chunk {}: {}",
+                                        chunk_id,
+                                        e
+                                    )
+                                })?;
                                 if !resp.status().is_success() {
                                     anyhow::bail!(
                                         "PUT /chunks/{} failed with status: {}",
@@ -2020,13 +2285,17 @@ impl ProtocolClient {
                                 let base_url = self.base_url.clone();
                                 let odb = odb.clone();
                                 async move {
-                                    let chunk_data = odb.get_compressed_chunk(&chunk_id).await?;
+                                    let chunk_data: bytes::Bytes =
+                                        odb.get_compressed_chunk(&chunk_id).await?.into();
                                     let chunk_size = chunk_data.len() as u64;
                                     let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
-                                    let resp =
-                                        client.put(&url).body(chunk_data).send().await.map_err(
-                                            |e| anyhow::anyhow!("Retry chunk {}: {}", chunk_id, e),
-                                        )?;
+                                    let resp = crate::client::send_with_rate_limit_retry(|| {
+                                        client.put(&url).body(chunk_data.clone()).send()
+                                    })
+                                    .await
+                                    .map_err(|e| {
+                                        anyhow::anyhow!("Retry chunk {}: {}", chunk_id, e)
+                                    })?;
                                     if !resp.status().is_success() {
                                         anyhow::bail!(
                                             "Retry PUT /chunks/{} failed: {}",
@@ -2102,18 +2371,17 @@ impl ProtocolClient {
                             let base_url = self.base_url.clone();
                             let odb = odb.clone();
                             async move {
-                                let chunk_data = odb.get_compressed_chunk(&chunk_id).await?;
+                                let chunk_data: bytes::Bytes =
+                                    odb.get_compressed_chunk(&chunk_id).await?.into();
                                 let chunk_size = chunk_data.len() as u64;
                                 let url = format!("{}/chunks/{}", base_url, chunk_id.to_hex());
-                                let resp = client.put(&url).body(chunk_data).send().await.map_err(
-                                    |e| {
-                                        anyhow::anyhow!(
-                                            "Failed to upload chunk {}: {}",
-                                            chunk_id,
-                                            e
-                                        )
-                                    },
-                                )?;
+                                let resp = crate::client::send_with_rate_limit_retry(|| {
+                                    client.put(&url).body(chunk_data.clone()).send()
+                                })
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!("Failed to upload chunk {}: {}", chunk_id, e)
+                                })?;
                                 if !resp.status().is_success() {
                                     anyhow::bail!(
                                         "PUT /chunks/{} failed with status: {}",
@@ -2149,22 +2417,25 @@ impl ProtocolClient {
                             let client = self.client.clone();
                             let base_url = self.base_url.clone();
                             async move {
+                                let delta_bytes: bytes::Bytes = delta_bytes.into();
                                 let delta_size = delta_bytes.len() as u64;
                                 let url =
                                     format!("{}/chunk-deltas/{}", base_url, chunk_id.to_hex());
-                                let resp = client
-                                    .put(&url)
-                                    .header("x-mediagit-delta-base", base_id.to_hex())
-                                    .body(delta_bytes)
-                                    .send()
-                                    .await
-                                    .map_err(|e| {
-                                        anyhow::anyhow!(
-                                            "Failed to upload chunk-delta {}: {}",
-                                            chunk_id,
-                                            e
-                                        )
-                                    })?;
+                                let resp = crate::client::send_with_rate_limit_retry(|| {
+                                    client
+                                        .put(&url)
+                                        .header("x-mediagit-delta-base", base_id.to_hex())
+                                        .body(delta_bytes.clone())
+                                        .send()
+                                })
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "Failed to upload chunk-delta {}: {}",
+                                        chunk_id,
+                                        e
+                                    )
+                                })?;
                                 if !resp.status().is_success() {
                                     anyhow::bail!(
                                         "PUT /chunk-deltas/{} failed with status: {}",
@@ -2192,7 +2463,8 @@ impl ProtocolClient {
             }
 
             // Upload manifest last (ensures all chunks exist first)
-            let manifest_data = mediagit_versioning::format::serialize(&manifest)
+            let manifest_data = manifest
+                .to_bytes()
                 .context("Failed to serialize manifest")?;
             self.upload_manifest(oid, &manifest_data).await?;
 
@@ -2202,6 +2474,169 @@ impl ProtocolClient {
         if let Some(b) = &_upload_bench {
             b.summary();
         }
-        Ok(total_chunks_uploaded)
+        // Sequential/per-chunk path: `bytes_done` accumulates
+        // `get_compressed_chunk(..).len()`, i.e. the same wire unit the pack
+        // path reports, so the two paths stay comparable.
+        Ok((total_chunks_uploaded, bytes_done))
+    }
+
+    /// Force-heal remote chunk storage (BUG-RM-3: one corrupt chunk object
+    /// permanently bricks a remote, because push dedup and pack-index checks
+    /// both treat "server already has it" as sufficient and never re-check
+    /// content).
+    ///
+    /// Walks the FULL object closure reachable from `commit_oids` — no
+    /// "have" diffing against the remote's current refs, since a poisoned
+    /// chunk is by definition one the server already believes it has (that's
+    /// exactly what makes it invisible to ordinary push). Every chunk id
+    /// referenced by any chunked blob in the closure is strong-verified via
+    /// `POST /chunks/verify-integrity` (BLAKE3 re-hash, always run — never
+    /// gated behind `MEDIAGIT_STRONG_VERIFY`). Any chunk the server reports
+    /// invalid is re-uploaded unconditionally via `PUT /chunks/:id`, which
+    /// the server always overwrites with no existence check (see
+    /// `mediagit-server::handlers::chunks::upload_chunk`) — so this bypasses
+    /// the "already present" dedup that `/chunks/check` and the pack index
+    /// would otherwise apply.
+    pub async fn repair_remote(
+        &self,
+        odb: &ObjectDatabase,
+        commit_oids: Vec<Oid>,
+    ) -> Result<RepairReport> {
+        if commit_oids.is_empty() {
+            return Ok(RepairReport::default());
+        }
+
+        let objects = self
+            .collect_reachable_objects(odb, commit_oids, Vec::new())
+            .await?;
+
+        let mut chunk_hexes: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for (oid, obj_type) in &objects {
+            if *obj_type == ObjectType::Blob
+                && odb.is_chunked(oid).await.unwrap_or(false)
+                && let Some(manifest) = odb.get_chunk_manifest(oid).await?
+            {
+                for c in &manifest.chunks {
+                    let hex = c.id.to_hex();
+                    if seen.insert(hex.clone()) {
+                        chunk_hexes.push(hex);
+                    }
+                }
+            }
+        }
+
+        let mut repaired = 0usize;
+        let mut unrepairable = Vec::new();
+
+        // Phase 1: whole objects (commits/trees/un-chunked blobs). The chunk
+        // walk below never sees these — CHK20's poisoned blob was one.
+        let object_hexes: Vec<String> = objects.iter().map(|(oid, _)| oid.to_hex()).collect();
+        let invalid_objects = self.strong_verify_objects(&object_hexes, true).await?;
+        if !invalid_objects.is_empty() {
+            let invalid_set: HashSet<&str> = invalid_objects.iter().map(|s| s.as_str()).collect();
+            let to_reupload: Vec<(Oid, ObjectType)> = objects
+                .iter()
+                .filter(|(oid, _)| invalid_set.contains(oid.to_hex().as_str()))
+                .cloned()
+                .collect();
+            let n = to_reupload.len();
+            let (pack, _) = self.generate_pack(odb, to_reupload).await?;
+            match self.upload_pack_file(&pack.path, pack.byte_len).await {
+                Ok(()) => repaired += n,
+                Err(_) => unrepairable.extend(invalid_objects.iter().cloned()),
+            }
+        }
+
+        if chunk_hexes.is_empty() {
+            return Ok(RepairReport {
+                verified: object_hexes.len(),
+                repaired,
+                unrepairable,
+            });
+        }
+
+        let invalid = self.strong_verify_chunks(&chunk_hexes, true).await?;
+        let verified = object_hexes.len() + chunk_hexes.len();
+
+        for hex in invalid {
+            let oid = match Oid::from_hex(&hex) {
+                Ok(o) => o,
+                Err(_) => {
+                    unrepairable.push(hex);
+                    continue;
+                }
+            };
+            let data = match odb.get_compressed_chunk(&oid).await {
+                Ok(d) => d,
+                Err(_) => {
+                    unrepairable.push(hex);
+                    continue;
+                }
+            };
+            let url = format!("{}/chunks/{}", self.base_url, hex);
+            match self.client.put(&url).body(data).send().await {
+                Ok(r) if r.status().is_success() => repaired += 1,
+                _ => unrepairable.push(hex),
+            }
+        }
+
+        Ok(RepairReport {
+            verified,
+            repaired,
+            unrepairable,
+        })
+    }
+}
+
+/// Detect an object's type by reading it and trying each deserializer in
+/// turn (Commit, Tree, Tag; else Blob) — same ordering rationale as
+/// `mediagit_versioning::reachability`'s sniff chain. Falls back to
+/// `ObjectType::Commit` if the object can't be read at all, matching this
+/// module's pre-existing behavior for stale/unknown "have" OIDs from the
+/// remote (an over-broad guess here only means the traversal below reads
+/// the object and finds it truly isn't a commit, not a correctness issue).
+async fn detect_object_type(odb: &ObjectDatabase, oid: &Oid) -> ObjectType {
+    let Ok(obj_data) = odb.read(oid).await else {
+        return ObjectType::Commit;
+    };
+    if Commit::deserialize(&obj_data).is_ok() {
+        ObjectType::Commit
+    } else if Tree::deserialize(&obj_data).is_ok() {
+        ObjectType::Tree
+    } else if Tag::deserialize(&obj_data).is_ok() {
+        ObjectType::Tag
+    } else {
+        ObjectType::Blob
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::signs_content_length;
+
+    #[test]
+    fn detects_server_signed_content_length() {
+        let headers = [["content-length".to_string(), "1234".to_string()]];
+        assert!(signs_content_length(&headers));
+    }
+
+    /// HTTP header names are case-insensitive and neither the SDK nor the wire
+    /// guarantees a casing. Matching only the lowercase spelling would let a
+    /// `Content-Length` through and re-introduce the duplicate.
+    #[test]
+    fn header_match_is_case_insensitive() {
+        let headers = [["Content-Length".to_string(), "1234".to_string()]];
+        assert!(signs_content_length(&headers));
+    }
+
+    /// Unbound presigned URLs (server passed `content_length == 0`) sign no
+    /// length, so the client must still supply one — returning true here would
+    /// send a body with no content-length at all.
+    #[test]
+    fn unbound_url_still_needs_an_explicit_length() {
+        let headers = [["x-amz-checksum-crc32".to_string(), "abcd".to_string()]];
+        assert!(!signs_content_length(&headers));
+        assert!(!signs_content_length(&[]));
     }
 }

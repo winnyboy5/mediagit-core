@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Reference (ref) abstraction for branches and tags
 //!
@@ -411,14 +401,23 @@ impl RefDatabase {
             fs::create_dir_all(parent).await?;
         }
 
-        // Write atomically using temp file + rename
-        let temp_path = path.with_extension("tmp");
+        // Write atomically using a *unique* temp file + rename.
+        //
+        // VC-3: this used `path.with_extension("tmp")`, a name derived purely
+        // from the target — so two processes writing the same ref opened the
+        // same temp path. The second `File::create` truncated the first's
+        // in-flight temp file, and whichever `rename` landed last won,
+        // silently discarding the other update.
+        let temp_path = crate::atomic_write::tmp_path_for(&path)?;
         let mut file = fs::File::create(&temp_path).await?;
         file.write_all(&data).await?;
         file.sync_all().await?;
         drop(file);
 
-        fs::rename(&temp_path, &path).await?;
+        if let Err(e) = fs::rename(&temp_path, &path).await {
+            let _ = fs::remove_file(&temp_path).await;
+            return Err(e.into());
+        }
 
         debug!(ref_name = %r.name, "Reference written successfully");
         Ok(())

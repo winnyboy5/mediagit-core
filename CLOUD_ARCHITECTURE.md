@@ -60,44 +60,53 @@ flowchart LR
     end
     
     subgraph Features["Features"]
-        MULTI[Multipart Upload<br/>100MB parts]
-        RETRY[Exponential Backoff<br/>3 retries]
-        CONC[8 Concurrent Parts]
+        MULTI[Presigned Multipart Upload]
+        RETRY[Per-chunk Retry]
+        IAM[IAM / Credential Chain]
     end
     
-    subgraph Security["Security"]
-        SSE[SSE-S3 / SSE-KMS]
-        SSEC[SSE-C Optional]
-        IAM[IAM Policies]
-    end
-    
-    Config --> Features --> Security
+    Config --> Features
 ```
 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `bucket` | Required | S3 bucket name |
-| `region` | Auto-detect | AWS region |
-| `endpoint` | AWS S3 | Custom endpoint for S3-compatible |
-| `part_size` | 100MB | Multipart upload part size |
-| `max_concurrent_parts` | 8 | Parallel part uploads |
-| `max_retries` | 3 | Retry attempts |
+| `region` | Required | AWS region |
+| `access_key_id` / `secret_access_key` | Optional | Falls back to the AWS credential chain when unset |
+| `endpoint` | AWS S3 | Custom endpoint for S3-compatible services |
+| `prefix` | `""` | Object key prefix |
 
-**Credential Chain:**
-1. Environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`)
-2. IAM role (EC2, ECS, Lambda)
-3. AWS profile files (`~/.aws/credentials`)
+`part_size`, concurrency, and retry counts are not `[storage]` config
+fields — see [Performance Tuning](#performance-tuning) below for how those
+are actually controlled. Server-side encryption (SSE-S3/SSE-KMS/SSE-C) is
+not implemented by the S3 backend (`crates/mediagit-storage/src/s3.rs`);
+see [Security Architecture](#security-architecture) for what encryption the
+project actually provides.
+
+**Credential Chain:** there isn't one. S3 credentials come from
+`access_key_id` / `secret_access_key` in the repository's own
+`.mediagit/config.toml` and nowhere else — no environment variables, no IAM
+role, no `~/.aws/credentials`. The chain above was documented for years and is
+dead code: see *Storage credentials are not environment variables* below, and
+note the module doc at `crates/mediagit-storage/src/s3.rs:59` still describes
+the same non-existent chain.
 
 ---
 
 ### Azure Blob Storage
 
+Credentials use a tagged `auth` block under `[storage]` (`config_version` 3+):
+one of `account_key` (`account_name` + `account_key`), `connection_string`
+(`value`), `sas` (`account_name` + `token`), or `emulator` (local Azurite).
+
 | Setting | Description |
 |---------|-------------|
-| `account_name` | Storage account name |
-| `account_key` | Storage account key |
 | `container` | Blob container name |
-| `use_managed_identity` | Use Azure AD auth |
+| `prefix` | Optional key prefix; lets multiple repos share one container |
+
+Built on Apache OpenDAL (the `azure_storage_blobs` 0.21 line is EOL, and its GA
+replacement is Entra-ID-only). Managed-identity / Azure AD auth is not
+supported — authenticate by shared key, SAS, or connection string.
 
 **Storage Tiers:**
 - **Hot**: Frequently accessed data (active repos)
@@ -228,20 +237,15 @@ flowchart LR
         TLS[TLS 1.3<br/>rustls]
     end
     
-    subgraph Server["Server-Side"]
-        SSE[SSE-S3 / SSE-KMS<br/>At Rest]
-    end
-    
-    Client --> Transit --> Server
+    Client --> Transit
 ```
 
 ### Security Layers
 
 | Layer | Implementation | Purpose |
 |-------|---------------|---------|
-| **Client Encryption** | AES-256-GCM | End-to-end encryption |
+| **Client Encryption** | AES-256-GCM (DC-7 at-rest encryption) | End-to-end encryption; server holds per-repo escrow keys, never the process key |
 | **Transport** | TLS 1.3 (rustls) | In-transit protection |
-| **Server Encryption** | SSE-S3 / SSE-KMS | At-rest protection |
 | **Authentication** | JWT / API Keys | Access control |
 | **Key Derivation** | Argon2 | Password-based keys |
 | **Rate Limiting** | tower_governor | DDoS protection |
@@ -371,9 +375,42 @@ flowchart LR
 
 | Component | Strategy |
 |-----------|----------|
-| **Servers** | Stateless, horizontally scalable |
-| **Load Balancer** | Health checks, auto-failover |
+| **Servers** | **Single instance per directory — enforced at boot.** See [Server topology](#server-topology) |
+| **Load Balancer** | Health checks; failover to a standby that owns its own `repos_dir` |
 | **Storage** | Cloud-managed durability (11 9s) |
+
+### Server topology
+
+**Supported: one `mediagit-server` process per `repos_dir` (and per
+`auth_store_dir`).** The server takes an exclusive lock on both at startup and
+refuses to start if another process holds one. The lock lives on an open file
+handle, so the OS releases it on any exit — a crashed server does not block its
+own restart.
+
+This is a real constraint, not caution. The server keeps state that is
+per-process, and a second instance sharing a directory corrupts it *silently*:
+
+| State | What a second instance does |
+|---|---|
+| `users.jsonl` / `grants.jsonl` | each loads at boot and full-rewrites on mutation; the slower writer's snapshot wins and the other's users and grants vanish |
+| `locks.jsonl` | same full rewrite, and the double-lock 409 guard is per-process, so two clients can both hold one path |
+| circular chunk-delta guard | in-process only; two instances can write A→B and B→A and leave the repo unpushable |
+| pack verification | the same pack is verified twice over the WAN |
+| token revocation | logout does not propagate; the sibling keeps accepting a revoked JWT |
+| rate limiter | N instances serve N× the configured budget |
+| want-cache | negotiation state is per-process, so clone/push negotiation breaks |
+
+None of those raise an error, which is why the enforcement is at boot rather
+than at each site.
+
+To scale out today, give each instance its own `repos_dir` and `auth_store_dir`
+and shard repositories across them at the load balancer. True horizontal scale —
+several instances over one shared store — needs the state above moved to a
+shared store (Postgres/Redis) and is **not implemented**.
+
+`MEDIAGIT_ALLOW_MULTI_INSTANCE=1` downgrades the refusal to a warning. It exists
+for an operator who has genuinely separated every directory and is only tripping
+over a lock file on a shared mount. It does not make the sharing safe.
 
 ### Disaster Recovery
 
@@ -457,10 +494,10 @@ region = "us-east-1"
 ```toml
 [storage]
 backend = "azure"
-account_name = "mediagitstorage"
 container = "repos"
-# account_key = "..."   # Or set MEDIAGIT_AZURE_ACCOUNT_KEY env var
-# connection_string = "..."  # Alternative to account_key
+auth = { type = "account_key", account_name = "mediagitstorage", account_key = "..." }
+# variants: connection_string { value }, sas { account_name, token }, emulator {}
+# account_key may also come from the AZURE_STORAGE_KEY env var
 ```
 
 ### MinIO (mediagit.toml)
@@ -497,49 +534,76 @@ base_path = "/fast-storage/mediagit"
 
 ## Server Configuration
 
+The server's own settings — bind address, TLS, repo directory — come from
+`mediagit-server.toml` and a few CLI flags. They are **not** environment
+variables: `MEDIAGIT_PORT`, `MEDIAGIT_HOST`, `MEDIAGIT_TLS_CERT`,
+`MEDIAGIT_TLS_KEY` and `MEDIAGIT_API_KEY_ENABLED` appeared in earlier
+revisions of this document and have never been read by anything. Because
+`ServerConfig` is `deny_unknown_fields`, a mistyped *config key* fails loudly
+at startup — but a mistyped env var just does nothing, which is why the list
+below is worth being exact about.
+
+```toml
+# mediagit-server.toml
+port = 3000
+host = "0.0.0.0"
+repos_dir = "/var/lib/mediagit/repos"
+
+enable_tls = true
+tls_port = 3443
+tls_cert_path = "/certs/server.crt"
+tls_key_path = "/certs/server.key"
+```
+
+`--port`, `--host`, `--data-dir` and `--config PATH` override the file.
+
 ### Environment Variables
 
+These are the server-side variables that are actually read:
+
 ```bash
-# Server
-MEDIAGIT_PORT=3000
-MEDIAGIT_HOST=0.0.0.0
-
-# TLS
-MEDIAGIT_TLS_CERT=/certs/server.crt
-MEDIAGIT_TLS_KEY=/certs/server.key
-
 # Auth
 MEDIAGIT_JWT_SECRET=your-secret-key
-MEDIAGIT_API_KEY_ENABLED=true
+MEDIAGIT_ADMIN_PASSWORD=...            # initial admin, setup only
+MEDIAGIT_GRANTS_ENFORCE=strict         # 0 | strict | unset (per repo)
 
-# Storage (AWS)
-AWS_ACCESS_KEY_ID=AKIA...
-AWS_SECRET_ACCESS_KEY=...
-AWS_REGION=us-east-1
+# Locking
+MEDIAGIT_LOCKS_ENFORCE=1
+MEDIAGIT_LOCKS_MAX_COMMITS=1000
 
 # Metrics
-MEDIAGIT_METRICS_ENABLED=true
-MEDIAGIT_METRICS_PORT=9090
+MEDIAGIT_METRICS_ADDR=0.0.0.0:9091     # binds the Prometheus endpoint
+
+# GCS only - Application Default Credentials
+GOOGLE_APPLICATION_CREDENTIALS=/etc/mediagit/gcs-sa.json
+GCS_PROJECT_ID=my-project
 ```
+
+**Storage credentials are not environment variables.** The server resolves a
+repository's backend by loading that repository's own `.mediagit/config.toml`,
+exactly as the client does, and reads `access_key_id` / `secret_access_key`
+from it. `AWS_ACCESS_KEY_ID` and friends are read by no MediaGit code path on
+either side. GCS is the one exception above, because its SDK resolves
+Application Default Credentials from the environment.
+
+Deployments that keep secrets in the environment must render them into each
+repo's `config.toml` at provisioning time.
 
 ### Docker Compose Example
 
 ```yaml
-version: '3.8'
 services:
   mediagit:
-    image: mediagit/server:latest
+    image: ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.5
+    entrypoint: mediagit-server
     ports:
       - "3000:3000"
       - "9090:9090"
     environment:
-      - AWS_REGION=us-east-1
-      - MEDIAGIT_METRICS_ENABLED=true
+      - MEDIAGIT_METRICS_ADDR=0.0.0.0:9090
     volumes:
       - ./config:/etc/mediagit
-    deploy:
-      replicas: 3
-      
+
   prometheus:
     image: prom/prometheus
     volumes:
@@ -555,21 +619,17 @@ services:
 
 ## Performance Tuning
 
-### S3 Backend
+### S3 / Upload Concurrency
 
-| Setting | Recommended | Impact |
-|---------|-------------|--------|
-| `part_size` | 100MB (default) | Larger = fewer API calls |
-| `max_concurrent_parts` | 8-16 | Higher = faster uploads |
-| `max_retries` | 3-5 | More resilience |
+These are env-var knobs, not `[storage]` TOML settings — full reference in
+[env-knobs.md](env-knobs.md):
 
-### Server
-
-| Setting | Recommended | Impact |
-|---------|-------------|--------|
-| Worker threads | CPU cores x 2 | Throughput |
-| Connection pool | 100-500 | Concurrent requests |
-| Request timeout | 300s | Large file handling |
+| Knob | Default | Impact |
+|------|---------|--------|
+| `MEDIAGIT_UPLOAD_CONCURRENCY` | 32 | Max concurrent chunk PUT requests |
+| `MEDIAGIT_PACK_UPLOAD_CONCURRENCY` | 8 | Concurrent pack uploads from the client pack builder |
+| `MEDIAGIT_PACK_WORKERS` | 8 | Concurrent ODB writes while unpacking an incoming push pack server-side |
+| `MEDIAGIT_CONTROL_READ_TIMEOUT_SECS` | 300 | Read (inter-byte) timeout on control-plane requests, not a total-request timeout — a slow-but-progressing transfer keeps resetting it |
 
 ---
 

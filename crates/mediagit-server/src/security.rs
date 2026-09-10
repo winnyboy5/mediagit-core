@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Security middleware and utilities
 //!
@@ -25,11 +15,59 @@ use mediagit_security::audit;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use tower_governor::{GovernorError, key_extractor::KeyExtractor};
 pub use tower_governor::{
+    GovernorLayer,
     governor::{GovernorConfig, GovernorConfigBuilder},
     key_extractor::SmartIpKeyExtractor,
-    GovernorLayer,
 };
+// Named so a shared limiter can be passed between listeners (see
+// `SharedRateLimiter`); `.use_headers()` selects this middleware type.
+pub use governor::middleware::StateInformationMiddleware;
+
+/// Rate-limit key: authenticated identity when present, else client IP.
+///
+/// Keying purely by IP does not survive real deployments — an entire team
+/// behind one NAT, or a fleet of CI runners, shares a single bucket, so one
+/// colleague's large push throttles everyone else. Worse, a legitimate push
+/// issues far more requests than a human ever would, so the per-IP budget is
+/// sized for the wrong thing.
+///
+/// Keying by credential makes the budget per-user, which is what the limit is
+/// actually meant to express. Anonymous traffic still falls back to IP, so
+/// unauthenticated abuse is bounded exactly as before.
+///
+/// The credential is **hashed**, never used verbatim: the key lives in the
+/// limiter's map and appears in tracing output, and a bearer token there would
+/// be a credential leak.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdentityOrIpKeyExtractor;
+
+impl KeyExtractor for IdentityOrIpKeyExtractor {
+    type Key = String;
+
+    // `name()` / `key_name()` are only part of this trait when tower_governor
+    // is built with its `tracing` feature, which we do not enable (only
+    // `axum`, `default`, `tonic`). Adding them behind `#[cfg(feature =
+    // "tracing")]` would silently refer to *our* crate's features, not
+    // tower_governor's — so they are omitted rather than guarded wrongly.
+    fn extract<T>(&self, req: &axum::http::Request<T>) -> Result<Self::Key, GovernorError> {
+        if let Some(cred) = req
+            .headers()
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .filter(|v| !v.trim().is_empty())
+        {
+            let digest = blake3::hash(cred.as_bytes());
+            // 16 hex chars is ample to separate identities without retaining
+            // anything that could reconstruct the credential.
+            return Ok(format!("id:{}", &digest.to_hex()[..16]));
+        }
+        SmartIpKeyExtractor
+            .extract(req)
+            .map(|ip| format!("ip:{ip}"))
+    }
+}
 
 /// Rate limiting configuration
 #[derive(Debug, Clone)]
@@ -42,12 +80,44 @@ pub struct RateLimitConfig {
 
 impl Default for RateLimitConfig {
     fn default() -> Self {
+        // Sized for bulk media transfer, not for browsing.
+        //
+        // The limiter wraps the whole router, data plane included. When the
+        // pack path is unavailable, push falls back to one request per chunk —
+        // a multi-GB push is then tens of thousands of requests in a few
+        // minutes, from one legitimate client. At the previous 100/s + 200
+        // burst that produced 429s on healthy pushes, and the retries they
+        // invite are what masked a real corruption bug (the `psds` incident).
+        //
+        // Now that the key is per-identity rather than per-IP (see
+        // `IdentityOrIpKeyExtractor`), this budget applies to one user rather
+        // than to everyone sharing a NAT, so it can be sized for what a single
+        // real client actually does.
+        //
+        // That last paragraph was aspirational until 2026-08-17: the boot path
+        // (`create_rate_limited_router`) hand-inlined its own builder keyed by
+        // `SmartIpKeyExtractor`, so nothing here was reachable and the key was
+        // per-IP after all. It now goes through `build_with_cleanup` below.
+        //
+        // Delegating to `config.rs` rather than repeating the numbers: these
+        // two disagreed (1000/2000 here, 10/20 there) and the serde defaults
+        // won, which is how a documented, incident-derived budget lost to a
+        // placeholder nobody re-read.
         Self {
-            requests_per_second: 100, // 100 req/s
-            burst_size: 200,          // Allow burst of 200
+            requests_per_second: crate::config::default_rate_limit_rps(),
+            burst_size: crate::config::default_rate_limit_burst(),
         }
     }
 }
+
+/// The shared rate limiter, so a second listener can enforce the *same* budget
+/// rather than being handed its own.
+///
+/// Lives here rather than in `lib.rs` so `build_with_cleanup` can name it, and
+/// so the key extractor in the type cannot silently disagree with the one the
+/// builder installs -- which is exactly what went wrong before.
+pub type SharedRateLimiter =
+    Arc<GovernorConfig<IdentityOrIpKeyExtractor, StateInformationMiddleware>>;
 
 impl RateLimitConfig {
     /// Create new rate limit configuration
@@ -56,26 +126,6 @@ impl RateLimitConfig {
             requests_per_second,
             burst_size,
         }
-    }
-
-    /// Build GovernorConfig from configuration
-    ///
-    /// Creates a rate limiting configuration using IP-based rate limiting (SmartIpKeyExtractor)
-    /// which checks proxy headers (x-forwarded-for, x-real-ip) before falling back
-    /// to peer IP address.
-    ///
-    /// To use this config, create a layer with `GovernorLayer::new(config)` or use
-    /// `build_with_cleanup()` to also get a cleanup task.
-    pub fn build_config(&self) -> Arc<impl Send + Sync> {
-        Arc::new(
-            GovernorConfigBuilder::default()
-                .per_second(self.requests_per_second)
-                .burst_size(self.burst_size)
-                .use_headers() // Include rate limit headers in responses
-                .key_extractor(SmartIpKeyExtractor)
-                .finish()
-                .expect("Failed to build rate limiter config"),
-        )
     }
 
     /// Build configuration with background cleanup task
@@ -102,13 +152,37 @@ impl RateLimitConfig {
     /// });
     /// # }
     /// ```
-    pub fn build_with_cleanup(&self) -> (Arc<impl Send + Sync>, impl FnOnce() + Send + 'static) {
-        let config = Arc::new(
+    pub fn build_with_cleanup(
+        &self,
+    ) -> (SharedRateLimiter, impl FnOnce() + Send + 'static + use<>) {
+        let config: SharedRateLimiter = Arc::new(
             GovernorConfigBuilder::default()
-                .per_second(self.requests_per_second)
+                // `.period()`, NOT `.per_second()`.
+                //
+                // tower_governor's `per_second(n)` is "replenish ONE cell every
+                // n SECONDS" -- an interval, not a rate. Its own doc says so:
+                // "Set the interval after which one element of the quota is
+                // replenished in seconds." So `per_second(10)` was 0.1 req/s,
+                // and the field called `requests_per_second` meant its own
+                // reciprocal. That inversion is the actual cause of the 429
+                // storms on ordinary pushes: the shipped default of 10 allowed
+                // one request every ten seconds once the burst drained.
+                //
+                // Raising the number made it exponentially worse while looking
+                // like a fix, because a bigger burst hides it until the bucket
+                // empties -- at 1000 the server started handing out
+                // `Retry-After` values around 900 seconds (observed in
+                // 20260818-p10check: the client honoured one and slept 22
+                // minutes).
+                //
+                // A period of 1s/rps gives the rate the field name promises.
+                // Guarded against zero, which the builder rejects outright.
+                .period(Duration::from_nanos(
+                    1_000_000_000u64 / self.requests_per_second.max(1),
+                ))
                 .burst_size(self.burst_size)
                 .use_headers()
-                .key_extractor(SmartIpKeyExtractor)
+                .key_extractor(IdentityOrIpKeyExtractor)
                 .finish()
                 .expect("Failed to build rate limiter config"),
         );
@@ -204,59 +278,57 @@ pub async fn request_validation_middleware(
     // Validate content length (max 2GB for large media files)
     const MAX_CONTENT_LENGTH: u64 = 2 * 1024 * 1024 * 1024; // 2GB
 
-    if let Some(content_length) = request.headers().get("content-length") {
-        if let Ok(length_str) = content_length.to_str() {
-            if let Ok(length) = length_str.parse::<u64>() {
-                if length > MAX_CONTENT_LENGTH {
-                    let client_ip = extract_client_ip(&request);
-                    let path = request.uri().path().to_string();
-                    let method = request.method().to_string();
+    if let Some(content_length) = request.headers().get("content-length")
+        && let Ok(length_str) = content_length.to_str()
+        && let Ok(length) = length_str.parse::<u64>()
+        && length > MAX_CONTENT_LENGTH
+    {
+        let client_ip = extract_client_ip(&request);
+        let path = request.uri().path().to_string();
+        let method = request.method().to_string();
 
-                    tracing::warn!(
-                        "Request exceeds maximum content length: {} > {}",
-                        length,
-                        MAX_CONTENT_LENGTH
-                    );
+        tracing::warn!(
+            "Request exceeds maximum content length: {} > {}",
+            length,
+            MAX_CONTENT_LENGTH
+        );
 
-                    audit::log_invalid_request(
-                        client_ip,
-                        path,
-                        method,
-                        &format!(
-                            "Content length {} exceeds maximum {}",
-                            length, MAX_CONTENT_LENGTH
-                        ),
-                    );
+        audit::log_invalid_request(
+            client_ip,
+            path,
+            method,
+            &format!(
+                "Content length {} exceeds maximum {}",
+                length, MAX_CONTENT_LENGTH
+            ),
+        );
 
-                    return Err(StatusCode::PAYLOAD_TOO_LARGE);
-                }
-            }
-        }
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     // Validate content type for POST/PUT requests
     let method = request.method();
-    if method == "POST" || method == "PUT" {
-        if let Some(content_type) = request.headers().get("content-type") {
-            let content_type_str = content_type.to_str().unwrap_or("");
+    if (method == "POST" || method == "PUT")
+        && let Some(content_type) = request.headers().get("content-type")
+    {
+        let content_type_str = content_type.to_str().unwrap_or("");
 
-            // Allow common types for MediaGit
-            let allowed_types = [
-                "application/octet-stream",
-                "application/json",
-                "application/x-git-upload-pack-request",
-                "application/x-git-receive-pack-request",
-                "multipart/form-data",
-            ];
+        // Allow common types for MediaGit
+        let allowed_types = [
+            "application/octet-stream",
+            "application/json",
+            "application/x-git-upload-pack-request",
+            "application/x-git-receive-pack-request",
+            "multipart/form-data",
+        ];
 
-            let is_allowed = allowed_types
-                .iter()
-                .any(|&allowed| content_type_str.starts_with(allowed));
+        let is_allowed = allowed_types
+            .iter()
+            .any(|&allowed| content_type_str.starts_with(allowed));
 
-            if !is_allowed && !content_type_str.is_empty() {
-                tracing::warn!("Unsupported content type: {}", content_type_str);
-                // Don't reject, just log warning for now
-            }
+        if !is_allowed && !content_type_str.is_empty() {
+            tracing::warn!("Unsupported content type: {}", content_type_str);
+            // Don't reject, just log warning for now
         }
     }
 
@@ -277,19 +349,14 @@ pub async fn audit_middleware(request: Request, next: Next) -> Result<Response, 
     let method = request.method().to_string();
 
     // Extract repository name from path (format: /:repo/...)
-    if let Some(repo_start) = path.strip_prefix('/') {
-        if let Some(repo_end) = repo_start.find('/') {
-            let repo = &repo_start[..repo_end];
+    if let Some(repo_start) = path.strip_prefix('/')
+        && let Some(repo_end) = repo_start.find('/')
+    {
+        let repo = &repo_start[..repo_end];
 
-            // Check for path traversal attempts
-            if let Err(reason) = validate_repo_name(repo) {
-                audit::log_path_traversal_attempt(
-                    client_ip,
-                    repo.to_string(),
-                    path.clone(),
-                    reason,
-                );
-            }
+        // Check for path traversal attempts
+        if let Err(reason) = validate_repo_name(repo) {
+            audit::log_path_traversal_attempt(client_ip, repo.to_string(), path.clone(), reason);
         }
     }
 
@@ -317,19 +384,18 @@ pub async fn path_validation_middleware(
     let method = request.method().to_string();
 
     // Extract repo name from path (format: /{repo}/...)
-    if let Some(repo) = path.strip_prefix('/').and_then(|p| p.split('/').next()) {
-        if !repo.is_empty() {
-            if let Err(reason) = validate_repo_name(repo) {
-                tracing::warn!("Path validation failed for '{}': {}", repo, reason);
-                audit::log_path_traversal_attempt(
-                    client_ip,
-                    path.to_string(),
-                    method.clone(),
-                    &format!("Rejected malicious repo name '{}': {}", repo, reason),
-                );
-                return Err(StatusCode::BAD_REQUEST);
-            }
-        }
+    if let Some(repo) = path.strip_prefix('/').and_then(|p| p.split('/').next())
+        && !repo.is_empty()
+        && let Err(reason) = validate_repo_name(repo)
+    {
+        tracing::warn!("Path validation failed for '{}': {}", repo, reason);
+        audit::log_path_traversal_attempt(
+            client_ip,
+            path.to_string(),
+            method.clone(),
+            &format!("Rejected malicious repo name '{}': {}", repo, reason),
+        );
+        return Err(StatusCode::BAD_REQUEST);
     }
 
     Ok(next.run(request).await)

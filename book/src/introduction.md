@@ -4,13 +4,15 @@ Welcome to MediaGit-Core, a next-generation media versioning system built with R
 
 ## What is MediaGit-Core?
 
-MediaGit-Core is an open-source version control system designed specifically for managing large binary files (media assets) with the same efficiency and flexibility that Git provides for source code. It solves the fundamental limitations of Git-LFS while providing a familiar Git-like interface.
+MediaGit-Core is a source-available version control system designed specifically for managing large binary files (media assets) with the same efficiency and flexibility that Git provides for source code. It solves the fundamental limitations of Git-LFS while providing a familiar Git-like interface.
+
+It is licensed under BUSL-1.1 — free to read, modify, fork, self-host and run in production at any scale, but **not open source in the OSI sense**, because offering MediaGit to third parties as a hosted or managed service is reserved. See [License](#license) below.
 
 ## Key Features
 
 ### High Performance
-- **Fast staging**: 25–240 MB/s for large files (release build)
-- **Efficient storage**: Up to 81% savings via compression + dedup + delta encoding
+- **Fast staging**: 25–240 MB/s for pre-compressed files (store-mode, zero CPU overhead); 80–240 MB/s for large video/PSD staging without chunking (release build)
+- **Efficient storage**: ~30% average savings across mixed media projects (up to 81–83% for individual well-compressing formats) via compression + dedup + delta encoding
 - **Parallel operations**: Optimized for modern multi-core systems
 
 ### Multi-Backend Storage
@@ -24,11 +26,15 @@ Support for 7 storage backends with zero vendor lock-in:
 - DigitalOcean Spaces
 
 ### Media-Aware Merging
-Intelligent conflict detection and resolution for:
-- Images (PSD, PNG, JPEG, WebP)
-- Video files (MP4, MOV, AVI)
-- Audio files (WAV, MP3, FLAC)
-- 3D models and game assets
+
+**Status: not yet available.** MediaGit can *analyse* images (PSD, PNG, JPEG,
+WebP), video (MP4, MOV, AVI), audio (WAV, MP3, FLAC) and 3D assets to determine
+whether two sets of edits overlap. It cannot yet **write** a merged file back
+in those formats, so there is no auto-merge to wire up: merging a binary file
+detects the conflict and checks out one side for you to resolve.
+
+Format *inspection* is available now via `mediagit media`, which parses PSD
+layers, video/audio streams and 3D model metadata.
 
 ### Full Branching Support
 - Create, merge, and rebase branches just like Git
@@ -36,7 +42,7 @@ Intelligent conflict detection and resolution for:
 - Branch-specific storage optimization
 
 ### Enterprise-Ready
-- AGPL-3.0 community license + commercial licensing
+- BUSL-1.1 source-available license + commercial licensing
 - Audit trails and security features
 - Self-hosted or cloud deployment options
 
@@ -56,12 +62,12 @@ MediaGit-Core is designed for teams and individuals working with large binary fi
 |---------|--------------|---------|----------|
 | Architecture | Standalone native VCS | Git extension + server | Centralized VCS |
 | Branch Switch Speed | Instant (ref-based) | Instant (Git handles) | ⚠️ Copy-based |
-| Storage Savings (avg) | Up to 81% (compression + dedup + delta) | ~0% (no dedup/delta) | ~10-20% (RCS deltas) |
+| Storage Savings (avg) | ~30% avg, up to 81% per-format (compression + dedup + delta) | ~0% (no dedup/delta) | ~10-20% (RCS deltas) |
 | Deduplication | ✅ Content-addressable | ❌ None | ✅ Server-side |
 | Multi-Backend Support | 7 backends | Server-dependent | Proprietary |
-| Media-Aware Merging | ✅ Yes | ❌ No | ⚠️ Limited |
+| Media-Aware Merging | ⚠️ Conflict *detection* only — see above; no auto-merge yet | ❌ No | ⚠️ Limited |
 | Offline Commits | ✅ Full DVCS | ✅ (Git handles) | ❌ Server required |
-| Open Source | ✅ AGPL-3.0 | ✅ MIT | ❌ No |
+| Source available | ✅ BUSL-1.1 | ✅ MIT (open source) | ❌ No |
 
 ## Quick Example
 
@@ -92,14 +98,23 @@ Ready to get started? Head to the [Installation](./installation/README.md) guide
 
 ## License
 
-MediaGit-Core is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**.
+MediaGit-Core is **source available** under the **Business Source License 1.1
+(BUSL-1.1)**.
 
-- ✅ Free to use, modify, and distribute
-- ✅ Source code must be made available
-- ✅ Network use requires source disclosure (AGPL provision)
-- ✅ Commercial use allowed with license compliance
+- ✅ **Free for production use at any scale**, by any organisation — no seat cap,
+  no company-size cap
+- ✅ Read, modify, fork and self-host freely
+- ✅ Each release converts to **AGPL-3.0-or-later four years after publication**
+- ⚠️ Offering MediaGit *to third parties* as a hosted, managed or
+  software-as-a-service offering requires a commercial licence
 
-See the [LICENSE](https://github.com/winnyboy5/mediagit-core/blob/main/LICENSE) file for details.
+Not open source in the OSI sense — the competing-service restriction is a
+field-of-use limit, which the Open Source Definition does not permit.
+
+See [LICENSE](https://github.com/winnyboy5/mediagit-core/blob/main/LICENSE) for the
+governing terms and
+[LICENSE-COMMERCIAL.md](https://github.com/winnyboy5/mediagit-core/blob/main/LICENSE-COMMERCIAL.md)
+for what needs a commercial licence.
 
 ## Community and Support
 

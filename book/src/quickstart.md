@@ -4,7 +4,7 @@ Get up and running with MediaGit in 5 minutes!
 
 ## Prerequisites
 
-- Rust 1.92.0 or later (if building from source)
+- Rust 1.97.1 or later (if building from source)
 - Git (for installing from source or contributing)
 
 ## Installation
@@ -18,15 +18,15 @@ curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/instal
 
 ```powershell
 # Windows (PowerShell)
-Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-x86_64-windows.zip" -OutFile mediagit.zip
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-x86_64-windows.zip" -OutFile mediagit.zip
 Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 ```
 
 ### Docker
 
 ```bash
-docker pull ghcr.io/winnyboy5/mediagit-core:0.2.8-beta.1
-docker run --rm ghcr.io/winnyboy5/mediagit-core:0.2.8-beta.1 mediagit --version
+docker pull ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.5
+docker run --rm ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.5 mediagit --version
 ```
 
 ### From Pre-built Binaries
@@ -35,11 +35,11 @@ Download the latest release for your platform from [GitHub Releases](https://git
 
 | Platform | Archive |
 |----------|---------|
-| Linux x86_64 | `mediagit-0.2.8-beta.1-x86_64-linux.tar.gz` |
-| Linux ARM64 | `mediagit-0.2.8-beta.1-aarch64-linux.tar.gz` |
-| macOS Intel | `mediagit-0.2.8-beta.1-x86_64-macos.tar.gz` |
-| macOS Apple Silicon | `mediagit-0.2.8-beta.1-aarch64-macos.tar.gz` |
-| Windows x86_64 | `mediagit-0.2.8-beta.1-x86_64-windows.zip` |
+| Linux x86_64 | `mediagit-0.3.0-rc.5-x86_64-linux.tar.gz` |
+| Linux ARM64 | `mediagit-0.3.0-rc.5-aarch64-linux.tar.gz` |
+| macOS Intel | `mediagit-0.3.0-rc.5-x86_64-macos.tar.gz` |
+| macOS Apple Silicon | `mediagit-0.3.0-rc.5-aarch64-macos.tar.gz` |
+| Windows x86_64 | `mediagit-0.3.0-rc.5-x86_64-windows.zip` |
 
 ### From Source
 
@@ -125,6 +125,43 @@ Date:   Mon Nov 24 2025 12:00:00
     Size: 42.3 MB → 6.4 MB (84.8% savings)
 ```
 
+## Your First Remote Push
+
+To collaborate with others, push your repository to a server:
+
+```bash
+# Initialize a remote server (see deployment guide for production)
+mediagit-server init --non-interactive --data-dir ./repos
+
+# Start the server
+mediagit-server --config mediagit-server.toml
+
+# From your repo, add a remote and push
+mediagit remote add origin http://127.0.0.1:3000/my-project
+mediagit push origin main
+```
+
+```mermaid
+flowchart LR
+    A["mediagit init<br/>local repo"] --> B["mediagit add files"]
+    B --> C["mediagit commit"]
+    C --> D["mediagit remote add<br/>origin"]
+    D --> E["mediagit push<br/>origin main"]
+    E --> F["mediagit clone<br/>from remote"]
+    
+    style A fill:#e3f2fd
+    style E fill:#fff3e0
+    style F fill:#f3e5f5
+```
+
+Other users can now clone your repository:
+
+```bash
+mediagit clone http://127.0.0.1:3000/my-project ./my-project
+cd my-project
+mediagit status
+```
+
 ## Working with Branches
 
 ### Create a Feature Branch
@@ -153,63 +190,84 @@ mediagit merge feature/new-assets
 
 MediaGit supports multiple storage backends. By default, it uses local filesystem storage.
 
+**Storage is configured by editing `.mediagit/config.toml` directly.** There is
+no `mediagit config set` command for storage keys — `config set` accepts only
+`author.name`, `author.email`, `performance.upload_concurrency` and
+`performance.download_concurrency`, and any other key is rejected.
+
 ### Configure AWS S3 Backend
 
-```bash
-# Edit .mediagit/config.toml
-mediagit config set storage.backend s3
-mediagit config set storage.s3.bucket my-media-bucket
-mediagit config set storage.s3.region us-west-2
+Open `.mediagit/config.toml` in your editor and replace the `[storage]` section:
+
+```toml
+[storage]
+backend = "s3"
+bucket = "my-media-bucket"
+region = "us-west-2"
+access_key_id = "AKIA..."
+secret_access_key = "..."
 ```
+
+Backend fields sit **directly under `[storage]`** alongside `backend` — there is
+no nested `[storage.s3]` table. Credentials must be in this file: MediaGit does
+not read `AWS_ACCESS_KEY_ID` and has no IAM-role or instance-profile path.
 
 ### Configure Azure Blob Storage
 
-```bash
-mediagit config set storage.backend azure
-mediagit config set storage.azure.account my-storage-account
-mediagit config set storage.azure.container media-container
+The credential goes in a tagged `auth` table, so exactly one credential is
+expressible:
+
+```toml
+[storage]
+backend = "azure"
+container = "media-container"
+auth = { type = "account_key", account_name = "my-storage-account", account_key = "..." }
 ```
+
+Other `type` values are `connection_string` (with `value`), `sas` (with
+`account_name` and `token`), and `emulator` for local Azurite. Writing
+`account_name`/`account_key` flat under `[storage]` is the pre-v3 layout;
+MediaGit detects it and reports a migration error rather than silently ignoring
+it.
 
 See [Storage Backend Configuration](./guides/storage-config.md) for detailed setup instructions.
 
 ## Media-Aware Features
 
-### Automatic Conflict Resolution for Images
+### Format inspection — available now
 
-When merging branches with image edits:
+`mediagit media` parses format structure without altering it:
 
 ```bash
-mediagit merge feature/photo-edits
+mediagit media info design.psd     # layer names, dimensions, colour mode
+mediagit media info sequence.mp4   # streams, codecs, duration
 ```
 
-MediaGit automatically detects:
-- ✅ Non-overlapping edits (auto-merge)
-- ✅ Metadata-only changes (auto-merge)
-- ⚠️  Overlapping pixel edits (manual resolution required)
+### Media-aware merging — not yet available
 
-### PSD Layer Merging
+This section previously described layer- and timeline-level auto-merge as
+though it worked. It does not, and the gap is larger than "not wired up":
+MediaGit can *analyse* PSD layers, video timelines and audio tracks and tell
+whether edits overlap, but it cannot **write** a merged file back in any of
+those formats — PSD writing is unsupported by the parser it uses, and video or
+audio would need re-encoding. An auto-merge that cannot produce a real file is
+not an auto-merge, so those strategies report an informative conflict instead.
 
-MediaGit understands PSD layer structure:
+What `mediagit merge` does today with a conflicting binary file:
 
 ```bash
 mediagit merge feature/design-updates
 ```
 
-- ✅ Different layer edits → Auto-merge
-- ✅ New layers added → Auto-merge
-- ⚠️  Same layer modified → Conflict marker
+- The conflict is detected and recorded in the index.
+- **One side is checked out** into the working tree so the file stays valid —
+  conflict markers are never inlined into binary content, which would corrupt
+  it.
+- You resolve by choosing or producing the file you want, then `mediagit add`
+  it. Staging is the acknowledgement that clears the conflict.
 
-### Video Timeline Merging
-
-MediaGit can merge non-overlapping video edits:
-
-```bash
-mediagit merge feature/video-cuts
-```
-
-- ✅ Different timeline ranges → Auto-merge
-- ✅ Different audio tracks → Auto-merge
-- ⚠️  Overlapping timeline edits → Manual resolution
+Deduplication and delta compression still apply to every version involved, so
+keeping both variants while you decide is cheap.
 
 ## Performance Tips
 
@@ -225,14 +283,12 @@ level = 3           # zstd: 1 (fastest) – 22 (best); brotli: 0–11
 
 ### Delta Encoding
 
-For incremental changes to large files:
-
-```toml
-[delta]
-enabled = true
-similarity_threshold = 0.80  # 80% similar = use delta
-max_chain_depth = 10
-```
+Delta encoding is automatic — there is no `[delta]` config table to enable
+or tune it. When you add a new version of a file, MediaGit compares it
+against similar stored chunks and stores only the difference once the
+similarity score clears a type-aware threshold (15–95% depending on file
+type; see the [FAQ](./reference/faq.md#how-does-delta-encoding-work)). Delta
+chains are capped at depth 10, a fixed internal limit, not a config option.
 
 ### Deduplication
 
@@ -243,10 +299,13 @@ MediaGit automatically deduplicates identical content:
 mediagit stats
 
 # Output:
-# Total objects: 1,234
-# Unique objects: 856 (69.4%)
-# Deduplicated: 378 (30.6%)
-# Space saved: 1.2 GB
+# 📊 Repository Statistics
+#
+# Storage:
+#   Total objects: 1,234 (856 loose, 320 chunks, 58 deltas)
+#   Original size: 1.8 GB
+#   Storage used:  1.2 GB
+#   Compression:   1.5x ratio (33.3% saved)
 ```
 
 ## Next Steps
@@ -260,9 +319,8 @@ mediagit stats
 ## Getting Help
 
 - 📖 [Documentation](https://winnyboy5.github.io/mediagit-core)
-- 💬 [Discord Community](https://discord.gg/mediagit)
 - 🐛 [Issue Tracker](https://github.com/winnyboy5/mediagit-core/issues)
-- 📧 Email: support@mediagit.dev
+- 💬 [Discussions](https://github.com/winnyboy5/mediagit-core/discussions)
 
 ## Common Issues
 
@@ -298,8 +356,9 @@ source ~/.zshrc
 Increase timeout in configuration:
 
 ```toml
-[storage]
-timeout_seconds = 300  # 5 minutes
+[performance.timeouts]
+request = 300   # 5 minutes
+write = 120
 ```
 
 For more troubleshooting, see the [Troubleshooting Guide](./guides/troubleshooting.md).

@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Verify command - Quick integrity verification
 
@@ -19,8 +9,8 @@ use clap::Parser;
 use console::style;
 use mediagit_storage::StorageBackend;
 use mediagit_versioning::{
-    resolve_revision, Commit, FsckChecker, FsckOptions, IssueSeverity, ObjectDatabase, Oid,
-    RefDatabase,
+    Commit, FsckChecker, FsckOptions, IssueSeverity, ObjectDatabase, Oid, RefDatabase,
+    resolve_revision,
 };
 use std::collections::HashSet;
 use std::path::Path;
@@ -402,10 +392,10 @@ impl VerifyCmd {
 
         while let Some(current) = queue.pop() {
             // Stop if we've reached the start commit
-            if let Some(start) = start_oid {
-                if current == start {
-                    continue;
-                }
+            if let Some(start) = start_oid
+                && current == start
+            {
+                continue;
             }
 
             if visited.contains(&current) {
@@ -415,12 +405,12 @@ impl VerifyCmd {
             commits.push(current);
 
             // Read commit to get parents
-            if let Ok(data) = odb.read(&current).await {
-                if let Ok(commit) = Commit::deserialize(&data) {
-                    for parent in commit.parents {
-                        if !visited.contains(&parent) {
-                            queue.push(parent);
-                        }
+            if let Ok(data) = odb.read(&current).await
+                && let Ok(commit) = Commit::deserialize(&data)
+            {
+                for parent in commit.parents {
+                    if !visited.contains(&parent) {
+                        queue.push(parent);
                     }
                 }
             }

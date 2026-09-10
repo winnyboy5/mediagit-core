@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 #![allow(clippy::unwrap_used)]
 //! Encryption and KDF performance benchmarks
@@ -19,10 +9,10 @@
 //! - Stream encryption performance for large objects
 //! - Argon2id key derivation with different parameters
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use mediagit_security::{
-    encryption::{decrypt, encrypt, EncryptionKey},
-    kdf::{derive_key, Argon2Params, Salt},
+    encryption::{EncryptionKey, decrypt, encrypt},
+    kdf::{Argon2Params, Salt, derive_key},
 };
 use secrecy::SecretString;
 use std::hint::black_box;

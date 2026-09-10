@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! HTTPS/TLS integration tests
 //!
@@ -19,7 +9,7 @@
 #[cfg(feature = "tls")]
 mod https_tests {
     use mediagit_security::{CertificateBuilder, TlsConfigBuilder};
-    use mediagit_server::{create_router, AppState};
+    use mediagit_server::{AppState, create_router};
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -175,6 +165,7 @@ mod https_tests {
         let (https_url, _temp_dir, _port) = create_test_https_server().await;
 
         // Create HTTPS client that accepts self-signed certificates
+        mediagit_protocol::ensure_crypto_provider();
         let client = reqwest::Client::builder()
             .danger_accept_invalid_certs(true) // Only for testing!
             .build()
@@ -202,6 +193,7 @@ mod https_tests {
         let (https_url, _temp_dir, _port) = create_test_https_server().await;
 
         // Create client that accepts self-signed certs
+        mediagit_protocol::ensure_crypto_provider();
         let client = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
             .build()
@@ -225,6 +217,7 @@ mod https_tests {
 
         let (https_url, _temp_dir, _port) = create_test_https_server().await;
 
+        mediagit_protocol::ensure_crypto_provider();
         let client = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
             .build()

@@ -2,11 +2,11 @@
 
 MediaGit-Core provides native binaries optimized for Intel-based Macs.
 
-## Quick Install (Homebrew - Recommended)
+## Quick Install
 
 ```bash
-brew tap mediagit/tap
-brew install mediagit-core
+# Not published: there is no mediagit/tap. Use the install script instead:
+curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 ```
 
 ## Alternative Installation Methods
@@ -15,7 +15,7 @@ brew install mediagit-core
 
 ```bash
 # Download latest Intel binary
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-x86_64-macos.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-x86_64-macos.tar.gz \
   | sudo tar xz -C /usr/local/bin
 
 # Verify
@@ -62,8 +62,6 @@ mediagit completions bash > /usr/local/etc/bash_completion.d/mediagit
 Add to `~/.zshrc`:
 
 ```bash
-# Optional: Set default backend
-export MEDIAGIT_DEFAULT_BACKEND=local
 
 # Optional: Enable debug logging
 export MEDIAGIT_LOG=info
@@ -89,8 +87,8 @@ xcode-select --install
 # Check version
 mediagit --version
 
-# Run self-test
-mediagit fsck --self-test
+# Verify a repository's integrity (run inside a repo)
+mediagit fsck --full
 
 # Create test repo
 mkdir ~/test-mediagit
@@ -100,7 +98,7 @@ mediagit init
 
 Expected output:
 ```
-mediagit-core 0.2.8-beta.1
+mediagit-core 0.3.0-rc.5
 ✓ All checks passed
 ✓ Initialized empty MediaGit repository in .mediagit/
 ```
@@ -145,33 +143,21 @@ echo 'export PATH="/usr/local/bin:$PATH"' >> ~/.zshrc
 sudo chown -R $(whoami) /usr/local/bin /usr/local/lib /usr/local/share
 
 # Retry installation
-brew install mediagit-core
+curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 ```
 
 ## Updating
 
-### Via Homebrew
-
-```bash
-brew update
-brew upgrade mediagit-core
-```
-
 ### Manual Update
 
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.2.8-beta.1/mediagit-0.2.8-beta.1-x86_64-macos.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-x86_64-macos.tar.gz \
   | sudo tar xz -C /usr/local/bin
 ```
 
 ## Uninstalling
 
-### Via Homebrew
-
-```bash
-brew uninstall mediagit-core
-brew untap mediagit/tap
-```
+There is no Homebrew tap (see above), so uninstalling is manual:
 
 ### Manual Uninstall
 

@@ -73,6 +73,17 @@ mediagit status           # check working tree
 - **1**: Network error or repository not found
 - **2**: Destination directory already exists
 
+
+## Common options
+
+Accepted by this command in addition to the options above.
+
+| Flag | Description |
+|---|---|
+| `--color <WHEN>` | Colored output: `always`, `auto`, or `never` (default `auto`) |
+| `-C`, `--repository <PATH>` | Run as if invoked in `PATH` |
+| `-h`, `--help` | Print help |
+| `-V`, `--version` | Print version |
 ## See Also
 
 - [mediagit remote](./remote.md) - Manage remote repositories

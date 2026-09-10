@@ -1,15 +1,5 @@
-// MediaGit - Git for Media Files
-// Copyright (C) 2025 MediaGit Contributors
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 //! Authentication module for MediaGit
 //!
@@ -36,19 +26,24 @@
 
 pub mod apikey;
 pub mod credentials;
+pub mod grants;
 pub mod handlers;
 pub mod jwt;
 pub mod middleware;
+mod persist;
+pub mod revocation;
 pub mod user;
 
 pub use apikey::{ApiKey, ApiKeyAuth};
 pub use credentials::{CredentialsStore, UserCredentials};
+pub use grants::{GrantsStore, Level as GrantLevel};
 pub use handlers::{
-    login_handler, logout_handler, me_handler, refresh_handler, register_handler, AuthResponse,
-    AuthService, ErrorResponse, LoginRequest, RefreshRequest, RegisterRequest, UserInfo,
+    AuthResponse, AuthService, ErrorResponse, LoginRequest, RefreshRequest, RegisterRequest,
+    UserInfo, login_handler, logout_handler, me_handler, refresh_handler, register_handler,
+    validate_password_strength, validate_registration_input,
 };
 pub use jwt::{Claims, JwtAuth, TokenPair};
-pub use middleware::{auth_middleware, AuthLayer, AuthUser};
+pub use middleware::{AuthLayer, AuthUser, auth_middleware};
 pub use user::{User, UserId};
 
 use thiserror::Error;
