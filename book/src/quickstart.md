@@ -283,14 +283,12 @@ level = 3           # zstd: 1 (fastest) – 22 (best); brotli: 0–11
 
 ### Delta Encoding
 
-For incremental changes to large files:
-
-```toml
-[delta]
-enabled = true
-similarity_threshold = 0.80  # 80% similar = use delta
-max_chain_depth = 10
-```
+Delta encoding is automatic — there is no `[delta]` config table to enable
+or tune it. When you add a new version of a file, MediaGit compares it
+against similar stored chunks and stores only the difference once the
+similarity score clears a type-aware threshold (15–95% depending on file
+type; see the [FAQ](./reference/faq.md#how-does-delta-encoding-work)). Delta
+chains are capped at depth 10, a fixed internal limit, not a config option.
 
 ### Deduplication
 
@@ -301,10 +299,13 @@ MediaGit automatically deduplicates identical content:
 mediagit stats
 
 # Output:
-# Total objects: 1,234
-# Unique objects: 856 (69.4%)
-# Deduplicated: 378 (30.6%)
-# Space saved: 1.2 GB
+# 📊 Repository Statistics
+#
+# Storage:
+#   Total objects: 1,234 (856 loose, 320 chunks, 58 deltas)
+#   Original size: 1.8 GB
+#   Storage used:  1.2 GB
+#   Compression:   1.5x ratio (33.3% saved)
 ```
 
 ## Next Steps

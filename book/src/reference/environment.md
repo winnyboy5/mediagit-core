@@ -227,7 +227,11 @@ Used by the CI integration test job and local integration testing:
 | `AWS_ENDPOINT_URL` | `http://localhost:9000` |
 | `AWS_REGION` | `us-east-1` |
 | `AZURE_STORAGE_CONNECTION_STRING` | `DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://localhost:10000/devstoreaccount1;` |
-| `GCS_EMULATOR_HOST` | `http://localhost:4443` |
+The GCS emulator tests set `STORAGE_EMULATOR_HOST` themselves in-process
+(`crates/mediagit-storage/tests/gcs_emulator_tests.rs`) rather than reading it
+from the shell — `GCS_EMULATOR_HOST` is not read by anything and does not
+need to be exported for local testing, despite CI setting it as a workflow
+env var.
 
 See [Development Setup](../contributing/development.md#integration-tests-requires-docker) for running integration tests locally.
 

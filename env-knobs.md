@@ -27,7 +27,7 @@ Lifecycle: **experimental** → **stable** (2 clean deep-test releases) → **de
 | `MEDIAGIT_AWS_CONNECT_TIMEOUT_SECS` | `5` | 0.2.5 | all | stable | TCP connect timeout for AWS SDK calls. |
 | `MEDIAGIT_AWS_MAX_ATTEMPTS` | `5` | 0.2.5 | all | stable | Max retry attempts for AWS SDK calls (exponential backoff). |
 | `MEDIAGIT_MINIO_MPU_CONCURRENCY` | `16` | 0.2.5 | push | stable | Semaphore capacity for concurrent MinIO MPU operations. |
-| `MEDIAGIT_BENCH` | `0` (OFF) | 0.2.6-beta | all | stable | Emit `[bench]` lines to stderr with schema_version=2 (A9/B9). Capture with `2>file.tsv`; compare with `diff_bench.ps1`. |
+| `MEDIAGIT_BENCH` | `0` (OFF) | 0.2.6-beta | all | stable | Emit `[bench]` lines to stderr with schema_version=2 (A9/B9). Capture with `2>file.tsv`; compare with `diff_bench.ps1` (`dev-tests/deep-tests/diff_bench.ps1` — gitignored, local-only, not in a fresh clone). |
 | `MEDIAGIT_CDC_SEED` | repo config `cdc_seed` (`0` for legacy repos) | 0.2.8-beta | add/chunking | stable | Seeds CDC chunk boundaries per-repo. `0` forces legacy unseeded boundaries. |
 | `MEDIAGIT_CODEC_DETECT` | `1` (ON) | 0.2.8-beta | add/chunking | stable | Detects chunk codec for compression routing. `0` forces all chunks to `CodecHint::Unknown` (pre-detection behavior). |
 | `MEDIAGIT_PHASH` | `1` (ON) | 0.2.8-beta | add | stable | Computes perceptual image hashes for delta candidacy. `0` disables hashing, `phash.idx`, and image delta. |
@@ -76,6 +76,9 @@ Lifecycle: **experimental** → **stable** (2 clean deep-test releases) → **de
 | `MEDIAGIT_PACK_RANGE_COALESCE_MAX_GAP` | `1048576` (1 MiB) | 0.3.0-rc.4 | packs | stable | Max byte gap between chunk ranges to coalesce into one ranged pack GET. |
 | `MEDIAGIT_PACK_RANGE_COALESCE_MAX_BYTES` | `8388608` (8 MiB) | 0.3.0-rc.4 | packs | stable | Max coalesced-range size for a single ranged pack GET. |
 | `MEDIAGIT_REPACK_CHUNKS` | `1` (ON) | 0.3.0-rc.4 | gc | stable | Whether `gc --repack` bundles loose chunks into cloud packs. `0` restores per-chunk-object repacking. |
+| `MEDIAGIT_PACK_VERIFY_CONCURRENCY` | `16` | 0.3.0-rc.3 | packs/server | stable | Per-entry range-read concurrency for background content-verification INSIDE one pack (`pack_entries_failing_content_verification`, `handlers/repo.rs:1163`). Any positive integer; unset/unparseable/`0` falls back to `16`. Distinct axis from `MEDIAGIT_PACK_VERIFY_PACK_CONCURRENCY` below — until 2026-08-20 one name drove both, at two different defaults; setting this one now only logs a warning pointing at the other if the pack-level axis is what you meant to change. |
+| `MEDIAGIT_PACK_VERIFY_PACK_CONCURRENCY` | `1` | 0.3.0-rc.3 | packs/server | stable | How many packs verify concurrently, global (not per-repo) semaphore (`pack_verify_semaphore`, `handlers/repo.rs:1485`). Any positive integer; unset/unparseable/`0` falls back to `1`. Deliberately serialised: raising it to `16` measured **4.5x worse** per-pack verification (mean 12.7s→56.6s over a 512 MB GCS payload) by thrashing the shared WAN link — more permits is the intuitive fix for a clone blocked on verification and it is the wrong one. |
+| `MEDIAGIT_PACK_VERIFY_BUDGET_SECS` | `300` | 0.3.0-rc.3 | packs/server | stable | Wall-clock ceiling for ONE attempt at verifying ONE pack (`pack_verify_budget`, `handlers/repo.rs:1448`). Any positive integer (seconds); unset/unparseable/`0` falls back to `300`. Sized from measurement: healthy GCS per-pack verification on this link class ran mean 12.7s/worst 35.5s over 512 MB, worst-in-a-healthy-run 103s over 2 GB; the pathological case that motivated this was 2628s. Exceeding it is not an error — the pack is simply left unverified for a later attempt, same outcome as the pre-existing "unreadable after retries" path. |
 
 ## Transfer / Server-side Concurrency
 
@@ -132,6 +135,7 @@ Lifecycle: **experimental** → **stable** (2 clean deep-test releases) → **de
 | `MEDIAGIT_GRANTS_ENFORCE` | `1` (ON, only when at least one grant is configured) | 0.3.0-rc.4 | server/auth | stable | Enforce per-repo permission grants. `0` falls back to the flat auth check. No-op if no grants exist. |
 | `MEDIAGIT_LOCKS_ENFORCE` | `1` (ON) | 0.3.0-rc.4 | server/locks | stable | Server rejects pushes that touch paths locked by another user. `0` disables lock enforcement. |
 | `MEDIAGIT_LOCKS_MAX_COMMITS` | `1000` | 0.3.0-rc.4 | server/locks | stable | Max commits walked when computing touched paths for lock enforcement on a push. |
+| `MEDIAGIT_ALLOW_MULTI_INSTANCE` | unset (refuse to start) | 0.3.0-rc.3 | server | stable | Downgrades the AU-10 single-instance-per-directory startup refusal to a warning and continues without the lock. `=1` only — for an operator who has genuinely separated every piece of shared state and only trips over a lock file on a shared mount. See `crates/mediagit-server/src/instance_lock.rs`. |
 | `MEDIAGIT_NO_KEYRING` | unset (OS keychain used) | 0.3.0-rc.4 | auth | stable | Any value disables OS keychain credential storage/lookup on the client. |
 | `MEDIAGIT_ENCRYPTION_KEYFILE` | unset (master key read from the OS keychain) | 0.3.0-rc.4 | encryption | stable | Path to a file holding the at-rest master key, for hosts with no usable keychain (CI, headless servers). The master key is machine-wide, not per-repo: each repository has its own random repo key, so one master unlocking several leaks nothing between them. |
 | `MEDIAGIT_ADMIN_PASSWORD` | none | 0.3.0-rc.4 | server setup | stable | Password for the bootstrap admin created by `mediagit-server init`. Supplied via env so it never lands in shell history or a config file; requires `--admin-username` and `--admin-email` too. Empty is treated as unset. |
@@ -148,27 +152,33 @@ Lifecycle: **experimental** → **stable** (2 clean deep-test releases) → **de
 |------|---------|-----------|-------|--------|-------------|
 | `MEDIAGIT_GC_REFLOG_HORIZON_DAYS` | `90` | 0.3.0-rc.4 | gc | stable | Reflog entries older than this are no longer GC roots (mirrors git's `gc.reflogExpire`). `0` disables reflog roots entirely. |
 | `MEDIAGIT_NO_AUTO_GC` | unset (auto-gc ON) | 0.3.0-rc.4 | gc | stable | Any value disables auto-gc for the current invocation (mirrors git's `GC_AUTO`). |
+| `MEDIAGIT_AUTO_GC_INTERVAL` | `100` | 0.3.0-rc.3 | gc | stable | How many auto-gc triggers must elapse between full repo scans (`should_scan`, `crates/mediagit-cli/src/auto_gc.rs:158`). Any positive integer; unset/unparseable/`0` falls back to `100`. `1` (or less) restores the old scan-every-time behavior. Fails open: any I/O problem reading/writing the counter file forces a scan rather than silently skipping GC forever. |
 
-## Server App Config Overrides
+## Server App Config Overrides — REMOVED
 
-These override `[app]`/`[observability]`/`[compression]`/`[performance]`/`[security]` fields in the server's `config.toml`; env value wins when both are set.
+Fourteen `MEDIAGIT_*` names were listed here as knobs until 2026-09-10. Each is
+named in full below so that anyone searching this file for one of them lands
+here rather than finding nothing:
 
-| Knob | Default | Introduced | Scope | Status | Description |
-|------|---------|-----------|-------|--------|-------------|
-| `MEDIAGIT_APP_NAME` | `mediagit` | 0.3.0-rc.4 | config | stable | Overrides `[app] name`. |
-| `MEDIAGIT_APP_PORT` | `8080` | 0.3.0-rc.4 | config | stable | Overrides `[app] port`. |
-| `MEDIAGIT_APP_HOST` | `127.0.0.1` | 0.3.0-rc.4 | config | stable | Overrides `[app] host`. |
-| `MEDIAGIT_APP_ENVIRONMENT` | `development` | 0.3.0-rc.4 | config | stable | Overrides `[app] environment`. |
-| `MEDIAGIT_APP_DEBUG` | `false` | 0.3.0-rc.4 | config | stable | Overrides `[app] debug`. |
-| `MEDIAGIT_LOG_LEVEL` | `info` | 0.3.0-rc.4 | config | stable | Overrides `[observability] log_level`. |
-| `MEDIAGIT_METRICS_ENABLED` | `true` | 0.3.0-rc.4 | config | stable | Overrides `[observability.metrics] enabled`. |
-| `MEDIAGIT_METRICS_PORT` | `9090` | 0.3.0-rc.4 | config | stable | Overrides `[observability.metrics] port`. |
-| `MEDIAGIT_COMPRESSION_ENABLED` | `true` | 0.3.0-rc.4 | config | stable | Overrides `[compression] enabled`. |
-| `MEDIAGIT_COMPRESSION_LEVEL` | `3` | 0.3.0-rc.4 | config | stable | Overrides `[compression] level` (Zstd level). |
-| `MEDIAGIT_MAX_CONCURRENCY` | `num_cpus` (min 4) | 0.3.0-rc.4 | config | stable | Overrides `[performance] max_concurrency`. |
-| `MEDIAGIT_BUFFER_SIZE` | `65536` | 0.3.0-rc.4 | config | stable | Overrides `[performance] buffer_size`. |
-| `MEDIAGIT_HTTPS_ENABLED` | `false` | 0.3.0-rc.4 | config | stable | Overrides `[security] https_enabled`. |
-| `MEDIAGIT_AUTH_ENABLED` | `false` | 0.3.0-rc.4 | config | stable | Overrides `[security] auth_enabled`. |
+`MEDIAGIT_APP_NAME`, `MEDIAGIT_APP_PORT`, `MEDIAGIT_APP_HOST`,
+`MEDIAGIT_APP_ENVIRONMENT`, `MEDIAGIT_APP_DEBUG`, `MEDIAGIT_LOG_LEVEL`,
+`MEDIAGIT_METRICS_ENABLED`, `MEDIAGIT_METRICS_PORT`,
+`MEDIAGIT_COMPRESSION_ENABLED`, `MEDIAGIT_COMPRESSION_LEVEL`,
+`MEDIAGIT_MAX_CONCURRENCY`, `MEDIAGIT_BUFFER_SIZE`, `MEDIAGIT_HTTPS_ENABLED`,
+`MEDIAGIT_AUTH_ENABLED`.
+
+**None of them do anything, so they are no longer documented as knobs.** They
+are read only by `apply_env_overrides` (`mediagit-config/src/loader.rs:282`),
+which is reachable only through `load_with_overrides` (`loader.rs:220`) — and
+nothing in the workspace calls that outside the crate's own tests. Setting any
+of them is silently ignored. This note exists so that anyone who set one before
+today can find out why nothing happened; wiring the overlay into the real config
+path is tracked for v0.4.0 (FUTURE_TODOS item 22).
+
+Working alternatives: `MEDIAGIT_METRICS_ADDR` for the metrics endpoint,
+`MEDIAGIT_LOG` / `RUST_LOG` for log level. Two variables read by that same dead
+function are genuinely live via other read sites and remain documented in their
+own sections: `MEDIAGIT_API_KEY` and `MEDIAGIT_CHUNK_WRITE_CONCURRENCY`.
 
 ## Legacy Repo-Config Overrides
 
@@ -199,3 +209,4 @@ Not documented here (test-harness only, gated behind `#[ignore]` integration tes
 - **B4 graduation**: **COMPLETE (2026-05-22).** Windows stress PASS (20×50MB, 0 handle errors), MinIO 148/148, AWS 148/148, Azure 147/147 all with knob ON. Ready to flip default ON in next release. GCS pending (no config).
 - **B7 graduation**: **COMPLETE (2026-05-22).** AWS clone 159.8s→134.5s (15.8% improvement, threshold ≥10%). 148/148 PASS. Ready to flip default ON for S3/MinIO. Other backends use default-impl wrapper (parity preserved).
 - Setting `MEDIAGIT_HTTP_POOL_MAX` too high on Windows risks handle exhaustion — keep ≤ 128.
+- `apply_env_overrides` (`loader.rs:282`, see "Server App Config Overrides" above) reads 16 `MEDIAGIT_*` vars total, but only 14 of them are dead. `MEDIAGIT_API_KEY` and `MEDIAGIT_CHUNK_WRITE_CONCURRENCY` are also read there, yet both stay live through separate, real read sites elsewhere (`MEDIAGIT_API_KEY` in the client auth path documented near the top of this file; `MEDIAGIT_CHUNK_WRITE_CONCURRENCY` directly at `odb/chunks.rs:646`) — the dead function does not make them inert too.

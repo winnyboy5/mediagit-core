@@ -83,10 +83,13 @@ not implemented by the S3 backend (`crates/mediagit-storage/src/s3.rs`);
 see [Security Architecture](#security-architecture) for what encryption the
 project actually provides.
 
-**Credential Chain:**
-1. Environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`)
-2. IAM role (EC2, ECS, Lambda)
-3. AWS profile files (`~/.aws/credentials`)
+**Credential Chain:** there isn't one. S3 credentials come from
+`access_key_id` / `secret_access_key` in the repository's own
+`.mediagit/config.toml` and nowhere else — no environment variables, no IAM
+role, no `~/.aws/credentials`. The chain above was documented for years and is
+dead code: see *Storage credentials are not environment variables* below, and
+note the module doc at `crates/mediagit-storage/src/s3.rs:59` still describes
+the same non-existent chain.
 
 ---
 

@@ -8,7 +8,7 @@ See [Storage Backend Configuration](../guides/storage-config.md) for detailed se
 
 ## Authentication
 
-Requires appropriate credentials configured via environment variables or config file.
+`credentials_path` under `[storage]` if set; otherwise falls back to Application Default Credentials, which honour `GOOGLE_APPLICATION_CREDENTIALS` or a `gcloud auth application-default login` session. GCS is the only backend with a real environment-variable path.
 
 ## Transfer
 

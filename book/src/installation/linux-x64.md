@@ -150,17 +150,14 @@ mediagit-core 0.3.0-rc.5
 - **OS**: Linux kernel 4.4+ (glibc 2.17+)
 - **Dependencies**: None (statically linked)
 
-### Verified Distributions
+### Build and CI Environment
 
-| Distribution | Version | Status |
-|-------------|---------|--------|
-| Ubuntu | 20.04, 22.04, 24.04 | ✅ Tested |
-| Debian | 10, 11, 12 | ✅ Tested |
-| Fedora | 38, 39, 40 | ✅ Tested |
-| RHEL | 8, 9 | ✅ Tested |
-| CentOS | 7, 8, Stream 9 | ✅ Tested |
-| Arch Linux | Rolling | ✅ Tested |
-| openSUSE | Leap 15.5, Tumbleweed | ✅ Tested |
+The release binary is a statically-linked (no runtime distro dependencies)
+x86_64 build produced on `ubuntu-22.04` in CI (`.github/workflows/release.yml`),
+and CI itself only runs `ubuntu-latest`/`windows-latest` — there is no
+per-distribution test matrix. It should run on any glibc 2.17+ Linux, but
+"tested on Debian/Fedora/RHEL/CentOS/Arch/openSUSE" specifically has not been
+verified; treat those as untested rather than confirmed.
 
 ## Troubleshooting
 
@@ -213,16 +210,6 @@ sudo dnf install ca-certificates
 
 ## Updating
 
-### APT/DNF Repository
-
-```bash
-# Ubuntu/Debian
-sudo apt update && sudo apt upgrade mediagit-core
-
-# Fedora/RHEL
-sudo dnf update mediagit-core
-```
-
 ### Manual Update
 
 ```bash
@@ -237,22 +224,10 @@ sudo mv mediagit mediagit-server /usr/local/bin/
 
 ## Uninstalling
 
-### APT
+There is no package-manager install path (see [Distribution-Specific Installation](#distribution-specific-installation) above), so uninstalling is manual:
 
 ```bash
-sudo apt remove mediagit-core
-```
-
-### DNF/YUM
-
-```bash
-sudo dnf remove mediagit-core
-```
-
-### Manual
-
-```bash
-sudo rm /usr/local/bin/mediagit
+sudo rm /usr/local/bin/mediagit /usr/local/bin/mediagit-server
 rm -rf ~/.mediagit
 ```
 

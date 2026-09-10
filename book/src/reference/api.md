@@ -73,9 +73,21 @@ route simply does not call it.
 | POST | `/:repo/packs/upload-urls` | `repo:write` | Get presigned upload URLs for pack files |
 | PUT | `/:repo/packs/:pack_id` | `repo:write` | Upload a pack via server proxy (no-presign backends) |
 | POST | `/:repo/packs/complete` | `repo:write` | Register a completed pack upload |
+| POST | `/:repo/packs/mpu/start` | `repo:write` | Start a multipart upload for a pack (same handlers as chunk MPU, `packs/` prefix) |
+| POST | `/:repo/packs/mpu/complete` | `repo:write` | Complete a pack multipart upload |
+| POST | `/:repo/packs/mpu/abort` | `repo:write` | Abort a pack multipart upload |
 | POST | `/:repo/packs/presign-download-urls` | `repo:read` | Get presigned download URLs for pack ranges |
 | POST | `/:repo/packs/batch-get` | `repo:read` | Batch-fetch multiple chunk slices from one pack (no-presign backends) |
 | POST | `/:repo/packs/rebuild-index` | `repo:write` | Rebuild a pack's embedded index |
+
+### Repository — Encryption Key Escrow (DC-7)
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| PUT | `/:repo/encryption-key` | `repo:write` | Store the repo's wrapped encryption key |
+| GET | `/:repo/encryption-key` | `repo:read` | Retrieve the repo's wrapped encryption key |
+
+Both 404 when `[encryption]` is off server-side, so a server without the feature is indistinguishable from one that predates it.
 
 ### Repository — File Locks
 
@@ -117,17 +129,25 @@ route simply does not call it.
 | POST | `/auth/refresh` | Bearer | Refresh an expiring JWT token |
 | POST | `/auth/logout` | Bearer | Invalidate the current session |
 | GET | `/auth/me` | Bearer | Current user info |
+| GET | `/auth/whoami` | Bearer | Self-scoped: identity, role, and per-repo grants |
+| POST | `/auth/password` | Bearer | Self-scoped: change the caller's own password |
+| POST | `/auth/keys` | Bearer | Self-scoped: mint an API key (admin may target another `user_id`) |
+| GET | `/auth/keys/mine` | Bearer | Self-scoped: list the caller's own API keys |
 
-### Administration (requires `user:manage`)
+### Administration (requires `user:manage`, i.e. Admin role)
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | GET | `/auth/users` | Admin | List users |
-| DELETE | `/auth/users/:id` | Admin | Delete a user |
+| POST | `/auth/users` | Admin | Create a user with an explicit role |
+| DELETE | `/auth/users/:id` | Admin | Delete a user (cascades their grants) |
+| PATCH | `/auth/users/:id/role` | Admin | Change a user's role |
+| PATCH | `/auth/users/:id/disabled` | Admin | Suspend or restore a user without deleting it |
+| PATCH | `/auth/users/:id/password` | Admin | Reset a user's password (no current password needed) |
 | POST | `/auth/users/:id/grants` | Admin | Create or update a per-repo grant (Read/Write/Admin) |
 | DELETE | `/auth/users/:id/grants` | Admin | Remove a per-repo grant |
-| GET | `/auth/keys` | Admin | List API keys |
-| DELETE | `/auth/keys/:id` | Admin | Revoke an API key |
+| GET | `/auth/keys` | Admin | List all API keys (metadata only) |
+| DELETE | `/auth/keys/:id` | Admin | Revoke an API key (caller's own, or any as admin) |
 
 See [Authentication](./authentication.md) for the auth model, persistence, and grant semantics.
 

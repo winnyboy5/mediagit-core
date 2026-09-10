@@ -95,7 +95,7 @@ graph TD
 
 ## FastCDC Details
 
-MediaGit uses the **`fastcdc` crate v3.2** (`fastcdc::v2020`) for all content-defined chunking.
+MediaGit uses the **`fastcdc` crate v4.0** (`fastcdc::v2020`) for all content-defined chunking.
 
 > [!NOTE]
 > FastCDC uses a **gear table-based hash** that achieves **O(1) boundary detection per byte**,

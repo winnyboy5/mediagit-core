@@ -6,7 +6,7 @@ MediaGit-Core is designed as a modular, extensible version control system optimi
 
 ```mermaid
 graph TD
-    subgraph CLI["mediagit-cli (32 commands)"]
+    subgraph CLI["mediagit-cli (35 commands)"]
         ADD["add"]
         COMMIT["commit"]
         PUSH["push"]
@@ -112,8 +112,8 @@ sequenceDiagram
 
 ### Media-Aware Intelligence
 - **Why**: Generic byte-level merging fails for structured media
-- **How**: Format parsers for PSD layers, video tracks, audio channels
-- **Benefit**: Preserve layer hierarchies, avoid corruption
+- **How**: Format parsers inspect PSD layers, video tracks, audio channels to detect whether concurrent edits actually overlap
+- **Benefit**: Avoids corrupting binary files with inline conflict markers; a real conflict is reported instead of silently mangled. This is conflict *detection*, not an auto-merge — see [Media-Aware Merging](./media-merging.md)
 
 ### Trait-Based Abstraction
 - **Why**: Decouple logic from storage implementation
@@ -131,10 +131,11 @@ sequenceDiagram
 
 ## Security Model
 
-### Authentication
+### Authentication (to storage backends)
 - Local: File system permissions
-- S3/Azure/GCS: IAM roles, service principals, service accounts
-- B2/MinIO/Spaces: Application keys with bucket-level permissions
+- S3 (and MinIO/B2/Spaces, all built through the S3-compatible path): config-file `access_key_id`/`secret_access_key` only — no IAM role, instance-profile, or environment-variable path
+- Azure: a tagged `auth` credential in `config.toml` (`account_key`, `connection_string`, `sas`, or `emulator`) — no service-principal or environment-variable path
+- GCS: the only backend with a real out-of-config path — falls back to Application Default Credentials (service account key file, `gcloud` login, or workload identity) when `credentials_path` is unset
 
 ### Integrity
 - BLAKE3 content verification on all read operations
@@ -159,7 +160,7 @@ sequenceDiagram
 ## Scalability
 
 ### Repository Size
-- Tested with repositories up to 500GB
+- Validated with a 58 GB dataset across 27+ file types; single-file scalability tested to 6 GB (see README "Last Validated" for the current campaign numbers) — no evidence found for a 500 GB repository-scale test
 - Object count: Millions of objects supported
 - Recommendation: Use cloud backends for >100GB repos
 
@@ -192,20 +193,18 @@ sequenceDiagram
 
 ## Extension Points
 
-### Custom Merge Strategies
-- Implement `MergeStrategy` trait
-- Register strategy in `MergeEngine`
-- Example: Custom video frame merging
+### Merge Strategies
+
+`MergeStrategy` (`crates/mediagit-versioning/src/merge.rs`) is a closed enum
+— `Recursive` (default), `Ours`, `Theirs` — not a trait, so there is no
+pluggable/third-party merge-strategy mechanism today. Adding a new strategy
+means adding a variant and teaching `MergeEngine` to handle it, not
+implementing an extension point.
 
 ### Storage Backend Development
 - Implement `StorageBackend` trait
-- Provide `get`, `put`, `exists`, `delete`, `list_objects` operations
+- Provide `get`, `put`, `exists`, `delete`, `list_objects` operations (plus the presign/MPU trio, default no-op)
 - Example: IPFS backend, SFTP backend
-
-### Media Format Support
-- Implement format parser (e.g., FBX, Blender, CAD)
-- Register with `MediaIntelligence` module
-- Example: 3D model layer-aware merging
 
 ## Technology Stack
 
@@ -213,7 +212,7 @@ sequenceDiagram
 - **Async Runtime**: Tokio 1.40+
 - **CLI Framework**: Clap 4.5+
 - **Compression**: zstd, brotli, delta (zstd dictionary)
-- **Cloud SDKs**: aws-sdk-s3, azure_storage, google-cloud-storage
+- **Cloud SDKs**: aws-sdk-s3, opendal (Azure Blob — replaced the EOL `azure_storage_blobs` stack), google-cloud-storage
 - **Testing**: proptest (property-based), criterion (benchmarking)
 
 ## Related Documentation

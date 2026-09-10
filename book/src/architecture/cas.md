@@ -85,7 +85,7 @@ Objects are stored under a per-repo namespace directory, sharded two levels deep
 
 ### The full key space
 
-`objects/` is one of six key families, and they all shard the same way: on
+`objects/` is one of seven key families, and they all shard the same way: on
 the **hash**, never on the key string's own prefix. That distinction is the
 whole point of layout v2 — sharding on the key prefix would put every chunk
 in a single `chunks/` directory and defeat the fanout.
@@ -101,6 +101,7 @@ flowchart TD
     NS --> M["manifests/../&lt;hash&gt;"]
     NS --> D["deltas/../&lt;hash&gt;[.meta]"]
     NS --> P["packs/aa/&lt;pack_oid&gt;<br/>single-level shard"]
+    NS --> B["bitmaps/de/ad/&lt;commit_oid&gt;.bitmap<br/>gc reachability bitmaps"]
 ```
 
 Two details carry real consequences:

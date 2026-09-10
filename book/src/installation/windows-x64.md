@@ -141,16 +141,6 @@ Add-MpPreference -ExclusionPath "C:\Program Files\MediaGit"
 Add-MpPreference -ExclusionPath "$env:USERPROFILE\.mediagit"
 ```
 
-### File System Configuration
-
-```toml
-# %USERPROFILE%\.mediagit\config.toml
-[filesystem]
-case_sensitive = false  # Windows is case-insensitive
-symlinks_enabled = false  # Limited symlink support
-line_endings = "crlf"  # Windows-style line endings
-```
-
 ## Troubleshooting
 
 ### "mediagit is not recognized"

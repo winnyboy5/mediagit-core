@@ -6,11 +6,17 @@ This document describes the release process for MediaGit.
 
 MediaGit uses an automated release process powered by GitHub Actions. Releases are triggered by pushing git tags and automatically:
 
-1. Build binaries for all 6 platforms (Linux/macOS/Windows on x86_64/ARM64)
+1. Build binaries for 5 platforms (Linux x86_64/ARM64, macOS x86_64/ARM64,
+   Windows x86_64 — no Windows ARM64 target yet, see FUTURE_TODOS.md)
 2. Generate installation scripts (shell, PowerShell)
 3. Create GitHub Release with all artifacts
-4. Publish to crates.io
-5. Build and publish Docker images to GitHub Container Registry
+4. Build and publish Docker images to GitHub Container Registry
+
+Publishing to crates.io is **not currently automated** — the `publish-crates`
+job in `.github/workflows/release.yml` is present but commented out
+("Crate publishing to crates.io is disabled for now"). Do a manual
+`cargo publish` per crate (see [Manual Release](#manual-release-emergency))
+if you need it published.
 
 ## Prerequisites
 
@@ -66,11 +72,12 @@ git push origin v0.3.0-rc.5
 2. Watch the "Release" workflow run
 3. Verify all jobs complete successfully:
    - plan
-   - build (all 6 platforms)
+   - build (all 5 platforms)
    - installers
    - release
-   - publish-crates
    - docker
+
+   (`publish-crates` is defined but commented out — see Overview.)
 
 ### 5. Verify Release
 
@@ -86,7 +93,6 @@ After the workflow completes:
   # Windows PowerShell
   iwr -UseBasicParsing https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.ps1 | iex
   ```
-- [ ] Verify crates.io publication: https://crates.io/crates/mediagit-cli
 - [ ] Test Docker image:
   ```bash
   docker run --rm ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.5 --version

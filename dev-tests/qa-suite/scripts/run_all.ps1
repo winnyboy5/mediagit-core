@@ -37,10 +37,16 @@ if (-not $Phases -or $Phases.Count -eq 0) {
   # for ~28 commands, so it is seconds - and two book/src/cli pages have already
   # been found to be outright fiction by a human happening to read them, with
   # nothing checking in between.
+  # Phase 14 (docs surface) joins it as of 2026-09-10. It was opt-in, which meant
+  # the gate written to catch fabricated docs was not running on the campaigns
+  # that cleared the release - and a 2026-09-10 sweep then found dead file
+  # references in README, SETUP, DEVELOPMENT_GUIDE and three book pages that 14
+  # is built to catch. A gate nobody runs is not a gate. It is pure file
+  # scanning, no binary and no network, so it costs about as much as 13.
   $Phases = if ($QA.Tier -eq "SCALE") {
-    @("00", "01", "02", "03", "04", "05", "06", "07", "08", "10", "12", "13", "09")
+    @("00", "01", "02", "03", "04", "05", "06", "07", "08", "10", "12", "13", "14", "09")
   } else {
-    @("00", "01", "02", "03", "04", "05", "06", "07", "08", "12", "13", "09")
+    @("00", "01", "02", "03", "04", "05", "06", "07", "08", "12", "13", "14", "09")
   }
 }
 

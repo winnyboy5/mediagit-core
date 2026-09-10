@@ -68,7 +68,8 @@ multi-repo server.
 - **At-rest (MediaGit's own)**: **implemented, including push and clone.**
   `mediagit-security` implements XAES-256-GCM with Argon2id key derivation, and
   `SmartCompressor` seals every object it writes and opens every sealed object it
-  reads (`MGEN` v2, `FORMATS.md` §10b). Key management is implemented
+  reads (`MGEN` v2, specified in `docs/FORMATS.md` §10b — a local-only working
+  doc, gitignored and absent from a fresh clone). Key management is implemented
   (`mediagit key init/status/recover/rotate-master`) — a master key from a
   passphrase (Argon2id), the OS keychain, or a keyfile/env var.
 

@@ -37,9 +37,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```rust
 let config = loader.load_with_overrides("config.toml").await?;
 
-// Environment variables with MEDIAGIT_ prefix will override file settings:
-// export MEDIAGIT_APP_PORT=9000
-// export MEDIAGIT_LOG_LEVEL=debug
+// Layers MEDIAGIT_*-prefixed variables over the file. Library API only:
+// neither `mediagit` nor `mediagit-server` calls this, so those variables
+// have no effect on a real invocation. See "Environment Variable Overrides".
 ```
 
 ### Loading from String
@@ -222,38 +222,29 @@ burst_size = 2000
 
 ## Environment Variable Overrides
 
-Configuration values can be overridden using environment variables with the `MEDIAGIT_` prefix **when loading through `load_with_overrides`** — a library API of this crate.
+This crate exposes `load_with_overrides()`, which layers `MEDIAGIT_*` variables
+onto a parsed config via `apply_env_overrides()` (`loader.rs:282`).
 
-> **Note**: the `mediagit` CLI and `mediagit-server` load config via `Config::load()`, which does **not** apply these overrides — so the env vars below have no effect on a normal MediaGit run. For the env vars that actually affect MediaGit, see `CONFIGURATION.md` (repo root) and `env-knobs.md` (repo root).
+**Nothing calls it.** `load_with_overrides` has no caller in the workspace
+outside this crate's own tests, and the real config path — `Config::load()`
+(`schema.rs:174`) for the client, `ServerConfig` for the server — parses TOML
+directly and never applies the overlay. The fourteen `MEDIAGIT_APP_*` /
+`MEDIAGIT_COMPRESSION_*` / `MEDIAGIT_METRICS_*` / `MEDIAGIT_LOG_LEVEL` /
+`MEDIAGIT_MAX_CONCURRENCY` / `MEDIAGIT_BUFFER_SIZE` / `MEDIAGIT_HTTPS_ENABLED` /
+`MEDIAGIT_AUTH_ENABLED` variables this section used to document are therefore
+**not knobs**, and are no longer listed as such. Wiring the overlay into the real
+config path is tracked for v0.4.0 (FUTURE_TODOS item 22).
 
-### Common Overrides
+Two variables read by that same dead function are live via other, real read
+sites, and are the only ones worth setting from here:
 
-```bash
-# App Configuration
-export MEDIAGIT_APP_NAME="my-app"
-export MEDIAGIT_APP_PORT=9000
-export MEDIAGIT_APP_HOST="0.0.0.0"
-export MEDIAGIT_APP_ENVIRONMENT="production"
-export MEDIAGIT_APP_DEBUG=false
+- **`MEDIAGIT_API_KEY`** — read directly at `mediagit-cli/src/repo.rs:187`;
+  supplies the auth token for push/pull.
+- **`MEDIAGIT_CHUNK_WRITE_CONCURRENCY`** — read directly at
+  `mediagit-versioning/src/odb/chunks.rs:646`; sets chunk-write parallelism.
 
-# Observability
-export MEDIAGIT_LOG_LEVEL=debug
-export MEDIAGIT_METRICS_ENABLED=true
-export MEDIAGIT_METRICS_PORT=9091
-
-# Compression
-export MEDIAGIT_COMPRESSION_ENABLED=true
-export MEDIAGIT_COMPRESSION_LEVEL=5
-
-# Performance
-export MEDIAGIT_MAX_CONCURRENCY=8
-export MEDIAGIT_BUFFER_SIZE=131072
-
-# Security
-export MEDIAGIT_API_KEY="secret-key"
-export MEDIAGIT_HTTPS_ENABLED=true
-export MEDIAGIT_AUTH_ENABLED=true
-```
+For the full catalogue of variables that actually work, see `env-knobs.md` and
+`CONFIGURATION.md` at the repo root.
 
 ## Validation
 

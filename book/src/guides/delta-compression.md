@@ -37,10 +37,18 @@ in three stages — a candidate has to clear all three:
    100 MB, and PDF containers (`ai`, `indd`, `idml`, `pdf`) only above 50 MB,
    where even partial similarity in unchanged embedded images is worth the CPU.
 2. **Is a similar enough base available?** Content similarity must clear the
-   per-type threshold in the table below.
-3. **Did it actually help?** The delta must come out **below 80%** of the full
-   object. At 80% or above it is discarded and the object is stored whole — a
-   delta that saves a fifth is not worth the reconstruction cost.
+   per-type threshold in the table below, *and* the candidate base's overall
+   size must be within a per-type ratio of the target's size
+   (`get_size_ratio_threshold` in `similarity.rs` — a tighter allowance for
+   video/3D-scene/game-engine formats at 0.70, creative-container and ML
+   formats at 0.50, everything else at the same 0.80 default).
+3. **Did it actually help?** The encoded delta must come out below a
+   codec-aware threshold of the full object (`delta_ratio_threshold` in
+   `crates/mediagit-versioning/src/odb/mod.rs`): 0.60 for ProRes/DNxHR/JPEG2000/raw
+   video, 0.90 for subtitle/metadata chunks, **0.80 for everything else**.
+   At or above the threshold the delta is discarded and the object is stored
+   whole — a delta that barely saves anything is not worth the
+   reconstruction cost.
 
 ### Similarity Thresholds by File Type
 
@@ -110,7 +118,7 @@ $ mediagit add --no-delta huge-video.mp4
 ```
 
 There is no force-on counterpart. If the type gate, the similarity threshold,
-or the 80% benefit gate rejects a file, nothing on the command line overrides
+or the benefit gate rejects a file, nothing on the command line overrides
 that — the object is stored whole.
 
 ## Delta Chains
@@ -180,7 +188,9 @@ $ MEDIAGIT_LOG=warn,mediagit=debug mediagit add large-file.psd
 ```
 
 A file that was genuinely rewritten between versions has low similarity, and a
-delta that lands at 80% or more of the full size is discarded by design.
+delta that fails its stream's benefit threshold is discarded by design — 0.80
+of full size for most content, but 0.60 for intra-only video and 0.90 for
+subtitle/metadata streams (`odb/mod.rs:100-114`).
 
 ### Reconstruction feels slow
 
@@ -204,8 +214,8 @@ $ mediagit add --no-parallel large-file.psd
 
 ## Best Practices
 
-1. **Let it decide.** The type gate, similarity thresholds and the 80% benefit
-   gate are tuned per format. The one useful manual override is `--no-delta`
+1. **Let it decide.** The type gate, similarity thresholds and the benefit
+   gate are all tuned per format. The one useful manual override is `--no-delta`
    for a file you know was fully rewritten.
 2. **Run `mediagit gc` periodically** to reclaim unreachable objects, and
    `gc --repack` to consolidate loose objects into packs.

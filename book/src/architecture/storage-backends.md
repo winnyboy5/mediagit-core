@@ -149,12 +149,12 @@ flowchart TD
 
 ## Migration Between Backends
 
-```bash
-# Clone from S3 to local
-mediagit clone s3://my-bucket/repo.git ./repo
-
-# Push to different backend
-cd repo
-mediagit remote add azure azure://my-account/my-container/repo.git
-mediagit push azure main
-```
+`mediagit clone`/`remote add` only accept `http://`/`https://` URLs (or a
+local filesystem path for clone) — MediaGit always talks to a
+`mediagit-server` over HTTP, never directly to a storage bucket via a
+`s3://`/`azure://`-style URL; those schemes are rejected. The storage
+backend a *server* uses is chosen under `[storage]` in that server's own
+`.mediagit/config.toml`, not by the client's remote URL. To move a
+repository's data to a different backend, change that server's storage
+config (or point a new server at the new backend) and re-push/re-clone
+through the normal HTTP remote — see [Storage Backend Configuration](../guides/storage-config.md).

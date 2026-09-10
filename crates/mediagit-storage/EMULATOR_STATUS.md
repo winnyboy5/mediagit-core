@@ -80,11 +80,11 @@ The google-cloud-storage Rust crate doesn't have built-in emulator support that 
 
 | Backend | Tests | Pass | Fail | Rate | Status |
 |---------|-------|------|------|------|--------|
-| S3 (LocalStack) | 16 | 12 | 4 | 75% | ✅ Operational |
-| Azure (Azurite) | 17 | 14 | 3 | 82% | ✅ Operational |
-| MinIO | 18 | 15 | 3 | 83% | ✅ Operational |
+| S3 (LocalStack) | 16 | 16 | 0 | 100% | ✅ Operational |
+| Azure (Azurite) | 18 | 18 | 0 | 100% | ✅ Operational |
+| MinIO | 18 | 18 | 0 | 100% | ✅ Operational |
 | GCS (Emulator) | 19 | 0 | 19 | 0% | ⚠️ Auth Blocked |
-| **TOTAL** | **70** | **41** | **29** | **59%** | **3/4 Backends** |
+| **TOTAL** | **71** | **52** | **19** | **73%** | **3/4 Backends** |
 
 ### Known Test Issues (Non-Blocking)
 

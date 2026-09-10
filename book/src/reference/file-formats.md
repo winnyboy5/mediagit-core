@@ -10,14 +10,12 @@ Internal file format reference for MediaGit's on-disk data structures.
     ├── HEAD              # Current branch or commit pointer
     ├── config.toml       # Repository configuration (TOML)
     ├── objects/          # Content-addressable object database
-    │   ├── <xx>/         # Two-character prefix directories
-    │   │   └── <hash>    # Object files (remaining 62 hex chars of BLAKE3)
-    │   └── pack/         # Pack files (future)
+    │   └── <h0:2>/<h2:4>/<hash>  # Two-level hash-fanout sharding (layout v2 — see below)
     ├── refs/             # Reference storage
     │   └── heads/        # Branch refs
     │       └── main      # Branch pointer files
     ├── manifests/        # Chunk manifests per committed file
-    │   └── <hash>.bin    # Bincode-serialized ChunkManifest
+    │   └── <h0:2>/<h2:4>/<hash>  # Envelope-wrapped postcard ChunkManifest (no extension)
     └── stats/            # Operation statistics (non-critical)
         └── <timestamp>.json
 ```
@@ -75,10 +73,10 @@ changed.
 
 ## Object Format
 
-All objects are stored content-addressably. The object's BLAKE3 hash (over the uncompressed content) is used as the key. The key is split into a 2-character directory prefix and 62-character filename:
+All objects are stored content-addressably. The object's BLAKE3 hash (over the uncompressed content) is used as the key. Under layout v2 (the default), the key is sharded two levels deep — the first 2 hex characters, then the next 2 — with the full hash as the filename:
 
 ```
-objects/ab/cdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890cd
+objects/ab/cd/abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890
 ```
 
 ### Object Types
@@ -108,7 +106,7 @@ See [`CompressionStrategy::for_object_type`](../architecture/compression.md) for
 
 ## Chunk Manifests
 
-Large files are split into content-addressable chunks. The mapping of file → ordered list of chunks is stored as a `ChunkManifest` serialized with [postcard](https://docs.rs/postcard) (compact binary format):
+Large files are split into content-addressable chunks. The mapping of file → ordered list of chunks is stored as a `ChunkManifest`, on disk as an envelope — `MAGIC ("MGCM", 4 bytes) | VERSION (1 byte) | postcard body` — rather than a bare [postcard](https://docs.rs/postcard) payload, so a future format change can be detected before postcard (non-self-describing) attempts to parse it:
 
 ```
 .mediagit/manifests/<content-hash>.bin
@@ -116,13 +114,16 @@ Large files are split into content-addressable chunks. The mapping of file → o
 
 The manifest contains:
 
-- File path
-- Total file size
-- Ordered list of chunks, each with:
-  - Chunk hash (BLAKE3 of chunk content)
-  - Chunk offset in the original file
-  - Chunk size (uncompressed)
-  - Whether the chunk is stored as full or delta
+- `chunks` — ordered `Vec<ChunkRef>`, each with:
+  - `id` — chunk identifier (BLAKE3 hash)
+  - `offset` — offset in the original file
+  - `size` — chunk size in bytes
+  - `chunk_type` — media classification (Generic, VideoStream, AudioStream, Metadata, Subtitle, ...)
+  - `codec_hint` — per-chunk compression/delta hint
+- `total_size` — total size of the reconstructed object
+- `filename` — original filename, optional (used for type detection, not a full path)
+
+Whether a given chunk is stored full or as a delta is not recorded in the manifest itself — deltas live as separate sidecar objects keyed by chunk hash (`chunk-deltas/<hash>[.meta]`, see [Storage Layout v2](#storage-layout-v2-namespace--true-hash-fanout) above).
 
 ---
 
@@ -170,29 +171,33 @@ level = 3
 
 ## Commit Object Format
 
-Commits are stored as Bincode-serialized structs containing:
+Commits are postcard-serialized structs (see [Chunk Manifests](#chunk-manifests) — the whole object database uses postcard, not bincode) containing:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `tree` | `[u8; 32]` | BLAKE3 hash of the root tree object |
-| `parents` | `Vec<[u8; 32]>` | Parent commit hashes (0 for initial, 1+ for merges) |
-| `author` | `string` | Author name |
-| `email` | `string` | Author email |
-| `timestamp` | `i64` | Unix timestamp (seconds) |
+| `tree` | `Oid` | BLAKE3 hash of the root tree object |
+| `parents` | `Vec<Oid>` | Parent commit hashes (0 for initial, 1+ for merges) |
+| `author` | `Signature` | Author `{name, email, timestamp}` |
+| `committer` | `Signature` | Committer `{name, email, timestamp}` — separate from `author` |
 | `message` | `string` | Commit message |
+
+A `Signature` is `{name: string, email: string, timestamp: DateTime<Utc>}`.
 
 ---
 
 ## Tree Object Format
 
-Trees are stored as Bincode-serialized ordered lists of entries:
+A tree object is a postcard-serialized `BTreeMap<String, TreeEntry>` (keyed
+by filename, so entries are already in canonical sorted order). Each
+`TreeEntry`:
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | `string` | Filename (not full path) |
-| `hash` | `[u8; 32]` | BLAKE3 hash of the blob or subtree |
-| `is_tree` | `bool` | `true` for subdirectory, `false` for file |
-| `size` | `u64` | Uncompressed size in bytes |
+| `mode` | `FileMode` | `Regular` (100644), `Executable` (100755), `Symlink` (120000), or `Directory` (040000) |
+| `oid` | `Oid` | BLAKE3 hash of the blob or subtree |
+
+There is no separate `size` field on a tree entry — file size lives on the blob/chunk manifest, not the tree.
 
 ---
 
@@ -203,14 +208,12 @@ with postcard (compact binary format). Each Tag contains:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `target` | `[u8; 32]` | BLAKE3 hash of the tagged object (commit, tree, or blob) |
-| `target_type` | `ObjectType` | Type of the tagged object (Commit, Tree, Tag, or Blob) |
-| `name` | `string` | Tag name (e.g., `v1.0.0`) |
-| `tagger` | `string` | Name of the person who created the tag |
-| `tagger_email` | `string` | Email address of the tagger |
+| `target` | `Oid` | BLAKE3 hash of the tagged object (commit, tree, or blob) |
+| `target_type` | `ObjectType` | Type of the tagged object |
+| `name` | `string` | Tag name (e.g., `v1.0.0`), without the `refs/tags/` prefix |
+| `tagger` | `Signature` | Who created the tag: `{name, email, timestamp}` |
 | `message` | `string` | Tag message |
-| `timestamp` | `i64` | Unix timestamp (seconds) when tag was created |
-| `signature` | `Option<SshSig>` | Optional OpenSSH signature (embedded, TOFU model) |
+| `signature` | `Option<Vec<u8>>` | Optional OpenSSH-armored `SSH SIGNATURE` PEM block (embedded, TOFU model) |
 
 Tags are serialized with postcard so every field except `signature` forms the
 deterministic signing payload. The `signature` field (if present) contains
@@ -288,22 +291,23 @@ ignored. Absent file or empty file = sparse checkout disabled (full checkout).
 
 ## Statistics Format
 
-Operation statistics are written as JSON to `.mediagit/stats/`:
+Per-operation transfer statistics (push/pull/fetch/clone) are written as JSON
+to `.mediagit/stats/<timestamp>_<operation_name>.json`:
 
 ```json
 {
-  "operation": "add",
+  "operation_name": "push",
   "timestamp": "2026-02-20T10:30:00Z",
-  "files_processed": 42,
-  "bytes_input": 1073741824,
-  "bytes_stored": 157286400,
-  "chunks_created": 512,
-  "chunks_deduplicated": 87,
+  "bytes_downloaded": 0,
+  "bytes_uploaded": 1073741824,
+  "objects_received": 0,
+  "objects_sent": 512,
+  "files_updated": 0,
   "duration_ms": 4320
 }
 ```
 
-These files are informational only and can be deleted without affecting repository integrity.
+Only the most recent 100 stats files are kept; older ones are pruned automatically. These files are informational only and can be deleted without affecting repository integrity.
 
 ---
 

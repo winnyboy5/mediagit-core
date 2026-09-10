@@ -57,7 +57,7 @@ confirmed the remote is clean. Both API keys were revoked regardless of the clea
 | 9 | Windows ARM64 native binaries | **P3** | — | Blocked on GitHub runner availability |
 | 10 | macOS Metal GPU acceleration | **P3** | 2-3 wk | Apple Silicon image processing |
 | 11 | Security / Audit enhancements (v0.3.0+) | **P3** | — | Compliance, SIEM |
-| 12 | GA knob-policy execution (remove/keep each `MEDIAGIT_*` knob) | **P1** (at GA) | 1 day | `docs/next-set/knob-policy.md` is the decision record |
+| 12 | GA knob-policy execution (remove/keep each `MEDIAGIT_*` knob) | **P1** (at GA) | 1 day | `docs/next-set/knob-policy.md` is the decision record (gitignored, local-only) |
 | 13 | SSO integration, multi-region, Web UI (v1.0.0) | **P3** | — | Enterprise features |
 | 14 | FBX Objects-descending walker (or delete walker at GA) | **P3** | 1-2 wk | Fair trial closed 2026-07-07: top-level cuts ≈ CDC (+0.003pp) |
 | 15 | EXR structure-aware chunking | **P3** | 3-5 days | Needs real EXR fixtures first (creating them requires the `exr` crate) |
@@ -66,6 +66,12 @@ confirmed the remote is clean. Both API keys were revoked regardless of the clea
 | 18 | Cross-process chunk-delta write lock | **P3** | 2-3 days | In-process race fixed 2026-07-07; multi-process writers to one local repo could still race (CLI never does this) |
 | 19 | phash.idx compaction | **P3** | 0.5 day | Append-only today; only matters >1M entries (~16 MB) |
 | 20 | PSD spot-color channel parse failure | **P3** | Unscoped (needs upstream fix or crate swap) | `psd` crate 0.3.5 errors "invalid channel id 3" on PSDs with a spot-color channel; found 2026-07-10, M5b |
+| 21 | `remote add` accepts URL schemes with no transport | **P2** (v0.4.0) | 1 line + 1 test | `file://`, `ssh://`, `git://` pass `validate_url` and write a remote that can never push; found 2026-09-10 |
+| 22 | Wire `load_with_overrides` into the real config path (or delete it) | **P2** (v0.4.0) | 0.5-1 day | 14 `MEDIAGIT_*` names are read only by the unreachable `apply_env_overrides`; removed from the docs 2026-09-10 |
+| 23 | Dead config keys: decide wire-up vs removal | **P2** (v0.4.0) | 1 day | `[compression]`, `chunk_write_concurrency`, `max_concurrency`, `[performance.connection_pool]`, `[performance.timeouts]` — parsed, never read back |
+| 24 | `s3.rs:59` module doc describes a credential chain that does not exist | **P3** | 10 min | Left untouched 2026-09-10 to keep release binaries byte-identical with the GA clearance |
+| 25 | Truth-up the prose in `book/src/cli/` (29 pages) | **P3** | 1-2 days | `13_docs` gates their flag tables only; the surrounding prose has never been swept |
+| 26 | Re-verify `CHANGELOG.md:314` ("237/237 gates, 25/25 phases") | **P3** | 30 min | Older release; no campaign artifact on hand to confirm it |
 
 ---
 
@@ -175,7 +181,7 @@ replaced it holds no similarity threshold at all. The thresholds live in **two i
 tables**:
 
 - `crates/mediagit-versioning/src/similarity.rs` — `get_similarity_threshold(filename)`,
-  a 27-arm extension match (`ai`/`pdf`/`psd` → 0.15, office → 0.20, text → 0.85, config →
+  a 19-arm extension match (`ai`/`pdf`/`psd` → 0.15, office → 0.20, text → 0.85, config →
   0.95, images → 0.70, video → 0.50, `blend` → 0.40, `hip` → 0.35, NLE projects → 0.25, …),
   defaulting to `MIN_SIMILARITY_THRESHOLD`.
 - `crates/mediagit-versioning/src/odb/mod.rs` — `delta_ratio_threshold(codec, chunk_type)`,
@@ -263,3 +269,9 @@ implementation plan yet. Effort: **2-3 weeks** (research + implementation).
 | 17 | P3 | **Video pHash** | No perceptual delta-base nomination for video; no viable crate | R&D 2026-07-07 |
 | 18 | P3 | **Cross-process delta lock** | Chunk-delta cycle guard is per-process; concurrent multi-process writers to one local repo could still race | fix 2026-07-07 |
 | 20 | P3 | **PSD spot-color channels** | `psd` crate 0.3.5 errors `"invalid channel id 3"` on PSDs with a spot-color channel; falls back to generic chunking, no crash/data-loss | found 2026-07-10, M5b |
+| 21 | P2 | **Dead URL schemes in `remote add`** | `validate_url` (`commands/remote.rs:443`) accepts `file://`, `ssh://` and `git://`, but no transport implements them: `clone.rs:62` routes every non-HTTP(S) URL to its LOCAL-PATH branch, which then fails canonicalizing the URL as a directory. So `remote add` succeeds and the first push fails. Copied from git's scheme list and never wired up. Fix is to narrow the list to `http://`/`https://` so it fails at configure time; prepared and reverted on 2026-09-10 to keep release binaries byte-identical with the ga50/ga52 GA clearance | deferred to v0.4.0 |
+| 22 | P2 | **Env-override overlay is unreachable** | `apply_env_overrides` (`mediagit-config/src/loader.rs:282`) reads 16 `MEDIAGIT_*` vars; it is called only by `load_with_overrides` (`loader.rs:220`), which has no caller outside the crate's own tests. The real path is `Config::load()` (`schema.rs:174`), which never applies the overlay. 14 of the 16 are therefore inert (`MEDIAGIT_API_KEY` and `MEDIAGIT_CHUNK_WRITE_CONCURRENCY` are live via other read sites). They were listed as "stable" knobs in env-knobs.md for a long time and were removed from the docs on 2026-09-10. Decide: wire the overlay into `Config::load()` so the documented behaviour becomes true, or delete the dead function | deferred to v0.4.0 |
+| 23 | P2 | **Config keys parsed but never read** | `[compression]` (whole section), `performance.chunk_write_concurrency` (the env var is read directly at `odb/chunks.rs:646`, the TOML key never is), `performance.max_concurrency`, `[performance.connection_pool]` (4 keys), `[performance.timeouts]` (4 keys). Zero read sites outside `mediagit-config`, against 13/7/1 for the sibling keys `upload_concurrency`/`download_concurrency`/`pack_workers` — that asymmetry is what makes the negative credible. Documented as inert 2026-09-10; same decision as item 22 | deferred to v0.4.0 |
+| 24 | P3 | **`s3.rs:59` stale module doc** | Describes an "environment variables -> IAM role -> profile files" credential chain. No such chain exists: S3 credentials are config-file-only. CLOUD_ARCHITECTURE.md carried the same claim and was fixed 2026-09-10; the module doc was left alone only to avoid touching a `.rs` file while the GA clearance depends on byte-identical binaries | fix in v0.4.0 |
+| 25 | P3 | **`book/src/cli/` prose unswept** | The 2026-09-10 truth-up covered all 55 non-cli book pages and the 32 root/crate docs. `book/src/cli/`'s 29 pages were excluded because `13_docs` already gates their flag tables against `--help` — but that gate reads flags only, not prose, and two pages on this path were previously found to be outright fiction | v0.4.0 |
+| 26 | P3 | **Unverified older gate count** | `CHANGELOG.md:314` states "237/237 gates, 25/25 phases" for an earlier release. Every campaign artifact still on disk (ga40-ga52) records 1 skip, so a clean N/N is suspect, but the corresponding run's `summary.json` is gone and it could not be checked either way | v0.4.0 |

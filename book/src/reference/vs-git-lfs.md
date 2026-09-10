@@ -56,13 +56,16 @@ Git-LFS has no delta encoding. MediaGit stores only the diff between similar chu
 
 ### Ingestion
 
-| File | Git-LFS | MediaGit (16 cores) |
-|------|---------|---------------------|
-| PSD 71 MB | ~2 MB/s | ~35 MB/s |
-| MP4 500 MB | ~3 MB/s | ~20 MB/s |
-| Pre-compressed (JPEG) | ~80 MB/s | ~200 MB/s |
+MediaGit's measured release-build staging throughput (no Git-LFS baseline
+available for a direct comparison):
 
-MediaGit's parallel chunking pipeline (`--jobs N`) saturates multi-core machines.
+| File type | Throughput |
+|-----------|-----------|
+| Pre-compressed (MP4, MOV, JPEG, USDZ) | 25–240 MB/s — store-mode, zero CPU overhead |
+| Compressible (PSD, TIFF, WAV) | 2–120 MB/s — Zstd compression + optional chunking |
+| Chunked large files (GLB, FLAC, AI) | 1.9–5.2 MB/s — CDC chunking + delta encoding |
+
+MediaGit's parallel chunking pipeline (`--jobs N`) saturates multi-core machines; Git-LFS uploads are single-threaded per file.
 
 ### Transfer
 
@@ -104,10 +107,10 @@ mediagit push origin main
 ## Advantages of MediaGit
 
 1. **No Git required** — deploy MediaGit independently of your code repository
-2. **Content-aware chunking** — PSD layers, video frames, and audio segments are split at format boundaries for better deduplication
-3. **Cross-file deduplication** — identical frames in different videos share storage
+2. **Content-aware chunking** — MP4/MOV, MKV/WebM, AVI and GLB/glTF have dedicated container parsers that cut at structural boundaries (`chunk_mp4`, `chunk_matroska`, `chunk_avi`, `chunk_glb`), so an edit shifts only nearby chunks. Everything else uses content-defined chunking with per-format tuning rather than structural parsing — PSD and the other creative containers get smaller average chunks for cross-version dedup, and WAV gets a PCM codec hint; neither parses layers or RIFF segments
+3. **Cross-file deduplication** — identical *chunks* are stored once, no matter which files, commits or branches reference them. This is byte-level (BLAKE3 over content-defined chunks), not frame-level: two different encodes of the same footage share no bytes and therefore do not dedup — the QA campaign measures video variants at 0%. It pays off on re-committed or copied assets, and on formats that are not already compressed
 4. **Delta encoding** — only differences are stored for similar versions
-5. **Parallel ingestion** — 10–20× faster than sequential on multi-core hardware
+5. **Parallel ingestion** — staging runs across multiple worker threads (`add --jobs/-j`), and chunk hashing is parallel by default (`MEDIAGIT_HASH_PARALLEL`, on unless set to `0`). Measured staging throughput is in [BENCHMARKS.md](../../../BENCHMARKS.md); no speedup multiplier over a sequential build is published, so none is claimed here
 6. **Format-aware compression** — pre-compressed formats (JPEG, MP4) are not re-compressed, saving CPU cycles
 7. **No host file size limits** — no GitHub-imposed 2 GB limit
 8. **Self-hosted options** — MinIO, local filesystem, or any S3-compatible service

@@ -91,7 +91,7 @@ mediagit --version
 # Verify a repository's integrity (run inside a repo)
 mediagit fsck --full
 
-# Should output: All checks passed ✓
+# Should output: ✅ Repository integrity: PERFECT
 ```
 
 ## Cloud Backend Setup (Optional)

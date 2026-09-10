@@ -262,15 +262,15 @@ in CI except the third:
 
 ### 5. Local Dev Server Harness
 
-`dev-tests/dev-server/` is a ready-made server working directory for manual
-client-server testing — `mediagit-server.toml` (port `5000`), a `repos/` dir,
-an `auth/` store, and per-backend configs (`config.aws.toml`,
-`config.azure.toml`, `config.gcs.toml`) you can swap in. `dev-tests/dev-client/`
-is the matching client-side scratch dir. Start it with:
-
-```bash
-./target/debug/mediagit-server --config dev-tests/dev-server/mediagit-server.toml
-```
+`dev-tests/dev-server/` and `dev-tests/dev-client/` are gitignored
+(`dev-tests/*` in `.gitignore`), so a fresh clone has neither. They are scratch
+directories a maintainer accumulates locally; nothing about their layout is
+guaranteed, and any port or filename this guide quoted for them would be one
+machine's setup rather than a fact about the project. Build your own instead —
+**SETUP.md → Run the dev harness** has the steps, and the checked-in
+`crates/mediagit-server/mediagit-server.example.toml` plus the five per-backend
+`[storage]` configs under `dev-tests/qa-suite/config/backends/` are the
+references that do ship.
 
 ### 6. Pre-Commit Hooks
 
@@ -293,9 +293,9 @@ If hooks fail to execute at all (`cannot exec '.husky/pre-commit'`), see
 
 ```
 mediagit-core/
-├── crates/                    # 14 workspace members (see below)
+├── crates/                    # 12 workspace members (see below)
 ├── dev-tests/                 # Manual/integration test harnesses (qa-suite, dev-server, deep-tests, compat-fixture)
-├── docs/                      # env-knobs.md, ROADMAP, ARCHITECTURE notes
+├── docs/                      # gitignored, local-only working notes (not in a fresh clone)
 ├── book/                      # mdBook documentation source
 ├── target/                    # Build artifacts
 │   ├── debug/                 # mediagit, mediagit-server (dev builds)
@@ -321,9 +321,7 @@ and manual test harnesses live under `dev-tests/`, and each crate has its own
 | `mediagit-media` | Media metadata extraction and merge strategies |
 | `mediagit-config` | Configuration management system for MediaGit Core |
 | `mediagit-observability` | Structured logging and observability for MediaGit |
-| `mediagit-git` | Git migration support: filter drivers and pointer files |
 | `mediagit-metrics` | Prometheus metrics and performance monitoring for MediaGit |
-| `mediagit-migration` | Storage backend migration tool for MediaGit |
 | `mediagit-test-utils` | Shared test utilities for MediaGit crates |
 
 ---
@@ -449,13 +447,16 @@ For debugging auth issues on a dev server, know where the state lives:
 
 Client-side credential lookup for talking to a remote (used by `fetch`,
 `pull`, `push`, `clone`, `download`, `lock`) follows this precedence, in
-`crates/mediagit-cli/src/repo.rs::resolve_credentials` (repo.rs:136-177):
+`crates/mediagit-cli/src/repo.rs::resolve_credentials_tiered` (repo.rs:162-218):
 
 1. Env var `MEDIAGIT_TOKEN` (bearer token)
 2. Env var `MEDIAGIT_API_KEY`
-3. OS keychain (skipped if `MEDIAGIT_NO_KEYRING` is set)
-4. Per-remote config: `remotes.<name>.token` / `remotes.<name>.api_key` in
+3. Per-remote config: `remotes.<name>.token` / `remotes.<name>.api_key` in
    `.mediagit/config.toml` (`token` wins if both are set)
+4. OS keychain (skipped if `MEDIAGIT_NO_KEYRING` is set)
+
+The config tier outranks the keychain (I11) — an explicitly configured
+token is the operator's stated intent and must beat an opaque write-cache.
 
 There is no `MEDIAGIT_AUTH_TOKEN` env var or top-level `auth_token` config
 key — those don't exist in the codebase; use the precedence above instead.
@@ -500,7 +501,7 @@ It's organized as numbered phases (`01_preflight`, `02_matrix`,
 
 ```bash
 cargo bench
-cargo bench --bench storage_benchmarks
+cargo bench --bench cache_bench
 cargo bench --bench odb_bench
 ```
 
@@ -659,7 +660,7 @@ MEDIAGIT_BENCH=1 mediagit push origin main   # emits [bench] throughput summary
 | `MEDIAGIT_UPLOAD_CONCURRENCY` | `32` | Total upload semaphore slots per push |
 | `MEDIAGIT_DOWNLOAD_CONCURRENCY` | `32` | Total chunk downloads during pull/clone |
 | `MEDIAGIT_BENCH` | `0` | Set `1` to emit throughput summary after push/pull |
-| `MEDIAGIT_HASH_PARALLEL` | `0` | Set `1` for BLAKE3 tree-parallel hashing (~2.6× faster) |
+| `MEDIAGIT_HASH_PARALLEL` | `1` (ON) | BLAKE3 tree-parallel mmap hashing for files ≥ 5 MiB (~2.6× faster). Set `0` to force sequential. |
 | `RUST_LOG` | — | Module-scoped log levels, see Debug Logging above |
 
 See **env-knobs.md** for the complete list (30+ knobs covering upload/

@@ -192,7 +192,9 @@ let odb = ObjectDatabase::with_smart_compression(root).await?;
 ```rust
 use mediagit_config::schema::Config;
 let config = Config::load(&repo_root).await?;
-// Author priority: --author CLI > MEDIAGIT_AUTHOR_NAME env > config.toml [author] > $USER
+// Author priority: --author CLI > MEDIAGIT_AUTHOR_NAME env > config.toml [author]
+// (commit refuses rather than guess further; lock and some other commands
+// fall back to $USER as a last resort)
 ```
 
 ### Cross-Platform Paths

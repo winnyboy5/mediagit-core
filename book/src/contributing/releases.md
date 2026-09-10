@@ -80,8 +80,14 @@ Generates `install.sh` (Unix) and `install.ps1` (Windows) scripts.
 Creates the GitHub Release with all archives, checksums, and installer scripts.
 Only runs on tag push (not `workflow_dispatch`).
 
-### 5. publish-crates
-Publishes all 11 crates to crates.io in dependency order. Only runs for stable releases (`is-prerelease == false`).
+### 5. publish-crates — currently disabled
+
+**This job is commented out in `release.yml`** ("Crate publishing to
+crates.io is disabled for now. Uncomment the publish-crates job below when
+ready to publish."). Tagging a release today does **not** publish anything to
+crates.io. The job as written, for when it is re-enabled, would publish all
+11 crates to crates.io in dependency order, only for stable releases
+(`is-prerelease == false`):
 
 **Publish order** (respects internal dependency tiers):
 1. Tier 0: `mediagit-config`, `mediagit-security`, `mediagit-observability`, `mediagit-compression`, `mediagit-storage`, `mediagit-media`
@@ -117,7 +123,7 @@ The dry run builds all binaries and creates a pre-release with tag `dry-run`. No
 After a successful release:
 
 1. Verify [GitHub Releases](https://github.com/winnyboy5/mediagit-core/releases) has all assets
-2. Verify crates on [crates.io](https://crates.io/crates/mediagit-cli)
+2. (Skip while `publish-crates` stays disabled — see above) Verify crates on [crates.io](https://crates.io/crates/mediagit-cli)
 3. Verify Docker image: `docker pull ghcr.io/winnyboy5/mediagit-core:latest`
 4. Update the [documentation site](https://winnyboy5.github.io/mediagit-core) if needed
 5. Announce on Discord/community channels
@@ -127,8 +133,10 @@ After a successful release:
 For critical bug fixes on a stable release:
 
 ```bash
-# Create hotfix branch from the tag
-git checkout -b hotfix/v0.3.0 v0.3.0-rc.5
+# Create the hotfix branch from the tag being patched. Name it for the version
+# it will PRODUCE, not the one it branches from — this example used to say
+# hotfix/v0.3.0 while tagging v0.3.1 off it.
+git checkout -b hotfix/v0.3.1 v0.3.0-rc.5
 
 # Apply the fix, test, commit
 # ...
@@ -139,6 +147,6 @@ git push origin v0.3.1
 
 # Merge fix back to main
 git checkout main
-git merge hotfix/v0.2.2
+git merge hotfix/v0.3.1
 git push origin main
 ```

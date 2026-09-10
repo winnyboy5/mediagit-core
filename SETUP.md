@@ -152,20 +152,42 @@ tls_port = 3443
 tls_cert_path = "/etc/mediagit/cert.pem"
 tls_key_path = "/etc/mediagit/key.pem"
 tls_self_signed = false   # dev convenience: generate a self-signed cert instead
+tls_min_version = "1.3"   # default; "1.2" is the escape hatch for old clients/proxies.
+                          # An unrecognized value is a hard boot error, not a fallback.
 
 # Authentication
 enable_auth = true
 jwt_secret = "replace-with-a-long-random-secret"   # or set MEDIAGIT_JWT_SECRET instead
+allow_open_registration = true                     # default; set false so POST /auth/register
+                                                   # rejects anonymous callers (`init --enable-auth`
+                                                   # writes false). Only read when enable_auth = true
 presigned_url_ttl_seconds = 43200                  # 12h; TTL for direct-to-bucket upload URLs
 auth_store_dir = "./auth"                          # default: sibling `auth/` dir next to repos_dir
 
-# Rate limiting
+# Rate limiting. These ARE the defaults — do not lower them casually. A push is
+# roughly one request per chunk, so the 10/20 this example used to show turned
+# every real push into a 429 storm (see the comment above
+# `default_rate_limit_rps` in crates/mediagit-server/src/config.rs).
 enable_rate_limiting = true
-rate_limit_rps = 10
-rate_limit_burst = 20
+rate_limit_rps = 1000
+rate_limit_burst = 2000
 
 # CORS — omit entirely to add no CORS layer (no CORS headers emitted at all)
 cors_allowed_origins = ["https://app.example.com"]
+
+# Server-side verification of presigned uploads at chunk/pack completion.
+# Defaults to true. Presigned bytes go client→bucket directly, so this is the
+# only point the server can check them; turning it off drops to existence-only
+# checks, which accept any bytes under a claimed id. Verification runs in the
+# background, so it is off the push critical path.
+verify_content_on_complete = true
+
+# At-rest encryption of stored objects. Off by default; absent from existing
+# config files, which parse unchanged. `master_key_path` is required when
+# enabled — it wraps every repository key the server escrows.
+[encryption]
+enabled = false
+master_key_path = "/etc/mediagit/master.key"   # 64 hex chars or 32 raw bytes
 ```
 
 There is intentionally **no `[storage]` section** in this file — storage
@@ -231,7 +253,10 @@ mediagit-server admin create alice alice@example.com --password a-strong-passwor
 ```
 
 `--force` is required if the server is currently live (it full-rewrites
-`users.jsonl` on the next mutation, so restart the server afterward).
+`users.jsonl` on the next mutation, so restart the server afterward). It sits
+on `admin` itself, before the subcommand — `mediagit-server admin --force
+create alice ...` — as does `-c/--config`, which resolves the auth store dir
+and the host:port used for the running-server guard.
 
 Auth state (`users.jsonl`, `api_keys.jsonl`, `grants.jsonl`) persists as
 JSONL files under `auth_store_dir` (default: a sibling `auth/` directory
@@ -344,6 +369,10 @@ real `tls_cert_path`/`tls_key_path` PEM files for production. When TLS is
 enabled, the server runs **both** the HTTP listener (`port`) and the HTTPS
 listener (`tls_port`, default `3443`) concurrently — HTTP is not disabled.
 
+The minimum protocol version is TLS 1.3 unless you set `tls_min_version = "1.2"`
+as an escape hatch for clients or proxies that can't speak 1.3. Any other value
+fails the boot rather than falling back silently.
+
 ### 6. Repos and storage backends
 
 Each served repository lives at `<repos_dir>/<name>` and is just a
@@ -353,10 +382,9 @@ object data lives — this is why the server-level TOML has no `[storage]`
 key of its own; storage is configured per repo, not globally.
 
 Minimal `[storage]` snippets (drop into `<repo>/.mediagit/config.toml` or a
-sibling `config.toml`), based on real examples in the repo
-(`dev-tests/dev-server/repos/local-repo/.mediagit/config.toml`,
-`dev-tests/dev-server/config.{aws,azure,gcs}.toml`,
-`dev-tests/qa-suite/config/backends/minio.toml`):
+sibling `config.toml`), based on the working per-backend configs the QA suite
+uses — `dev-tests/qa-suite/config/backends/{local,minio,aws,azure,gcs}.toml`,
+all five checked in:
 
 **Local filesystem:**
 ```toml
@@ -426,7 +454,12 @@ Point the client at a server repo:
 mediagit remote add origin http://host:3000/<repo-name>
 ```
 
-Supported URL schemes: `http://`, `https://`, `file://`, `ssh://`.
+**Only `http://` and `https://` reach the remote protocol.** `mediagit remote add`
+also *accepts* `file://`, `ssh://` and `git://`, but no transport implements
+them — `clone` treats any non-HTTP(S) URL as a local directory path (a folder
+containing `.mediagit`), so an `ssh://` remote fails as a missing local path
+rather than dialling anything. Clone from a local repo by passing the path
+directly, not a `file://` URL.
 
 Credentials are resolved in this order:
 1. Environment: `MEDIAGIT_TOKEN` (JWT) or `MEDIAGIT_API_KEY`
@@ -488,20 +521,25 @@ Binaries land at `./target/{debug,release}/mediagit{,-server}`.
 
 ### Run the dev harness
 
-A pre-wired dev server config and seeded repos live under
-`dev-tests/dev-server/`:
+**`dev-tests/dev-server/` is gitignored.** `.gitignore:202` ignores `dev-tests/*`
+and re-includes only `!dev-tests/qa-suite/` (itself minus `work/`, `logs/`,
+`reports/`, `fixtures-synthetic/` and `.venv/`); `compat-fixture` is tracked
+because it predates the rule. So `dev-server/` is a scratch directory a
+maintainer accumulates locally, not something a fresh clone has — build your own
+harness rather than looking for one that isn't there:
 
 ```bash
-cd dev-tests/dev-server
-../../target/debug/mediagit-server
+mkdir -p /tmp/mg-dev && cd /tmp/mg-dev
+/path/to/target/debug/mediagit-server init --non-interactive --data-dir ./repos
+/path/to/target/debug/mediagit-server
 ```
 
-`mediagit-server.toml` there runs on `port = 5000`, `host = 0.0.0.0`, with
-`enable_auth = true` and a pre-seeded `auth/users.jsonl`, plus a seeded
-`repos/local-repo` (filesystem backend). `config.aws.toml`,
-`config.azure.toml`, and `config.gcs.toml` in the same directory are
-reference `[storage]` snippets for the corresponding cloud backends (not
-alternate server configs — the server config never has a `[storage]` key).
+Two checked-in server configs are worth reading first:
+`crates/mediagit-server/mediagit-server.example.toml` and
+`mediagit-server-production.example.toml`. For `[storage]`, the five
+per-backend configs under `dev-tests/qa-suite/config/backends/` are tracked and
+current — those are repo-level `[storage]` snippets, not alternate server
+configs, since the server config never has a `[storage]` key.
 
 ### Local MinIO for backend testing
 
@@ -528,8 +566,15 @@ cargo test --workspace
 
 For broader integration/economics/abuse/perf coverage against real or
 MinIO-backed storage, see the QA harness at
-`dev-tests/qa-suite/scripts/run_all.ps1` (PowerShell; 9 phases, env-knob
-driven, credentials via `dev-tests/qa-suite/scripts/campaign_env.ps1`).
+`dev-tests/qa-suite/scripts/run_all.ps1` (PowerShell; env-knob driven,
+credentials via `dev-tests/qa-suite/scripts/campaign_env.ps1`).
+
+A default run executes `00`–`08`, then `12` (safety), `13` (docs) and `14`
+(docs surface), and finally `09`, which aggregates them into the report; the
+`SCALE` tier (`MG_QA_TIER=SCALE`) inserts `10` before `09`. Phase `11`
+(memprofile) is opt-in via `-Phases`. A phase *token* globs to
+`scripts\<token>*.ps1`, so one token can run several scripts — `07` alone
+covers abuse, auth, cli_auth, creds, ratelimit, setup and users.
 
 ---
 

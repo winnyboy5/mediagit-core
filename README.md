@@ -12,12 +12,12 @@
 **Version**: v0.3.0-rc.5
 **Status**: 🚧 **RELEASE CANDIDATE**
 **Features**: 100% complete (all P0–P3 items from the rc.3 feature-completeness sprint implemented — a closed batch, distinct from the forward-looking backlog in [FUTURE_TODOS.md](FUTURE_TODOS.md), which reuses the same P0–P3 labels as effort/impact tiers for planned work)
-**Last Validated**: September 9, 2026 — two clean SCALE QA campaigns (`20260909-ga50`, `20260909-ga52`), **243 gates each, 0 failures, all 14 phases**, on byte-identical binaries, across MinIO, AWS S3, Azure Blob, GCS and local
+**Last Validated**: September 9, 2026 — two SCALE QA campaigns (`20260909-ga50`, `20260909-ga52`), **239 gates each: 238 pass, 0 failures, 1 skip, all 14 phases**, on byte-identical binaries, across MinIO, AWS S3, Azure Blob, GCS and local. The skip is the same gate in both runs — `A8-disk-full`, which needs an elevated shell to attach a size-capped volume — so it has never actually been exercised
 **At-rest encryption (DC-7)**: now campaign-covered. Every campaign runs 15 encryption gates — push, clone and byte-for-byte roundtrip against MinIO, AWS S3, Azure Blob and GCS, each asserting every object is actually sealed, plus three key-mismatch drills. (This line previously said encryption had never been in a campaign; that stopped being true and the README did not follow.)
 **🚨 WARNING 🚨**: This project is under active development. Be aware that large breaking changes may happen before 1.0 is reached.
 
-✅ **614/614 deep-tests passing** across MinIO, AWS S3 (ap-south-1), Azure Blob (South India), Google Cloud Storage *(deep-test sweep, June 2026; the current per-campaign gate count is 243 — see Last Validated above)*
-✅ **32 CLI commands validated end-to-end** — 0 crashes, 0 data corruption across all 4 cloud backends
+✅ **614/614 deep-tests passing** across MinIO, AWS S3 (ap-south-1), Azure Blob (South India), Google Cloud Storage *(deep-test sweep, June 2026; the current per-campaign gate count is 239 — see Last Validated above)*
+✅ **32 CLI commands validated end-to-end** — 0 crashes, 0 data corruption across all 4 cloud backends *(that sweep's command count; the CLI now exposes 35 — see [CLI Reference](#cli-reference))*
 ✅ **27+ file types tested** (58 GB dataset) across video, audio, 3D, image, design, ML
 ✅ **26.3–26.5% storage savings** measured on cloud backends (compression + dedup + delta, validated June 2026)
 ✅ **Files up to 398 MB** staged and transferred; single-file scalability to 6 GB tested
@@ -67,7 +67,7 @@ Traditional Git struggles with large binary files. MediaGit solves this with:
 - **Intelligent Chunking**: Split large files for efficient storage and transfer
 - **Smart Compression**: Type-aware compression — lossless audio/RAW up to 55%, text/JSON up to 70%, pre-compressed video/JPEG stored as-is
 - **Cloud-Native**: AWS S3, Azure Blob, Google Cloud Storage, MinIO
-- **Media Intelligence**: PSD layer merging, video timeline parsing, audio track handling
+- **Media Intelligence**: PSD layer *analysis*, video timeline parsing, audio track handling
 - **High Performance**: 80–240 MB/s staging throughput for large files (release build)
 
 ### Key Features
@@ -83,7 +83,7 @@ Traditional Git struggles with large binary files. MediaGit solves this with:
 - **Similarity delta**: 15–65% savings for similar-but-changed chunks; FNV-1a sampler + type-aware thresholds
 
 🎨 **Media-Aware Intelligence**
-- **PSD Files**: Layer metadata extraction, auto-merge, conflict detection
+- **PSD Files**: Layer metadata extraction and conflict detection. Layer merging computes a merged *structure*, not a merged file — the parser is read-only, so `merge` reports the conflict and checks out one side (`psd.rs:492`)
 - **Video**: Timeline parsing, non-overlapping edit merge
 - **Audio**: Track-level merge, format metadata
 - **3D Models**: OBJ, FBX, Blend, GLTF support
@@ -118,9 +118,9 @@ Uploads and downloads bypass the server entirely when the backend supports signi
 
 | Category | MediaAware Chunking | Other Formats |
 |----------|---------------------|---------------|
-| **Video** | MP4, MOV, AVI, MKV, WebM | FLV, WMV, MPG |
-| **Audio** | WAV (RIFF) | MP3, FLAC, AAC, OGG |
-| **3D Models** | GLB, glTF | OBJ, FBX, Blend, STL |
+| **Video** | MP4, MOV, M4V, 3GP, AVI, MKV, WebM | FLV, WMV, MPG |
+| **Audio** | M4A, MKA | WAV, MP3, FLAC, AAC, OGG |
+| **3D Models** | GLB, glTF, OBJ, STL, PLY, FBX, Blend | DAE |
 | **Images** | — | JPEG, PNG, PSD, TIFF, RAW, EXR |
 | **Documents** | — | PDF, SVG, EPS, AI |
 | **Archives** | — | ZIP, TAR, 7Z |
@@ -244,13 +244,14 @@ mediagit auth admin set-role bob admin
 
 ## CLI Reference
 
-All 32 MediaGit commands, grouped by workflow:
+All 35 MediaGit commands, grouped by workflow:
 
 ### Repository Setup
 | Command | Description |
 |---------|-------------|
 | `mediagit init` | Initialize a new MediaGit repository in the current directory |
 | `mediagit clone <url>` | Clone a remote repository into a new directory |
+| `mediagit config` | Get and set repository configuration (`.mediagit/config.toml`) |
 
 ### Staging & Committing
 | Command | Description |
@@ -288,6 +289,12 @@ All 32 MediaGit commands, grouped by workflow:
 | `mediagit lock create <path>` | Acquire a server-enforced lock on a file (e.g. a non-mergeable binary asset) |
 | `mediagit lock unlock <path>` | Release a lock (`--force` to release someone else's, requires `repo:admin`) |
 | `mediagit lock list` | List active locks |
+
+### Authentication & Encryption
+| Command | Description |
+|---------|-------------|
+| `mediagit auth <login\|register\|status\|logout\|passwd\|whoami\|key\|admin>` | Authenticate against a MediaGit server; manage your own API keys and, as admin, users/roles/grants |
+| `mediagit key <init\|status\|recover\|rotate-master>` | Manage at-rest encryption for this repository (opt-in at creation; see Security above) |
 
 ### Remote Operations
 | Command | Description |
@@ -423,14 +430,14 @@ MinIO is the loopback software ceiling; AWS/Azure/GCS are real cloud over WAN
 | GLB | 13.8 MB | 3.0–4.2 MB/s | Zstd Best | GLB parser + CDC chunking |
 | GLB | 25.4 MB | 5.2 MB/s | Zstd Best | GLB parser + CDC chunking |
 | FLAC | 38–39 MB | 2.2–4.1 MB/s | Zstd Best | FastCDC chunking |
-| WAV | 55–57 MB | 2.1–3.6 MB/s | Zstd Best | RIFF parser + chunking (CPU-bound) |
+| WAV | 55–57 MB | 2.1–3.6 MB/s | Zstd Best | FastCDC + PCM codec hint (CPU-bound) |
 | AI (large) | 129 MB | 1.9 MB/s | Zstd Best | Deep delta + chunking |
 | AI (very large) | 216 MB | 2.4 MB/s | Zstd Best | Deep delta + chunking |
 | MinIO PSD | 72 MB | 72.8 MB/s | Cloud upload | S3-compatible backend |
 | Push (150 MB) | — | 167 MB/s | Network | Local server |
 | Clone (150 MB) | — | 100 MB/s | Network | Local server |
 
-> WAV is CPU-bound: RIFF chunking + Zstd Best on uncompressed PCM. Throughput scales with CPU core count.
+> WAV is CPU-bound: Zstd Best over uncompressed PCM is the cost, not the chunking. WAV has no RIFF structure parser — it takes the FastCDC path with a PCM codec hint (`chunker.rs:462`); the container parsers are for MP4/MOV, MKV/WebM, AVI and the 3D formats. Throughput scales with CPU core count.
 
 ### Compression Efficiency
 
@@ -533,16 +540,36 @@ New chunk → CAS check → miss → SimilarityDetector.find_similar_with_size_r
                               store delta (base + diff)
 ```
 
-| Format | Eligible? | Similarity Threshold | Size Ratio Threshold | Validated Savings |
-|--------|-----------|---------------------|---------------------|-------------------|
-| Text / Code / JSON | ✅ Always | 0.85–0.95 | 0.80 | **50–75%** |
-| SVG / EPS (vector) | ✅ Always | 0.30 | 0.80 | **20–50%** |
-| PSD / PSB | ✅ Always | 0.70 | 0.80 | **15–35%** |
-| WAV / AIFF (lossless audio) | ✅ Always | 0.65 | 0.80 | **20–40%** |
-| STL / OBJ / PLY (text 3D) | ✅ Always | 0.30 | 0.80 | **40–65%** |
-| GLB / FBX (binary 3D) | ✅ If > 1 MB | 0.70 | 0.80 | **20–45%** |
-| MP4 / MKV (video) | ✅ If > 100 MB | 0.50 | 0.70 | Variable |
-| AI / InDesign (PDF containers) | ✅ If > 50 MB | 0.15 | 0.50 | ~0% (pre-compressed internals) |
+Every chunk is eligible; the thresholds below decide the outcome, not a
+size or type gate. Both columns are read straight from
+`get_similarity_threshold` and `get_size_ratio_threshold`
+(`crates/mediagit-versioning/src/similarity.rs`) — an extension with no arm
+of its own falls to the defaults, **0.30 / 0.80**.
+
+| Format | Similarity Threshold | Size Ratio Threshold | Validated Savings |
+|--------|---------------------|---------------------|-------------------|
+| Code / Markdown / text | 0.85 | 0.80 | **50–75%** |
+| JSON / YAML / TOML / XML | 0.95 | 0.80 | **50–75%** |
+| JPEG / PNG | 0.70 | 0.80 | ~0% (pre-compressed) |
+| WAV / AIFF / MP3 / FLAC | 0.65 | 0.80 | **20–40%** |
+| OBJ / FBX / GLTF / GLB (3D) | 0.70 | 0.80 | **20–45%** |
+| MP4 / MOV / AVI / MKV (video) | 0.50 | 0.70 | Variable |
+| **PSD / PSB**, AI / INDD / EPS / PDF | **0.15** | 0.50 | ~0% (pre-compressed internals) |
+| Office (DOCX / XLSX / PPTX / ODT) | 0.20 | 0.60 | Variable |
+| Blender, Cinema4D, Unity / prefab | 0.40 | 0.70 | Variable |
+| Maya (MA / MB) | 0.50 | 0.70 | Variable |
+| DAW projects (PTX / ALS / FLP / Logic) | 0.55 | 0.80 | Variable |
+| CAD (DWG / DXF) | 0.45 | 0.80 | Variable |
+| Houdini, Unreal (UASSET / UMAP) | 0.35 | 0.70 | Variable |
+| NLE projects (DRP / FCPBUNDLE / AVB) | 0.25 | 0.60 | Variable |
+| ML weights (safetensors / GGUF / GGML) | 0.15 | 0.50 | Variable |
+| SVG, STL, PLY, ZIP, anything else | 0.30 *(default)* | 0.80 | Varies by content |
+
+> **PSD is not an image, for this purpose.** It sits at 0.15 with the PDF
+> containers, not at 0.70 with JPEG/PNG — a layered container with embedded
+> compressed streams is structurally closer to an `.ai` file than to a flat
+> raster. An earlier revision of this table listed PSD at 0.70 and grouped
+> `EPS` with `SVG` and `OBJ` with `STL`, none of which matches the code.
 | JPEG / PNG / ZIP | ❌ Never | — | — | Not eligible |
 
 **Delta chain cap**: depth 10 maximum. Prevents read-amplification — at depth 10 the object is re-stored as a full compressed copy.
@@ -859,8 +886,8 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
       unbounded fallback (`MEDIAGIT_SHORT_REQUEST_ATTEMPTS`)
 - [x] Client transport errors keep their full `source()` chain, so a failure names the
       layer that actually broke instead of "error sending request for url"
-- [x] Validated by two clean SCALE campaigns, 243 gates each, 0 failures, on
-      byte-identical binaries
+- [x] Validated by two SCALE campaigns, 239 gates each, 0 failures and 1 skip
+      (`A8-disk-full`, needs elevation), on byte-identical binaries
 
 ### v0.3.0-rc.4 — July 2026
 *Object-store layout v2, client auth, and reachability tooling, GA hardening: server-enforced locking, durable auth, format freeze*
@@ -882,7 +909,7 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 - [x] `push --repair` — pack-aware re-upload of corrupted remote chunks and objects
 - [x] Server-side integrity verification endpoints (chunks + objects, strong BLAKE3 re-hash)
 - [x] `gc --repack` chunk consolidation into cloud packs
-- [x] Format freeze + compatibility promise — persisted/wire formats frozen as of this release (see `FORMATS.md` §11)
+- [x] Format freeze + compatibility promise — persisted/wire formats frozen as of this release (scope and terms in [CHANGELOG.md](CHANGELOG.md), under *Compat*; the `docs/FORMATS.md` §11 spec it cites is a local-only working doc and is not part of the repo)
 
 
 
@@ -983,19 +1010,19 @@ Special thanks to:
 
 ## Statistics
 
-- **Lines of Code**: 85,000+ (Rust, 218 source files across 14 crates)
+- **Lines of Code**: 122,000+ (Rust, 193 source files across 12 crates); 161,000+ across 313 files including test code
 - **Features**: 100% complete (all P0–P3 items from the rc.3 feature-completeness sprint — see disambiguation note above)
-- **Test Coverage**: **2,238 unit/integration tests, 0 failures** (measured 2026-09-09); 243 QA-campaign gates per run across all five backends (2026-09-09); **614/614 deep-tests** across MinIO, AWS S3, Azure Blob, GCS (validated 2026-06-02)
+- **Test Coverage**: **2,238 unit/integration tests, 0 failures** (measured 2026-09-09); 239 QA-campaign gates per run across all five backends — 238 pass, 0 fail, 1 skip (2026-09-09); **614/614 deep-tests** across MinIO, AWS S3, Azure Blob, GCS (validated 2026-06-02)
 - **Staging Throughput**: 25–240 MB/s for small files; 2.8–5.2 MB/s for chunked large files (WAV/PSD/GLB)
 - **Network Throughput**: 134–267 MB/s push (local server, pack negotiation); WAN-bound on cloud backends
 - **Storage Savings**: **26.3–26.5%** validated on 4 cloud backends (June 2026); ~30% average across mixed media projects
 - **Stability**: 0 crashes, 0 data corruption across all validated test runs
 - **File Formats**: 70+ extensions (video, audio, image, 3D, DCC, ML, game engines, office)
-- **Server Endpoints**: 20 handler routes + auth
+- **Server Endpoints**: 51 routes — 35 repo/health + 16 auth
 - **Platforms**: Linux (x86_64 + ARM64), macOS (Intel + Apple Silicon), Windows (x86_64)
 
 ---
 
 **Made with 🦀 and ❤️ by Aswin Krishnamoorthy**
 
-**Status**: Release Candidate | **Version**: v0.3.0-rc.5 | **Updated**: September 9, 2026 | **Cloud-Validated**: QA campaigns `20260909-ga50` + `20260909-ga52`, 243 gates each, 0 failures ✅
+**Status**: Release Candidate | **Version**: v0.3.0-rc.5 | **Updated**: September 9, 2026 | **Cloud-Validated**: QA campaigns `20260909-ga50` + `20260909-ga52`, 239 gates each, 0 failures, 1 skip ✅

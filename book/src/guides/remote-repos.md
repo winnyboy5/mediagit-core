@@ -26,8 +26,14 @@ Add a remote to an existing repo:
 
 ```bash
 mediagit remote add origin https://host:3000/my-repo
-mediagit remote add backup s3://bucket/backup-repo
+mediagit remote add backup https://backup-host:3000/my-repo
 ```
+
+Remote URLs must be `http://` or `https://` — MediaGit talks to a
+`mediagit-server` over its HTTP API. `file://`, `ssh://`, `git://` and
+storage-provider URL schemes like `s3://` are rejected by `remote add`; a
+cloud storage backend is configured under `[storage]` in
+`.mediagit/config.toml`, not as a remote (see [Storage Backend Configuration](./storage-config.md)).
 
 List configured remotes:
 

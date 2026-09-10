@@ -1,3 +1,28 @@
 kind	count
 env	0
 flag	0
+ref	1
+# `ref` is the dead-file-reference axis, added 2026-09-10.
+#
+# The sweep that introduced it started at 338 raw hits and ended at 1. What
+# closed the gap was mostly resolver work, not doc edits -- see the exemption
+# notes in 14_docs_surface.ps1. The real defects it found and that were fixed:
+#   README.md, dev-tests/compat-fixture/README.md   -> cited docs/FORMATS.md
+#   book/src/architecture/{blake3,security}.md      -> cited FORMATS.md
+#   book/src/architecture/delta-encoding.md         -> cited odb.rs (since split)
+#   CONFIGURATION.md                                -> cited KNOWN_LIMITATIONS.md
+#   CONTRIBUTING.md                                 -> cited CONTRIBUTORS.md
+#   DEVELOPMENT_GUIDE.md, SETUP.md                  -> cited dev-tests/dev-server/*
+#   FUTURE_TODOS.md                                 -> cited docs/next-set/
+#   env-knobs.md                                    -> cited diff_bench.ps1
+# Every one named a path that exists on a maintainer's disk and in no clone.
+#
+# THE REMAINING 1 IS A VERIFIED FALSE POSITIVE, not deferred debt:
+#   book/src/contributing/development.md:215 names
+#   `crates/mediagit-cli/src/commands/mycommand.rs`
+# That is a placeholder in a "how to add a command" tutorial -- the file is
+# one the READER creates. Correct as written. Rewording accurate documentation
+# to satisfy a metric would make it worse, so it stays and the baseline is 1.
+#
+# If this number RISES, a doc started pointing at something that is not in the
+# repo -- investigate, do not relock.

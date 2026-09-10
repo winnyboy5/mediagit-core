@@ -4,13 +4,15 @@ Welcome to MediaGit-Core, a next-generation media versioning system built with R
 
 ## What is MediaGit-Core?
 
-MediaGit-Core is an open-source version control system designed specifically for managing large binary files (media assets) with the same efficiency and flexibility that Git provides for source code. It solves the fundamental limitations of Git-LFS while providing a familiar Git-like interface.
+MediaGit-Core is a source-available version control system designed specifically for managing large binary files (media assets) with the same efficiency and flexibility that Git provides for source code. It solves the fundamental limitations of Git-LFS while providing a familiar Git-like interface.
+
+It is licensed under BUSL-1.1 — free to read, modify, fork, self-host and run in production at any scale, but **not open source in the OSI sense**, because offering MediaGit to third parties as a hosted or managed service is reserved. See [License](#license) below.
 
 ## Key Features
 
 ### High Performance
-- **Fast staging**: 25–240 MB/s for large files (release build)
-- **Efficient storage**: Up to 81% savings via compression + dedup + delta encoding
+- **Fast staging**: 25–240 MB/s for pre-compressed files (store-mode, zero CPU overhead); 80–240 MB/s for large video/PSD staging without chunking (release build)
+- **Efficient storage**: ~30% average savings across mixed media projects (up to 81–83% for individual well-compressing formats) via compression + dedup + delta encoding
 - **Parallel operations**: Optimized for modern multi-core systems
 
 ### Multi-Backend Storage
@@ -60,7 +62,7 @@ MediaGit-Core is designed for teams and individuals working with large binary fi
 |---------|--------------|---------|----------|
 | Architecture | Standalone native VCS | Git extension + server | Centralized VCS |
 | Branch Switch Speed | Instant (ref-based) | Instant (Git handles) | ⚠️ Copy-based |
-| Storage Savings (avg) | Up to 81% (compression + dedup + delta) | ~0% (no dedup/delta) | ~10-20% (RCS deltas) |
+| Storage Savings (avg) | ~30% avg, up to 81% per-format (compression + dedup + delta) | ~0% (no dedup/delta) | ~10-20% (RCS deltas) |
 | Deduplication | ✅ Content-addressable | ❌ None | ✅ Server-side |
 | Multi-Backend Support | 7 backends | Server-dependent | Proprietary |
 | Media-Aware Merging | ⚠️ Conflict *detection* only — see above; no auto-merge yet | ❌ No | ⚠️ Limited |

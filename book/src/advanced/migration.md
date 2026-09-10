@@ -137,25 +137,42 @@ mediagit fsck
 
 # Review statistics
 mediagit stats
-
-# Spot-check specific files
-mediagit verify --path assets/hero-video.mp4
 ```
+
+`mediagit verify` has no per-file spot-check: its `--path` flag selects the
+*repository* root (same as `-C`), not a file inside it, and `[COMMIT]` takes a
+commit-ish, not a file path (`mediagit verify --help`). For a fuller report use
+`mediagit verify --detailed`; there is no flag to verify a single file's
+checksum in isolation.
 
 ---
 
 ## Storage Efficiency After Migration
 
-MediaGit's deduplication and delta encoding provide significant storage savings for versioned media collections:
+How much you save depends almost entirely on whether your bytes are already
+compressed. The figures below are **measured**, from the per-family economics of
+QA campaign `20260909-ga52` and the chain fixtures in
+[BENCHMARKS.md](../../../BENCHMARKS.md) — not estimates.
 
-| Content type | Typical savings vs raw files |
-|---|---|
-| Design iterations (PSD, AI) | 40–80% via delta encoding |
-| Video master + proxy pairs | 15–30% via deduplication of shared frames |
-| Photo series | 10–40% via chunk deduplication |
-| Pre-compressed media (JPEG, MP4) | Minimal (stored as-is) |
+| Content type | Measured savings vs raw files | Why |
+|---|---|---|
+| Layered design files (PSD) | **67%** | Layer data is stored less aggressively compressed, so unchanged layers dedup across edits |
+| Vector / page containers (SVG) | **67%** | Structured text deltas well |
+| Uncompressed audio (WAV) | **95%** | Raw PCM; both compression and delta apply |
+| 3D meshes (GLB, STL, PLY, DAE) | **80%** on a GLB version chain (39.5 → 7.8 MB); 33–83% per-edit | Float-heavy geometry compresses and deltas extremely well |
+| Illustrator / PDF containers (AI) | **26%** | Embedded streams are already compressed; only structure deltas |
+| ML weights (safetensors, NPZ) | **45–77%** | Large float arrays; content-dependent |
+| Photos (JPEG, PNG) | **0%** | Already compressed — stored as-is, by design |
+| Video, including master + proxy variants | **0%** | Already compressed. Two encodes of the same footage share no *bytes*, so chunk dedup cannot see the shared frames |
+| FLAC | **0%** | Already losslessly compressed |
 
-Run `mediagit stats` after committing multiple versions to see actual compression and deduplication ratios.
+**Aggregate on a mixed real-file corpus: ~26.5%.** That number is lower than most
+rows above because real repositories are dominated by pre-compressed bytes —
+video and JPEG pull the average down no matter how well PSD and WAV do. Estimate
+your own result from your *format mix*, not from the best row in this table.
+
+Run `mediagit stats` after committing multiple versions to see your actual
+compression and deduplication ratios.
 
 ---
 

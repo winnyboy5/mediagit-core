@@ -42,7 +42,7 @@ MediaGit uses **zstd dictionary compression** for chunk-level delta encoding:
 Base → Delta 1 → Delta 2 → Delta 3 → ... → Delta N
 ```
 
-- **Default Max Depth**: 10 (`MAX_DELTA_DEPTH` in `odb.rs`)
+- **Default Max Depth**: 10 (`MAX_DELTA_DEPTH` in `crates/mediagit-versioning/src/odb/mod.rs`)
 - **Reason**: Deeper chains = slower reconstruction
 - **Solution**: After depth 10, the next version is stored as a new full base
 
@@ -155,12 +155,19 @@ The similarity checking process:
 1. Read base version from ODB
 2. Read new version from working directory
 3. Generate delta (zstd dictionary at chunk level)
-4. If delta < 80% of full object, store delta
-5. If delta larger, store full object (no benefit)
+4. If the delta is below the benefit threshold for that stream, store the delta
+5. Otherwise store the full object (no benefit)
+
+The threshold is codec-dependent, not a flat 80%
+(`delta_ratio_threshold`, `crates/mediagit-versioning/src/odb/mod.rs:100-114`):
+**0.60** for intra-only video (ProRes, DNxHR, JPEG 2000, raw), where delta is
+very effective and a weak result is not worth the read amplification; **0.90**
+for subtitle and metadata streams, which are small and highly similar; **0.80**
+for everything else, including PCM, FLAC and unknown.
 
 ### Example (Chunk-Level Delta in ODB)
 ```rust
-// From odb.rs — chunk-level delta using zstd dictionary
+// From crates/mediagit-versioning/src/odb/mod.rs — chunk-level delta using zstd dictionary
 let delta = DeltaEncoder::encode(&base_data, &chunk.data)?;
 let delta_bytes = delta.to_bytes();
 let delta_ratio = delta_bytes.len() as f64 / chunk.data.len() as f64;
@@ -184,7 +191,7 @@ if delta_ratio < 0.80 {
 
 ### Example (Chunk-Level Reconstruction)
 ```rust
-// From odb.rs — reconstruct from zstd dictionary delta
+// From crates/mediagit-versioning/src/odb/mod.rs — reconstruct from zstd dictionary delta
 let delta = Delta::from_bytes(&delta_bytes)?;
 let reconstructed = DeltaDecoder::apply(&base_data, &delta)?;
 

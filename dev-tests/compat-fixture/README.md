@@ -1,7 +1,9 @@
 # Compat Fixture (format-freeze gate)
 
 **DO NOT REGENERATE.** These bytes were produced once, at the wire/persisted-format
-freeze (`0.3.0-rc.1`, see `docs/FORMATS.md`), by that commit's release `mediagit`. Their whole
+freeze (`0.3.0-rc.1`; terms in `CHANGELOG.md` under *Compat* — the `docs/FORMATS.md`
+spec it cites is a local-only working doc, gitignored and not part of the repo),
+by that commit's release `mediagit`. Their whole
 purpose is to be *old bytes*: every future build must still read them. Regenerating
 them with a newer build defeats the test — it would only ever prove the current
 build can read its own output.

@@ -232,9 +232,10 @@ prefix = ""
 | `min_size` | integer | `1024` | (Informational) Not currently enforced |
 
 **Automatic algorithm selection by file type** (always active, cannot be overridden via config):
-- Already-compressed formats (JPEG, MP4, ZIP, docx, AI, PDF): stored as-is (`none`)
-- PSD, raw formats, 3D models: `zstd` at `Best` level (level 22)
-- Text, JSON, TOML: `zstd` at `Default` level (level 3)
+- Already-compressed formats (JPEG, MP4, ZIP, docx, AI/InDesign): stored as-is (`none`) — PDF is *not* in this group, see below
+- Raw/uncompressed image formats (TIFF, RAW, EXR) and 3D interchange formats (OBJ/FBX/GLB/STL/PLY): `zstd` at `Best` level (level 19 — levels 20-22 are deliberately never used, they OOM under parallel adds for <0.5% extra ratio)
+- PSD and other creative project files (After Effects, Premiere, Blender, Maya, ...), plus PDF/SVG: `zstd` at `Default` level (level 3)
+- Text, JSON, TOML: `brotli` at `Default` level (falls back to `zstd` above 500 MB)
 - ML checkpoints: `zstd` at `Fast` level (level 1)
 
 ---
@@ -244,6 +245,10 @@ prefix = ""
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `max_concurrency` | integer | CPU count (min 4) | Max parallel operations |
+| `upload_concurrency` | integer | unset | Override for client-side parallel chunk uploads. Falls back to `MEDIAGIT_UPLOAD_CONCURRENCY` / internal default (`32`) when unset. |
+| `download_concurrency` | integer | unset | Override for client-side parallel chunk downloads. Falls back to `MEDIAGIT_DOWNLOAD_CONCURRENCY` / internal default (`24`) when unset. |
+| `pack_workers` | integer | unset | Override for server-side concurrent pack-write workers. Falls back to `MEDIAGIT_PACK_WORKERS` / internal default (`8`) when unset. |
+| `chunk_write_concurrency` | integer | unset | Override for parallel chunk write concurrency during `add`. Falls back to `MEDIAGIT_CHUNK_WRITE_CONCURRENCY` / internal default (`num_cpus`) when unset. |
 | `buffer_size` | integer | `65536` | I/O buffer size in bytes (64 KB) |
 
 ### `[performance.cache]`

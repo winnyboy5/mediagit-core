@@ -122,22 +122,14 @@ Cache and buffer sizes are raw **bytes**, and `level` is an **integer** (zstd
 - **Disk**: 100MB for binaries, SSD recommended
 - **Xcode**: Command Line Tools (optional)
 
-### Verified Chips
+### Build Environment
 
-| Chip | Cores | Status |
-|------|-------|--------|
-| M1 | 4P+4E | ✅ Tested |
-| M1 Pro | 6P+2E, 8P+2E | ✅ Tested |
-| M1 Max | 8P+2E | ✅ Tested |
-| M1 Ultra | 16P+4E | ✅ Tested |
-| M2 | 4P+4E | ✅ Tested |
-| M2 Pro | 6P+4E, 8P+4E | ✅ Tested |
-| M2 Max | 8P+4E | ✅ Tested |
-| M2 Ultra | 16P+8E | ✅ Tested |
-| M3 | 4P+4E | ✅ Tested |
-| M3 Pro | 6P+6E | ✅ Tested |
-| M3 Max | 12P+4E | ✅ Tested |
-| M4 | 4P+6E | ✅ Tested |
+The `aarch64-apple-darwin` release binary is built (and its test suite run)
+on GitHub's `macos-14` runner (`.github/workflows/release.yml`) — one
+specific Apple Silicon chip, not a matrix. It should run on any M-series Mac
+since they share the same architecture, but per-chip testing across
+M1/M2/M3/M4 variants has not been verified; treat that as untested rather
+than confirmed.
 
 ## Verification
 

@@ -319,16 +319,15 @@ MediaGit implements intelligent chunking for efficient large file storage and pr
 
 ### Chunking Configuration
 
-```toml
-[storage.chunking]
-# Enable automatic chunking
-enabled = true
+Chunking is automatic and not configurable via `config.toml` — there is no
+`[storage.chunking]` section. Chunk sizes are adaptive by file size, compiled
+into `get_chunk_params()`:
 
-# Chunk sizes are adaptive by file size (from get_chunk_params()):
-# < 100 MB:     avg 1 MB,  min 512 KB, max 4 MB
-# 100 MB-10 GB: avg 2 MB,  min 1 MB,   max 8 MB
-# 10-100 GB:    avg 4 MB,  min 1 MB,   max 16 MB
-# > 100 GB:     avg 8 MB,  min 1 MB,   max 32 MB
+```
+< 100 MB:     avg 1 MB,  min 512 KB, max 4 MB
+100 MB-10 GB: avg 2 MB,  min 1 MB,   max 8 MB
+10-100 GB:    avg 4 MB,  min 1 MB,   max 16 MB
+> 100 GB:     avg 8 MB,  min 1 MB,   max 32 MB
 ```
 
 ### Chunking Performance

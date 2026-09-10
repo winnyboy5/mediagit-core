@@ -11,7 +11,7 @@
 
 ```mermaid
 graph TD
-    subgraph CLI["mediagit-cli (32 commands)"]
+    subgraph CLI["mediagit-cli (35 commands)"]
         ADD["add"]
         COMMIT["commit"]
         PUSH["push"]
@@ -28,7 +28,7 @@ graph TD
 
     subgraph Infra["Infrastructure"]
         STORE["mediagit-storage<br/>Local · S3 · Azure<br/>GCS · B2 · MinIO"]
-        SEC["mediagit-security<br/>AES-256-GCM · JWT<br/>TLS · Audit · KDF"]
+        SEC["mediagit-security<br/>XAES-256-GCM · JWT<br/>TLS · Audit · KDF"]
         PROTO["mediagit-protocol<br/>Client · Packs<br/>Chunk Transfer"]
     end
 
@@ -54,18 +54,18 @@ graph TD
 
 ---
 
-## Workspace Crates (14)
+## Workspace Crates (12)
 
 | Crate | Role | Key Modules |
 |-------|------|-------------|
-| **mediagit-cli** | CLI binary (32 commands) | `commands/`, main entry |
+| **mediagit-cli** | CLI binary (35 commands) | `commands/`, main entry |
 | **mediagit-versioning** | Core VCS engine | `odb/` & `chunking/` (submodules), index, refs, tree, commit, delta, similarity, cloud packs (`streaming_pack`, `streaming_index`, `pack`, `transaction`) |
 | **mediagit-compression** | Smart compression | Zstd, Brotli, Zlib, Store; `SmartCompressor` with type+size awareness |
 | **mediagit-media** | Media parsing & merging | Image, PSD, Video, Audio, 3D, VFX parsers & merge strategies |
 | **mediagit-storage** | Storage abstraction | `StorageBackend` trait + 7 implementations |
 | **mediagit-protocol** | Network protocol | `client/` (submodule), pack reader/writer, streaming pack, chunk transfer, cloud-pack transfer |
 | **mediagit-server** | HTTP server | Axum routes, `handlers/` (submodule), auth middleware, rate limiting, security |
-| **mediagit-security** | Security layer | Encryption (AES-256-GCM), Auth (JWT + API keys), TLS, audit, KDF |
+| **mediagit-security** | Security layer | Encryption (XAES-256-GCM), Auth (JWT + API keys), TLS, audit, KDF |
 | **mediagit-config** | Configuration | TOML config file management |
 | **mediagit-observability** | Logging/tracing | Structured tracing with env-filter |
 | **mediagit-metrics** | Prometheus metrics | Operation stats, dedup ratios |
@@ -101,7 +101,7 @@ graph TD
 
 ---
 
-## CLI Commands (32)
+## CLI Commands (35)
 
 ### Core Workflow
 | Command | Description |
@@ -140,6 +140,7 @@ graph TD
 | `fetch` | Fetch all remote refs without merging |
 | `remote` | Manage remote repositories |
 | `download` | Download a single file from a remote repository by path |
+| `auth` | Manage authentication with a MediaGit server |
 
 ### Media & Sparse Checkout
 | Command | Description |
@@ -160,6 +161,8 @@ graph TD
 | `fsck` | Verify object database integrity |
 | `verify` | Quick commit and signature verification |
 | `stats` | Show repository statistics (storage, files, compression, dedup) |
+| `config` | Get and set repository configuration |
+| `key` | Manage this repository's at-rest encryption key |
 | `completions` | Generate shell completions |
 | `version` | Show version information |
 
@@ -416,7 +419,7 @@ Each media format has a dedicated parser that understands the container structur
 
 ### FastCDC Integration
 
-MediaGit uses the **`fastcdc` crate v3.2** (specifically `fastcdc::v2020`, the 2020 algorithm revision) for all content-defined chunking. FastCDC replaces traditional rolling hash with a **gear table-based hash** that achieves **O(1) boundary detection per byte** — approximately **10× faster** than Buzhash or Rabin fingerprint.
+MediaGit uses the **`fastcdc` crate v4.0** (specifically `fastcdc::v2020`, the 2020 algorithm revision) for all content-defined chunking. FastCDC replaces traditional rolling hash with a **gear table-based hash** that achieves **O(1) boundary detection per byte** — approximately **10× faster** than Buzhash or Rabin fingerprint.
 
 #### Two Modes of Operation
 
@@ -504,11 +507,11 @@ The `get_chunk_params(file_size)` function selects FastCDC parameters:
 
 ## Delta Compression
 
-**Crate**: `mediagit-versioning` · **Key files**: `delta.rs` (~290 lines), `similarity.rs` (524 lines)
+**Crate**: `mediagit-versioning` · **Key files**: `delta.rs` (424 lines), `similarity.rs` (573 lines)
 
 ### Delta Encoder — Zstd Dictionary Mode
 - **Algorithm**: Zstd dictionary compression — base chunk serves as the raw dictionary
-- **Encoder**: `zstd::bulk::Compressor::with_dictionary(19, base_bytes)`
+- **Encoder**: `zstd::bulk::Compressor::with_dictionary(level, base_bytes)`, level defaults to `19` and is tunable via `MEDIAGIT_DELTA_LEVEL` (1–22; out-of-range values warn and fall back to the default)
 - **Decoder**: `zstd::bulk::Decompressor::with_dictionary(base_bytes)`
 - **Wire format**: `[0x5A, 0x44]` magic ("ZD") + varint(base_size) + varint(result_size) + zstd-compressed bytes
 - **Max chain depth**: 10 (then re-stored as full object)
@@ -547,12 +550,12 @@ graph TD
 
 | File Type | Threshold | Rationale |
 |-----------|-----------|-----------|
-| Creative/PDF (AI, InDesign) | 0.15 | Embedded compressed streams shift boundaries |
+| Creative/PDF (AI, InDesign, PSD) | 0.15 | Embedded compressed streams shift boundaries |
 | Office (DOCX, XLSX) | 0.20 | ZIP containers with shared structure |
 | Video (MP4, MKV) | 0.50 | Metadata/timeline changes significant |
 | Audio (WAV, MP3) | 0.65 | Medium structural similarity |
-| Images (JPEG, PSD) | 0.70 | Perceptual similarity |
-| 3D Models (FBX, Blend) | 0.70 | Geometric data similarity |
+| Images (JPEG, PNG) | 0.70 | Perceptual similarity |
+| 3D Models (FBX, glTF) | 0.70 | Geometric data similarity |
 | Text/Code | 0.85 | Small changes matter |
 | Config (JSON, YAML) | 0.95 | Near-exact matches preferred |
 | Default | 0.30 | Conservative baseline |
@@ -586,7 +589,7 @@ graph TD
 
 ## Media Merge Strategies
 
-**Crate**: `mediagit-media` · **Key file**: `strategy.rs` (619 lines)
+**Crate**: `mediagit-media` · **Key file**: `strategy.rs` (676 lines)
 
 ```mermaid
 graph TD
@@ -637,7 +640,7 @@ Six format-specific merge strategies with automatic conflict detection:
 
 ## Staging & Index
 
-**Crate**: `mediagit-versioning` · **Key file**: `index.rs` (296 lines)
+**Crate**: `mediagit-versioning` · **Key file**: `index.rs` (349 lines)
 
 ### IndexEntry Fields
 ```rust
@@ -858,7 +861,7 @@ flowchart TD
 
 ### Path-Traversal Hardening
 
-`validate_object_key()` (`crates/mediagit-storage/src/lib.rs:651-694`) is the single choke point every `StorageBackend` implementation and wrapper (`NamespacedBackend`, `local::LocalBackend`) must call before turning a caller-supplied key into a filesystem path or remote object key. It rejects absolute paths, Windows drive/UNC prefixes, and `..`/`..\` traversal components (normalizing backslashes first so the check is platform-independent) — without it, a user-controlled chunk/pack id containing `..` could escape the repo's storage root or, once namespaced, escape into another tenant's namespace. Server handlers add a second layer of hex-id guards on untrusted path segments (e.g. `crates/mediagit-server/src/handlers/chunks.rs:507,517` reject any `chunk_id`/delta-base header that isn't exactly 64 hex characters) before those ids ever reach the storage layer.
+`validate_object_key()` (`crates/mediagit-storage/src/lib.rs:662-701`) is the single choke point every `StorageBackend` implementation and wrapper (`NamespacedBackend`, `local::LocalBackend`) must call before turning a caller-supplied key into a filesystem path or remote object key. It rejects absolute paths, Windows drive/UNC prefixes, and `..`/`..\` traversal components (normalizing backslashes first so the check is platform-independent) — without it, a user-controlled chunk/pack id containing `..` could escape the repo's storage root or, once namespaced, escape into another tenant's namespace. Server handlers add a second layer of hex-id guards on untrusted path segments (e.g. `crates/mediagit-server/src/handlers/chunks.rs:646,656` reject any `chunk_id`/delta-base header that isn't exactly 64 hex characters) before those ids ever reach the storage layer.
 
 ---
 
@@ -870,14 +873,14 @@ flowchart TD
 - **Roles**: `Read`, `Write`, `Admin` (wire form capitalized, e.g. `"Write"`). `Read` = `repo:read`; `Write` = `repo:read` + `repo:write` (self-registration default); `Admin` = all of the above + `repo:admin` + `user:manage` (the marker permission for admin-only routes).
 - **Tokens**: JWT access tokens (HS256, 24h TTL, self-contained claims — a password change does **not** revoke existing tokens) + refresh tokens (30d); API keys (64 hex chars, id `ak_<32hex>`) as a long-lived alternative for machine clients, created/listed/revoked via `mediagit auth key`.
 - **Persistence**: users, API keys, and per-repo grants are persisted to `users.jsonl` / `api_keys.jsonl` / `grants.jsonl` under `auth_store_dir`. Writes are atomic (tmp file + rename); each file starts with a `{"v":1}` version header, and a corrupt file is a **hard load-time error** — never silently dropped or reset.
-- **Per-repo grants**: `GrantLevel` is ordered `Read < Write < Admin`. `check_permission()` (`crates/mediagit-server/src/handlers/mod.rs:69-119`) checks in order:
+- **Per-repo grants**: `GrantLevel` is ordered `Read < Write < Admin`. `check_permission()` (`crates/mediagit-server/src/handlers/mod.rs:67-141`) checks in order:
   1. Auth disabled → allow everything.
   2. No authenticated user → reject.
   3. Admin role (flat `user:manage` permission) → always allowed, regardless of grants.
-  4. Zero-grants deployment or `MEDIAGIT_GRANTS_ENFORCE=0` → fall back to the flat role-permission check (pre-grants behavior).
+  4. Zero-grants deployment, or `MEDIAGIT_GRANTS_ENFORCE=0` → fall back to the flat role-permission check (pre-grants behavior). `MEDIAGIT_GRANTS_ENFORCE=strict` does the opposite — forces per-repo grant enforcement even for a repo with no grants recorded, so an ungranted repo denies rather than falling back.
   5. Otherwise, per-repo grant lookup: the user's grant level for the repo must be at or above the level implied by the required permission.
 - **Admin routes**: `/auth/users`, `/auth/users/{id}/grants`, `/auth/keys` — user and grant management, gated on the admin role.
-- **Env knobs**: `MEDIAGIT_AUTH_PERSIST` (enable disk persistence), `MEDIAGIT_GRANTS_ENFORCE` (`0` to disable per-repo grant checks and fall back to flat roles).
+- **Env knobs**: `MEDIAGIT_AUTH_PERSIST` (enable disk persistence), `MEDIAGIT_GRANTS_ENFORCE` (`0` disables per-repo grant checks and falls back to flat roles; `strict` forces per-repo enforcement everywhere, including repos with no grants recorded).
 
 ```mermaid
 flowchart TD
@@ -1120,7 +1123,7 @@ flowchart TD
 
 - `--dry-run` mode reports what would be deleted without touching data
 - Chunks are **content-addressed** — a chunk stays alive if ANY reachable manifest references it
-- The `--aggressive` flag performs deeper sweeps and pack recompaction
+- A hidden `--aggressive` flag exists on the struct (reserved for a future deeper-sweep/recompaction mode) but is **not implemented**: passing it makes `gc` fail immediately with "gc --aggressive is not yet implemented." Use `--repack` for pack recompaction today.
 
 ---
 
@@ -1150,20 +1153,21 @@ flowchart TD
 
 ## Configuration
 
-**File**: `.mediagit/config.toml`
+**File**: `.mediagit/config.toml`. See [`CONFIGURATION.md`](CONFIGURATION.md) for the full, field-by-field reference (client + server + environment variables); this is an illustrative excerpt only, not the schema.
 
 ```toml
-[core]
-compression = true          # Enable smart compression
-chunk_strategy = "rolling"  # fixed | rolling | media_aware
-delta_enabled = true        # Enable delta compression
+[storage]
+backend = "filesystem"
+base_path = "./.mediagit/objects"
 
-[remote "origin"]
+[compression]
+enabled = true
+algorithm = "zstd"
+
+[remotes.origin]
 url = "http://localhost:3000"
-push_url = ""               # Optional separate push URL
-auth_method = "bearer"
 
-[branch "main"]
+[branches.main]
 remote = "origin"
 merge = "refs/heads/main"
 ```
@@ -1175,9 +1179,9 @@ merge = "refs/heads/main"
 - **MSRV**: Rust 1.97
 - **License**: BUSL-1.1 (Business Source License 1.1)
 - **Release profile**: `opt-level = 3`, LTO, `codegen-units = 1`
-- **Distribution**: cargo-dist (v0.26.0) with GitHub CI
+- **Distribution**: cargo-dist (v0.32.0) with GitHub CI
 - **Installers**: Shell, PowerShell, Homebrew, MSI
-- **Targets**: x86_64 + aarch64 for Linux, macOS, Windows
+- **Targets**: x86_64 + aarch64 for Linux and macOS; x86_64 only for Windows (no aarch64-windows target)
 
 ---
 

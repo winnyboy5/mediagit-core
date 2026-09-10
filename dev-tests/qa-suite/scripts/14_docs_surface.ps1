@@ -68,6 +68,22 @@ foreach ($scope in @("crates", "dev-tests", ".github")) {
 Pop-Location
 Write-QaLog $PHASE "MEDIAGIT_* names defined in source/harness/CI: $($known.Count)"
 
+# KNOWN BLIND SPOT, stated rather than silently carried: this asks whether a
+# name EXISTS, never whether setting it DOES anything. A variable read inside
+# dead code counts as defined here and its docs pass.
+#
+# That is not hypothetical. `apply_env_overrides` (mediagit-config
+# loader.rs:282) reads 16 MEDIAGIT_* vars; it is called only by
+# `load_with_overrides` (loader.rs:220), which has no caller in the workspace
+# outside a doc-comment example. Fourteen of those sixteen have no other read
+# site, so they are inert - and env-knobs.md listed all fourteen as "stable"
+# with plausible defaults while this gate stayed green over them (2026-09-10).
+#
+# Closing it properly needs reachability, i.e. a call graph, which is a lot of
+# machinery and a lot of false positives for one defect class. Left open
+# deliberately. If it bites again, the cheap 80% is to flag any MEDIAGIT_* whose
+# only read site sits in a function no non-test code calls.
+
 # A doc that says "there is no MEDIAGIT_FOO" is doing the right thing and must
 # not be punished for naming it.
 #
@@ -80,7 +96,7 @@ Write-QaLog $PHASE "MEDIAGIT_* names defined in source/harness/CI: $($known.Coun
 #
 # +/-2 lines covers a wrapped sentence without swallowing a whole section, so an
 # accurate paragraph and a fabricating one can still coexist in one file.
-$retraction = 'there (is|are) no|never (existed|been read|done anything|read)|do(es)? not exist|no such|not implemented|has no effect|have no effect|no caller|inert|removed|retracted|appeared in earlier|earlier revisions|not supported|REFUSE'
+$retraction = 'there (is|are) no|never (existed|been read|done anything|read)|do(es)? not exist|no such|not implemented|has no effect|have no effect|no caller|inert|removed|retracted|appeared in earlier|earlier revisions|not supported|REFUSE|local-only|gitignored|not part of the repo|not in the repo|absent from a fresh clone|not tracked in git|untracked'
 $RETRACT_WINDOW = 2
 
 function Test-QaRetracted($Lines, $Idx, $Window, $Pattern) {
@@ -205,34 +221,139 @@ foreach ($f in $docs) {
   }
 }
 
+# ---------------------------------------------------------------- dead file refs
+#
+# Third axis, added 2026-09-10. The env/flag scans above ask "does this NAME
+# exist?"; this one asks "does this FILE exist?" - and it is the same defect
+# wearing different clothes. README cited `FORMATS.md` for the format-freeze
+# terms, book\src\architecture\{blake3,security}.md cited it too, and SETUP.md
+# sent developers to `dev-tests\dev-server\`. All four are real paths ON A
+# MAINTAINER'S DISK and absent from a fresh clone: .gitignore:201-202 ignore
+# `docs/*` and `dev-tests/*`. Nothing checked, so a reader who cloned the repo
+# and followed the docs hit a file that was never there.
+#
+# git ls-files IS THE ORACLE, not the filesystem. Testing existence on disk is
+# precisely the bug - it passes on the machine that has the untracked file and
+# fails for everyone else.
+#
+# THREE EXEMPTIONS, each learned from a false positive in the first sweep,
+# which found 338 and would have been switched off on sight:
+#
+# 1. BASENAMES. Prose saying "see delta.rs" is correct as long as some tracked
+#    file is named delta.rs; it is not a link and has no path to be wrong
+#    about. Requiring a repo-relative path made 305 of the first 338 findings
+#    this shape. Same for a tail ("handlers/transfer.rs").
+# 2. FILES THE READER OR THE TOOL CREATES. `mediagit-server.toml` is what the
+#    operator writes from the example; `.mediagit/config.toml` is what
+#    `mediagit init` writes; `users.jsonl` is what the server writes. None of
+#    them are in git and none of them should be. 16 of the first 33 surviving
+#    findings were `mediagit-server.toml` alone.
+# 3. HISTORY. A changelog naming a file deleted three releases ago is telling
+#    the truth. Same principle as Test-QaRetracted below.
+#
+# Deliberately NOT scanned: .rs comments. Measured on this repo, that scan is
+# 1 real finding in 8 - runtime paths the code itself creates
+# (`rebase-apply/state.json`), a file in an external crate
+# (`reqsign-azure-storage`'s `service_sas.rs`), and a comment deliberately
+# contrasting `users.jsonl` with `users.json`. A gate that is 87% noise gets
+# switched off, so the comment axis stays a manual sweep until someone finds a
+# discriminator that works.
+$refRows = @()
+
+# Oracle: every tracked path, plus every suffix of one, plus every basename.
+#
+# EVERY tracked file, not $tracked - that one is `git ls-files "*.md"` and knows
+# only markdown. Building the oracle from it reported all 167 refs as dead,
+# including `main.rs` and `schema.rs`, because no .rs file was in the set at all.
+Push-Location $repo
+$refAllFiles = @(& git ls-files) | Where-Object { $_ }
+Pop-Location
+$refKnown = New-Object System.Collections.Generic.HashSet[string]
+foreach ($t in $refAllFiles) {
+  $parts = $t.ToLower() -split '/'
+  for ($i = 0; $i -lt $parts.Count; $i++) {
+    $null = $refKnown.Add(($parts[$i..($parts.Count - 1)] -join '/'))
+  }
+}
+Write-QaLog $PHASE "ref oracle: $($refAllFiles.Count) tracked files, $($refKnown.Count) resolvable path forms"
+
+# Exemption 2, by basename. These are created by the reader or by MediaGit.
+$refCreated = @(
+  "mediagit-server.toml", "config.toml", "config.json", "config.yaml",
+  "users.jsonl", "api_keys.jsonl", "grants.jsonl", "state.json",
+  "cert.pem", "key.pem", "master.key", ".env",
+  # Written by this harness into $QA.Logs\<runid>\, never committed. BENCHMARKS.md
+  # cites them to say "check the output", which is right, not a dead link.
+  "remote_results.tsv", "economics.tsv", "perf.tsv", "gates.tsv",
+  "coverage_matrix.tsv", "coverage-placeholders.tsv", "docs_surface.tsv",
+  "docs_flags.tsv", "archive-manifest.tsv"
+)
+# Exemption 3, by file. History is allowed to name the dead.
+$refHistory = @("CHANGELOG.md", "NOTICE-PROVENANCE.md", "THIRD_PARTY_LICENSES.md", "CLA.md")
+
+$refDocs = $docs | Where-Object { $refHistory -notcontains (Split-Path $_ -Leaf) }
+foreach ($f in $refDocs) {
+  $full = Join-Path $repo $f
+  if (-not (Test-Path $full)) { continue }
+  $lines = @(Get-Content $full -EA SilentlyContinue)
+  for ($li = 0; $li -lt $lines.Count; $li++) {
+    if (Test-QaRetracted $lines $li $RETRACT_WINDOW $retraction) { continue }
+    $cands = @()
+    # markdown link target, minus any #anchor
+    foreach ($m in [regex]::Matches($lines[$li], '\]\(([^)#\s]+?)(?:#[^)]*)?\)')) {
+      $cands += $m.Groups[1].Value
+    }
+    # inline `path.ext` that names a source-ish file
+    foreach ($m in [regex]::Matches($lines[$li], '`([A-Za-z0-9_./\\-]+\.(?:md|rs|toml|ps1|sh|yml|yaml|tsv))`')) {
+      $cands += $m.Groups[1].Value
+    }
+    foreach ($c in $cands) {
+      if ($c -match '^(https?:|mailto:|#|<)') { continue }
+      $p = ($c -replace '\\', '/').TrimStart('./')
+      if (-not $p) { continue }
+      $leaf = Split-Path $p -Leaf
+      if ($refCreated -contains $leaf) { continue }
+      if ($refKnown.Contains($p.ToLower()) -or $refKnown.Contains($leaf.ToLower())) { continue }
+      # A link to a DIRECTORY (`book/`, `crates/mediagit-cli/`) resolves if any
+      # tracked file lives under it. git ls-files lists files, never dirs, so
+      # without this every directory link reads as dead.
+      $dir = $p.ToLower().TrimEnd('/')
+      if ($dir -and ($refAllFiles | Where-Object { $_.ToLower().StartsWith("$dir/") } | Select-Object -First 1)) { continue }
+      $refRows += [pscustomobject]@{ Kind = "ref"; Name = $p; File = $f; Line = ($li + 1) }
+    }
+  }
+}
+
 # ---------------------------------------------------------------- report
 $detail = Join-Path $QA.Logs "docs_surface.tsv"
-$all = @($envRows) + @($flagRows)
+$all = @($envRows) + @($flagRows) + @($refRows)
 foreach ($r in $all) { Write-QaRow $detail @("kind","name","file","line") @($r.Kind, $r.Name, $r.File, $r.Line) }
 foreach ($r in $all) { Write-QaLog $PHASE ("INVENTED {0,-5} {1,-46} {2}:{3}" -f $r.Kind, $r.Name, $r.File, $r.Line) }
 
 $envN  = @($envRows).Count
 $flagN = @($flagRows).Count
-Write-QaLog $PHASE "scanned $($docs.Count) docs outside book\src\cli: invented-env=$envN invented-flags=$flagN"
+$refN  = @($refRows).Count
+Write-QaLog $PHASE "scanned $($docs.Count) docs outside book\src\cli: invented-env=$envN invented-flags=$flagN dead-refs=$refN"
 
 # ---------------------------------------------------------------- ratchet
-$baseEnv = 0; $baseFlag = 0
+$baseEnv = 0; $baseFlag = 0; $baseRef = 0
 if (Test-Path $baselineFile) {
   foreach ($l in (Get-Content $baselineFile | Select-Object -Skip 1)) {
     $p = $l -split "`t"
     if ($p[0] -eq "env")  { $baseEnv  = [int]$p[1] }
     if ($p[0] -eq "flag") { $baseFlag = [int]$p[1] }
+    if ($p[0] -eq "ref")  { $baseRef  = [int]$p[1] }
   }
 } else {
-  Write-QaLog $PHASE "no baseline at $baselineFile - treating as 0/0"
+  Write-QaLog $PHASE "no baseline at $baselineFile - treating as 0/0/0"
 }
 
-$ok = ($envN -le $baseEnv) -and ($flagN -le $baseFlag)
+$ok = ($envN -le $baseEnv) -and ($flagN -le $baseFlag) -and ($refN -le $baseRef)
 Write-QaGate $PHASE "docs-surface-no-invented-names" $ok `
-  "env=$envN/<=$baseEnv flags=$flagN/<=$baseFlag detail=$detail"
+  "env=$envN/<=$baseEnv flags=$flagN/<=$baseFlag refs=$refN/<=$baseRef detail=$detail"
 
-if ($ok -and (($envN -lt $baseEnv) -or ($flagN -lt $baseFlag))) {
-  Write-QaLog $PHASE "IMPROVED - re-lock the baseline in the same commit: env=$envN flag=$flagN"
+if ($ok -and (($envN -lt $baseEnv) -or ($flagN -lt $baseFlag) -or ($refN -lt $baseRef))) {
+  Write-QaLog $PHASE "IMPROVED - re-lock the baseline in the same commit: env=$envN flag=$flagN ref=$refN"
 }
 
 Exit-QaPhase $PHASE $false

@@ -8,7 +8,7 @@ See [Storage Backend Configuration](../guides/storage-config.md) for detailed se
 
 ## Authentication
 
-Requires appropriate credentials configured via environment variables or config file.
+Config-file only — `access_key_id`/`secret_access_key` under `[storage]` in `.mediagit/config.toml`. No environment-variable fallback, and no IAM-role/instance-profile path.
 
 ## Transfer
 

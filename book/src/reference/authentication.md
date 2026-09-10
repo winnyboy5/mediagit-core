@@ -240,9 +240,11 @@ For remote commands (`push`, `pull`, `fetch`, `clone`, `download`,
 1. **Environment variables** (checked first, wins over everything):
    - `MEDIAGIT_TOKEN` → sent as a bearer token
    - `MEDIAGIT_API_KEY` → sent as an API key
-2. **OS keychain** — a per-remote entry keyed by the resolved remote URL
+2. **Config file** — `remotes.<name>.token` / `.api_key` in `config.toml` (token wins over api_key if both are set)
+3. **OS keychain** — a per-remote entry keyed by the remote's *origin*
+   (scheme+host+port, so one `auth login` covers every repo on the same
+   server), falling back to the bare remote name if the URL doesn't parse
    (skip entirely with `MEDIAGIT_NO_KEYRING`)
-3. **Config file** — `remotes.<name>.token` / `.api_key` in `config.toml` (token wins over api_key if both are set)
 4. **No credentials** → 401 if the server requires auth
 
 **Write-through caching**: After a successful request using environment or config credentials, the CLI writes the credential to the OS keychain so the next invocation resolves faster. This only happens after success — credentials are never cached speculatively — and is best-effort; a locked keychain doesn't block commands.

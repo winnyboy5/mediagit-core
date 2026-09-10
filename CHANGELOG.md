@@ -9,16 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [v0.3.0-rc.5] - 2026-09-09
 
-Cleared for release by two clean QA campaigns — **243 gates each, 0 failures,
-all 14 phases, across all five backends** — on byte-identical binaries, plus a
-green workspace suite (**2,238 passed, 0 failed**).
+Cleared for release by two QA campaigns — **239 gates each: 238 pass, 0
+failures, 1 skip, all 14 phases, across all five backends** — on byte-identical
+binaries, plus a green workspace suite (**2,238 passed, 0 failed**).
+
+The skip is `A8-disk-full`, the same gate in both runs. It needs an elevated
+shell to attach a size-capped volume, and the campaign runs unelevated, so the
+disk-full path has never actually been exercised — stated here rather than
+rounded up into a clean sweep. (These numbers previously read "243 gates each,
+0 failures" and described the runs as clean; `reports/20260909-ga50` and
+`-ga52` both record `pass=238 fail=0 skip=1` and a verdict of
+`PASS-WITH-SKIPS`.)
 
 A third campaign, run between the two, failed and is described under *Known
 issues* rather than omitted: its one failure was a harness defect (the suite
 waited 60 s for a server whose own startup probe is allowed 90 s), not product
 code. An earlier pair of campaigns cleared an earlier subset of this same
-release at 241 gates each; the transfer fixes below landed after that pair and
-were validated by the 243-gate pair. Both pairs ran through a degraded network
+release at 237 gates each; the transfer fixes below landed after that pair and
+were validated by the 239-gate pair. Both pairs ran through a degraded network
 and neither lost a gate; see the pack-upload section below.
 
 ### Fixed — a clone died because a retry budget was sized for the wrong failure
@@ -258,8 +266,9 @@ these fixes produced `packsCompleted=30` and was the only failing gate in that
 run. The endpoint label is confirmed in the same logs, reading
 `complete_multipart_upload https://s3.ap-south-1.amazonaws.com:`.
 
-**Validation:** two consecutive clean campaigns, **241 gates each, 0 failures**,
-all 14 phases, on identical binaries. Both ran through a degraded link — all
+**Validation:** two consecutive campaigns, **237 gates each: 236 pass, 0
+failures, 1 skip** (`A8-disk-full`, which needs an elevated shell), all 14
+phases, on identical binaries. Both ran through a degraded link — all
 three cloud arms dropping simultaneously for multi-minute stretches inside the
 11 GB scale phase, with no Wi-Fi disconnect and no power event to explain it —
 and no gate failed in either. A degraded link can only manufacture false

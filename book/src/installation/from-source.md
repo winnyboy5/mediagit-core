@@ -197,7 +197,6 @@ AWS_SECRET_ACCESS_KEY=minioadmin \
 AWS_ENDPOINT_URL=http://localhost:9000 \
 AWS_REGION=us-east-1 \
 AZURE_STORAGE_CONNECTION_STRING="DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://localhost:10000/devstoreaccount1;" \
-GCS_EMULATOR_HOST=http://localhost:4443 \
 cargo test --ignored -p mediagit-storage -p mediagit-server
 
 docker compose -f docker-compose.test.yml down -v

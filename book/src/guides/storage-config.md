@@ -18,7 +18,13 @@ create_dirs = true
 sync = false
 ```
 
-Set `sync = true` to flush writes to disk before confirming (slower but safer on crash-prone systems).
+`create_dirs` and `sync` are accepted by the schema but not consulted by the
+filesystem backend — `LocalBackend::new` takes only the resolved path, no
+config (`crates/mediagit-storage/src/local.rs:153`). In practice, parent
+directories are always created (`ensure_parent_dir`, local.rs:337) and every
+write is always `fsync`'d before the atomic rename (`file.sync_all()`,
+local.rs:596) regardless of what `sync` is set to — there is no faster,
+unsynced write path today.
 
 ---
 
@@ -126,21 +132,25 @@ a user-facing knob.
 
 ## Performance Tuning
 
-All backends benefit from increased connection pool and concurrency for large parallel uploads:
+`max_concurrency`, `[performance.connection_pool]` and `[performance.timeouts]`
+are parsed into the config struct but nothing outside `mediagit-config`
+reads them back out — setting them changes no actual behavior. The knobs
+that do gate concurrency are the other `[performance]` fields:
 
 ```toml
 [performance]
-max_concurrency = 32
-
-[performance.connection_pool]
-max_connections = 32
-
-[performance.timeouts]
-request = 300   # 5 min — for very large chunks
-write = 120
+upload_concurrency = 32     # client-side parallel chunk uploads (push/pull/fetch)
+download_concurrency = 24   # client-side parallel chunk downloads
+pack_workers = 8            # server-side concurrent pack-write workers
 ```
 
-For the local filesystem backend, `max_concurrency` controls how many concurrent chunk writes are issued.
+`upload_concurrency` and `download_concurrency` can also be set with
+`mediagit config set performance.upload_concurrency <n>` (and the
+`download_concurrency` equivalent); `pack_workers` has no `config` key and
+must be edited directly in `.mediagit/config.toml`. Each falls back to an
+env var when unset — `MEDIAGIT_UPLOAD_CONCURRENCY`, `MEDIAGIT_DOWNLOAD_CONCURRENCY`,
+`MEDIAGIT_PACK_WORKERS` — and the env var wins if both are set; only then
+does the internal default (32 / 24 / 8) apply.
 
 ---
 

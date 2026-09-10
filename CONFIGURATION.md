@@ -116,12 +116,12 @@ Used when creating commits.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `name` | string \| absent | absent | Display name on commits. Precedence: `MEDIAGIT_AUTHOR_NAME` env var (`crates/mediagit-cli/src/commands/commit.rs:253`, and similarly in `lock.rs`, `merge.rs`, `tag.rs`) > `[author].name` in config.toml > `$USER`. |
+| `name` | string \| absent | absent | Display name on commits. Precedence: `MEDIAGIT_AUTHOR_NAME` env var (`crates/mediagit-cli/src/commands/commit.rs:271`, and similarly in `lock.rs`, `merge.rs`, `tag.rs`) > `[author].name` in config.toml > `$USER`. |
 | `email` | string \| absent | absent | Email address on commits. |
 
 ## `[storage]` — storage backend
 
-Selected with the `backend` key. All backend-specific fields sit **directly under `[storage]`** alongside `backend` — there is no nested `[storage.s3]`/`[storage.filesystem]` table. `StorageConfig` is a Rust enum tagged on `backend` (`schema.rs:332-354`), so exactly one backend's fields apply per repo.
+Selected with the `backend` key. All backend-specific fields sit **directly under `[storage]`** alongside `backend` — there is no nested `[storage.s3]`/`[storage.filesystem]` table. `StorageConfig` is a Rust enum tagged on `backend` (`schema.rs:353-373`), so exactly one backend's fields apply per repo.
 
 ### Local filesystem (default)
 
@@ -206,17 +206,17 @@ Credentials sit in a tagged `auth` block (`config_version` 3+). Variants:
 `sas` (`account_name` + `token`), `emulator` (no fields, local Azurite). The
 pre-v3 flat form is migrated automatically on first open; ambiguous or empty
 flat configs fail with a message naming the replacement block. The backend
-runs on Apache OpenDAL; presign is Service SAS from the account key (see
-`KNOWN_LIMITATIONS.md` for the Azurite presign caveat).
+runs on Apache OpenDAL; presign is Service SAS from the account key. OpenDAL
+hardcodes an SAS service version Azurite rejects, so presigned URLs cannot be
+exercised against the emulator — verified as an emulator-only gap; real Azure
+accepts the same SAS (`crates/mediagit-storage/src/azure.rs:16-29`).
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `backend` | string | — | Must be `"azure"`. |
-| `account_name` | string | — | **Required.** Storage account name. |
-| `account_key` | string \| absent | absent | Storage account key (prefer env var). |
 | `container` | string | — | **Required.** Blob container name. |
 | `prefix` | string | `""` | Blob path prefix. |
-| `connection_string` | string \| absent | absent | Full connection string (alternative to `account_name`/`account_key`). |
+| `auth` | table | — | **Required (config_version 3+).** Tagged block: `type = "account_key"` (`account_name` + `account_key`), `type = "connection_string"` (`value`), `type = "sas"` (`account_name` + `token`), or `type = "emulator"` (no fields, local Azurite). No environment-variable override exists for any of these — same config-file-only rule as S3. |
 
 ### Google Cloud Storage
 
@@ -268,7 +268,7 @@ Verified: nothing outside `mediagit-config` itself (schema/loader/validation/tes
 | `upload_concurrency` | usize \| absent | `None` | Client-side parallel chunk-upload concurrency override. When unset, falls back to `MEDIAGIT_UPLOAD_CONCURRENCY` env var, then an internal default of 32. Read in `crates/mediagit-cli/src/commands/push.rs`. |
 | `download_concurrency` | usize \| absent | `None` | Client-side parallel chunk-download concurrency override. Falls back to `MEDIAGIT_DOWNLOAD_CONCURRENCY`, then an internal default of 24. |
 | `pack_workers` | usize \| absent | `None` | Server-side concurrent pack-write worker override. Falls back to `MEDIAGIT_PACK_WORKERS`, then an internal default of 8. |
-| `chunk_write_concurrency` | usize \| absent | `None` | Parallel chunk-write concurrency override. Falls back to `MEDIAGIT_CHUNK_WRITE_CONCURRENCY`, then an internal default of `num_cpus`. |
+| `chunk_write_concurrency` | usize \| absent | `None` | **Dead knob: this TOML key is never read.** The chunked-write worker pool (`crates/mediagit-versioning/src/odb/chunks.rs:646`) reads `MEDIAGIT_CHUNK_WRITE_CONCURRENCY` directly from the environment (falling back to `num_cpus`) and never consults `config.performance.chunk_write_concurrency` — the field is populated only by the same unused `apply_env_overrides` path noted above. Same dead-knob class as `[compression]`. |
 | `buffer_size` | usize | `65536` (64 KB) | I/O buffer size in bytes. |
 
 ### `[performance.cache]`
@@ -283,6 +283,14 @@ Verified: nothing outside `mediagit-config` itself (schema/loader/validation/tes
 
 ### `[performance.connection_pool]`
 
+**No read site observed outside `mediagit-config`** — same caveat as
+`max_concurrency` above, and the same limitation on that claim (see
+*Unverifiable / not independently confirmed* at the end of this document).
+Setting these has not been observed to
+change any pool behaviour; the HTTP client's real connection settings live in
+`mediagit-protocol`. Treat the values below as the struct's defaults, not as
+tuning that takes effect.
+
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `min_connections` | usize | `1` | Minimum pool connections. |
@@ -291,6 +299,10 @@ Verified: nothing outside `mediagit-config` itself (schema/loader/validation/tes
 | `idle_timeout` | u64 | `600` | Idle connection timeout, seconds. |
 
 ### `[performance.timeouts]`
+
+**No read site observed outside `mediagit-config`**, as above. A request that
+actually needs a longer budget is governed by the transport knobs in
+[`env-knobs.md`](env-knobs.md), not by this table.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -420,7 +432,7 @@ min_approvals = 1
 
 # Part 2 — Server: `mediagit-server.toml`
 
-Every key in `ServerConfig` (`crates/mediagit-server/src/config.rs:24-89`), `#[serde(deny_unknown_fields)]` — an unrecognized key or section (including a `[storage]` table, see below) fails config load with a parse error rather than being silently ignored.
+Every key in `ServerConfig` (`crates/mediagit-server/src/config.rs:45-175`), `#[serde(deny_unknown_fields)]` — an unrecognized key or section (including a `[storage]` table, see below) fails config load with a parse error rather than being silently ignored.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -433,13 +445,16 @@ Every key in `ServerConfig` (`crates/mediagit-server/src/config.rs:24-89`), `#[s
 | `tls_key_path` | path \| absent | absent | TLS private key (PEM). Required unless `tls_self_signed`. |
 | `tls_self_signed` | bool | `false` | Generate a self-signed certificate for `localhost` at boot (development only). |
 | `tls_min_version` | `"1.2"` \| `"1.3"` \| absent | `"1.3"` | Minimum TLS protocol version to accept. Escape hatch for TLS 1.2-only clients/proxies; any other value fails config load. |
+| `encryption.enabled` | bool | `false` | Server-side at-rest encryption switch: accept escrowed repository keys and permit encrypted repositories. Off by default; absent from existing configs, which parse unchanged. |
+| `encryption.master_key_path` | path \| absent | absent | File holding the server's master key, which wraps every repository key it stores. Required when `encryption.enabled = true`. |
 | `enable_auth` | bool | `false` | Enable JWT/API-key authentication. |
 | `jwt_secret` | string \| absent | absent | Required when `enable_auth = true` (or set via `MEDIAGIT_JWT_SECRET`, which takes precedence — see Part 3). |
+| `allow_open_registration` | bool | `true` | Whether `POST /auth/register` is open to anonymous callers. Only meaningful when `enable_auth = true`; defaults to `true` so existing configs keep self-registering as before. |
 | `presigned_url_ttl_seconds` | u64 | `43200` (12 h) | TTL for presigned PUT URLs issued for direct-to-bucket uploads. Lower this if your cloud credentials use short-lived STS sessions. |
 | `enable_rate_limiting` | bool | `false` | Enable request rate limiting. |
-| `rate_limit_rps` | u64 | `10` | Requests per second, when rate limiting is enabled. |
-| `rate_limit_burst` | u32 | `20` | Burst allowance, when rate limiting is enabled. |
-| `auth_store_dir` | path \| absent | *(resolved)* | Directory for `users.jsonl`/`api_keys.jsonl`. When unset, resolves to a sibling `auth/` directory next to `repos_dir` (`resolved_auth_store_dir`, `config.rs:190-197`) — e.g. `repos_dir = "./repos"` → `./auth`. |
+| `rate_limit_rps` | u64 | `1000` | Requests per second, when rate limiting is enabled. Sized for bulk media transfer (roughly one request per chunk on a push), not for browsing — an earlier `10` here caused 429 storms on ordinary pushes. |
+| `rate_limit_burst` | u32 | `2000` | Burst allowance, when rate limiting is enabled. |
+| `auth_store_dir` | path \| absent | *(resolved)* | Directory for `users.jsonl`/`api_keys.jsonl`. When unset, resolves to a sibling `auth/` directory next to `repos_dir` (`resolved_auth_store_dir`, `config.rs:307-314`) — e.g. `repos_dir = "./repos"` → `./auth`. |
 | `cors_allowed_origins` | array \| absent | absent (no CORS layer at all) | Allowed CORS origins, exact match (e.g. `"https://app.example.com"`). When unset, the server adds **no** CORS layer and emits no CORS headers — this is stricter than "allow none with headers present." |
 | `verify_content_on_complete` | bool | `true` | Server-enforced BLAKE3 content verification of presigned uploads — chunk completion (`POST /:repo/chunks/complete`) and pack registration (`POST /:repo/packs/complete`). Verification runs in the **background**; pushes do not wait for it. See below. |
 
@@ -543,12 +558,12 @@ Storage backend configuration is **per-repo**, living in each served repository'
 ### Config discovery
 
 - Default config path is `mediagit-server.toml` in the process's current working directory.
-- If that default path is missing, the server falls back to built-in defaults and logs a warning (`ServerConfig::load`, `config.rs:148-175`) — first-run operators still get a working (loopback, no-auth) server.
+- If that default path is missing, the server falls back to built-in defaults and logs a warning (`ServerConfig::load`, `config.rs:265-289`) — first-run operators still get a working (loopback, no-auth) server.
 - If an explicit path is given via `-c`/`--config` and that file is missing, the server **errors out** instead of silently using defaults — this prevents an operator from thinking S3/TLS/auth config is wired in when it isn't.
 
 ### CLI-argument overrides
 
-`mediagit-server` (`crates/mediagit-server/src/main.rs:28-89`) accepts:
+`mediagit-server` (`crates/mediagit-server/src/main.rs:21-42`) accepts:
 
 | Flag | Overrides |
 |------|-----------|
@@ -572,21 +587,22 @@ Where both an environment variable and a TOML key configure the same thing, **th
 | Variable | Default | Effect |
 |----------|---------|--------|
 | `MEDIAGIT_JWT_SECRET` | unset | Server: JWT signing secret, used when `enable_auth = true`. Wins over the config file's `jwt_secret` key (warns if both set). Required — from either source — when auth is enabled. |
-| `MEDIAGIT_ALLOW_INSECURE_BIND` | unset | Server: set to `1` to allow binding a non-loopback host with `enable_auth = false`. Without it, the server refuses to start in that combination (`main.rs:120-131`). |
+| `MEDIAGIT_ALLOW_INSECURE_BIND` | unset | Server: set to `1` to allow binding a non-loopback host with `enable_auth = false`. Without it, the server refuses to start in that combination (`main.rs:197-212`). |
 | `MEDIAGIT_METRICS_ADDR` | unset (metrics endpoint off) | Server: set to `host:port` (e.g. `127.0.0.1:9090`) to start a separate Prometheus `/metrics` listener at boot. Invalid `host:port` logs an error and leaves metrics disabled. |
-| `MEDIAGIT_STARTUP_PROBE` | on (any value except `"0"`) | Server: validates every served repo's storage backend at boot before accepting traffic (30 s timeout across up to 4 concurrent probes). Set to `0` to skip. |
+| `MEDIAGIT_STARTUP_PROBE` | on (any value except `"0"`) | Server: validates every served repo's storage backend at boot before accepting traffic (up to 4 concurrent probes, `main.rs:418` `buffer_unordered(4)`). Set to `0` to skip. |
+| `MEDIAGIT_STARTUP_PROBE_TIMEOUT_SECS` | `90` | Server: wall-clock budget for the whole startup probe above. Raised from an original `30` after two false-failure incidents against slow-but-alive MinIO/GCS backends; junk or `0` falls back to the default rather than disabling the probe (`main.rs:60-65`, `startup_probe_timeout_secs`). |
 | `MEDIAGIT_TOKEN` | unset | Client: bearer token, highest-precedence credential source for talking to a remote. |
 | `MEDIAGIT_API_KEY` | unset | Client: API-key credential, checked after `MEDIAGIT_TOKEN`. Also read directly by the server's env-override path in `mediagit-config`'s (unused-by-CLI) loader — not a server runtime effect in practice; see the client credential precedence for the path that matters. |
 | `MEDIAGIT_NO_KEYRING` | unset | Client: when set (any value), skips the OS-keychain credential tier entirely on both read and write. |
 | `MEDIAGIT_REPO` | unset | Client: repo root override, set internally by `-C <path>`/some multi-step commands (rebase, merge, stash, cherry-pick) to guard the working repo across `.await` points. Not generally meant to be set by hand. |
 | `MEDIAGIT_AUTHOR_NAME` | unset | Client: author name for new commits/locks/tags/merges. Precedence: this env var > `[author].name` in config.toml > `$USER`. |
 | `MEDIAGIT_AUTH_PERSIST` | on (any value except `"0"`) | Server: persist auth state (`users.jsonl`, `api_keys.jsonl`) to `auth_store_dir`. Set to `0` to force in-memory-only auth (no load, no save) — a persistence failure is otherwise a hard error. |
-| `MEDIAGIT_GRANTS_ENFORCE` | on (any value except `"0"`, unless no grants have ever been configured — backward-compat) | Server: enforce per-repo access grants. Set to `0` to disable enforcement. |
+| `MEDIAGIT_GRANTS_ENFORCE` | per-repo (repos with no grants recorded fall back to flat roles — backward-compat) | Server: enforce per-repo access grants. `0` disables enforcement everywhere (flat roles only). `strict` forces per-repo enforcement everywhere, including a repo with no grants recorded (denies rather than falling back). |
 | `MEDIAGIT_LOCKS_ENFORCE` | on (any value except `"0"`) | Server: enforce file-lock checks on push. Set to `0` to disable. |
 | `MEDIAGIT_LOCKS_MAX_COMMITS` | `1000` | Server: lock enforcement fails open (allows the push) if the pushed commit range exceeds this many commits — bounds the cost of the tree-diff walk. |
 | `MEDIAGIT_SIGN` | off | Client: when truthy (`"1"`/`"true"`), sign new annotated tags with SSHSIG (namespace `mediagit-tag`) using the key from `MEDIAGIT_SIGN_KEY`. |
 | `MEDIAGIT_SIGN_KEY` | unset | Client: path to the private key used for tag signing when `MEDIAGIT_SIGN` is enabled. Required in that case — signing errors out if unset. |
-| `RUST_LOG` | `mediagit_server=debug,tower_http=debug,mediagit_storage=warn` | Server only (`tracing_subscriber::EnvFilter`, `main.rs:61-68`). Overrides `[observability].log_level`/that whole client-side table, which is not read by either binary. The CLI does not initialize `tracing_subscriber` and does not read `RUST_LOG`. |
+| `RUST_LOG` | `mediagit_server=debug,tower_http=debug,mediagit_storage=warn` | Server only (`tracing_subscriber::EnvFilter`, `main.rs:129-137`). Overrides `[observability].log_level`/that whole client-side table, which is not read by either binary. The CLI does not initialize `tracing_subscriber` and does not read `RUST_LOG`. |
 
 The full ~88-knob performance/tuning catalog (chunking, compression, upload/download concurrency, pack workers, retry/backoff, timeouts, etc.) lives in [`env-knobs.md`](env-knobs.md) and [`book/src/reference/environment.md`](book/src/reference/environment.md) — this table covers only the operational (auth/bind/metrics/locking/signing) set, not the performance-tuning knobs.
 
@@ -598,3 +614,4 @@ The full ~88-knob performance/tuning catalog (chunking, compression, upload/down
 - `MEDIAGIT_API_KEY`'s row notes that `mediagit-config`'s env-override path also reads it; I did not exhaustively check whether any other, non-CLI consumer of `mediagit-config::ConfigLoader::apply_env_overrides` exists outside this repository (e.g. a downstream tool) — within this repo, no caller exists outside its own tests/README.
 - I did not open `env-knobs.md` or `book/src/reference/environment.md` to verify their contents match current code (only confirmed both files exist) — Part 3 defers the full knob catalog to them by reference, not by transcription, so any drift there is out of scope for this document.
 - `max_concurrency` under `[performance]`: I confirmed no read-site outside `mediagit-config` itself; I did not exhaustively grep for indirect consumption through a cloned/threaded `PerformanceConfig` value, so "not observed to be read" is a search result, not a proof of dead code.
+- `[performance.connection_pool]` and `[performance.timeouts]` (8 keys) carry the same finding and the same limitation: a grep for each field name across `crates/*/src`, excluding `mediagit-config`, returns nothing, while the sibling keys `upload_concurrency`, `download_concurrency` and `pack_workers` return 13, 7 and 1 live read sites respectively. That asymmetry is what makes the negative result credible, but it is still a search result rather than a proof — the same "reachable read site" question that made 14 `MEDIAGIT_*` variables look real for years (see the note in `dev-tests/qa-suite/scripts/14_docs_surface.ps1`).

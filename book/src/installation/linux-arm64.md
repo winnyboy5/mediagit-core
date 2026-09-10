@@ -161,16 +161,14 @@ never having written it at all.
 - **Disk**: 100MB for binaries
 - **OS**: Linux kernel 4.4+
 
-### Verified ARM Platforms
+### Build Environment
 
-| Platform | Version | Status |
-|----------|---------|--------|
-| Raspberry Pi 4 | 8GB | ✅ Tested |
-| Raspberry Pi 5 | 4GB, 8GB | ✅ Tested |
-| AWS Graviton 2/3 | All instance types | ✅ Tested |
-| Oracle Ampere A1 | All shapes | ✅ Tested |
-| Azure ARM64 VMs | Dpsv5, Epsv5 series | ✅ Tested |
-| Ampere Altra | All SKUs | ✅ Tested |
+The `aarch64-unknown-linux-gnu` release binary is cross-compiled in CI
+(`.github/workflows/release.yml`), not built or run on real ARM hardware.
+It should work on any AArch64 Linux meeting the requirements above, but none
+of Raspberry Pi, AWS Graviton, Oracle Ampere, Azure ARM64 VMs, or Ampere
+Altra specifically has been verified — treat those as untested rather than
+confirmed.
 
 ## Troubleshooting
 

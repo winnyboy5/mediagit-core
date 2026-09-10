@@ -107,19 +107,20 @@ cargo build -p mediagit-cli
 mediagit-core/
 ├── crates/
 │   ├── mediagit-cli/          # Command-line interface
+│   ├── mediagit-server/        # Axum REST API server
 │   ├── mediagit-storage/       # Storage abstraction and backends
 │   ├── mediagit-versioning/    # Object database, commits, branches
+│   ├── mediagit-protocol/      # Network push/pull/clone protocol
 │   ├── mediagit-compression/   # Compression algorithms
 │   ├── mediagit-media/         # Media-aware merging
 │   ├── mediagit-config/        # Configuration management
 │   ├── mediagit-observability/ # Logging and tracing
-│   ├── mediagit-git/           # Git integration layer
 │   ├── mediagit-security/      # Encryption and security
 │   ├── mediagit-metrics/       # Prometheus metrics
-│   └── mediagit-migration/     # Storage backend migration
-├── benches/                    # Performance benchmarks
+│   └── mediagit-test-utils/    # Shared test utilities
+├── crates/*/benches/            # Per-crate performance benchmarks
 ├── book/                       # User documentation (mdBook)
-├── docs/                       # Developer documentation
+├── docs/                       # gitignored, local-only working notes (not in a fresh clone)
 ├── .github/                    # GitHub Actions CI/CD
 ├── Cargo.toml                  # Workspace configuration
 └── README.md
@@ -397,7 +398,6 @@ Releases are managed by maintainers. The process is:
 ## Recognition
 
 Contributors are recognized in:
-- `CONTRIBUTORS.md` file
 - Release notes
 - Project README
 

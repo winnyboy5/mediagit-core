@@ -12,11 +12,11 @@ flowchart TD
     B -->|Found| C["Use as<br/>Bearer token"]
     B -->|Not found| D{"Check<br/>MEDIAGIT_API_KEY<br/>environment?"}
     D -->|Found| E["Use as<br/>API key"]
-    D -->|Not found| F{"Check<br/>OS keychain<br/>for remote?"}
-    F -->|Found| G["Use cached<br/>credential"]
-    F -->|Not found| H{"Check config.toml<br/>remotes.name<br/>token/api_key?"}
+    D -->|Not found| H{"Check config.toml<br/>remotes.name<br/>token/api_key?"}
     H -->|Found| I["Use from config"]
-    H -->|Not found| J["No credentials<br/>401 if protected"]
+    H -->|Not found| F{"Check<br/>OS keychain<br/>for remote?"}
+    F -->|Found| G["Use cached<br/>credential"]
+    F -->|Not found| J["No credentials<br/>401 if protected"]
     
     C --> K["Send request"]
     E --> K

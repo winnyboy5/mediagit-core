@@ -10,7 +10,7 @@ Branches are files in `refs/heads/` containing commit hashes.
 - Switch: `mediagit branch switch <name>` (or the `mediagit checkout <name>` shim)
 - List: `mediagit branch list` (bare `mediagit branch` defaults to this)
 - Delete: `mediagit branch delete <name>`
-- Also: `rename`, `show`, `protect`, `merge`
+- Also: `rename`, `show`, `protect` (branch-scoped merge is not a thing — use `mediagit merge`)
 
 ## Branch Protection
 Protected branches prevent force-push and deletion.

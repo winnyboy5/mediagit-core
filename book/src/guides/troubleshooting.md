@@ -323,11 +323,15 @@ Set the credentials path:
 export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
 ```
 
-For local testing with the fake-gcs-server emulator:
+For local testing with the fake-gcs-server emulator, MediaGit's own GCS
+integration tests set `STORAGE_EMULATOR_HOST` (for the Google SDK's benefit)
+rather than reading it as a documented user-facing knob:
 
 ```bash
-export GCS_EMULATOR_HOST=http://localhost:4443
+export STORAGE_EMULATOR_HOST=http://localhost:4443
 ```
+
+`GCS_EMULATOR_HOST` is not read anywhere in the codebase — setting it has no effect.
 
 ---
 

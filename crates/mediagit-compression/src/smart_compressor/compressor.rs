@@ -1730,7 +1730,9 @@ mod tests {
         EncryptionKey::from_bytes(vec![7u8; 32]).unwrap()
     }
 
-    /// THE format-freeze guarantee. `FORMATS.md` has been frozen since rc.1, and
+    /// THE format-freeze guarantee. The persisted format has been frozen since
+    /// rc.1 (terms in CHANGELOG.md under *Compat*; the `docs/FORMATS.md` spec it
+    /// cites is a local-only working doc, not in the repo), and
     /// DC-7 is only additive if a repo with no key writes exactly what it wrote
     /// before. Asserted over every strategy and over content that trips the
     /// expand-to-Store fallback, because that path has its own return.
