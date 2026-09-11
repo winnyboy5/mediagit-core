@@ -2906,6 +2906,67 @@ impl ObjectDatabase {
         chunk_id: &Oid,
         path: &std::path::Path,
     ) -> anyhow::Result<()> {
+        // Same integrity contract as `put_compressed_chunk`: bytes that arrived
+        // from a remote are not stored under an id until they are shown to hash
+        // to it.
+        //
+        // This used to be missing, and this is the DEFAULT path, not a corner:
+        // `MEDIAGIT_STREAM_CHUNK_TO_DISK` defaults to 1 (`pull.rs`), so every
+        // per-chunk clone fallback came through here, while the verified
+        // in-memory sibling was the branch you had to opt into.
+        //
+        // The reachable failure is a proxied body that ends EARLY WITHOUT AN
+        // ERROR. `Body::from_stream` terminates a chunked response normally
+        // when its stream yields `None` — it only aborts on `Some(Err)` — so a
+        // short upstream read arrives as a complete, short body. The client's
+        // streaming helper then returns `Ok(written)` with no size check (its
+        // own comment said "the hash check that would catch it happens later",
+        // which was true of the in-memory sibling and not of this path), and a
+        // truncated chunk was written under a valid id. It would surface much
+        // later, as corruption, to someone who did nothing wrong. This repo has
+        // already shipped two short-but-clean read bugs: GCS resumable
+        // truncation, and the store-prefix P0 that corrupted ~1 in 8000 objects.
+        //
+        // Verified by STREAMING the staged file, never by reading it back.
+        // B4 staged to disk precisely to stop holding chunks in RAM at 24-32
+        // concurrent downloads; a verification that buffers would undo the
+        // reason this function exists.
+        let computed = if let Some(smart) = &self.smart_compressor {
+            decompress_file_hash_blocking(smart.clone(), path.to_path_buf())
+                .await
+                .map_err(|e| anyhow::anyhow!("Chunk {} failed to decompress: {}", chunk_id, e))?
+        } else {
+            // No SmartCompressor: mirror `put_compressed_chunk`'s else-arm
+            // exactly, including its use of the plain `Compressor`, which has
+            // no streaming decoder. `clone` always builds its ODB with smart
+            // compression (`clone.rs` -> `core.rs`), so this arm is not the
+            // clone path and does not carry its memory constraint.
+            let data = tokio::fs::read(path).await.map_err(|e| {
+                anyhow::anyhow!("Failed to read staged chunk {}: {}", path.display(), e)
+            })?;
+            let decompressed = match CompressionAlgorithm::detect(&data) {
+                CompressionAlgorithm::None => data,
+                _ => decompress_blocking(self.compressor.clone(), data)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("Chunk {} failed to decompress: {}", chunk_id, e)
+                    })?,
+            };
+            Oid::hash(&decompressed)
+        };
+        if computed != *chunk_id {
+            // The staged file is the evidence, but it is also corrupt: leaving
+            // it behind in the temp dir would let a later run stage over a
+            // half-written name. The caller removes it on the success path only.
+            let _ = tokio::fs::remove_file(path).await;
+            anyhow::bail!(
+                "Chunk integrity check failed for staged chunk {}: expected {}, computed {} — refusing to store",
+                chunk_id,
+                chunk_id,
+                computed
+            );
+        }
+
         let chunk_key = format!("chunks/{}", chunk_id.to_hex());
         if mediagit_compression::process_key().is_some() {
             let data = tokio::fs::read(path).await.map_err(|e| {
@@ -3586,6 +3647,64 @@ mod chunk_delta_depth_tests {
 /// Content-Length. A wrong answer either 403s a valid upload (undersized) or
 /// silently accepts more than intended (oversized) — see the presign_put
 /// binding at mediagit-server's transfer.rs.
+#[cfg(test)]
+mod streamed_put_integrity_tests {
+    use super::*;
+    use mediagit_storage::mock::MockBackend;
+    use std::sync::Arc as StdArc;
+
+    /// Both ways of storing a chunk that arrived from a remote must refuse
+    /// bytes that do not hash to the id they are filed under.
+    ///
+    /// `put_compressed_chunk` decompresses and compares against `chunk_id`
+    /// before writing. `put_compressed_chunk_from_file` — the B4 streamed
+    /// path, and the DEFAULT one, since `MEDIAGIT_STREAM_CHUNK_TO_DISK`
+    /// defaults to 1 — did not, so it wrote whatever was staged.
+    ///
+    /// The reachable shape is a proxied chunk body that ends early WITHOUT an
+    /// error: `Body::from_stream` terminates a chunked response normally when
+    /// its stream yields `None`, so a short upstream read reaches the client
+    /// as a complete, short body. Its streaming helper returns `Ok(written)`
+    /// with no size or hash check — its own doc comment says "the hash check
+    /// that would catch it happens later", which was true of the in-memory
+    /// sibling and not of this path. A truncated chunk would be stored under
+    /// a valid id and only surface later, as corruption, on a different
+    /// machine, to someone who did nothing wrong.
+    #[tokio::test]
+    async fn both_puts_refuse_bytes_that_do_not_match_the_id() {
+        let storage = StdArc::new(MockBackend::new());
+        let odb = ObjectDatabase::new(storage, 100);
+
+        // An id for one payload, bytes for another. Incompressible-by-detect
+        // raw bytes, so `CompressionAlgorithm::detect` reports None and the
+        // stored form is the input form — the comparison under test is the
+        // hash, not the codec.
+        let real = vec![b'x'; 4096];
+        let chunk_id = Oid::hash(&real);
+        let wrong = vec![b'y'; 4096];
+        assert_ne!(Oid::hash(&wrong), chunk_id, "fixture must actually differ");
+
+        let in_memory = odb.put_compressed_chunk(&chunk_id, &wrong).await;
+        assert!(
+            in_memory.is_err(),
+            "in-memory put must reject a chunk whose bytes do not hash to its id"
+        );
+
+        let tmp = std::env::temp_dir().join("mg-streamed-put-integrity-test.bin");
+        tokio::fs::write(&tmp, &wrong)
+            .await
+            .expect("stage temp file");
+        let streamed = odb.put_compressed_chunk_from_file(&chunk_id, &tmp).await;
+        let _ = tokio::fs::remove_file(&tmp).await;
+        assert!(
+            streamed.is_err(),
+            "streamed put must reject the same bytes the in-memory put rejected; \
+             it is the default clone-fallback path, so an unverified write here \
+             stores corruption under a valid id"
+        );
+    }
+}
+
 #[cfg(test)]
 mod compressed_chunk_len_tests {
     use super::*;
