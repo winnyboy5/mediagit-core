@@ -235,6 +235,37 @@ async fn decompress_typed_hash_blocking(
     }
 }
 
+/// [`decompress_typed_hash_blocking`] for bytes that are already on disk.
+///
+/// Same digest, same guarantee, but the compressed side is never read into a
+/// buffer either: the file is the reader and the hasher is the writer, so peak
+/// residency is `decompress_streaming`'s internal window regardless of chunk
+/// size. That is the whole point — the caller is B4's stream-to-disk path,
+/// which exists *because* holding a chunk in RAM at 24-32 concurrent downloads
+/// was the dominant client allocation during a clone. Verifying by reading the
+/// file back into memory would hand that allocation straight back.
+///
+/// Always `spawn_blocking`: unlike the in-memory sibling there is no small-input
+/// case worth running inline, because file I/O blocks whatever the size.
+async fn decompress_file_hash_blocking(
+    compressor: std::sync::Arc<SmartCompressor>,
+    path: std::path::PathBuf,
+) -> mediagit_compression::CompressionResult<Oid> {
+    tokio::task::spawn_blocking(move || -> mediagit_compression::CompressionResult<Oid> {
+        let file = std::fs::File::open(&path).map_err(|e| {
+            mediagit_compression::CompressionError::decompression_failed(format!(
+                "open staged chunk {}: {e}",
+                path.display()
+            ))
+        })?;
+        let mut sink = HashSink(crate::hash::Hasher::new());
+        compressor.decompress_streaming(std::io::BufReader::new(file), &mut sink)?;
+        Ok(Oid::from_bytes(sink.0.finalize()))
+    })
+    .await
+    .map_err(|e| mediagit_compression::CompressionError::decompression_failed(e.to_string()))?
+}
+
 /// `decompress_typed` variant of `decompress_blocking` for `SmartCompressor`.
 async fn decompress_typed_blocking(
     compressor: std::sync::Arc<SmartCompressor>,
