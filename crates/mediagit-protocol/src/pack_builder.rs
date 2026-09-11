@@ -337,12 +337,6 @@ pub async fn upload_and_register(
         .context("parse /packs/upload-urls response")?;
 
     // 2. Upload pack bytes
-    // B5: Bytes so the proxy-fallback retry closure below clones a refcount
-    // bump, not the whole pack.
-    let pack_data: bytes::Bytes = tokio::fs::read(&result.temp_path)
-        .await
-        .context("read pack temp file")?
-        .into();
 
     // 2a. Multipart first, for packs big enough to be worth it.
     //
@@ -367,6 +361,14 @@ pub async fn upload_and_register(
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(16 * 1024 * 1024);
+    // X2: the pack is NOT resident. MPU reads each part as a range from the
+    // temp file, so peak residency is one part rather than the whole 64 MiB --
+    // which is what made `MEDIAGIT_PACK_UPLOAD_CONCURRENCY` cap out at 8
+    // against a cap of 64 (8 x 64 MiB = a ~512 MiB floor).
+    //
+    // Packs are 64 MiB by default and the threshold is 16 MiB, so this IS the
+    // normal path; the single-PUT branches below are the 501/404 degradation.
+    // Only those read the file into memory, and only if they are reached.
     let uploaded_via_mpu = byte_len >= mpu_threshold
         && crate::client::upload_object_mpu(
             http_client,
@@ -374,7 +376,8 @@ pub async fn upload_and_register(
             base_url,
             "packs",
             &pack_oid_hex,
-            &pack_data,
+            crate::client::MpuSource::File(&result.temp_path),
+            byte_len,
         )
         .await;
 
@@ -384,6 +387,13 @@ pub async fn upload_and_register(
         // bench/QA "did the fast path hold?" signal reads it as direct.
         presigned_direct = true;
     } else if let Some(Some(purl)) = presign_map.get(&pack_oid_hex) {
+        // Fallback path only: MPU declined (501/404/part failure) or the pack is
+        // under the MPU threshold. `Bytes` so the retry closures below clone a
+        // refcount bump, not the whole pack (B5).
+        let pack_data: bytes::Bytes = tokio::fs::read(&result.temp_path)
+            .await
+            .context("read pack temp file")?
+            .into();
         let put_url = purl["url"].as_str().unwrap_or("").to_string();
         // Presigned direct-to-bucket PUT — not server-bound, so not routed
         // through send_with_rate_limit_retry: a 429 here comes from the BUCKET,
@@ -565,6 +575,15 @@ pub async fn upload_and_register(
         tracing::debug!(pack = %pack_oid_hex, bytes = byte_len, "Pack uploaded via presigned URL");
     } else {
         // Proxy fallback: PUT to /packs/<oid> so complete_pack's head("packs/<oid>") succeeds
+        //
+        // Reads the pack into memory, like the presigned fallback above and for
+        // the same reason: this path has no part granularity, so the body must
+        // be whole and re-clonable across retries. Only reached when MPU
+        // declined AND no presigned URL was issued.
+        let pack_data: bytes::Bytes = tokio::fs::read(&result.temp_path)
+            .await
+            .context("read pack temp file")?
+            .into();
         let proxy_url = format!("{}/packs/{}", base_url, pack_oid_hex);
         // Same class: the proxy PUT targets a content-addressed pack key, so
         // re-sending is idempotent, and this IS the fallback -- letting one

@@ -1273,6 +1273,47 @@ pub(crate) async fn download_chunk_ranged(
 /// Flow: POST `/chunks/mpu/start` → PUT each part URL → POST `/chunks/mpu/complete`.
 /// On part-upload failure the in-flight MPU is aborted best-effort to release S3
 /// storage, and `false` is returned so the caller retries via single-PUT/proxy.
+/// Where an MPU part's bytes come from.
+///
+/// X2: a 64 MiB cloud pack used to be read into RAM in full before MPU even
+/// started, and at `MEDIAGIT_PACK_UPLOAD_CONCURRENCY` = 8 that is a ~512 MiB
+/// floor which is precisely what capped that knob at 8 against a cap of 64.
+/// MPU parts are natural range reads, so the pack never needs to be resident:
+/// `File` reads one part at a time and peak residency becomes `part_size`, not
+/// the whole object.
+///
+/// `Memory` is unchanged behaviour for callers that legitimately already hold
+/// the bytes (the per-chunk path, where the chunk was just produced in memory).
+pub(crate) enum MpuSource<'a> {
+    Memory(&'a [u8]),
+    File(&'a std::path::Path),
+}
+
+impl MpuSource<'_> {
+    /// Read exactly one part.
+    ///
+    /// The file is re-opened per part rather than held: a single shared handle
+    /// would need a cursor shared across the part loop, and re-opening is
+    /// negligible against a multi-MiB network PUT. Same reasoning as
+    /// `push.rs`'s `upload_pack_file`, which re-opens inside its retry closure.
+    async fn part(&self, start: u64, len: usize) -> std::io::Result<Vec<u8>> {
+        match self {
+            MpuSource::Memory(bytes) => {
+                let s = start as usize;
+                Ok(bytes[s..s + len].to_vec())
+            }
+            MpuSource::File(path) => {
+                use tokio::io::{AsyncReadExt, AsyncSeekExt};
+                let mut f = tokio::fs::File::open(path).await?;
+                f.seek(std::io::SeekFrom::Start(start)).await?;
+                let mut buf = vec![0u8; len];
+                f.read_exact(&mut buf).await?;
+                Ok(buf)
+            }
+        }
+    }
+}
+
 pub(crate) async fn upload_chunk_mpu(
     api_client: &reqwest::Client,
     direct_client: &reqwest::Client,
@@ -1286,7 +1327,8 @@ pub(crate) async fn upload_chunk_mpu(
         base_url,
         "chunks",
         chunk_hex,
-        chunk_data,
+        MpuSource::Memory(chunk_data),
+        chunk_data.len() as u64,
     )
     .await
 }
@@ -1309,7 +1351,8 @@ pub(crate) async fn upload_object_mpu(
     base_url: &str,
     family: &str,
     chunk_hex: &str,
-    chunk_data: &[u8],
+    source: MpuSource<'_>,
+    total_len: u64,
 ) -> bool {
     #[derive(serde::Serialize)]
     struct StartReq<'a> {
@@ -1356,7 +1399,7 @@ pub(crate) async fn upload_object_mpu(
             .post(&start_url)
             .json(&StartReq {
                 chunk_id: chunk_hex,
-                chunk_size: chunk_data.len() as u64,
+                chunk_size: total_len,
             })
             .send()
     })
@@ -1393,12 +1436,32 @@ pub(crate) async fn upload_object_mpu(
     // --- Upload each part (with per-part retry, same backoff as single-PUT) ---
     const MAX_PART_ATTEMPTS: u32 = 5;
     for part in &mpu.parts {
+        let total = total_len as usize;
         let start = (part.part_number as usize - 1) * part_size;
-        let end = (start + part_size).min(chunk_data.len());
-        if start >= chunk_data.len() {
+        let end = (start + part_size).min(total);
+        if start >= total {
             break;
         }
-        let part_data = &chunk_data[start..end];
+
+        // Read this part once, outside the attempt loop: retries re-send the
+        // same bytes, and re-reading per attempt would add syscalls without
+        // changing what is sent. Peak residency here is one part, not the whole
+        // object -- the entire point of X2.
+        let part_data = match source.part(start as u64, end - start).await {
+            Ok(b) => b,
+            Err(e) => {
+                // Decline MPU rather than fail the upload: the caller's
+                // single-PUT fallback still has a correct path to the bucket,
+                // and "degrades, never fails" is this function's contract.
+                tracing::debug!(
+                    chunk = %chunk_hex,
+                    part = part.part_number,
+                    err = %e,
+                    "MPU part read failed; using single-PUT"
+                );
+                return false;
+            }
+        };
 
         let mut part_etag: Option<String> = None;
         for attempt in 0..MAX_PART_ATTEMPTS {
@@ -1412,10 +1475,16 @@ pub(crate) async fn upload_object_mpu(
                 tokio::time::sleep(tokio::time::Duration::from_millis(base_ms + jitter_ms)).await;
             }
 
+            // Content-Length is explicit and load-bearing. Without it a body of
+            // unknown length becomes `Transfer-Encoding: chunked`, which a
+            // presigned S3 PUT rejects with 501 -- and 501 is exactly the code
+            // this path treats as "backend has no MPU, fall back to single PUT".
+            // Getting it wrong would not error; it would silently demote every
+            // pack to the slower path while the logs looked healthy.
             let result = direct_client
                 .put(&part.url)
                 .header(reqwest::header::CONTENT_LENGTH, part_data.len())
-                .body(part_data.to_vec())
+                .body(part_data.clone())
                 .send()
                 .await;
 
@@ -2291,7 +2360,8 @@ mod mpu_complete_retry_tests {
             &format!("http://{addr}/repo"),
             "packs",
             &"aa".repeat(32),
-            &[7u8; 1024],
+            super::MpuSource::Memory(&[7u8; 1024]),
+            1024,
         )
         .await;
         server.abort();
@@ -2328,5 +2398,93 @@ mod mpu_complete_retry_tests {
             attempts, 1,
             "a 4xx must not be retried; got {attempts} attempts"
         );
+    }
+}
+
+/// X2: `MpuSource::File` must yield byte-identical parts to `MpuSource::Memory`.
+///
+/// The whole point of reading parts as ranges is that nobody notices. The risk
+/// is arithmetic: a wrong offset silently uploads the wrong bytes (the object
+/// still "uploads", and the corruption surfaces much later as a failed
+/// verification), and the final part is short whenever the object is not an
+/// exact multiple of the part size -- which, for a 64 MiB pack against an
+/// 8 MiB part size, is the common case rather than an edge case.
+#[cfg(test)]
+mod mpu_source_tests {
+    use super::MpuSource;
+
+    /// Deterministic, position-dependent bytes: a swapped or overlapping range
+    /// changes the content, which a constant fill would hide.
+    fn payload(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
+
+    async fn assert_parts_match(total: usize, part_size: usize) {
+        let data = payload(total);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pack.tmp");
+        tokio::fs::write(&path, &data).await.unwrap();
+
+        let from_file = MpuSource::File(&path);
+        let from_mem = MpuSource::Memory(&data);
+
+        let mut reassembled = Vec::with_capacity(total);
+        let mut start = 0usize;
+        while start < total {
+            let len = part_size.min(total - start);
+            let f = from_file.part(start as u64, len).await.unwrap();
+            let m = from_mem.part(start as u64, len).await.unwrap();
+            assert_eq!(f.len(), len, "file part length at offset {start}");
+            assert_eq!(f, m, "file/memory mismatch at offset {start} len {len}");
+            reassembled.extend_from_slice(&f);
+            start += len;
+        }
+
+        // The decisive assertion: the parts put the original object back
+        // together. Per-part equality alone would still pass if every part were
+        // read from the same offset.
+        //
+        // Reported as the first divergent index rather than `assert_eq!` on the
+        // vectors: a mismatch on a multi-KiB object otherwise prints both buffers
+        // in full, which buries the one number that identifies the bug.
+        assert_eq!(
+            reassembled.len(),
+            data.len(),
+            "reassembled length differs (total={total}, part={part_size})"
+        );
+        if let Some(i) = (0..data.len()).find(|&i| reassembled[i] != data[i]) {
+            panic!(
+                "parts did not reassemble to the original object                  (total={total}, part={part_size}): first difference at byte {i},                  expected {expected} got {got} -- an offset this far in means the                  part starting at {part_start} was read from the wrong place",
+                expected = data[i],
+                got = reassembled[i],
+                part_start = i - (i % part_size),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_multiple_of_part_size() {
+        assert_parts_match(4096, 1024).await;
+    }
+
+    #[tokio::test]
+    async fn final_part_is_short() {
+        // 4097 = four full parts plus a 1-byte tail; the off-by-one case.
+        assert_parts_match(4097, 1024).await;
+    }
+
+    #[tokio::test]
+    async fn single_part_smaller_than_part_size() {
+        assert_parts_match(100, 1024).await;
+    }
+
+    #[tokio::test]
+    async fn reading_past_the_end_is_an_error_not_a_short_read() {
+        // read_exact must fail rather than hand back a truncated part, which
+        // would upload silently-wrong bytes.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("short.tmp");
+        tokio::fs::write(&path, &payload(10)).await.unwrap();
+        assert!(MpuSource::File(&path).part(0, 64).await.is_err());
     }
 }
