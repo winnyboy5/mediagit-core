@@ -1,5 +1,5 @@
 metric	value
-undocumented_knobs	3
+undocumented_knobs	2
 # 8 -> 3 on 2026-09-10. Four real knobs were documented in env-knobs.md that
 # gate run, each with its default read from the parsing code rather than a
 # nearby comment:
@@ -21,4 +21,20 @@ undocumented_knobs	3
 # entirely inert, and green here throughout. See the blind-spot note in
 # 14_docs_surface.ps1.
 #
+# 3 -> 2 on 2026-09-11 (v0.4.0). Not a documentation change: `MEDIAGIT_APP_`
+# stopped appearing in the code at all. It was a stem captured from
+# MEDIAGIT_APP_NAME/_PORT/_HOST/_ENVIRONMENT/_DEBUG inside `apply_env_overrides`,
+# and that function was deleted along with the 14 inert knobs it was the sole
+# reader of (FUTURE_TODOS items 22/23). So one of the three accepted false
+# positives went away by deleting the dead code that produced it.
+#
+# Ratcheted rather than left at 3, on this file's own precedent (8 -> 3): a
+# baseline held above the real number stops catching regressions in the gap.
+#
+# The remaining 2 are still FAMILY STEMS, not settable variables:
+#   MEDIAGIT_AUTHOR_  MEDIAGIT_COMMIT_EDITMSG_
+#
 # If this number RISES, a knob was added without documenting it.
+# It nearly did this release: MEDIAGIT_GC_GRACE_SECS shipped in the gc prune
+# grace period documented only in CHANGELOG and code comments, and was added to
+# env-knobs.md before the campaign rather than after a 2.5h run found it.
