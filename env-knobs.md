@@ -58,7 +58,7 @@ Lifecycle: **experimental** → **stable** (2 clean deep-test releases) → **de
 | `MEDIAGIT_PHASH_MAX_MB` | `64` | 0.3.0-rc.4 | add | stable | Max image size (MiB) perceptual-hashed for delta candidacy; larger images skip pHash. |
 | `MEDIAGIT_MEDIA_META` | `1` (ON) | 0.3.0-rc.4 | status | stable | Show `media: ...` summary lines in `status` for recognized media files. `0` disables. |
 | `MEDIAGIT_CHUNK_CACHE_BYTES` | `268435456` (256 MiB) | 0.3.0-rc.4 | odb | stable | In-process chunk read cache size. |
-| `MEDIAGIT_CHUNK_WRITE_CONCURRENCY` | `num_cpus` (clamped 2–16 at the call site) | 0.3.0-rc.4 | add/odb | stable | Worker threads for parallel chunk writes during `add`. Also settable via repo config `[performance] chunk_write_concurrency`; the direct env read at chunking time wins in practice. |
+| `MEDIAGIT_CHUNK_WRITE_CONCURRENCY` | `num_cpus` (clamped 2–16 at the call site) | 0.3.0-rc.4 | add/odb | stable | Worker threads for parallel chunk writes during `add`. There is no repo-config equivalent — `[performance] chunk_write_concurrency` was removed from `schema.rs` in v0.4.0 as a dead TOML key; this env var is the only way to set it. |
 | `MEDIAGIT_DELTA_LEVEL` | `19` | 0.3.0-rc.4 | add/commit | stable | zstd dictionary compression level for delta encoding. Valid `1`-`22`; anything outside that range is rejected with a warning and the default used. |
 | `MEDIAGIT_ODB_CACHE_MB` | `512` | 0.3.0-rc.4 | all | stable | Object-database in-memory cache size, in MiB. Unparseable values fall back to the default rather than to zero. |
 
@@ -168,12 +168,11 @@ here rather than finding nothing:
 `MEDIAGIT_AUTH_ENABLED`.
 
 **None of them do anything, so they are no longer documented as knobs.** They
-are read only by `apply_env_overrides` (`mediagit-config/src/loader.rs:282`),
-which is reachable only through `load_with_overrides` (`loader.rs:220`) — and
-nothing in the workspace calls that outside the crate's own tests. Setting any
-of them is silently ignored. This note exists so that anyone who set one before
-today can find out why nothing happened; wiring the overlay into the real config
-path is tracked for v0.4.0 (FUTURE_TODOS item 22).
+were read only by an env-var overlay that had no caller in the workspace
+outside the crate's own tests; that overlay has been deleted in v0.4.0
+(FUTURE_TODOS item 22, resolved by removal rather than wiring it up). Setting
+any of them was silently ignored while the overlay existed. This note exists
+so that anyone who set one before today can find out why nothing happened.
 
 Working alternatives: `MEDIAGIT_METRICS_ADDR` for the metrics endpoint,
 `MEDIAGIT_LOG` / `RUST_LOG` for log level. Two variables read by that same dead
@@ -209,4 +208,4 @@ Not documented here (test-harness only, gated behind `#[ignore]` integration tes
 - **B4 graduation**: **COMPLETE (2026-05-22).** Windows stress PASS (20×50MB, 0 handle errors), MinIO 148/148, AWS 148/148, Azure 147/147 all with knob ON. Ready to flip default ON in next release. GCS pending (no config).
 - **B7 graduation**: **COMPLETE (2026-05-22).** AWS clone 159.8s→134.5s (15.8% improvement, threshold ≥10%). 148/148 PASS. Ready to flip default ON for S3/MinIO. Other backends use default-impl wrapper (parity preserved).
 - Setting `MEDIAGIT_HTTP_POOL_MAX` too high on Windows risks handle exhaustion — keep ≤ 128.
-- `apply_env_overrides` (`loader.rs:282`, see "Server App Config Overrides" above) reads 16 `MEDIAGIT_*` vars total, but only 14 of them are dead. `MEDIAGIT_API_KEY` and `MEDIAGIT_CHUNK_WRITE_CONCURRENCY` are also read there, yet both stay live through separate, real read sites elsewhere (`MEDIAGIT_API_KEY` in the client auth path documented near the top of this file; `MEDIAGIT_CHUNK_WRITE_CONCURRENCY` directly at `odb/chunks.rs:646`) — the dead function does not make them inert too.
+- The now-deleted env-var overlay (see "Server App Config Overrides" above) used to read 16 `MEDIAGIT_*` vars total, but only 14 of them were dead. `MEDIAGIT_API_KEY` and `MEDIAGIT_CHUNK_WRITE_CONCURRENCY` were also read there, yet both stay live through separate, real read sites elsewhere (`MEDIAGIT_API_KEY` in the client auth path documented near the top of this file; `MEDIAGIT_CHUNK_WRITE_CONCURRENCY` directly at `odb/chunks.rs:646`) — its removal does not affect them.

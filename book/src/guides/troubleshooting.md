@@ -170,13 +170,18 @@ If the error names the "removed flat format", the config still has
 
 ### Push times out on large files
 
-Large files can take time to upload. Increase timeouts in `.mediagit/config.toml`:
+Large files can take time to upload. Raise the transfer budgets:
 
-```toml
-[performance.timeouts]
-request = 300   # 5 minutes
-write = 120
+```bash
+# Data-plane read timeout: the gap allowed between received bytes (default 300s).
+MEDIAGIT_DATA_READ_TIMEOUT_SECS=1800
+# Wall-clock budget for retrying a single pack PUT (default 120s).
+MEDIAGIT_PACK_PUT_RETRY_BUDGET_SECS=300
 ```
+
+These are environment variables, not config keys. `[performance.timeouts]` was
+accepted in `config.toml` until v0.4.0 but never read by anything; it was removed
+in that release, so raising values there had no effect.
 
 ---
 
@@ -212,13 +217,16 @@ mediagit gc
 
 If the remote is on S3, increase upload concurrency:
 
-```toml
-[performance]
-max_concurrency = 32
-
-[performance.connection_pool]
-max_connections = 32
+```bash
+MEDIAGIT_UPLOAD_CONCURRENCY=32    # parallel chunk uploads (default 32)
+MEDIAGIT_DOWNLOAD_CONCURRENCY=32  # parallel chunk downloads (default 24)
+MEDIAGIT_HTTP_POOL_MAX=64         # idle connections kept per host (default 64)
 ```
+
+Equivalent `config.toml` keys exist for the first two
+(`[performance] upload_concurrency` / `download_concurrency`). There is no
+`max_concurrency` key and no `[performance.connection_pool]` section — both were
+removed in v0.4.0 because nothing read them.
 
 ---
 

@@ -13,8 +13,8 @@
 //!
 //! # Features
 //!
-//! - **Credential chain**: Automatically detects credentials from environment, IAM roles, or AWS profiles
-//! - **Region detection**: Uses environment variables or AWS metadata service
+//! - **Credential chain**: standard AWS SDK chain (environment, IAM roles, AWS profiles) *only* when no custom endpoint is set; a custom endpoint (e.g. MinIO) uses explicit `S3Config` credentials instead — see Configuration below
+//! - **Region detection**: environment variables or AWS metadata service on the plain-AWS path; `S3Config.region` (or `"us-east-1"`) on the custom-endpoint path
 //! - **Multipart uploads**: Automatically handles files >100MB with concurrent uploads
 //! - **Retry logic**: Exponential backoff with configurable max retries
 //! - **Performance**: Optimized for >100MB/s throughput on high-speed connections
@@ -55,15 +55,34 @@
 //!
 //! # Configuration
 //!
-//! Configuration is automatic using the AWS SDK's credential chain:
-//! 1. Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, etc.)
-//! 2. IAM role credentials (if running on EC2, ECS, Lambda, etc.)
-//! 3. AWS profiles (~/.aws/credentials and ~/.aws/config)
+//! Credential resolution is **not** uniform — it depends on whether
+//! `S3Config.endpoint` is set:
 //!
-//! Region detection:
-//! 1. AWS_REGION environment variable
-//! 2. AWS_DEFAULT_REGION environment variable
-//! 3. From instance metadata service (if on EC2)
+//! - **No custom endpoint** (real AWS S3, e.g. via `S3Backend::new()` or
+//!   `with_config()` with `endpoint: None`): calls
+//!   `aws_config::defaults(...).load()`, so the standard AWS SDK credential
+//!   chain applies:
+//!   1. Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, etc.)
+//!   2. IAM role credentials (if running on EC2, ECS, Lambda, etc.)
+//!   3. AWS profiles (~/.aws/credentials and ~/.aws/config)
+//!
+//!   Region detection on this path:
+//!   1. AWS_REGION environment variable
+//!   2. AWS_DEFAULT_REGION environment variable
+//!   3. From instance metadata service (if on EC2)
+//!
+//! - **Custom endpoint set** (S3-compatible services like MinIO, via
+//!   `with_config()` with `endpoint: Some(..)`): deliberately *skips*
+//!   `aws_config::defaults()` to avoid IMDS timeouts. Credentials come only
+//!   from `S3Config.access_key_id` / `secret_access_key`; if either is
+//!   unset, no credentials provider is configured at all. AWS environment
+//!   variables, IAM roles and `~/.aws` profiles are never consulted on this
+//!   path. Region comes from `S3Config.region`, falling back to
+//!   `"us-east-1"` — the AWS region env vars are not read here either.
+//!
+//! - **`with_credentials()`**: bypasses both of the above and always builds
+//!   the client from the explicit access key, secret key and region passed
+//!   in, regardless of whether an endpoint is set.
 //!
 //! # Performance
 //!

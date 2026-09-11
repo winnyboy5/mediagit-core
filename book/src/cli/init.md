@@ -101,14 +101,6 @@ create_dirs = true
 sync = false
 file_permissions = "0644"
 
-# [compression] values below are informational — SmartCompressor selects
-# algorithm and level automatically per file type and ignores these settings.
-[compression]
-enabled = true
-algorithm = "zstd"
-level = 3
-min_size = 1024
-
 [author]
 # Set with: mediagit config author.name "Your Name"
 #            mediagit config author.email "you@example.com"
@@ -120,7 +112,7 @@ min_size = 1024
 
 All backend fields are at the same level as `backend` in `[storage]` (no nested `[storage.filesystem]` subsection).
 
-The `[compression]` section is written for reference but is not read at runtime. MediaGit's `SmartCompressor` automatically chooses the optimal algorithm and level based on file type (e.g., Zstd Best for PSD/3D models, Store for already-compressed formats like JPEG/MP4).
+There is no `[compression]` section. One used to be written for reference, but it was never read at runtime and was removed in v0.4.0. MediaGit's `SmartCompressor` chooses algorithm and level from the file type (e.g. Zstd Best for PSD/3D models, Store for already-compressed formats like JPEG/MP4).
 
 ## Exit Status
 

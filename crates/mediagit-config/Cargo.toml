@@ -34,7 +34,6 @@ tokio = { workspace = true, features = ["fs", "io-util"] }
 tracing.workspace = true
 
 # Utilities
-num_cpus = "1.16"
 
 [dev-dependencies]
 tokio.workspace = true

@@ -1160,9 +1160,6 @@ flowchart TD
 backend = "filesystem"
 base_path = "./.mediagit/objects"
 
-[compression]
-enabled = true
-algorithm = "zstd"
 
 [remotes.origin]
 url = "http://localhost:3000"

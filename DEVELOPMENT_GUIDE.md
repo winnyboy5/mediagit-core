@@ -635,17 +635,8 @@ every config key) lives in **env-knobs.md** and **CONFIGURATION.md**.
 
 ### Compression (dev iteration speed vs. ratio)
 
-```toml
-# Fast (dev loop)
-[compression]
-algorithm = "zstd"
-level = 1
-
-# Balanced (default)
-[compression]
-algorithm = "zstd"
-level = 3
-```
+Not adjustable. `SmartCompressor` selects algorithm and level from the file type;
+the `[compression]` config section was removed in v0.4.0 because nothing read it.
 
 ### Benchmark Instrumentation
 

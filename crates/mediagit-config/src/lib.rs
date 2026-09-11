@@ -27,7 +27,7 @@
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let loader = ConfigLoader::new();
-//!     let config = loader.load_with_overrides("config.toml").await?;
+//!     let config = loader.load_file("config.toml").await?;
 //!
 //!     println!("Loaded configuration for: {}", config.app.name);
 //!     println!("Running on: {}:{}", config.app.host, config.app.port);

@@ -273,13 +273,14 @@ keeping both variants while you decide is cheap.
 
 ### Enable Compression
 
-Compression is enabled by default. Adjust levels in `.mediagit/config.toml`:
+Compression is automatic and has no configuration. `SmartCompressor` picks the
+algorithm and level from the file type on every write - already-compressed media
+(JPEG, MP4, ZIP) is stored as-is, text and JSON get brotli, raw image and 3D
+formats get zstd at its highest useful level.
 
-```toml
-[compression]
-algorithm = "zstd"  # or "brotli"
-level = 3           # zstd: 1 (fastest) – 22 (best); brotli: 0–11
-```
+There is no `[compression]` section in `config.toml`. One was accepted until
+v0.4.0, but nothing ever read it, so it was removed rather than left to look
+like a control.
 
 ### Delta Encoding
 
@@ -353,12 +354,17 @@ source ~/.zshrc
 
 ### Large File Upload Timeout
 
-Increase timeout in configuration:
+Raise the data-plane transfer budget:
 
-```toml
-[performance.timeouts]
-request = 300   # 5 minutes
-write = 120
+```bash
+# Data-plane read timeout: the gap allowed between received bytes (default 300s).
+MEDIAGIT_DATA_READ_TIMEOUT_SECS=1800
+# Wall-clock budget for retrying a single pack PUT (default 120s).
+MEDIAGIT_PACK_PUT_RETRY_BUDGET_SECS=300
 ```
+
+These are environment variables, not config keys. `[performance.timeouts]` was
+accepted in `config.toml` until v0.4.0 but never read by anything; it was removed
+in that release, so raising values there had no effect.
 
 For more troubleshooting, see the [Troubleshooting Guide](./guides/troubleshooting.md).

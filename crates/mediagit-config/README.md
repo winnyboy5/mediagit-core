@@ -5,11 +5,10 @@ A comprehensive configuration management system for MediaGit Core with support f
 ## Features
 
 - **Multi-Format Support**: Load configuration from TOML, YAML, or JSON files
-- **Environment Variable Overrides**: `load_with_overrides` applies `MEDIAGIT_`-prefixed overrides. Library API only — neither `mediagit` nor `mediagit-server` uses it (see the note under [Environment Variable Overrides](#environment-variable-overrides))
 - **Comprehensive Validation**: Detailed error messages for invalid configurations
 - **Configuration Migration**: Framework for handling schema version updates
 - **Flexible Storage Backends**: Support for filesystem, AWS S3, Azure Blob, Google Cloud Storage, and multi-backend configurations
-- **Performance Tuning**: Cache, connection pool, and timeout configurations
+- **Performance Tuning**: Cache and concurrency configurations
 - **Observability**: Logging, metrics, and tracing configurations
 - **Security Settings**: TLS, encryption, CORS, rate limiting, and authentication options
 
@@ -32,15 +31,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### Loading with Environment Variable Overrides
-
-```rust
-let config = loader.load_with_overrides("config.toml").await?;
-
-// Layers MEDIAGIT_*-prefixed variables over the file. Library API only:
-// neither `mediagit` nor `mediagit-server` calls this, so those variables
-// have no effect on a real invocation. See "Environment Variable Overrides".
-```
+There is no environment-variable overlay on top of a loaded file. A
+`load_with_overrides` method used to exist for this, but it had no caller
+outside this crate's own tests and was removed in v0.4.0 along with the
+fourteen `MEDIAGIT_*` variables it alone read — see
+[`env-knobs.md`](../../env-knobs.md#server-app-config-overrides--removed) at
+the repo root. Use `load_file` (above) for both the client and the server.
 
 ### Loading from String
 
@@ -77,7 +73,6 @@ let config = loader.load_and_merge(&[
 ```toml
 [app]           # Application metadata
 [storage]       # Storage backend configuration
-[compression]   # Compression settings
 [performance]   # Performance tuning
 [observability] # Logging, metrics, tracing
 [security]      # TLS, encryption, authentication
@@ -146,27 +141,15 @@ which resolve `GOOGLE_APPLICATION_CREDENTIALS` from the environment. That is
 the only environment path any backend has. There is no
 `MEDIAGIT_GCS_CREDENTIALS_PATH`.
 
-## Compression Configuration
-
-```toml
-[compression]
-enabled = true
-algorithm = "zstd"          # zstd, brotli, or none
-level = 3                   # zstd: 1-22, brotli: 0-11
-min_size = 1024             # minimum file size to compress
-
-[compression.algorithms.zstd]
-level = 3
-
-[compression.algorithms.brotli]
-level = 4
-```
+There is no `[compression]` section as of v0.4.0 — it was removed from the
+schema as a dead knob. `SmartCompressor` (in `mediagit-versioning`) chooses
+algorithm and level automatically per file type; there is no config surface
+for it.
 
 ## Performance Configuration
 
 ```toml
 [performance]
-max_concurrency = 4         # CPU cores or explicit number
 buffer_size = 65536         # 64KB
 
 [performance.cache]
@@ -174,18 +157,13 @@ enabled = true
 cache_type = "memory"       # memory, disk, redis
 max_size = 536870912        # 512MB
 ttl = 3600                  # 1 hour
-
-[performance.connection_pool]
-min_connections = 1
-max_connections = 10
-timeout = 30                # seconds
-
-[performance.timeouts]
-request = 60                # seconds
-read = 30
-write = 30
-connection = 30
 ```
+
+`upload_concurrency`, `download_concurrency` and `pack_workers` are also live
+`[performance]` keys (each falls back to a `MEDIAGIT_*` env var, then an
+internal default — see `env-knobs.md`). `max_concurrency`,
+`[performance.connection_pool]` and `[performance.timeouts]` were removed
+from the schema in v0.4.0 as dead knobs with no read site outside this crate.
 
 ## Observability Configuration
 
@@ -222,21 +200,19 @@ burst_size = 2000
 
 ## Environment Variable Overrides
 
-This crate exposes `load_with_overrides()`, which layers `MEDIAGIT_*` variables
-onto a parsed config via `apply_env_overrides()` (`loader.rs:282`).
+There is no environment-variable overlay in this crate as of v0.4.0. It used
+to expose `load_with_overrides()`, which layered `MEDIAGIT_*` variables onto a
+parsed config via `apply_env_overrides()`, but that method had no caller in
+the workspace outside this crate's own tests, and the real config path —
+`Config::load()` (`schema.rs:174`) for the client, `ServerConfig` for the
+server — parsed TOML directly and never applied the overlay. Both methods and
+the fourteen `MEDIAGIT_APP_*` / `MEDIAGIT_COMPRESSION_*` / `MEDIAGIT_METRICS_*`
+/ `MEDIAGIT_LOG_LEVEL` / `MEDIAGIT_MAX_CONCURRENCY` / `MEDIAGIT_BUFFER_SIZE` /
+`MEDIAGIT_HTTPS_ENABLED` / `MEDIAGIT_AUTH_ENABLED` variables they alone read
+were deleted in v0.4.0 rather than wired up (FUTURE_TODOS item 22).
 
-**Nothing calls it.** `load_with_overrides` has no caller in the workspace
-outside this crate's own tests, and the real config path — `Config::load()`
-(`schema.rs:174`) for the client, `ServerConfig` for the server — parses TOML
-directly and never applies the overlay. The fourteen `MEDIAGIT_APP_*` /
-`MEDIAGIT_COMPRESSION_*` / `MEDIAGIT_METRICS_*` / `MEDIAGIT_LOG_LEVEL` /
-`MEDIAGIT_MAX_CONCURRENCY` / `MEDIAGIT_BUFFER_SIZE` / `MEDIAGIT_HTTPS_ENABLED` /
-`MEDIAGIT_AUTH_ENABLED` variables this section used to document are therefore
-**not knobs**, and are no longer listed as such. Wiring the overlay into the real
-config path is tracked for v0.4.0 (FUTURE_TODOS item 22).
-
-Two variables read by that same dead function are live via other, real read
-sites, and are the only ones worth setting from here:
+Two variables read by that same now-deleted function are live via other, real
+read sites, and are the only ones worth setting:
 
 - **`MEDIAGIT_API_KEY`** — read directly at `mediagit-cli/src/repo.rs:187`;
   supplies the auth token for push/pull.
@@ -261,9 +237,6 @@ config.validate()?;  // Validates all settings
 
 - **App Port**: Must be between 1 and 65535
 - **Environment**: Must be one of: development, staging, production
-- **Compression Level**:
-  - Zstd: 1-22
-  - Brotli: 0-11
 - **Cache Type**: Must be one of: memory, disk, redis
 - **Log Level**: Must be one of: debug, info, warn, error, trace
 - **S3 Bucket**: 3-63 characters, lowercase letters, digits, hyphens, dots
@@ -290,7 +263,7 @@ let new_config: Config = serde_json::from_value(migrated)?;
 
 ### Available Migrations
 
-- **v0 → v1**: Adds default metrics configuration and compression algorithm
+- **v0 → v1**: Adds default metrics configuration
 
 ## Example Files
 
@@ -328,19 +301,6 @@ cargo test --package mediagit-config --test integration_tests
 ## Integration with Other Crates
 
 The configuration system is designed to integrate seamlessly with other MediaGit crates:
-
-### With mediagit-compression
-
-```rust
-use mediagit_config::Config;
-use mediagit_compression::CompressionEngine;
-
-let config = loader.load_file("config.toml").await?;
-let engine = CompressionEngine::new(
-    config.compression.algorithm,
-    config.compression.level
-)?;
-```
 
 ### With mediagit-storage
 

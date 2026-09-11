@@ -14,7 +14,7 @@ All facts below were verified directly against the source (`crates/mediagit-conf
 <repo-root>/.mediagit/config.toml
 ```
 
-Created by `mediagit init` / `mediagit clone`. All sections are optional in the file itself — any key not present falls back to its Rust-side default (`#[serde(default)]` in `schema.rs`). Loading goes through `Config::load()` (`crates/mediagit-config/src/schema.rs:174`), which parses the TOML directly — it does **not** apply the environment-variable overlay described in the crate's `README.md`/`lib.rs` doc comment (`apply_env_overrides` / `load_with_overrides`); that overlay method exists in `mediagit-config` but has no caller outside its own tests, so the `MEDIAGIT_APP_*`, `MEDIAGIT_COMPRESSION_*`, `MEDIAGIT_MAX_CONCURRENCY`, `MEDIAGIT_BUFFER_SIZE`, `MEDIAGIT_HTTPS_ENABLED`, and `MEDIAGIT_AUTH_ENABLED` env vars documented in that README do not affect a real `mediagit` invocation today.
+Created by `mediagit init` / `mediagit clone`. All sections are optional in the file itself — any key not present falls back to its Rust-side default (`#[serde(default)]` in `schema.rs`). Loading goes through `Config::load()` (`crates/mediagit-config/src/schema.rs:174`), which parses the TOML directly. An environment-variable overlay (`apply_env_overrides` / `load_with_overrides`) used to exist in `mediagit-config` with no caller outside its own tests; it has been removed as of v0.4.0, along with the fourteen `MEDIAGIT_APP_*`/`MEDIAGIT_COMPRESSION_*`/etc. env vars it alone read (see [`env-knobs.md`](env-knobs.md#server-app-config-overrides--removed)).
 
 ## Minimal example
 
@@ -46,14 +46,7 @@ create_dirs = true
 sync = false
 file_permissions = "0644"
 
-[compression]
-enabled = true
-algorithm = "zstd"
-level = 3
-min_size = 1024
-
 [performance]
-max_concurrency = 8
 buffer_size = 65536
 
 [performance.cache]
@@ -61,18 +54,6 @@ enabled = true
 cache_type = "memory"
 max_size = 536870912  # 512 MB
 ttl = 3600
-
-[performance.connection_pool]
-min_connections = 1
-max_connections = 10
-timeout = 30
-idle_timeout = 600
-
-[performance.timeouts]
-request = 60
-read = 30
-write = 30
-connection = 30
 
 [observability]
 log_level = "info"
@@ -241,16 +222,9 @@ There is also a `"multi"` backend variant (`MultiBackendStorage`: `primary`, `re
 
 ---
 
-## `[compression]` — informational only, not read at runtime
+## Compression — not configurable
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `enabled` | bool | `true` | (Informational) `SmartCompressor` is always active regardless of this value. |
-| `algorithm` | string | `"zstd"` | (Informational) Actual algorithm is selected per file type, not from this key. |
-| `level` | integer | `3` | (Informational) Actual level is selected per file type. |
-| `min_size` | integer | `1024` | (Informational) Not enforced. |
-
-Verified: nothing outside `mediagit-config` itself (schema/loader/validation/tests/README) reads `config.compression.*`. `mediagit init` writes this section with defaults, but `SmartCompressor` (in `mediagit-versioning`) makes its algorithm/level choice purely from file type — there is no code path connecting this table to compression behavior.
+There is no `[compression]` section as of v0.4.0. It was removed from `schema.rs`: the keys it held (`enabled`, `algorithm`, `level`, `min_size`) were informational only — nothing outside `mediagit-config` itself ever read `config.compression.*`, and `SmartCompressor` (in `mediagit-versioning`) makes its algorithm/level choice purely from file type.
 
 **Automatic algorithm selection by file type** (always active, not configurable):
 - Already-compressed formats (JPEG, MP4, ZIP, DOCX, AI, PDF): stored as-is (`none`)
@@ -264,12 +238,12 @@ Verified: nothing outside `mediagit-config` itself (schema/loader/validation/tes
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `max_concurrency` | usize | `num_cpus::get().max(4)` | Max parallel operations. Not observed to be read outside `mediagit-config` — verify before relying on it to bound a specific operation; use the concurrency knobs below for chunk upload/download/pack behavior. |
 | `upload_concurrency` | usize \| absent | `None` | Client-side parallel chunk-upload concurrency override. When unset, falls back to `MEDIAGIT_UPLOAD_CONCURRENCY` env var, then an internal default of 32. Read in `crates/mediagit-cli/src/commands/push.rs`. |
 | `download_concurrency` | usize \| absent | `None` | Client-side parallel chunk-download concurrency override. Falls back to `MEDIAGIT_DOWNLOAD_CONCURRENCY`, then an internal default of 24. |
 | `pack_workers` | usize \| absent | `None` | Server-side concurrent pack-write worker override. Falls back to `MEDIAGIT_PACK_WORKERS`, then an internal default of 8. |
-| `chunk_write_concurrency` | usize \| absent | `None` | **Dead knob: this TOML key is never read.** The chunked-write worker pool (`crates/mediagit-versioning/src/odb/chunks.rs:646`) reads `MEDIAGIT_CHUNK_WRITE_CONCURRENCY` directly from the environment (falling back to `num_cpus`) and never consults `config.performance.chunk_write_concurrency` — the field is populated only by the same unused `apply_env_overrides` path noted above. Same dead-knob class as `[compression]`. |
 | `buffer_size` | usize | `65536` (64 KB) | I/O buffer size in bytes. |
+
+There is no `max_concurrency` or `chunk_write_concurrency` TOML key as of v0.4.0 — both were removed from `schema.rs` as dead knobs. Chunk-write concurrency is still controllable: `MEDIAGIT_CHUNK_WRITE_CONCURRENCY` is read directly by the chunked-write worker pool (`crates/mediagit-versioning/src/odb/chunks.rs:646,1179`, falling back to `num_cpus`) and remains live — see [`env-knobs.md`](env-knobs.md).
 
 ### `[performance.cache]`
 
@@ -281,37 +255,9 @@ Verified: nothing outside `mediagit-config` itself (schema/loader/validation/tes
 | `ttl` | u64 | `3600` | Cache entry TTL in seconds. |
 | `compression` | bool | `false` | Compress cached objects. |
 
-### `[performance.connection_pool]`
+There is no `[performance.connection_pool]` or `[performance.timeouts]` section as of v0.4.0 — both were removed from `schema.rs` as dead knobs (no read site outside `mediagit-config` itself). A request that actually needs a longer budget is governed by the transport knobs in [`env-knobs.md`](env-knobs.md), not by config.
 
-**No read site observed outside `mediagit-config`** — same caveat as
-`max_concurrency` above, and the same limitation on that claim (see
-*Unverifiable / not independently confirmed* at the end of this document).
-Setting these has not been observed to
-change any pool behaviour; the HTTP client's real connection settings live in
-`mediagit-protocol`. Treat the values below as the struct's defaults, not as
-tuning that takes effect.
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `min_connections` | usize | `1` | Minimum pool connections. |
-| `max_connections` | usize | `10` | Maximum pool connections. |
-| `timeout` | u64 | `30` | Connection timeout, seconds. |
-| `idle_timeout` | u64 | `600` | Idle connection timeout, seconds. |
-
-### `[performance.timeouts]`
-
-**No read site observed outside `mediagit-config`**, as above. A request that
-actually needs a longer budget is governed by the transport knobs in
-[`env-knobs.md`](env-knobs.md), not by this table.
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `request` | u64 | `60` | Total request timeout, seconds. |
-| `read` | u64 | `30` | Read timeout, seconds. |
-| `write` | u64 | `30` | Write timeout, seconds. |
-| `connection` | u64 | `30` | Connection timeout, seconds. |
-
-Note: `cache`, `connection_pool`, and `timeouts` are struct fields with no `#[serde(default)]` derive shown at the field level, but each nested type implements `Default`, and the containing `PerformanceConfig` is only ever constructed via `Default` or full deserialization — practically, an absent `[performance.cache]` etc. table in the TOML falls back to that type's `Default` impl (`schema.rs:1034-1066`).
+Note: `cache` is a struct field with no `#[serde(default)]` derive shown at the field level, but its type implements `Default`, and the containing `PerformanceConfig` is only ever constructed via `Default` or full deserialization — practically, an absent `[performance.cache]` table in the TOML falls back to that type's `Default` impl (`schema.rs`, `impl Default for PerformanceConfig`).
 
 ---
 
@@ -611,7 +557,4 @@ The full ~88-knob performance/tuning catalog (chunking, compression, upload/down
 ## Unverifiable / not independently confirmed
 
 - The exact default `layout_version` shown in the "top-level identity" table (`1` when the field is absent, `2` for new repos) is derived from `default_layout_version()` and `CURRENT_LAYOUT_VERSION` in `schema.rs`; I did not additionally trace every migration path that might touch it.
-- `MEDIAGIT_API_KEY`'s row notes that `mediagit-config`'s env-override path also reads it; I did not exhaustively check whether any other, non-CLI consumer of `mediagit-config::ConfigLoader::apply_env_overrides` exists outside this repository (e.g. a downstream tool) — within this repo, no caller exists outside its own tests/README.
 - I did not open `env-knobs.md` or `book/src/reference/environment.md` to verify their contents match current code (only confirmed both files exist) — Part 3 defers the full knob catalog to them by reference, not by transcription, so any drift there is out of scope for this document.
-- `max_concurrency` under `[performance]`: I confirmed no read-site outside `mediagit-config` itself; I did not exhaustively grep for indirect consumption through a cloned/threaded `PerformanceConfig` value, so "not observed to be read" is a search result, not a proof of dead code.
-- `[performance.connection_pool]` and `[performance.timeouts]` (8 keys) carry the same finding and the same limitation: a grep for each field name across `crates/*/src`, excluding `mediagit-config`, returns nothing, while the sibling keys `upload_concurrency`, `download_concurrency` and `pack_workers` return 13, 7 and 1 live read sites respectively. That asymmetry is what makes the negative result credible, but it is still a search result rather than a proof — the same "reachable read site" question that made 14 `MEDIAGIT_*` variables look real for years (see the note in `dev-tests/qa-suite/scripts/14_docs_surface.ps1`).

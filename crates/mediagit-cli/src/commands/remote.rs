@@ -439,8 +439,14 @@ pub fn validate_url(url: &str) -> Result<()> {
         anyhow::bail!("Remote URL cannot be empty");
     }
 
-    // Supported protocols
-    let valid_protocols = ["http://", "https://", "file://", "ssh://", "git://"];
+    // Supported protocols.
+    //
+    // HTTP(S) only. No transport implements `file://`, `ssh://` or `git://`:
+    // `CloneCmd::execute` routes every non-HTTP(S) URL to its local-path branch,
+    // which then fails canonicalising the URL as a directory. Accepting them here
+    // meant `remote add` succeeded and the first push failed, which is the worst
+    // place to find out. The list was copied from git and never wired up.
+    let valid_protocols = ["http://", "https://"];
 
     // Check if URL starts with a valid protocol
     let has_valid_protocol = valid_protocols.iter().any(|p| url.starts_with(p));
@@ -452,18 +458,10 @@ pub fn validate_url(url: &str) -> Result<()> {
         );
     }
 
-    // Additional validation for HTTP/HTTPS URLs
-    if url.starts_with("http://") || url.starts_with("https://") {
-        // Basic URL structure validation
-        if !url.contains("://") {
-            anyhow::bail!("Invalid URL format");
-        }
-
-        // Check for at least a host after protocol
-        let parts: Vec<&str> = url.splitn(2, "://").collect();
-        if parts.len() != 2 || parts[1].is_empty() {
-            anyhow::bail!("URL must include a host");
-        }
+    // Every accepted URL is HTTP(S) by now, so the host check is unconditional.
+    let parts: Vec<&str> = url.splitn(2, "://").collect();
+    if parts.len() != 2 || parts[1].is_empty() {
+        anyhow::bail!("URL must include a host");
     }
 
     Ok(())
@@ -479,11 +477,14 @@ mod tests {
         assert!(validate_url("https://example.com/repo").is_ok());
     }
 
+    /// Schemes git supports and mediagit does not. These used to be accepted,
+    /// so `remote add ssh://...` succeeded and the first push failed instead.
+    /// They must be rejected at configure time.
     #[test]
-    fn test_validate_url_valid_protocols() {
-        assert!(validate_url("file:///path/to/repo").is_ok());
-        assert!(validate_url("ssh://user@host/repo").is_ok());
-        assert!(validate_url("git://host/repo").is_ok());
+    fn test_validate_url_rejects_schemes_with_no_transport() {
+        assert!(validate_url("file:///path/to/repo").is_err());
+        assert!(validate_url("ssh://user@host/repo").is_err());
+        assert!(validate_url("git://host/repo").is_err());
     }
 
     #[test]

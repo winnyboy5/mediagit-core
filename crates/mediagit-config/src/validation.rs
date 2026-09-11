@@ -14,7 +14,6 @@ impl Validator for Config {
     fn validate(&self) -> ConfigResult<()> {
         self.app.validate()?;
         self.storage.validate()?;
-        self.compression.validate()?;
         self.performance.validate()?;
         self.observability.validate()?;
         self.security.validate()?;
@@ -262,76 +261,8 @@ impl Validator for MultiBackendStorage {
     }
 }
 
-impl Validator for CompressionConfig {
-    fn validate(&self) -> ConfigResult<()> {
-        if self.enabled {
-            // Validate level based on algorithm
-            match self.algorithm {
-                CompressionAlgorithm::Zstd => {
-                    if self.level < 1 || self.level > 22 {
-                        return Err(ConfigError::invalid_value(
-                            "compression.level",
-                            "zstd level must be between 1 and 22",
-                        ));
-                    }
-                }
-                CompressionAlgorithm::Brotli => {
-                    if self.level > 11 {
-                        return Err(ConfigError::invalid_value(
-                            "compression.level",
-                            "brotli level must be between 0 and 11",
-                        ));
-                    }
-                }
-                CompressionAlgorithm::None => {
-                    // No validation needed
-                }
-            }
-        }
-
-        // Validate algorithm configs
-        for (algo_name, algo_config) in &self.algorithms {
-            if let Some(level) = algo_config.level {
-                match algo_name.as_str() {
-                    "zstd" => {
-                        if !(1..=22).contains(&level) {
-                            return Err(ConfigError::invalid_value(
-                                format!("compression.algorithms.{}.level", algo_name),
-                                "zstd level must be between 1 and 22",
-                            ));
-                        }
-                    }
-                    "brotli" => {
-                        if level > 11 {
-                            return Err(ConfigError::invalid_value(
-                                format!("compression.algorithms.{}.level", algo_name),
-                                "brotli level must be between 0 and 11",
-                            ));
-                        }
-                    }
-                    _ => {
-                        return Err(ConfigError::invalid_value(
-                            "compression.algorithms",
-                            format!("unknown algorithm: {}", algo_name),
-                        ));
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-}
-
 impl Validator for PerformanceConfig {
     fn validate(&self) -> ConfigResult<()> {
-        if self.max_concurrency == 0 {
-            return Err(ConfigError::invalid_value(
-                "performance.max_concurrency",
-                "must be greater than 0",
-            ));
-        }
-
         if self.buffer_size == 0 {
             return Err(ConfigError::invalid_value(
                 "performance.buffer_size",
@@ -340,8 +271,6 @@ impl Validator for PerformanceConfig {
         }
 
         self.cache.validate()?;
-        self.connection_pool.validate()?;
-        self.timeouts.validate()?;
 
         Ok(())
     }
@@ -368,54 +297,6 @@ impl Validator for CacheConfig {
             if self.ttl == 0 {
                 return Err(ConfigError::invalid_value(
                     "cache.ttl",
-                    "must be greater than 0",
-                ));
-            }
-        }
-
-        Ok(())
-    }
-}
-
-impl Validator for ConnectionPoolConfig {
-    fn validate(&self) -> ConfigResult<()> {
-        if self.max_connections == 0 {
-            return Err(ConfigError::invalid_value(
-                "connection_pool.max_connections",
-                "must be greater than 0",
-            ));
-        }
-
-        if self.min_connections > self.max_connections {
-            return Err(ConfigError::ConflictingValues(
-                "min_connections cannot be greater than max_connections".to_string(),
-            ));
-        }
-
-        if self.timeout == 0 {
-            return Err(ConfigError::invalid_value(
-                "connection_pool.timeout",
-                "must be greater than 0",
-            ));
-        }
-
-        Ok(())
-    }
-}
-
-impl Validator for TimeoutConfig {
-    fn validate(&self) -> ConfigResult<()> {
-        let fields = [
-            ("request", self.request),
-            ("read", self.read),
-            ("write", self.write),
-            ("connection", self.connection),
-        ];
-
-        for (name, value) in fields.iter() {
-            if *value == 0 {
-                return Err(ConfigError::invalid_value(
-                    format!("timeouts.{}", name),
                     "must be greater than 0",
                 ));
             }
@@ -584,13 +465,6 @@ mod tests {
         if let StorageConfig::FileSystem(fs) = &mut config.storage {
             fs.file_permissions = "644".to_string();
         }
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_compression_level_validation() {
-        let mut config = Config::default();
-        config.compression.level = 30;
         assert!(config.validate().is_err());
     }
 

@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed — BREAKING (configuration)
+
+Config keys that were parsed and round-tripped but never read by any consumer
+have been deleted from `schema.rs`. Each was verified to have zero read sites
+outside `mediagit-config` before removal:
+
+- the whole `[compression]` section (`enabled`, `algorithm`, `level`,
+  `min_size`, and the `algorithms` override map). Compression is, and always
+  was, chosen per file type by `SmartCompressor`; these keys never influenced it.
+- `[performance] max_concurrency`
+- `[performance] chunk_write_concurrency` — **the TOML key only.** The
+  `MEDIAGIT_CHUNK_WRITE_CONCURRENCY` environment variable is read directly by
+  the chunked-write worker pool and remains live.
+- `[performance.connection_pool]` — `min_connections`, `max_connections`,
+  `timeout`, `idle_timeout`
+- `[performance.timeouts]` — `request`, `read`, `write`, `connection`
+
+Also removed: `ConfigLoader::apply_env_overrides` and `load_with_overrides`, the
+only readers of 14 inert `MEDIAGIT_*` variables. `Config::load()` never called
+them, so those variables had no effect. `MEDIAGIT_API_KEY` and
+`MEDIAGIT_CHUNK_WRITE_CONCURRENCY` were also read there but have independent
+real read sites and are unaffected.
+
+**Impact.** The crate does not set `deny_unknown_fields`, so an existing
+`config.toml` containing any of these keys still loads — the keys are now
+unknown and are ignored with a warning. No behavior changes, because nothing
+read them before either. Documentation that told users to tune compression
+levels or raise `[performance.timeouts]` was describing controls that did not
+exist; it has been corrected to point at the environment knobs that do work
+(`MEDIAGIT_DATA_READ_TIMEOUT_SECS`, `MEDIAGIT_UPLOAD_CONCURRENCY`,
+`MEDIAGIT_HTTP_POOL_MAX`, and others).
+
+### Fixed
+
+- `remote add` / `remote set-url` accepted `file://`, `ssh://` and `git://`,
+  none of which any transport implements. A remote configured with one would be
+  written successfully and then fail on first push. Both scheme gates are now
+  HTTP(S)-only: `validate_url` (`commands/remote.rs`) and, more importantly,
+  `Config::resolve_remote_url` (`mediagit-config/src/schema.rs`) — the latter is
+  what `push`, `pull`, `fetch`, `clone`, `lock`, `auth` and `download` route
+  through, and it previously passed a bare `ssh://` URL straight to the
+  transport. Unit tests covering both were verified to fail before the fix.
+
 ## [v0.3.0-rc.5] - 2026-09-09
 
 Cleared for release by two QA campaigns — **239 gates each: 238 pass, 0
@@ -311,8 +354,13 @@ this cycle changes not one persisted byte. The frozen-fixture gate (`02_compat`)
 has not been regenerated since rc.1.
 
 **Release status — read this.** The GA campaign cleared at commit `8332c5c`
-with two consecutive clean runs (237/237 gates, 25/25 phases, across all five
-backends). This release is tagged one commit later, at `bf8aa0e`, which that
+with two consecutive clean runs, reported at the time as 237/237 gates across
+25/25 phases and all five backends. That figure is unverified as of this
+truth-up: the run's own `summary.json` no longer exists on disk, and the
+nearest surviving SCALE-tier artifacts from the same window do not reproduce
+it, so it can be neither confirmed nor disproven from what remains.
+
+This release is tagged one commit later, at `bf8aa0e`, which that
 campaign did not cover: it makes three hidden `pull` flags refuse instead of
 lying, and changes a QA stall verdict. Its CLI change carries four unit tests
 and was verified end-to-end on a release binary. A third campaign was started

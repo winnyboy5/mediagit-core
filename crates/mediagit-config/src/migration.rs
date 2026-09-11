@@ -144,16 +144,11 @@ impl ConfigMigration for MigrationV0ToV1 {
             });
         }
 
-        // Ensure compression algorithm is set
-        if config["compression"]["algorithm"].is_null() {
-            config["compression"]["algorithm"] = json!("zstd");
-        }
-
         Ok(config)
     }
 
     fn description(&self) -> &str {
-        "Add default metrics configuration and compression algorithm"
+        "Add default metrics configuration"
     }
 }
 

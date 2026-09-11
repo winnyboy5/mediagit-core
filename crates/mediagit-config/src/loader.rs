@@ -214,13 +214,6 @@ impl ConfigLoader {
         Ok(config)
     }
 
-    /// Load configuration with environment variable overrides
-    pub async fn load_with_overrides<P: AsRef<Path>>(&self, path: P) -> ConfigResult<Config> {
-        let mut config = self.load_file(path).await?;
-        self.apply_env_overrides(&mut config)?;
-        Ok(config)
-    }
-
     /// Merge multiple configuration files
     pub async fn load_and_merge<P: AsRef<Path>>(&self, paths: &[P]) -> ConfigResult<Config> {
         if paths.is_empty() {
@@ -262,121 +255,6 @@ impl ConfigLoader {
         Ok(config)
     }
 
-    /// Apply environment variable overrides
-    /// DC-5: **this is not wired into anything, and calling it would not help.**
-    ///
-    /// The obvious reading is that `Config::load` forgot to call it, so every
-    /// `MEDIAGIT_APP_*` override is inert. That is true but not the whole
-    /// problem: the fields it writes — `[app]`, `[observability]`,
-    /// `[compression]`, `[performance] max_concurrency` — are read **nowhere
-    /// outside this crate's own tests**. The server's real settings live in
-    /// `ServerConfig` (`mediagit-server.toml`), a different type these
-    /// variables do not reach. Wiring the call in would set fields nobody
-    /// consults and reintroduce the "looks configured, isn't" failure with a
-    /// green checkmark on it.
-    ///
-    /// The documented knobs have been retracted from
-    /// `book/src/reference/environment.md`. Delete this and the dead schema
-    /// sections together, or give those fields real readers — do not just add
-    /// the call.
-    pub fn apply_env_overrides(&self, config: &mut Config) -> ConfigResult<()> {
-        // App settings
-        if let Ok(value) = std::env::var("MEDIAGIT_APP_NAME") {
-            config.app.name = value;
-        }
-        if let Ok(value) = std::env::var("MEDIAGIT_APP_PORT") {
-            config.app.port = value.parse().map_err(|_| {
-                ConfigError::env_var_parsing_error(
-                    "MEDIAGIT_APP_PORT",
-                    &value,
-                    "expected valid port number (1-65535)",
-                )
-            })?;
-        }
-        if let Ok(value) = std::env::var("MEDIAGIT_APP_HOST") {
-            config.app.host = value;
-        }
-        if let Ok(value) = std::env::var("MEDIAGIT_APP_ENVIRONMENT") {
-            config.app.environment = value;
-        }
-        if let Ok(value) = std::env::var("MEDIAGIT_APP_DEBUG") {
-            config.app.debug = parse_bool(&value)?;
-        }
-
-        // Observability settings
-        if let Ok(value) = std::env::var("MEDIAGIT_LOG_LEVEL") {
-            config.observability.log_level = value;
-        }
-        if let Ok(value) = std::env::var("MEDIAGIT_METRICS_ENABLED") {
-            config.observability.metrics.enabled = parse_bool(&value)?;
-        }
-        if let Ok(value) = std::env::var("MEDIAGIT_METRICS_PORT") {
-            config.observability.metrics.port = value.parse().map_err(|_| {
-                ConfigError::env_var_parsing_error(
-                    "MEDIAGIT_METRICS_PORT",
-                    &value,
-                    "expected valid port number",
-                )
-            })?;
-        }
-
-        // Compression settings
-        if let Ok(value) = std::env::var("MEDIAGIT_COMPRESSION_ENABLED") {
-            config.compression.enabled = parse_bool(&value)?;
-        }
-        if let Ok(value) = std::env::var("MEDIAGIT_COMPRESSION_LEVEL") {
-            config.compression.level = value.parse().map_err(|_| {
-                ConfigError::env_var_parsing_error(
-                    "MEDIAGIT_COMPRESSION_LEVEL",
-                    &value,
-                    "expected valid compression level",
-                )
-            })?;
-        }
-
-        // Performance settings
-        if let Ok(value) = std::env::var("MEDIAGIT_MAX_CONCURRENCY") {
-            config.performance.max_concurrency = value.parse().map_err(|_| {
-                ConfigError::env_var_parsing_error(
-                    "MEDIAGIT_MAX_CONCURRENCY",
-                    &value,
-                    "expected valid integer",
-                )
-            })?;
-        }
-        if let Ok(value) = std::env::var("MEDIAGIT_BUFFER_SIZE") {
-            config.performance.buffer_size = value.parse().map_err(|_| {
-                ConfigError::env_var_parsing_error(
-                    "MEDIAGIT_BUFFER_SIZE",
-                    &value,
-                    "expected valid integer",
-                )
-            })?;
-        }
-        if let Ok(value) = std::env::var("MEDIAGIT_CHUNK_WRITE_CONCURRENCY") {
-            config.performance.chunk_write_concurrency = Some(value.parse().map_err(|_| {
-                ConfigError::env_var_parsing_error(
-                    "MEDIAGIT_CHUNK_WRITE_CONCURRENCY",
-                    &value,
-                    "expected valid integer",
-                )
-            })?);
-        }
-
-        // Security settings
-        if let Ok(value) = std::env::var("MEDIAGIT_API_KEY") {
-            config.security.api_key = Some(value);
-        }
-        if let Ok(value) = std::env::var("MEDIAGIT_HTTPS_ENABLED") {
-            config.security.https_enabled = parse_bool(&value)?;
-        }
-        if let Ok(value) = std::env::var("MEDIAGIT_AUTH_ENABLED") {
-            config.security.auth_enabled = parse_bool(&value)?;
-        }
-
-        Ok(())
-    }
-
     /// Merge second config into first (second takes precedence)
     fn merge_configs(&self, base: &mut Config, overlay: &Config) {
         // Merge app settings if explicitly set
@@ -395,9 +273,6 @@ impl ConfigLoader {
         if overlay.app.debug {
             base.app.debug = true;
         }
-
-        // Merge compression settings
-        base.compression = overlay.compression.clone();
 
         // Merge performance settings
         base.performance = overlay.performance.clone();
@@ -433,19 +308,6 @@ impl Default for ConfigLoader {
     }
 }
 
-/// Parse boolean from string (accepts: true, false, yes, no, 1, 0)
-fn parse_bool(value: &str) -> ConfigResult<bool> {
-    match value.to_lowercase().as_str() {
-        "true" | "yes" | "1" | "on" => Ok(true),
-        "false" | "no" | "0" | "off" => Ok(false),
-        _ => Err(ConfigError::env_var_parsing_error(
-            "BOOL_VALUE",
-            value,
-            "expected 'true', 'false', 'yes', 'no', '1', '0', 'on', or 'off'",
-        )),
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -475,19 +337,6 @@ mod tests {
     fn test_format_detection_error() {
         assert!(ConfigFormat::from_path("config.xml").is_err());
         assert!(ConfigFormat::from_path("config").is_err());
-    }
-
-    #[test]
-    fn test_parse_bool() {
-        assert!(parse_bool("true").unwrap());
-        assert!(parse_bool("yes").unwrap());
-        assert!(parse_bool("1").unwrap());
-        assert!(parse_bool("on").unwrap());
-        assert!(!parse_bool("false").unwrap());
-        assert!(!parse_bool("no").unwrap());
-        assert!(!parse_bool("0").unwrap());
-        assert!(!parse_bool("off").unwrap());
-        assert!(parse_bool("invalid").is_err());
     }
 
     #[test]
@@ -620,10 +469,6 @@ bucket = "my-media-bucket"
 region = "us-east-1"
 access_key_id = "AKIAEXAMPLE"
 secret_access_key = "secret"
-
-[compression]
-algorithm = "zstd"
-level = 3
 
 [custom]
 anything_at_all = "is valid here"

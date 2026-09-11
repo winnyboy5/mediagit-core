@@ -34,13 +34,8 @@ mediagit --version
 ```toml
 # .mediagit/config.toml
 [performance]
-max_concurrency = 4          # Raspberry Pi 4/5 has 4 cores
 upload_concurrency = 4
 download_concurrency = 4
-
-[compression]
-algorithm = "zstd"
-level = 1                    # lowest CPU cost; level is an integer, not a name
 ```
 
 ## ARM Server Installation
@@ -115,7 +110,6 @@ mediagit --version
 ```toml
 # .mediagit/config.toml
 [performance]
-max_concurrency = 2          # keep peak memory down on a 1-2GB board
 upload_concurrency = 4
 download_concurrency = 4
 buffer_size = 65536          # bytes
@@ -123,10 +117,6 @@ buffer_size = 65536          # bytes
 [performance.cache]
 enabled = true
 max_size = 268435456         # bytes — 256 MiB
-
-[compression]
-algorithm = "zstd"
-level = 1                    # 1 is the cheapest zstd level; 22 is the slowest
 ```
 
 ### High-Performance ARM Servers (Graviton 3, Ampere Altra)
@@ -134,7 +124,6 @@ level = 1                    # 1 is the cheapest zstd level; 22 is the slowest
 ```toml
 # .mediagit/config.toml
 [performance]
-max_concurrency = 64
 upload_concurrency = 32
 download_concurrency = 24
 pack_workers = 8
@@ -143,16 +132,11 @@ buffer_size = 1048576        # bytes — 1 MiB
 [performance.cache]
 enabled = true
 max_size = 4294967296        # bytes — 4 GiB
-
-[compression]
-algorithm = "zstd"
-level = 3
 ```
 
-Sizes are raw **bytes**, and `level` is an **integer** (zstd 1-22, brotli 0-11).
-Unrecognised keys in `config.toml` are silently discarded, so a value written in
-the wrong shape — `"256MB"`, or `level = "fast"` — is indistinguishable from
-never having written it at all.
+Sizes are raw **bytes**. Unrecognised keys in `config.toml` are silently
+discarded, so a value written in the wrong shape — `"256MB"` — is
+indistinguishable from never having written it at all.
 
 ## System Requirements
 
@@ -189,7 +173,6 @@ uname -m  # Should output: aarch64
 ```toml
 # Reduce memory usage — .mediagit/config.toml
 [performance]
-max_concurrency = 1
 upload_concurrency = 2
 download_concurrency = 2
 buffer_size = 32768          # bytes — 32 KiB
@@ -197,10 +180,6 @@ buffer_size = 32768          # bytes — 32 KiB
 [performance.cache]
 enabled = true
 max_size = 134217728         # bytes — 128 MiB
-
-[compression]
-algorithm = "zstd"
-level = 1
 ```
 
 ### Slow Performance

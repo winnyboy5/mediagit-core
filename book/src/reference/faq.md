@@ -150,13 +150,10 @@ MediaGit's `SmartCompressor` picks one of four strategies automatically per file
 - **Brotli** (Default level) for text/code formats (TXT, JSON, XML, YAML, TOML, CSV) — falls back to Zstd above 500 MB, where Brotli's encode cost stops paying off
 - **Zlib** only for internal Git-compatible objects (not used on media files)
 
-You can tune the global fallback level in `.mediagit/config.toml`:
-
-```toml
-[compression]
-algorithm = "zstd"
-level = 3   # 1 (fast) to 22 (best)
-```
+You cannot tune this. Algorithm and level are chosen per file type by
+`SmartCompressor` and there is no config key for either - the `[compression]`
+section that used to appear in `config.toml` was never read at runtime and was
+removed in v0.4.0.
 
 ---
 
