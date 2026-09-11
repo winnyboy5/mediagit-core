@@ -1,4 +1,4 @@
-﻿# qa-suite shared helpers. ASCII-only, PS 5.1 compatible.
+# qa-suite shared helpers. ASCII-only, PS 5.1 compatible.
 # Scripts dot-source ONLY this file; it pulls in config.ps1 (defines $QA).
 . (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) "config.ps1")
 Initialize-QaDirs

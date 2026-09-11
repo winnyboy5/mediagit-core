@@ -759,6 +759,33 @@ assign letter=$driveLetter
     $attached = $true
 
     $repo = New-SandboxRepo "$($driveLetter):\a8-repo" $Phase
+
+    # Seed a committed file BEFORE filling the disk, for two reasons.
+    #
+    # Correctness of the assertion: `fsckAfterClear` below is what proves the
+    # failed add left no partial state behind, and on a repo with zero commits
+    # it cannot prove that. `mediagit init` leaves HEAD pointing at
+    # refs/heads/main before that ref exists, so fsck -- while exiting 0 and
+    # reporting "integrity: OK" -- emits "Symbolic reference HEAD points to
+    # missing ref refs/heads/main". Test-QaFsckClean substring-matches
+    # "missing", so the check read FALSE on the drill's first-ever real run
+    # against a repo that was in fact perfectly intact. Verified against a
+    # bare `mediagit init` + `fsck` outside the harness: same warning, same
+    # exit 0, no disk-full involved.
+    #
+    # Strength: recovering an EMPTY repo from ENOSPC is the easy case. With a
+    # commit already on disk the assertion becomes the one worth making --
+    # the failed add damaged neither the new object nor the existing history.
+    #
+    # Budget: ~2MB on the tiny volume (worktree copy + ODB), which the fixture
+    # arithmetic below absorbs: 55 + 1 still fits in ~89MB usable, and 2*55
+    # still does not.
+    New-QaBinaryFixture (Join-Path $repo "seed.bin") 1 78000
+    $seedAdd = Invoke-MG $repo @("add", "seed.bin") $Phase
+    $seedCommit = Invoke-MG $repo @("commit", "-m", "a8 seed") $Phase
+    if ($seedAdd.Exit -ne 0 -or $seedCommit.Exit -ne 0) {
+      throw "a8 seed failed (add=$($seedAdd.Exit) commit=$($seedCommit.Exit)) - setup fault, not a product result"
+    }
     # Size the fixture so it FITS on the tiny volume but its ODB copy does not.
     #
     # This was 150MB against a 100MB volume, which cannot work: Copy-Item below
