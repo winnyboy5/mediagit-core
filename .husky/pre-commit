@@ -57,4 +57,39 @@ for file in $(git diff --cached --name-only --diff-filter=ACM); do
   fi
 done
 
+# 6. Secret check on staged ADDITIONS only.
+#
+# There is no secret scanner anywhere else -- not in this hook, not in CI --
+# and this repo has already run one leaked-secret remediation sprint
+# (2026-07-18, see .gitignore's `enc_key` entry). The real credentials live
+# under dev-tests/dev-server/ and dev-tests/qa-suite/work/, both gitignored,
+# and the tracked backend configs hold only {{TOKEN}} placeholders; this is
+# the backstop for when that arrangement is broken by accident.
+#
+# The pattern set was tuned against the whole tracked corpus and matches zero
+# lines of it today, so it can be enforced without grandfathering anything.
+# The allowlist exists because the docs legitimately quote AWS's own published
+# sample key (AKIAIOSFODNN7EXAMPLE) and several "CHANGE-THIS" placeholders.
+#
+# Both patterns are SINGLE-quoted and contain no single quote of their own.
+# The first version of this check embedded ["'] inline in a double-quoted
+# string; the shell mangled it, grep read the tail of the pattern as a
+# filename, printed "No such file or directory" -- and the hook passed anyway
+# on a staged AKIA key. A gate that cannot fail is worse than no gate, so the
+# value side matches an optional double quote only, and both directions are
+# exercised before this is trusted.
+SECRET_RE='AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|ya29\.[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|gh[pousr]_[A-Za-z0-9]{30,}|(secret_access_key|account_key|access_key_id|client_secret|api_key|password|jwt_secret)[[:space:]]*[:=][[:space:]]*"?[A-Za-z0-9+/=_-]{32,}'
+ALLOW_RE='EXAMPLE|CHANGE-THIS|CHANGE_THIS|your-|your_|replace-with|replace_with|placeholder|test-secret|dummy|fake|xxxx'
+secret_hits=$(git diff --cached -U0 --diff-filter=ACM |
+  grep -E '^\+' | grep -vE '^\+\+\+' |
+  grep -EI "$SECRET_RE" |
+  grep -viE "$ALLOW_RE")
+if [ -n "$secret_hits" ]; then
+  echo "❌ Possible credential in staged changes:"
+  echo "$secret_hits" | sed 's/^/    /'
+  echo "   Move it to a gitignored file (dev-tests/dev-server/, qa-suite/work/)"
+  echo "   or use a {{TOKEN}} placeholder. Override: git commit --no-verify."
+  exit 1
+fi
+
 echo "✅ All pre-commit checks passed!"
