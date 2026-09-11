@@ -160,7 +160,7 @@ View staged changes with `mediagit status`:
 ```bash
 $ mediagit add video.mp4 image.jpg
 $ mediagit status
-On branch main
+On branch: main
 
 Changes to be committed:
   (use "mediagit reset <file>..." to unstage)

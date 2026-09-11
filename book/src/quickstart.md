@@ -85,7 +85,7 @@ mediagit status
 
 Output:
 ```
-On branch main
+On branch: main
 
 Changes to be committed:
   new file:   my-video.mp4
