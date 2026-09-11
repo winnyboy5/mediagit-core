@@ -162,8 +162,9 @@ MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurre
 | `MEDIAGIT_LOCKS_ENFORCE` | Server rejects pushes that touch paths locked by another user. | `1` (ON) |
 
 > **Removed from this table (DC-5).** `MEDIAGIT_APP_*`, `MEDIAGIT_LOG_LEVEL`,
-> `MEDIAGIT_METRICS_ENABLED` / `_PORT`, `MEDIAGIT_COMPRESSION_ENABLED` /
-> `_LEVEL`, `MEDIAGIT_MAX_CONCURRENCY`, `MEDIAGIT_BUFFER_SIZE` and
+> `MEDIAGIT_METRICS_ENABLED` / `_PORT` — all removed, no such variables —
+> `MEDIAGIT_COMPRESSION_ENABLED` / `_LEVEL`, `MEDIAGIT_MAX_CONCURRENCY`,
+> `MEDIAGIT_BUFFER_SIZE` and — again, all removed —
 > `MEDIAGIT_HTTPS_ENABLED` / `MEDIAGIT_AUTH_ENABLED` were documented here but
 > never did anything: they were read only by an env-var overlay on
 > `ConfigLoader` that no load path ever called, writing into `[app]`,

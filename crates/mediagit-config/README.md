@@ -206,10 +206,12 @@ parsed config via `apply_env_overrides()`, but that method had no caller in
 the workspace outside this crate's own tests, and the real config path —
 `Config::load()` (`schema.rs:174`) for the client, `ServerConfig` for the
 server — parsed TOML directly and never applied the overlay. Both methods and
-the fourteen `MEDIAGIT_APP_*` / `MEDIAGIT_COMPRESSION_*` / `MEDIAGIT_METRICS_*`
-/ `MEDIAGIT_LOG_LEVEL` / `MEDIAGIT_MAX_CONCURRENCY` / `MEDIAGIT_BUFFER_SIZE` /
-`MEDIAGIT_HTTPS_ENABLED` / `MEDIAGIT_AUTH_ENABLED` variables they alone read
-were deleted in v0.4.0 rather than wired up (FUTURE_TODOS item 22).
+the fourteen variables they alone read were removed in v0.4.0 rather than
+wired up (FUTURE_TODOS item 22). All removed, no such variables now:
+`MEDIAGIT_APP_*` / `MEDIAGIT_COMPRESSION_*` / `MEDIAGIT_METRICS_*` /
+`MEDIAGIT_LOG_LEVEL` — removed — `MEDIAGIT_MAX_CONCURRENCY` /
+`MEDIAGIT_BUFFER_SIZE` / `MEDIAGIT_HTTPS_ENABLED` / `MEDIAGIT_AUTH_ENABLED`,
+none of which exist.
 
 Two variables read by that same now-deleted function are live via other, real
 read sites, and are the only ones worth setting:

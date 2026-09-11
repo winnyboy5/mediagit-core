@@ -82,16 +82,17 @@ inert, and vice versa.
 
 ### One family of variables that does nothing
 
+All of the following were removed in v0.4.0 and have no effect:
 `MEDIAGIT_APP_*`, `MEDIAGIT_LOG_LEVEL`, `MEDIAGIT_METRICS_ENABLED` /
-`_PORT`, `MEDIAGIT_COMPRESSION_ENABLED` / `_LEVEL`,
-`MEDIAGIT_MAX_CONCURRENCY`, `MEDIAGIT_BUFFER_SIZE`, and
-`MEDIAGIT_HTTPS_ENABLED` / `MEDIAGIT_AUTH_ENABLED` **have no effect**. They
+`_PORT` — removed, no such variables — `MEDIAGIT_COMPRESSION_ENABLED` /
+`_LEVEL`, `MEDIAGIT_MAX_CONCURRENCY`, `MEDIAGIT_BUFFER_SIZE`, and
+`MEDIAGIT_HTTPS_ENABLED` / `MEDIAGIT_AUTH_ENABLED`, all removed. They
 are recorded here so nobody spends an afternoon on why setting one changed
 nothing.
 
 Watch the near-misses: `MEDIAGIT_METRICS_ADDR` is real and does bind the
-Prometheus endpoint, while `MEDIAGIT_METRICS_ENABLED` and
-`MEDIAGIT_METRICS_PORT` beside it do nothing at all.
+Prometheus endpoint, while the removed `MEDIAGIT_METRICS_ENABLED` and
+`MEDIAGIT_METRICS_PORT` beside it have no effect — no such variables exist.
 
 The override code that reads them exists but is never called, and — this is
 the part that makes it more than a missing function call — the fields it
