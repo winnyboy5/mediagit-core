@@ -254,6 +254,17 @@ impl StorageBackend for NamespacedBackend {
     async fn head(&self, key: &str) -> anyhow::Result<Option<u64>> {
         self.inner.head(&self.prefixed(key)?).await
     }
+
+    /// Forwarded, not defaulted.
+    ///
+    /// Inheriting the trait's `Ok(None)` here would silently disable gc's
+    /// prune grace period for every namespaced repo — the wrapper would report
+    /// "age unknown" for objects whose age the inner backend knows perfectly
+    /// well. A guard that cannot see is worse than no guard, because it still
+    /// reads as present.
+    async fn modified_at(&self, key: &str) -> anyhow::Result<Option<std::time::SystemTime>> {
+        self.inner.modified_at(&self.prefixed(key)?).await
+    }
 }
 
 #[cfg(test)]

@@ -620,6 +620,27 @@ pub trait StorageBackend: Send + Sync + Debug {
     /// Returns `Ok(Some(len))` when the object exists, `Ok(None)` when it
     /// does not. Propagates other errors (permission denied, I/O failure, etc.).
     async fn head(&self, key: &str) -> anyhow::Result<Option<u64>>;
+
+    /// Last modification time of an object, if this backend can report one.
+    ///
+    /// `Ok(None)` means **unknown** — either the object is absent or this
+    /// backend has no notion of mtime. It does NOT mean "old".
+    ///
+    /// Added for gc's prune grace period (VC-2). Rooting is inherently racy
+    /// against a concurrent writer: a chunk uploaded by one client but not yet
+    /// referenced by any ref is unreachable and therefore collectible, and the
+    /// victim cannot recover — push dedups unconditionally without
+    /// re-verifying, so a later clone hits a terminal 404. Refusing to delete
+    /// objects written in the last few minutes is the standard defence, and it
+    /// needs an age, which `head` (size only) cannot give.
+    ///
+    /// Defaults to `Ok(None)` so a backend opts in rather than being forced to
+    /// invent a timestamp. Callers must decide explicitly what unknown means
+    /// for them; see `gc`, which treats it as "cannot protect this object" and
+    /// says so in its output rather than silently choosing either way.
+    async fn modified_at(&self, _key: &str) -> anyhow::Result<Option<std::time::SystemTime>> {
+        Ok(None)
+    }
 }
 
 /// Prepend `prefix` to `key`, separated by `/`.
