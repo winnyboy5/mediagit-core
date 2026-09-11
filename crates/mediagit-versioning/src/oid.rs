@@ -30,6 +30,52 @@ use std::fmt;
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Oid([u8; 32]);
 
+/// Buffer size at or above which `Oid::hash` switches to BLAKE3's tree-parallel
+/// hashing.
+///
+/// B1. Measured on this machine (20 cores, release build, 25 reps, see the
+/// `b1_rayon_threshold_measurement` test below which can be re-run anywhere):
+///
+/// ```text
+/// size      sequential   rayon      speedup
+///  64 KiB     0.0147ms   0.0585ms     0.25x   <-- 4x SLOWER
+/// 128 KiB     0.0338ms   0.0316ms     1.07x   <-- noise
+/// 256 KiB     0.0635ms   0.0380ms     1.67x
+///   1 MiB     0.2366ms   0.0855ms     2.77x
+///   4 MiB     0.9022ms   0.1584ms     5.70x
+///  16 MiB     3.6655ms   0.4320ms     8.48x
+/// ```
+///
+/// Blanket-enabling rayon would make every small hash 4x slower, and small
+/// hashes are the common case (refs, metadata, tree entries). 128 KiB is the
+/// true break-even but wins there are inside the noise, so the threshold sits
+/// at 256 KiB where the gain is unambiguous.
+///
+/// CAVEAT, deliberately not designed around: those numbers are one hash at a
+/// time on an otherwise idle machine. The download and add paths already hash
+/// many chunks concurrently, and concurrent callers contend for the same global
+/// rayon pool, so the aggregate gain under real load will be smaller than the
+/// single-shot figures — possibly much smaller when the cores are already busy.
+/// The threshold is chosen to never LOSE, which holds either way; the size of
+/// the win is what varies.
+///
+/// Output is byte-identical in both modes: BLAKE3's tree-hash spec guarantees
+/// sequential and parallel agree, which `hash_is_identical_either_side_of_the_threshold`
+/// asserts rather than assumes.
+const RAYON_HASH_THRESHOLD_BYTES: usize = 256 * 1024;
+
+/// Compile-time guard on the measured decision above.
+///
+/// rayon was 4x SLOWER at 64 KiB on the reference machine, so a threshold that
+/// drifted below the break-even would be a silent performance regression on the
+/// common small-hash case (refs, metadata, tree entries). A `const` assertion
+/// rather than a test: this cannot be skipped by a filtered run, and it fails
+/// the build rather than a suite someone might not execute.
+const _: () = assert!(
+    RAYON_HASH_THRESHOLD_BYTES >= 128 * 1024,
+    "RAYON_HASH_THRESHOLD_BYTES is below the measured break-even; small hashes      would get slower, not faster"
+);
+
 impl Oid {
     /// Create an OID by hashing the given data
     ///
@@ -44,7 +90,11 @@ impl Oid {
     /// ```
     pub fn hash(data: &[u8]) -> Self {
         let mut hasher = Hasher::new();
-        hasher.update(data);
+        if data.len() >= RAYON_HASH_THRESHOLD_BYTES {
+            hasher.update_rayon(data);
+        } else {
+            hasher.update(data);
+        }
         Oid(hasher.finalize())
     }
 
@@ -424,6 +474,110 @@ mod tests {
         assert_eq!(
             memory_oid, file_oid,
             "Large file streaming hash should match in-memory hash"
+        );
+    }
+}
+
+/// B1 — the size gate must never change the digest.
+///
+/// BLAKE3's tree-hash spec guarantees sequential and parallel agree, but
+/// `Oid::hash` now picks between them based on a length comparison, and a
+/// digest that varies with buffer size would corrupt content addressing
+/// silently and irreversibly: objects written on one side of the threshold
+/// would be unfindable from the other. Asserted rather than trusted.
+#[cfg(test)]
+mod b1_threshold_identity_tests {
+    use super::{Oid, RAYON_HASH_THRESHOLD_BYTES};
+
+    fn sequential(data: &[u8]) -> Oid {
+        let mut h = blake3::Hasher::new();
+        h.update(data);
+        Oid::from_bytes(*h.finalize().as_bytes())
+    }
+
+    #[test]
+    fn hash_is_identical_either_side_of_the_threshold() {
+        // Straddle the boundary exactly, plus sizes well clear of it in both
+        // directions. The two interesting cases are threshold-1 (last
+        // sequential) and threshold (first parallel).
+        let sizes = [
+            0usize,
+            1,
+            RAYON_HASH_THRESHOLD_BYTES - 1,
+            RAYON_HASH_THRESHOLD_BYTES,
+            RAYON_HASH_THRESHOLD_BYTES + 1,
+            RAYON_HASH_THRESHOLD_BYTES * 4 + 7,
+        ];
+        for size in sizes {
+            // Position-dependent bytes: a constant fill would hide a chunk
+            // ordering fault inside the tree hash.
+            let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+            assert_eq!(
+                Oid::hash(&data),
+                sequential(&data),
+                "Oid::hash disagreed with sequential BLAKE3 at {size} bytes                  (threshold {RAYON_HASH_THRESHOLD_BYTES}). The size gate must be                  a performance choice only -- if it changes the digest, content                  addressing breaks across the boundary."
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod b1_rayon_threshold_measurement {
+    use blake3::Hasher;
+    use std::time::Instant;
+
+    /// TEMPORARY measurement, not a gate. Prints sequential vs rayon BLAKE3 for
+    /// a range of buffer sizes so the B1 threshold is chosen from THIS machine's
+    /// numbers rather than BLAKE3's documented ~128 KiB, which varies by CPU.
+    #[test]
+    #[ignore = "measurement, run explicitly"]
+    fn measure_sequential_vs_rayon() {
+        let sizes = [
+            64 * 1024usize,
+            128 * 1024,
+            256 * 1024,
+            1024 * 1024,
+            4 * 1024 * 1024,
+            16 * 1024 * 1024,
+        ];
+        // Enough repeats that a single scheduling hiccup does not set the verdict.
+        const REPS: usize = 25;
+        println!("size_kib,seq_ms,rayon_ms,speedup");
+        for size in sizes {
+            let data = vec![0xA5u8; size];
+            // Warm caches and the rayon pool before timing either arm.
+            let _ = Hasher::new().update(&data).finalize();
+            let _ = Hasher::new().update_rayon(&data).finalize();
+
+            let t = Instant::now();
+            for _ in 0..REPS {
+                let mut h = Hasher::new();
+                h.update(&data);
+                std::hint::black_box(h.finalize());
+            }
+            let seq = t.elapsed().as_secs_f64() * 1000.0 / REPS as f64;
+
+            let t = Instant::now();
+            for _ in 0..REPS {
+                let mut h = Hasher::new();
+                h.update_rayon(&data);
+                std::hint::black_box(h.finalize());
+            }
+            let par = t.elapsed().as_secs_f64() * 1000.0 / REPS as f64;
+
+            println!(
+                "{},{:.4},{:.4},{:.2}x",
+                size / 1024,
+                seq,
+                par,
+                seq / par.max(f64::MIN_POSITIVE)
+            );
+        }
+        println!(
+            "cores={}",
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(0)
         );
     }
 }
