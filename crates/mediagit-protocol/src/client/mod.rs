@@ -1447,8 +1447,16 @@ pub(crate) async fn upload_object_mpu(
         // same bytes, and re-reading per attempt would add syscalls without
         // changing what is sent. Peak residency here is one part, not the whole
         // object -- the entire point of X2.
-        let part_data = match source.part(start as u64, end - start).await {
-            Ok(b) => b,
+        //
+        // `Bytes`, not `Vec<u8>`, because the send below clones the body on
+        // EVERY attempt including the first, and a Vec clone is a full copy.
+        // That doubling was visible in the numbers: peak working set at
+        // MEDIAGIT_PACK_UPLOAD_CONCURRENCY=8 rose 31.5 MB per extra in-flight
+        // pack against a 16 MiB part size -- almost exactly 2x the part, not
+        // 1x. Same reasoning and same fix as the single-PUT fallback in
+        // `pack_builder.rs`, which already uses `Bytes` for this (B5).
+        let part_data: bytes::Bytes = match source.part(start as u64, end - start).await {
+            Ok(b) => b.into(),
             Err(e) => {
                 // Decline MPU rather than fail the upload: the caller's
                 // single-PUT fallback still has a correct path to the bucket,
