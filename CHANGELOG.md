@@ -39,7 +39,61 @@ exist; it has been corrected to point at the environment knobs that do work
 (`MEDIAGIT_DATA_READ_TIMEOUT_SECS`, `MEDIAGIT_UPLOAD_CONCURRENCY`,
 `MEDIAGIT_HTTP_POOL_MAX`, and others).
 
+### Performance
+
+- **Pack uploads no longer hold the whole pack in RAM (X2).** A 64 MiB cloud
+  pack was read into memory in full before multipart upload even started, and
+  each part was copied again per attempt — a ~512 MiB floor at the default
+  concurrency of 8, which is why that knob is capped there against a limit of
+  64. MPU parts are natural range reads, so the pack is now streamed one part at
+  a time and peak residency is one part rather than the whole object. The
+  single-PUT and proxy fallbacks still read it whole, deliberately: neither has
+  part granularity. `MEDIAGIT_PACK_UPLOAD_CONCURRENCY` is deliberately NOT
+  raised — that depends on the memory ceiling actually being gone, which has not
+  been measured against a real bucket.
+
+- **Large-buffer hashing uses BLAKE3 tree hashing above 256 KiB (B1).**
+  Measured on a 20-core machine: rayon is 1.67x at 256 KiB rising to 8.48x at
+  16 MiB, but **4x slower at 64 KiB**, so a blanket enable would have penalised
+  the common small-hash case. Those are single-shot figures on an idle machine;
+  the download and add paths already hash concurrently and contend for one rayon
+  pool, so the aggregate gain under real load is smaller and is not claimed.
+  Output is byte-identical either side of the threshold, asserted rather than
+  assumed.
+
+**Not measured end to end.** No push or clone was timed for this release. The
+cloud path is bandwidth-bound (32x concurrency was measured buying 1.63x), and
+the 14.22 MB/s SLO applies to fast backends only, where local already measures
+~285 MB/s. X2's peak-RSS gate and the T1 link measurement both need cloud
+credentials and remain outstanding.
+
 ### Fixed
+
+- **gc could collect objects it had only just seen written (VC-2).** Rooting is
+  racy against a concurrent writer: a chunk uploaded but not yet referenced by
+  any ref is unreachable, and the victim cannot recover — push dedups without
+  re-verifying, so the loss surfaces later as a terminal 404 on clone. `gc` now
+  refuses to delete objects written inside `MEDIAGIT_GC_GRACE_SECS`
+  (default 3600). Needs an object age, so `StorageBackend::modified_at` was
+  added; it defaults to `Ok(None)` meaning **unknown**, never "old".
+  `LocalBackend` implements it and `NamespacedBackend` forwards it — the latter
+  matters because every local repo is wrapped in one, so inheriting the default
+  would have left the guard present and blind. Cloud backends still report
+  unknown and keep the previous behaviour; those objects are counted and
+  reported with a warning naming the cause rather than silently skipped.
+
+- **A chunk body that died mid-stream killed the whole transfer (R-HARD).**
+  `get_chunk_with_retry` retried `send()`, whose future resolves when the
+  response *headers* arrive; the bytes were read outside every retry. ga47
+  logged 44 such aborts, all of which recovered by luck. A clone has no luck to
+  spare — `buffer_unordered` + `result?` is fail-fast, so one abort discarded
+  every byte already downloaded. Both the in-memory and stream-to-disk paths now
+  re-issue the GET on a mid-body failure; re-fetching is safe because chunks are
+  content-addressed. The streamed path recreates its temp file per attempt
+  rather than resuming, since a range-resume against a server that ignores
+  ranges yields a wrong-but-plausible chunk that only surfaces later as
+  corruption.
+
 
 - `remote add` / `remote set-url` accepted `file://`, `ssh://` and `git://`,
   none of which any transport implements. A remote configured with one would be
