@@ -68,6 +68,30 @@ the 14.22 MB/s SLO applies to fast backends only, where local already measures
 ~285 MB/s. X2's peak-RSS gate and the T1 link measurement both need cloud
 credentials and remain outstanding.
 
+### Testing
+
+- **`A8-disk-full` executed for the first time, and passed.** The drill was
+  the one standing unexpected-skip in every campaign to date: it needs an
+  elevated shell for `diskpart attach vdisk`, and there is no non-elevated way
+  to cap a volume's size on Windows. Run under elevation, `mediagit add` of a
+  55 MB incompressible fixture into a repo on a 100 MB NTFS volume fails with
+  `Store chunk: There is not enough space on the disk. (os error 112)` — exit
+  1, no panic, cause named — and `fsck` immediately afterwards reports PERFECT
+  with the pre-existing commit intact, so the partial chunk writes leave
+  nothing behind. A subsequent add and commit succeed and fsck stays PERFECT.
+  Disk exhaustion, on a product whose failure mode under a full disk would be
+  data loss, is now tested rather than assumed.
+
+  Two harness faults had to be cleared first, both of which had been invisible
+  precisely because the drill had never run. It passed an absolute path to a
+  helper that resolves names under `work/`, so `Join-Path` threw before
+  diskpart's volume was ever used; and it asserted a clean `fsck` on a repo
+  with no commits, where `mediagit init` leaves HEAD pointing at a
+  `refs/heads/main` that does not exist yet and fsck says so in a warning that
+  the harness substring-matched as a failure. The drill now seeds a commit
+  first, which also makes the assertion the one worth making — that the failed
+  add damaged neither the new object nor existing history.
+
 ### Fixed
 
 - **gc could collect objects it had only just seen written (VC-2).** Rooting is
