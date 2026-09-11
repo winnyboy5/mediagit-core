@@ -7,7 +7,7 @@ MediaGit-Core provides native Windows binaries for x64 systems (Windows 10/11).
 Download and extract the release ZIP:
 
 ```powershell
-Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-x86_64-windows.zip" -OutFile mediagit.zip
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.4.0-rc.1/mediagit-0.4.0-rc.1-x86_64-windows.zip" -OutFile mediagit.zip
 Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 ```
 
@@ -23,7 +23,7 @@ Then add `%LOCALAPPDATA%\MediaGit\bin` to your `PATH`.
 
 ### Direct Download
 
-1. Download the latest ZIP from [GitHub Releases](https://github.com/winnyboy5/mediagit-core/releases): `mediagit-0.3.0-rc.5-x86_64-windows.zip`
+1. Download the latest ZIP from [GitHub Releases](https://github.com/winnyboy5/mediagit-core/releases): `mediagit-0.4.0-rc.1-x86_64-windows.zip`
 2. Extract the archive
 3. Move `mediagit.exe` and `mediagit-server.exe` to a directory on your PATH
 
@@ -31,7 +31,7 @@ Then add `%LOCALAPPDATA%\MediaGit\bin` to your `PATH`.
 
 ```powershell
 # Download ZIP archive
-Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-x86_64-windows.zip" -OutFile "mediagit.zip"
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.4.0-rc.1/mediagit-0.4.0-rc.1-x86_64-windows.zip" -OutFile "mediagit.zip"
 
 # Extract (contains mediagit.exe + mediagit-server.exe)
 $dest = "$env:LOCALAPPDATA\MediaGit\bin"

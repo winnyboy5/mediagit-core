@@ -22,7 +22,7 @@ The script detects Apple Silicon and fetches the native ARM64 build.
 
 ```bash
 # Download latest ARM64 binary
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-aarch64-macos.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.4.0-rc.1/mediagit-0.4.0-rc.1-aarch64-macos.tar.gz \
   | sudo tar xz -C /usr/local/bin
 
 # Verify native ARM64
@@ -218,7 +218,7 @@ brew upgrade mediagit-core
 ### Manual Update
 
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-aarch64-macos.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.4.0-rc.1/mediagit-0.4.0-rc.1-aarch64-macos.tar.gz \
   | sudo tar xz -C /usr/local/bin
 ```
 

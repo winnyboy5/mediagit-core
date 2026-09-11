@@ -15,29 +15,29 @@ The install script automatically detects your OS and architecture and downloads 
 ### Linux (x86_64) — manual
 
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-x86_64-linux.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.4.0-rc.1/mediagit-0.4.0-rc.1-x86_64-linux.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 ### macOS (Apple Silicon) — manual
 
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-aarch64-macos.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.4.0-rc.1/mediagit-0.4.0-rc.1-aarch64-macos.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 ### Windows (x86_64 — PowerShell)
 
 ```powershell
-Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-x86_64-windows.zip" -OutFile mediagit.zip
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.4.0-rc.1/mediagit-0.4.0-rc.1-x86_64-windows.zip" -OutFile mediagit.zip
 Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 ```
 
 ### Docker
 
 ```bash
-docker pull ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.5
-docker run --rm ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.5 mediagit --version
+docker pull ghcr.io/winnyboy5/mediagit-core:0.4.0-rc.1
+docker run --rm ghcr.io/winnyboy5/mediagit-core:0.4.0-rc.1 mediagit --version
 ```
 
 ### All Release Archives
@@ -171,5 +171,5 @@ Remove-Item "$env:LOCALAPPDATA\MediaGit" -Recurse -Force
 
 ### Docker
 ```bash
-docker rmi ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.5
+docker rmi ghcr.io/winnyboy5/mediagit-core:0.4.0-rc.1
 ```

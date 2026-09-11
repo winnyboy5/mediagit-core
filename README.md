@@ -12,7 +12,7 @@
 **Version**: v0.3.0-rc.5
 **Status**: 🚧 **RELEASE CANDIDATE**
 **Features**: 100% complete (all P0–P3 items from the rc.3 feature-completeness sprint implemented — a closed batch, distinct from the forward-looking backlog in [FUTURE_TODOS.md](FUTURE_TODOS.md), which reuses the same P0–P3 labels as effort/impact tiers for planned work)
-**Last Validated**: September 9, 2026 — two SCALE QA campaigns (`20260909-ga50`, `20260909-ga52`), **239 gates each: 238 pass, 0 failures, 1 skip, all 14 phases**, on byte-identical binaries, across MinIO, AWS S3, Azure Blob, GCS and local. The skip is the same gate in both runs — `A8-disk-full`, which needs an elevated shell to attach a size-capped volume — so it has never actually been exercised
+**Last Validated**: September 9, 2026 — two SCALE QA campaigns (`20260909-ga50`, `20260909-ga52`), **239 gates each: 238 pass, 0 failures, 1 skip, all 14 phases**, on byte-identical binaries, across MinIO, AWS S3, Azure Blob, GCS and local. The skip is the same gate in both runs — `A8-disk-full`, which needs an elevated shell to attach a size-capped volume. It has since been run under elevation and passes: `add` onto a full volume fails cleanly with `os error 112` and leaves the repository fsck-PERFECT
 **At-rest encryption (DC-7)**: now campaign-covered. Every campaign runs 15 encryption gates — push, clone and byte-for-byte roundtrip against MinIO, AWS S3, Azure Blob and GCS, each asserting every object is actually sealed, plus three key-mismatch drills. (This line previously said encryption had never been in a campaign; that stopped being true and the README did not follow.)
 **🚨 WARNING 🚨**: This project is under active development. Be aware that large breaking changes may happen before 1.0 is reached.
 
@@ -142,19 +142,19 @@ curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/instal
 
 **Linux x86_64 — manual:**
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-x86_64-linux.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.4.0-rc.1/mediagit-0.4.0-rc.1-x86_64-linux.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 **macOS Apple Silicon — manual:**
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-aarch64-macos.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.4.0-rc.1/mediagit-0.4.0-rc.1-aarch64-macos.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 **Windows x86_64 (PowerShell):**
 ```powershell
-Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-x86_64-windows.zip" -OutFile mediagit.zip
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.4.0-rc.1/mediagit-0.4.0-rc.1-x86_64-windows.zip" -OutFile mediagit.zip
 Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 # Add to PATH:
 [Environment]::SetEnvironmentVariable("Path", "$env:Path;$env:LOCALAPPDATA\MediaGit\bin", "User")
@@ -163,8 +163,8 @@ Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 #### Docker
 
 ```bash
-docker pull ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.5
-docker run --rm ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.5 mediagit --version
+docker pull ghcr.io/winnyboy5/mediagit-core:0.4.0-rc.1
+docker run --rm ghcr.io/winnyboy5/mediagit-core:0.4.0-rc.1 mediagit --version
 ```
 
 #### From Source
@@ -184,11 +184,11 @@ cargo build --release
 
 | Platform | Archive |
 |----------|---------|
-| Linux x86_64 | `mediagit-0.3.0-rc.5-x86_64-linux.tar.gz` |
-| Linux ARM64 | `mediagit-0.3.0-rc.5-aarch64-linux.tar.gz` |
-| macOS Intel | `mediagit-0.3.0-rc.5-x86_64-macos.tar.gz` |
-| macOS Apple Silicon | `mediagit-0.3.0-rc.5-aarch64-macos.tar.gz` |
-| Windows x86_64 | `mediagit-0.3.0-rc.5-x86_64-windows.zip` |
+| Linux x86_64 | `mediagit-0.4.0-rc.1-x86_64-linux.tar.gz` |
+| Linux ARM64 | `mediagit-0.4.0-rc.1-aarch64-linux.tar.gz` |
+| macOS Intel | `mediagit-0.4.0-rc.1-x86_64-macos.tar.gz` |
+| macOS Apple Silicon | `mediagit-0.4.0-rc.1-aarch64-macos.tar.gz` |
+| Windows x86_64 | `mediagit-0.4.0-rc.1-x86_64-windows.zip` |
 
 Each archive includes `mediagit` (CLI) and `mediagit-server` binaries, plus a `.sha256` checksum file.
 
@@ -887,7 +887,7 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 - [x] Client transport errors keep their full `source()` chain, so a failure names the
       layer that actually broke instead of "error sending request for url"
 - [x] Validated by two SCALE campaigns, 239 gates each, 0 failures and 1 skip
-      (`A8-disk-full`, needs elevation), on byte-identical binaries
+      (`A8-disk-full`, needs elevation; run separately under an elevated shell, where it passes), on byte-identical binaries
 
 ### v0.3.0-rc.4 — July 2026
 *Object-store layout v2, client auth, and reachability tooling, GA hardening: server-enforced locking, durable auth, format freeze*

@@ -46,7 +46,7 @@ jobs:
 
       - name: Install MediaGit
         run: |
-          curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/latest/download/mediagit-0.3.0-rc.5-x86_64-linux.tar.gz \
+          curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/latest/download/mediagit-0.4.0-rc.1-x86_64-linux.tar.gz \
             | tar xz -C /usr/local/bin/
 
       - name: Verify repository integrity
@@ -193,7 +193,7 @@ validate-assets:
   image: ubuntu:22.04
   before_script:
     - apt-get update -qq && apt-get install -y -qq curl
-    - curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/latest/download/mediagit-0.3.0-rc.5-x86_64-linux.tar.gz
+    - curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/latest/download/mediagit-0.4.0-rc.1-x86_64-linux.tar.gz
         | tar xz -C /usr/local/bin/
   script:
     - mediagit fsck

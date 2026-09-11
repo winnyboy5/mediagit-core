@@ -594,7 +594,7 @@ repo's `config.toml` at provisioning time.
 ```yaml
 services:
   mediagit:
-    image: ghcr.io/winnyboy5/mediagit-core:0.3.0-rc.5
+    image: ghcr.io/winnyboy5/mediagit-core:0.4.0-rc.1
     entrypoint: mediagit-server
     ports:
       - "3000:3000"

@@ -14,7 +14,7 @@ This script automatically detects your architecture and downloads the correct bi
 ### Direct Download (x86_64)
 
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-x86_64-linux.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.4.0-rc.1/mediagit-0.4.0-rc.1-x86_64-linux.tar.gz \
   | sudo tar xz -C /usr/local/bin
 mediagit --version
 ```
@@ -67,14 +67,14 @@ If package managers aren't available, install manually:
 
 ```bash
 # Download archive
-wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-x86_64-linux.tar.gz
+wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.4.0-rc.1/mediagit-0.4.0-rc.1-x86_64-linux.tar.gz
 
 # Verify checksum
-wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-x86_64-linux.tar.gz.sha256
-sha256sum -c mediagit-0.3.0-rc.5-x86_64-linux.tar.gz.sha256
+wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.4.0-rc.1/mediagit-0.4.0-rc.1-x86_64-linux.tar.gz.sha256
+sha256sum -c mediagit-0.4.0-rc.1-x86_64-linux.tar.gz.sha256
 
 # Extract (contains mediagit + mediagit-server)
-tar -xzf mediagit-0.3.0-rc.5-x86_64-linux.tar.gz
+tar -xzf mediagit-0.4.0-rc.1-x86_64-linux.tar.gz
 
 # Move to bin directory
 sudo mv mediagit mediagit-server /usr/local/bin/
@@ -217,8 +217,8 @@ sudo dnf install ca-certificates
 curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 
 # Or download specific version manually
-wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.3.0-rc.5/mediagit-0.3.0-rc.5-x86_64-linux.tar.gz
-tar -xzf mediagit-0.3.0-rc.5-x86_64-linux.tar.gz
+wget https://github.com/winnyboy5/mediagit-core/releases/download/v0.4.0-rc.1/mediagit-0.4.0-rc.1-x86_64-linux.tar.gz
+tar -xzf mediagit-0.4.0-rc.1-x86_64-linux.tar.gz
 sudo mv mediagit mediagit-server /usr/local/bin/
 ```
 
