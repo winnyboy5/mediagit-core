@@ -183,6 +183,7 @@ MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurre
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MEDIAGIT_GC_REFLOG_HORIZON_DAYS` | Reflog entries older than this stop being GC roots. `0` disables reflog roots. | `90` |
+| `MEDIAGIT_GC_GRACE_SECS` | Prune grace period: gc refuses to collect unreachable objects written this recently, because rooting is racy against a concurrent writer. `0` disables the protection. Only backends that implement `StorageBackend::modified_at` (currently local) can apply it; elsewhere the age is unknown and gc says so. | `3600` |
 | `MEDIAGIT_NO_AUTO_GC` | Any value disables auto-gc for the current invocation. | unset (auto-gc ON) |
 | `MEDIAGIT_REFLOG_MAX` | Max reflog entries retained per ref. | `1000` |
 | `MEDIAGIT_SIGN` / `MEDIAGIT_SIGN_KEY` | Sign tags with SSH/ed25519 (`tag -a`), and the key path to sign/verify with. | `0` (OFF) / `~/.ssh/id_ed25519` |
