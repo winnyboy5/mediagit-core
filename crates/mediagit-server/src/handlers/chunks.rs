@@ -363,10 +363,35 @@ pub async fn download_chunk(
     match storage.get_streaming(&chunk_key).await {
         Ok(stream) => {
             tracing::debug!(chunk = %chunk_id, "Chunk download started (streaming)");
+            // Log a mid-body failure before it reaches axum, because after this
+            // point NOTHING else will.
+            //
+            // `get_streaming` resolves as soon as the backend has a stream, so
+            // 200 and the headers are already on the wire. If the upstream read
+            // then dies, `Body::from_stream` just stops producing bytes: the
+            // client sees a truncated chunked body ("unexpected EOF during
+            // chunk size line") and the server's own record shows a healthy
+            // `status=200 latency=1 ms` and nothing more.
+            //
+            // That is not hypothetical. Campaign v040-ga1 lost an Azure S5
+            // clone to 145 mid-body aborts, and the server log for the exact
+            // chunk that killed it read 200/1ms with no error anywhere --
+            // "product or link?" could not be answered from the run's own
+            // record, which is the whole purpose of that record. Behaviour is
+            // unchanged; only the silence is.
+            use futures::TryStreamExt as _;
+            let chunk_for_log = chunk_id.clone();
+            let logged = stream.inspect_err(move |e| {
+                tracing::warn!(
+                    chunk = %chunk_for_log,
+                    err = %format!("{:#}", e),
+                    "chunk stream failed mid-body; the client will see a truncated response"
+                );
+            });
             Ok((
                 StatusCode::OK,
                 [("Content-Type", "application/octet-stream")],
-                axum::body::Body::from_stream(stream),
+                axum::body::Body::from_stream(logged),
             )
                 .into_response())
         }
