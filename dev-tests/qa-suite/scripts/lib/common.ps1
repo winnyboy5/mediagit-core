@@ -1,4 +1,4 @@
-# qa-suite shared helpers. ASCII-only, PS 5.1 compatible.
+﻿# qa-suite shared helpers. ASCII-only, PS 5.1 compatible.
 # Scripts dot-source ONLY this file; it pulls in config.ps1 (defines $QA).
 . (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) "config.ps1")
 Initialize-QaDirs
@@ -552,8 +552,14 @@ function Invoke-MG([string]$Repo, [string[]]$MgArgs, [string]$Phase = "misc", [i
 }
 
 # Fresh sandbox repo under work/. Returns path.
+#
+# $Name is normally a leaf name resolved under work/. An absolute path is taken
+# as-is, because A8 needs its repo on a size-capped volume that by definition
+# cannot live under work/. Without this, Join-Path throws "Second path fragment
+# must not be a drive or UNC name" and the drill dies in setup -- which is
+# exactly how A8 failed on its first-ever elevated run.
 function New-SandboxRepo([string]$Name, [string]$Phase = "misc") {
-  $p = Join-Path $QA.Work $Name
+  $p = if ([System.IO.Path]::IsPathRooted($Name)) { $Name } else { Join-Path $QA.Work $Name }
   if (Test-Path $p) { Remove-Item -Recurse -Force $p }
   New-Item -ItemType Directory -Path $p -Force | Out-Null
   $r = Invoke-MG $null @("init", $p) $Phase
