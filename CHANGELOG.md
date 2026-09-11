@@ -92,11 +92,44 @@ exist; it has been corrected to point at the environment knobs that do work
   Output is byte-identical either side of the threshold, asserted rather than
   assumed.
 
-**Throughput was not measured end to end.** No push or clone was timed for this
-release, and nothing here claims to make anything faster. Memory was measured
-(above); speed was not. The cloud path is bandwidth-bound — 32x concurrency was
-measured buying 1.63x — and the 14.22 MB/s SLO applies to fast backends only,
-where local already measures ~285 MB/s.
+### The cloud ceiling is the link, and here is this month's number (T1)
+
+Nothing in this release claims to make anything faster, and the one throughput
+measurement taken says why that would be the wrong goal. 768 MB pushed to S3 in
+`ap-south-1`, twice, same payload shape, CDC seed pinned, differing only in
+`MEDIAGIT_PACK_UPLOAD_CONCURRENCY`:
+
+| concurrency | wall | throughput |
+|---|---|---|
+| 1 | 262.0 s | 2.93 MB/s |
+| 8 | 157.2 s | 4.89 MB/s |
+
+**8x the concurrency bought 1.67x.** That is the signature of a path limited by
+bandwidth rather than by software, and it reproduces a measurement taken 15
+months earlier on different hardware, where 32x bought 1.63x. The absolute
+numbers are lower now — the link is slower than it was — but the shape is
+identical, which is the part that matters: there is no concurrency setting that
+reaches the 14.22 MB/s figure over this link, because the link does not carry it.
+
+Two things follow, and both are worth stating plainly rather than leaving for
+someone to rediscover:
+
+- **The 14.22 MB/s push SLO is a fast-backend SLO.** Local measures ~285 MB/s,
+  about 20x that floor. Holding a WAN-bound cloud push to the same number
+  compares a link to a disk.
+- **Raising upload concurrency is not the lever here.** The memory ceiling that
+  capped it is gone (see X2 above), but removing a cap does not create
+  bandwidth. On a fat link it may matter; on this one it buys 1.67x and then
+  stops.
+
+Both arms completed with exit 0 and neither showed a stall. The
+`MEDIAGIT_PACK_UPLOAD_CONCURRENCY` knob is independently proven live rather than
+assumed so — a null result from a dead knob is a measurement of nothing, and
+this project has had one before (`MEDIAGIT_GCS_UPLOAD_CONCURRENCY`, inert on the
+presigned path). The same two values move peak working set 39.8 MB → 149.8 MB in
+`15_packmem`, so the knob demonstrably reaches its fan-out.
+
+No clone was timed, and no backend other than S3 was measured.
 
 ### Testing
 
