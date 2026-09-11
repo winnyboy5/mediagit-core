@@ -13,6 +13,19 @@
 # process-wide and must not share the machine with another phase, which
 # sequential execution already guarantees.
 #
+# Spelling it out has a cost that bit twice, so both are fixed here. A phase
+# added to run_all's DEFAULT does not reach this list, and this list is what
+# certifies a release:
+#   14_docs_surface joined the default on 2026-09-10 to stop fabricated docs
+#     shipping, and would still have been absent from every GA run. It is pure
+#     file scanning - no binary, no network - so it costs seconds.
+#   15_packmem is the only guard on X2's memory claim, which was already wrong
+#     once by a factor of two with nothing to catch it. Like 11 it samples
+#     peak RSS process-wide, so it gets the same treatment: sequential
+#     execution is the isolation. ~2 minutes and ~2.3 GB through the local
+#     S3 endpoint.
+# Both sit before 09 so the report aggregates them.
+#
 # Run scratchpad\clean_before_run.ps1 FIRST. It is not called from here on
 # purpose: it kills leftover servers and drops the MinIO volume, and folding a
 # destructive step into the same script as a 3h gate makes a re-run of the gate
@@ -74,7 +87,7 @@ Start-QaLinkProbe -LogDir $logDir -Hosts (Get-QaLinkHosts)
 $sw = [Diagnostics.Stopwatch]::StartNew()
 # -Command, not -File: under -File every argument is a literal string, so a
 # comma-separated -Phases list arrives as ONE token and run_all rejects it.
-powershell -NoProfile -Command "& '.\run_all.ps1' -Phases @('00','01','02','03','04','05','06','07','08','10','11','12','13','09') -ContinueOnFail"
+powershell -NoProfile -Command "& '.\run_all.ps1' -Phases @('00','01','02','03','04','05','06','07','08','10','11','12','13','14','15','09') -ContinueOnFail"
 $code = $LASTEXITCODE
 $sw.Stop()
 Stop-QaLinkProbe
