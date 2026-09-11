@@ -24,6 +24,25 @@ Runs garbage collection to reclaim space in the repository:
 By default gc prunes (deletes) everything unreachable it finds; pass
 `--no-prune` to only report what's unreachable without deleting it.
 
+### Prune grace period
+
+Unreachable is not the same as garbage. Reachability is computed at a moment in
+time, and a concurrent writer can have uploaded a chunk that no ref points at
+*yet* — between the upload and the commit that references it, that chunk is
+unreachable and would be collected. The loss is unrecoverable for the other
+writer: push deduplicates without re-verifying, so nothing notices until a later
+clone hits a 404 that cannot be satisfied.
+
+So gc refuses to delete an unreachable object written within the last
+`MEDIAGIT_GC_GRACE_SECS` seconds (default `3600`). Set it to `0` to restore the
+previous behaviour — a deliberate data-loss risk on any repository with
+concurrent writers.
+
+This needs an object's age, which the storage backend has to report. Only the
+local backend does so today, so a **cloud-backed repository cannot apply the
+grace period**; gc counts those objects and warns, naming the reason, rather
+than pretending they were protected.
+
 ## Options
 
 | Flag | Description |
