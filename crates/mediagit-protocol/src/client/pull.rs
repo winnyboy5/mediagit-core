@@ -173,8 +173,7 @@ async fn get_chunk_with_retry(
                 )
                 .as_millis() as u64
             } else {
-                let floor_ms = (500u64 << attempt.min(20)).min(CHUNK_GET_BACKOFF_FLOOR_CAP_MS);
-                floor_ms + super::rate_limit_backoff(attempt, None).as_millis() as u64
+                chunk_get_backoff_ms(attempt)
             };
             attempt += 1;
             tracing::warn!(
@@ -206,6 +205,148 @@ async fn get_chunk_with_retry(
                 error_chain(&e)
             )
         });
+    }
+}
+
+/// Backoff for a transport-class chunk failure.
+///
+/// Extracted verbatim from `get_chunk_with_retry`'s non-rate-limited arm so the
+/// body retries below cannot drift into a second, subtly different schedule.
+/// The 500ms<<attempt floor is for a struggling backend (the 20260804-sigfix
+/// incident); the jitter term keeps concurrent chunk GETs in a clone from
+/// retrying in lockstep.
+fn chunk_get_backoff_ms(attempt: u32) -> u64 {
+    let floor_ms = (500u64 << attempt.min(20)).min(CHUNK_GET_BACKOFF_FLOOR_CAP_MS);
+    floor_ms + super::rate_limit_backoff(attempt, None).as_millis() as u64
+}
+
+/// Read a chunk response body, re-issuing the GET if the body fails mid-read.
+///
+/// R-HARD. `get_chunk_with_retry` retries `send()`, and that future resolves as
+/// soon as the response HEADERS arrive. Everything after that — the actual
+/// bytes — sat outside every retry the client had. ga47 logged 44
+/// "Failed to read object body: streaming error"; all 44 recovered, but by luck
+/// rather than design, because the surrounding operation happened to be retried
+/// at a higher level. On a clone there is no such level: `buffer_unordered` +
+/// `result?` is fail-fast, so one mid-body abort kills the whole transfer along
+/// with every byte already downloaded.
+///
+/// Re-fetching is safe by construction: chunks are content-addressed, so the
+/// same URL returns the same bytes and a partial read can simply be discarded.
+///
+/// Shares the transport budget (`chunk_get_send_max_retries`), not the 5xx one.
+/// A body that dies mid-stream is the same class of failure as a connection
+/// that dies before the headers, and the ga47 measurement that sized the
+/// transport budget applies unchanged.
+async fn read_chunk_body_with_retry(
+    client: &reqwest::Client,
+    url: &str,
+    chunk_id: &Oid,
+    first: reqwest::Response,
+    max: u32,
+) -> anyhow::Result<bytes::Bytes> {
+    let mut response = first;
+    let mut attempt = 0u32;
+    loop {
+        match response.bytes().await {
+            Ok(b) => return Ok(b),
+            Err(e) => {
+                if attempt >= max {
+                    return Err(anyhow::anyhow!(
+                        "Failed to read body of chunk {} after {} retries: {}",
+                        chunk_id,
+                        attempt,
+                        error_chain(&e)
+                    ));
+                }
+                attempt += 1;
+                let backoff_ms = chunk_get_backoff_ms(attempt);
+                tracing::warn!(
+                    chunk = %chunk_id.to_hex(),
+                    attempt,
+                    backoff_ms,
+                    cause = %error_chain(&e),
+                    "chunk body read failed mid-stream; re-fetching"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                response = get_chunk_with_retry(client, url, chunk_id).await?;
+            }
+        }
+    }
+}
+
+/// Stream a chunk response body to `temp_path`, re-issuing the GET on a
+/// mid-stream failure. See `read_chunk_body_with_retry` for why.
+///
+/// The temp file is recreated from scratch on every attempt. Resuming with a
+/// `Range` request would be the efficient thing, but it needs the server to
+/// honour ranges on this route and it silently corrupts the chunk if it does
+/// not — a wrong-but-plausible file is far worse here than a re-download,
+/// because the hash check that would catch it happens later and reports as
+/// corruption rather than as a failed transfer.
+async fn stream_chunk_body_to_file_with_retry(
+    client: &reqwest::Client,
+    url: &str,
+    chunk_id: &Oid,
+    first: reqwest::Response,
+    temp_path: &std::path::Path,
+    max: u32,
+) -> anyhow::Result<u64> {
+    use futures::StreamExt as _;
+    use tokio::io::AsyncWriteExt as _;
+
+    let mut response = first;
+    let mut attempt = 0u32;
+    loop {
+        let mut f = tokio::fs::File::create(temp_path)
+            .await
+            .map_err(|e| anyhow::anyhow!("B4 temp create: {}", e))?;
+        let mut written = 0u64;
+        let mut failure: Option<reqwest::Error> = None;
+        let mut byte_stream = response.bytes_stream();
+        while let Some(ch) = byte_stream.next().await {
+            match ch {
+                Ok(b) => {
+                    f.write_all(&b)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Write temp chunk: {}", e))?;
+                    written += b.len() as u64;
+                }
+                Err(e) => {
+                    failure = Some(e);
+                    break;
+                }
+            }
+        }
+        f.flush().await?;
+        drop(f);
+
+        let Some(e) = failure else {
+            return Ok(written);
+        };
+
+        if attempt >= max {
+            let _ = tokio::fs::remove_file(temp_path).await;
+            return Err(anyhow::anyhow!(
+                "Failed to stream body of chunk {} after {} retries ({} bytes in): {}",
+                chunk_id,
+                attempt,
+                written,
+                error_chain(&e)
+            ));
+        }
+        attempt += 1;
+        let backoff_ms = chunk_get_backoff_ms(attempt);
+        tracing::warn!(
+            chunk = %chunk_id.to_hex(),
+            attempt,
+            backoff_ms,
+            bytes_before_failure = written,
+            cause = %error_chain(&e),
+            "chunk body stream failed mid-transfer; re-fetching from the start"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+        response = get_chunk_with_retry(client, url, chunk_id).await?;
     }
 }
 
@@ -1127,34 +1268,35 @@ impl ProtocolClient {
                                 }
                                 if stream_to_disk {
                                     // B4: stream proxy response to temp file to reduce peak RAM.
-                                    use futures::StreamExt as _;
-                                    use tokio::io::AsyncWriteExt as _;
+                                    // R-HARD: the body read is inside a retry now. It used to sit
+                                    // outside every one the client had, so a mid-stream abort
+                                    // killed the whole clone along with every byte already
+                                    // downloaded.
                                     let temp_path =
                                         std::env::temp_dir().join(format!("mg-chunk-{}", hex));
-                                    let mut f = tokio::fs::File::create(&temp_path)
-                                        .await
-                                        .map_err(|e| anyhow::anyhow!("B4 temp create: {}", e))?;
-                                    let mut written = 0u64;
-                                    let mut byte_stream = response.bytes_stream();
-                                    while let Some(ch) = byte_stream.next().await {
-                                        let b = ch.map_err(|e| {
-                                            anyhow::anyhow!("Download stream error: {}", e)
-                                        })?;
-                                        f.write_all(&b).await.map_err(|e| {
-                                            anyhow::anyhow!("Write temp chunk: {}", e)
-                                        })?;
-                                        written += b.len() as u64;
-                                    }
-                                    f.flush().await?;
-                                    drop(f);
+                                    let written = stream_chunk_body_to_file_with_retry(
+                                        &client,
+                                        &url,
+                                        &chunk_id,
+                                        response,
+                                        &temp_path,
+                                        chunk_get_send_max_retries(),
+                                    )
+                                    .await?;
                                     odb.put_compressed_chunk_from_file(&chunk_id, &temp_path)
                                         .await?;
                                     let _ = tokio::fs::remove_file(&temp_path).await;
                                     Ok::<_, anyhow::Error>((chunk_id, written))
                                 } else {
-                                    let data = response.bytes().await.map_err(|e| {
-                                        anyhow::anyhow!("Failed to read chunk {}: {}", chunk_id, e)
-                                    })?;
+                                    // R-HARD: likewise retried; see above.
+                                    let data = read_chunk_body_with_retry(
+                                        &client,
+                                        &url,
+                                        &chunk_id,
+                                        response,
+                                        chunk_get_send_max_retries(),
+                                    )
+                                    .await?;
                                     let net = data.len() as u64;
                                     odb.put_compressed_chunk(&chunk_id, &data).await?;
                                     Ok::<_, anyhow::Error>((chunk_id, net))
@@ -1674,5 +1816,166 @@ mod tests {
             .await
             .expect("server task timed out")
             .expect("server task panicked");
+    }
+}
+
+/// R-HARD — a chunk body that dies mid-stream must be re-fetched, not fatal.
+///
+/// These call `read_chunk_body_with_retry` and
+/// `stream_chunk_body_to_file_with_retry` **directly**. An earlier version of
+/// this lived in `tests/` and, because both helpers are private, ended up
+/// exercising a copy of the retry loop written inside the test file — it passed
+/// with the production change reverted, which makes it worse than no test.
+///
+/// ## The gap being covered
+///
+/// `get_chunk_with_retry` retries `send()`, whose future resolves as soon as the
+/// response HEADERS arrive. The bytes were read afterwards, outside every retry
+/// the client had. ga47 logged 44 `Failed to read object body: streaming error`;
+/// all 44 recovered by luck, because the surrounding operation happened to be
+/// retried higher up. A clone has no such level — `buffer_unordered` + `result?`
+/// is fail-fast, so one mid-body abort discards the entire transfer.
+#[cfg(test)]
+mod r_hard_body_retry_tests {
+    use super::{read_chunk_body_with_retry, stream_chunk_body_to_file_with_retry};
+    use mediagit_versioning::Oid;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    const PAYLOAD: &[u8] = b"the complete chunk body that must survive a mid-stream abort";
+
+    /// Serves responses that announce the full Content-Length and then hang up
+    /// part-way through the body for the first `fail_first` requests.
+    ///
+    /// Deliberately a truncated body rather than a 5xx or a refused connection:
+    /// both of those are already covered by the pre-existing `send()` budget, so
+    /// a fixture built on them would pass without R-HARD and prove nothing.
+    async fn serve_truncating(listener: TcpListener, fail_first: usize, seen: Arc<AtomicUsize>) {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let truncate = seen.fetch_add(1, Ordering::SeqCst) < fail_first;
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await;
+            let header = format!(
+                "HTTP/1.1 200 OK
+Content-Length: {}
+Content-Type: application/octet-stream
+
+",
+                PAYLOAD.len()
+            );
+            let _ = sock.write_all(header.as_bytes()).await;
+            if truncate {
+                let _ = sock.write_all(&PAYLOAD[..PAYLOAD.len() / 3]).await;
+                let _ = sock.flush().await;
+                drop(sock);
+            } else {
+                let _ = sock.write_all(PAYLOAD).await;
+                let _ = sock.flush().await;
+            }
+        }
+    }
+
+    async fn spawn(fail_first: usize) -> (String, Arc<AtomicUsize>) {
+        crate::ensure_crypto_provider();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(AtomicUsize::new(0));
+        tokio::spawn(serve_truncating(listener, fail_first, Arc::clone(&seen)));
+        (format!("http://{addr}/chunk"), seen)
+    }
+
+    fn chunk_id() -> Oid {
+        Oid::from_hex(&"aa".repeat(32)).unwrap()
+    }
+
+    /// Proves the fixture really produces a mid-body failure. Without this, the
+    /// recovery tests could pass against a server that never truncated anything.
+    #[tokio::test]
+    async fn the_fixture_actually_breaks_the_body() {
+        let (url, _) = spawn(1).await;
+        let client = reqwest::Client::builder().build().unwrap();
+        let resp = client
+            .get(&url)
+            .send()
+            .await
+            .expect("headers should arrive");
+        assert!(
+            resp.bytes().await.is_err(),
+            "a truncated response did not surface as a body error, so the              recovery tests below would prove nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn in_memory_body_recovers_from_a_mid_stream_abort() {
+        // Two failures then success, so a single-shot retry cannot pass by luck.
+        let (url, seen) = spawn(2).await;
+        let client = reqwest::Client::builder().build().unwrap();
+        let id = chunk_id();
+        let first = client.get(&url).send().await.unwrap();
+
+        let body = read_chunk_body_with_retry(&client, &url, &id, first, 8)
+            .await
+            .expect("body never recovered despite retries being available");
+
+        assert_eq!(
+            &body[..],
+            PAYLOAD,
+            "recovered a body that is not the payload -- a retry that resumed              rather than restarting would look exactly like this"
+        );
+        assert!(seen.load(Ordering::SeqCst) >= 3, "expected >=3 requests");
+    }
+
+    #[tokio::test]
+    async fn streamed_body_recovers_and_does_not_append_partial_reads() {
+        let (url, _) = spawn(2).await;
+        let client = reqwest::Client::builder().build().unwrap();
+        let id = chunk_id();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chunk.tmp");
+        let first = client.get(&url).send().await.unwrap();
+
+        let written = stream_chunk_body_to_file_with_retry(&client, &url, &id, first, &path, 8)
+            .await
+            .expect("stream never recovered");
+
+        let on_disk = std::fs::read(&path).unwrap();
+        // The decisive assertion. Two truncated attempts wrote a third of the
+        // payload each; if the file were appended to rather than recreated, it
+        // would be longer than the payload and still "succeed".
+        assert_eq!(
+            on_disk, PAYLOAD,
+            "temp file does not match the payload -- partial reads from failed              attempts were not discarded"
+        );
+        assert_eq!(
+            written as usize,
+            PAYLOAD.len(),
+            "byte count disagrees with the file"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_endlessly_failing_body_gives_up_rather_than_spinning() {
+        let (url, _) = spawn(usize::MAX).await;
+        let client = reqwest::Client::builder().build().unwrap();
+        let id = chunk_id();
+        let first = client.get(&url).send().await.unwrap();
+
+        // Budget injected, NOT set via MEDIAGIT_CHUNK_GET_SEND_RETRIES. An
+        // earlier version of this test mutated that variable and restored it;
+        // cargo runs tests in parallel THREADS of one process, so the sibling
+        // `transport_failures_outlast_the_status_budget` -- which reads the same
+        // knob -- observed the mutated value and failed. A process-global is not
+        // a test fixture.
+        let result = read_chunk_body_with_retry(&client, &url, &id, first, 2).await;
+
+        assert!(
+            result.is_err(),
+            "a permanently truncating server must exhaust the budget and error,              not retry forever"
+        );
     }
 }
