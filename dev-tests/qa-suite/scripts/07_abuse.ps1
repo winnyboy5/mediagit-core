@@ -759,11 +759,27 @@ assign letter=$driveLetter
     $attached = $true
 
     $repo = New-SandboxRepo "$($driveLetter):\a8-repo" $Phase
-    # Fixture bigger than the whole 100MB volume, so add() runs out of space
-    # partway through writing chunks into .mediagit on that volume - the
-    # source lives on the normal (large) work drive, only the repo is tiny.
+    # Size the fixture so it FITS on the tiny volume but its ODB copy does not.
+    #
+    # This was 150MB against a 100MB volume, which cannot work: Copy-Item below
+    # runs out of space before `mediagit add` is ever invoked, so the drill
+    # failed in its own setup and never exercised the ENOSPC path inside add --
+    # the entire thing it exists to test. Never caught because A8 has never run
+    # (it needs elevation, and every campaign has skipped it).
+    #
+    # Arithmetic, for the next person who changes these numbers: a 100MB NTFS
+    # volume has roughly 90MB usable after format overhead. The working-tree
+    # copy costs $fixtureMB, and `add` then writes chunks into .mediagit on the
+    # SAME volume costing roughly another $fixtureMB, because the fixture is
+    # $rnd.NextBytes and therefore incompressible -- SmartCompressor stores it
+    # rather than shrinking it. So the invariant is:
+    #
+    #     fixtureMB < usable   AND   2 * fixtureMB > usable
+    #
+    # 55MB satisfies both (55 < 90, 110 > 90) with margin at each end.
+    $fixtureMB = 55
     $srcFixture = Join-Path $QA.Work "a8-src.bin"
-    New-QaBinaryFixture $srcFixture 150 78001
+    New-QaBinaryFixture $srcFixture $fixtureMB 78001
     Copy-Item $srcFixture (Join-Path $repo "big.bin")
 
     $a = Invoke-MG $repo @("add", "big.bin") $Phase -TimeoutSec 300
