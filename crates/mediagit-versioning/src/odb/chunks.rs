@@ -1935,7 +1935,19 @@ impl ObjectDatabase {
                 )
             })?;
 
-            // Verify chunk integrity (hash + size)
+            // Verify chunk integrity (hash + size).
+            //
+            // B2: this looks like a redundant hash -- the object is hashed again
+            // in full below -- and it is not. `get_chunk` verifies the chunk it
+            // reads from storage against `base_id`, which equals `chunk_id` only
+            // for a NON-delta chunk. For a delta chunk it checks the base, then
+            // applies the chain and returns the result **unverified**
+            // (`get_chunk_limited`). So for every delta-encoded chunk this is the
+            // only thing standing between a mis-applied delta and an object that
+            // reassembles to plausible, wrong bytes.
+            //
+            // It also names WHICH chunk failed, which the whole-object hash below
+            // cannot, and it fails before the reconstruction buffer is grown.
             let computed_chunk_oid = Oid::hash(&decompressed);
             if computed_chunk_oid != chunk_ref.id {
                 anyhow::bail!(
@@ -1976,7 +1988,15 @@ impl ObjectDatabase {
             );
         }
 
-        // Verify integrity on reconstructed data
+        // Verify integrity on reconstructed data.
+        //
+        // B2: NOT implied by the per-chunk checks above. Those prove every chunk
+        // is the chunk it claims to be; they say nothing about whether the
+        // manifest listed the right chunks, in the right order, exactly once.
+        // Swap two entries and every per-chunk hash still matches, the total size
+        // still matches, and the object is still wrong. This is the only check
+        // that catches a manifest-level fault, so it stays despite hashing bytes
+        // that were already hashed once as chunks.
         let computed_oid = Oid::hash(&reconstructed);
         if computed_oid != *oid {
             warn!(
