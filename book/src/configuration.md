@@ -43,10 +43,6 @@ Located in `.mediagit/config.toml`:
 backend = "filesystem"
 base_path = "./data"
 
-[compression]
-algorithm = "zstd"
-level = 3
-
 [author]
 name = "Your Name"
 email = "your.email@example.com"

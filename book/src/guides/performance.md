@@ -28,15 +28,9 @@ mediagit add --no-parallel assets/
 
 ## Compression Strategy
 
-MediaGit automatically selects the best compression strategy per file type. You can tune the global defaults:
-
-```toml
-# .mediagit/config.toml
-[compression]
-algorithm = "zstd"
-level = 3      # 1 (fast) → 22 (best). Default 3 is optimal for most cases.
-min_size = 1024  # Don't compress files smaller than 1 KB
-```
+MediaGit automatically selects the best compression strategy per file type.
+This is not tunable — there is no `[compression]` config section (one was
+accepted until v0.4.0 but never read, and was removed in that release).
 
 ### Format-Specific Behavior
 
@@ -107,17 +101,16 @@ Cloud backend upload speeds depend on network, not MediaGit:
 
 ### S3 Transfer Optimization
 
-```toml
-[performance]
-max_concurrency = 32  # More parallel uploads
-
-[performance.connection_pool]
-max_connections = 32
-
-[performance.timeouts]
-request = 300  # 5 min for very large files
-write = 120
+```bash
+MEDIAGIT_UPLOAD_CONCURRENCY=32    # parallel chunk uploads (default 32)
+MEDIAGIT_DOWNLOAD_CONCURRENCY=32  # parallel chunk downloads (default 24)
+MEDIAGIT_HTTP_POOL_MAX=64         # idle connections kept per host (default 64)
 ```
+
+Equivalent `config.toml` keys exist for the first two
+(`[performance] upload_concurrency` / `download_concurrency`). There is no
+`max_concurrency` key and no `[performance.connection_pool]` section — both were
+removed in v0.4.0 because nothing read them.
 
 ## Memory Usage
 

@@ -108,17 +108,16 @@ max_size = 268435456  # 256 MB
 
 Increase connection pool and concurrency for large parallel uploads:
 
-```toml
-[performance]
-max_concurrency = 32
-
-[performance.connection_pool]
-max_connections = 32
-
-[performance.timeouts]
-request = 300   # 5 minutes for very large chunks
-write = 120
+```bash
+MEDIAGIT_UPLOAD_CONCURRENCY=32    # parallel chunk uploads (default 32)
+MEDIAGIT_DOWNLOAD_CONCURRENCY=32  # parallel chunk downloads (default 24)
+MEDIAGIT_HTTP_POOL_MAX=64         # idle connections kept per host (default 64)
 ```
+
+Equivalent `config.toml` keys exist for the first two
+(`[performance] upload_concurrency` / `download_concurrency`). There is no
+`max_concurrency` key and no `[performance.connection_pool]` section — both were
+removed in v0.4.0 because nothing read them.
 
 Use a bucket in the same region as your workstation or CI runner.
 
@@ -126,9 +125,8 @@ Use a bucket in the same region as your workstation or CI runner.
 
 The Azure backend uses block upload for large objects. Increase timeout if uploads fail:
 
-```toml
-[performance.timeouts]
-write = 120
+```bash
+MEDIAGIT_DATA_READ_TIMEOUT_SECS=1800
 ```
 
 ### Local Filesystem

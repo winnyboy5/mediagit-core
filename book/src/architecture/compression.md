@@ -96,21 +96,18 @@ is **not read at runtime** (see [Configuration Reference](../reference/config.md
 
 ## Configuration
 
-### Repository-Level
-```toml
-# .mediagit/config.toml
-[compression]
-algorithm = "zstd"
-level = 3        # zstd: 1 (fastest) – 22 (best compression)
-min_size = 1024  # bytes; files smaller than this skip compression
-```
+**There is none.** Compression is chosen entirely by `SmartCompressor` from the
+file type, as described under [Algorithm Selection](#algorithm-selection) above.
 
-### Per-Algorithm Override
-```toml
-[compression.algorithms.zstd]
-level = 19
-```
-`CompressionConfig` supports one override map keyed by algorithm name (`algorithms: HashMap<String, AlgorithmConfig>`) for tuning a given algorithm's level; it does not support per-file-glob overrides. File-type-specific algorithm selection is automatic (see [Algorithm Selection](#algorithm-selection) above) and not user-configurable per extension. Note: zstd levels above 19 ("ultra") are not used — they need ~1 GB per compression context and have caused OOM under parallel adds, for <0.5% extra ratio on media data.
+A `[compression]` section (with an `algorithms` override map) was accepted in
+`config.toml` until v0.4.0, but no consumer ever read it — `CompressionConfig`
+was parsed, round-tripped, and ignored. It was removed from `schema.rs` rather
+than left to imply a control that did not exist. A `[compression]` table in an
+existing config is now an unknown key and is ignored with a warning.
+
+Note: zstd levels above 19 ("ultra") are never used — they need ~1 GB per
+compression context and have caused OOM under parallel adds, for <0.5% extra
+ratio on media data.
 
 ## Related Documentation
 

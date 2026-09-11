@@ -26,9 +26,6 @@ pub struct Config {
     /// Storage backend configuration
     pub storage: StorageConfig,
 
-    /// Compression settings
-    pub compression: CompressionConfig,
-
     /// Performance tuning
     pub performance: PerformanceConfig,
 
@@ -128,10 +125,7 @@ impl Config {
     /// If `remote_or_url` already starts with a URL scheme it is returned as-is;
     /// otherwise it is looked up as a remote name.
     pub fn resolve_remote_url(&self, remote_or_url: &str) -> Result<String, String> {
-        if remote_or_url.starts_with("http://")
-            || remote_or_url.starts_with("https://")
-            || remote_or_url.starts_with("ssh://")
-        {
+        if remote_or_url.starts_with("http://") || remote_or_url.starts_with("https://") {
             return Ok(remote_or_url.to_owned());
         }
         self.get_remote_url(remote_or_url)
@@ -543,58 +537,9 @@ pub struct MultiBackendStorage {
     pub backends: HashMap<String, serde_json::Value>,
 }
 
-/// Compression configuration
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct CompressionConfig {
-    /// Enable compression by default
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-
-    /// Default compression algorithm
-    #[serde(default = "default_algorithm")]
-    pub algorithm: CompressionAlgorithm,
-
-    /// Default compression level (1-22 for zstd, 1-11 for brotli)
-    #[serde(default = "default_level")]
-    pub level: u32,
-
-    /// Minimum file size for compression (in bytes)
-    #[serde(default = "default_min_size")]
-    pub min_size: u64,
-
-    /// Algorithm-specific settings
-    #[serde(default)]
-    pub algorithms: HashMap<String, AlgorithmConfig>,
-}
-
-/// Supported compression algorithms
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "lowercase")]
-pub enum CompressionAlgorithm {
-    Zstd,
-    Brotli,
-    None,
-}
-
-/// Algorithm-specific configuration
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AlgorithmConfig {
-    /// Compression level
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub level: Option<u32>,
-
-    /// Additional options (algorithm-specific)
-    #[serde(default)]
-    pub options: HashMap<String, serde_json::Value>,
-}
-
 /// Performance tuning configuration
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PerformanceConfig {
-    /// Maximum concurrent operations
-    #[serde(default = "default_max_concurrency")]
-    pub max_concurrency: usize,
-
     /// Override for client-side parallel chunk uploads. When None, falls back
     /// to MEDIAGIT_UPLOAD_CONCURRENCY env var or the internal default (32).
     #[serde(default)]
@@ -610,23 +555,12 @@ pub struct PerformanceConfig {
     #[serde(default)]
     pub pack_workers: Option<usize>,
 
-    /// Override for parallel chunk write concurrency. When None, falls back
-    /// to MEDIAGIT_CHUNK_WRITE_CONCURRENCY env var or the internal default (num_cpus).
-    #[serde(default)]
-    pub chunk_write_concurrency: Option<usize>,
-
     /// Buffer size for I/O operations (in bytes)
     #[serde(default = "default_buffer_size")]
     pub buffer_size: usize,
 
     /// Cache configuration
     pub cache: CacheConfig,
-
-    /// Connection pool settings
-    pub connection_pool: ConnectionPoolConfig,
-
-    /// Timeout settings (in seconds)
-    pub timeouts: TimeoutConfig,
 }
 
 /// Cache configuration
@@ -651,46 +585,6 @@ pub struct CacheConfig {
     /// Enable compression in cache
     #[serde(default)]
     pub compression: bool,
-}
-
-/// Connection pool configuration
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ConnectionPoolConfig {
-    /// Minimum pool size
-    #[serde(default = "default_min_connections")]
-    pub min_connections: usize,
-
-    /// Maximum pool size
-    #[serde(default = "default_max_connections")]
-    pub max_connections: usize,
-
-    /// Connection timeout (in seconds)
-    #[serde(default = "default_connection_timeout")]
-    pub timeout: u64,
-
-    /// Idle connection timeout (in seconds)
-    #[serde(default = "default_idle_timeout")]
-    pub idle_timeout: u64,
-}
-
-/// Timeout configuration
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct TimeoutConfig {
-    /// Request timeout (in seconds)
-    #[serde(default = "default_request_timeout")]
-    pub request: u64,
-
-    /// Read timeout (in seconds)
-    #[serde(default = "default_read_timeout")]
-    pub read: u64,
-
-    /// Write timeout (in seconds)
-    #[serde(default = "default_write_timeout")]
-    pub write: u64,
-
-    /// Connection timeout (in seconds)
-    #[serde(default = "default_connection_timeout")]
-    pub connection: u64,
 }
 
 /// Observability configuration
@@ -939,24 +833,8 @@ fn default_host() -> String {
     "127.0.0.1".to_string()
 }
 
-fn default_algorithm() -> CompressionAlgorithm {
-    CompressionAlgorithm::Zstd
-}
-
-fn default_level() -> u32 {
-    3
-}
-
-fn default_min_size() -> u64 {
-    1024 // 1KB
-}
-
 fn default_file_permissions() -> String {
     "0644".to_string()
-}
-
-fn default_max_concurrency() -> usize {
-    num_cpus::get().max(4)
 }
 
 fn default_buffer_size() -> usize {
@@ -973,34 +851,6 @@ fn default_cache_size() -> u64 {
 
 fn default_cache_ttl() -> u64 {
     3600 // 1 hour
-}
-
-fn default_min_connections() -> usize {
-    1
-}
-
-fn default_max_connections() -> usize {
-    10
-}
-
-fn default_connection_timeout() -> u64 {
-    30
-}
-
-fn default_idle_timeout() -> u64 {
-    600
-}
-
-fn default_request_timeout() -> u64 {
-    60
-}
-
-fn default_read_timeout() -> u64 {
-    30
-}
-
-fn default_write_timeout() -> u64 {
-    30
 }
 
 fn default_log_level() -> String {
@@ -1044,7 +894,6 @@ impl Default for Config {
         Config {
             app: AppConfig::default(),
             storage: StorageConfig::FileSystem(FileSystemStorage::default()),
-            compression: CompressionConfig::default(),
             performance: PerformanceConfig::default(),
             observability: ObservabilityConfig::default(),
             security: SecurityConfig::default(),
@@ -1086,30 +935,14 @@ impl Default for FileSystemStorage {
     }
 }
 
-impl Default for CompressionConfig {
-    fn default() -> Self {
-        CompressionConfig {
-            enabled: true,
-            algorithm: CompressionAlgorithm::Zstd,
-            level: 3,
-            min_size: 1024,
-            algorithms: HashMap::new(),
-        }
-    }
-}
-
 impl Default for PerformanceConfig {
     fn default() -> Self {
         PerformanceConfig {
-            max_concurrency: default_max_concurrency(),
             upload_concurrency: None,
             download_concurrency: None,
             pack_workers: None,
-            chunk_write_concurrency: None,
             buffer_size: 65536,
             cache: CacheConfig::default(),
-            connection_pool: ConnectionPoolConfig::default(),
-            timeouts: TimeoutConfig::default(),
         }
     }
 }
@@ -1122,28 +955,6 @@ impl Default for CacheConfig {
             max_size: 536870912,
             ttl: 3600,
             compression: false,
-        }
-    }
-}
-
-impl Default for ConnectionPoolConfig {
-    fn default() -> Self {
-        ConnectionPoolConfig {
-            min_connections: 1,
-            max_connections: 10,
-            timeout: 30,
-            idle_timeout: 600,
-        }
-    }
-}
-
-impl Default for TimeoutConfig {
-    fn default() -> Self {
-        TimeoutConfig {
-            request: 60,
-            read: 30,
-            write: 30,
-            connection: 30,
         }
     }
 }
@@ -1205,7 +1016,6 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.app.name, "mediagit");
         assert_eq!(config.app.port, 8080);
-        assert!(config.compression.enabled);
     }
 
     #[test]
@@ -1237,5 +1047,36 @@ base_path = "./data"
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.cdc_seed, 0);
+    }
+
+    #[test]
+    fn resolve_remote_url_rejects_ssh_scheme() {
+        // No transport implements ssh:// — a bare ssh:// URL must fall through
+        // to the remote-name lookup and fail there, not be passed through.
+        let config = Config::default();
+        assert!(config.resolve_remote_url("ssh://user@host/repo").is_err());
+    }
+
+    #[test]
+    fn resolve_remote_url_passes_through_http_and_https() {
+        let config = Config::default();
+        assert_eq!(
+            config.resolve_remote_url("http://host/repo").unwrap(),
+            "http://host/repo"
+        );
+        assert_eq!(
+            config.resolve_remote_url("https://host/repo").unwrap(),
+            "https://host/repo"
+        );
+    }
+
+    #[test]
+    fn resolve_remote_url_resolves_remote_name() {
+        let mut config = Config::default();
+        config.set_remote("origin", "https://host/repo");
+        assert_eq!(
+            config.resolve_remote_url("origin").unwrap(),
+            "https://host/repo"
+        );
     }
 }

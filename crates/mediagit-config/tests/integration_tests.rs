@@ -246,28 +246,6 @@ debug = true
     assert!(config.app.debug); // from overlay
 }
 
-#[tokio::test]
-async fn test_environment_variable_overrides() {
-    mediagit_test_utils::set_var("MEDIAGIT_APP_PORT", "7777");
-    mediagit_test_utils::set_var("MEDIAGIT_APP_ENVIRONMENT", "staging");
-    mediagit_test_utils::set_var("MEDIAGIT_LOG_LEVEL", "debug");
-
-    let loader = ConfigLoader::new();
-    let mut config = Config::default();
-
-    let result = loader.apply_env_overrides(&mut config);
-    assert!(result.is_ok());
-
-    assert_eq!(config.app.port, 7777);
-    assert_eq!(config.app.environment, "staging");
-    assert_eq!(config.observability.log_level, "debug");
-
-    // Cleanup
-    mediagit_test_utils::remove_var("MEDIAGIT_APP_PORT");
-    mediagit_test_utils::remove_var("MEDIAGIT_APP_ENVIRONMENT");
-    mediagit_test_utils::remove_var("MEDIAGIT_LOG_LEVEL");
-}
-
 #[test]
 fn test_validation_default_config() {
     let config = Config::default();
@@ -288,13 +266,6 @@ fn test_validation_invalid_port() {
 fn test_validation_invalid_environment() {
     let mut config = Config::default();
     config.app.environment = "invalid".to_string();
-    assert!(config.validate().is_err());
-}
-
-#[test]
-fn test_validation_compression_level() {
-    let mut config = Config::default();
-    config.compression.level = 25;
     assert!(config.validate().is_err());
 }
 

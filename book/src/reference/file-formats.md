@@ -160,11 +160,6 @@ email = "alice@example.com"
 [storage]
 backend = "filesystem"
 base_path = "./data"
-
-[compression]
-enabled = true
-algorithm = "zstd"
-level = 3
 ```
 
 ---

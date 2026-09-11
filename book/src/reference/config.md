@@ -31,27 +31,17 @@ prefix = "repos/my-project"
 access_key_id = "..."
 secret_access_key = "..."
 
-[compression]
-enabled = true
-algorithm = "zstd"
-level = 3
-min_size = 1024
-
 [performance]
-max_concurrency = 8
 buffer_size = 65536
+upload_concurrency = 32
+download_concurrency = 24
+pack_workers = 8
 
 [performance.cache]
 enabled = true
 cache_type = "memory"
 max_size = 536870912  # 512 MB
 ttl = 3600
-
-[performance.timeouts]
-request = 60
-read = 30
-write = 30
-connection = 30
 
 [observability]
 log_level = "info"
@@ -220,18 +210,14 @@ prefix = ""
 
 ---
 
-## `[compression]` — Compression Settings (Informational)
+## Compression — automatic, not configurable
 
-> **Note**: MediaGit uses `SmartCompressor` which automatically selects the optimal algorithm and level per file type. The values in this section are written to `config.toml` by `mediagit init` for reference but are **not read at runtime** — compression behavior is determined entirely by file type, not these settings.
+There is **no `[compression]` section**. One existed until v0.4.0, but none of its
+keys were ever read at runtime, so they were removed from `schema.rs` rather than
+left to imply a control that did not exist. A `[compression]` table in an existing
+`config.toml` is now simply an unknown key and is ignored (with a warning).
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `enabled` | bool | `true` | (Informational) SmartCompressor is always active |
-| `algorithm` | string | `"zstd"` | (Informational) Actual algorithm selected per file type |
-| `level` | integer | `3` | (Informational) Actual level selected per file type |
-| `min_size` | integer | `1024` | (Informational) Not currently enforced |
-
-**Automatic algorithm selection by file type** (always active, cannot be overridden via config):
+Compression is decided entirely by `SmartCompressor`, per file type:
 - Already-compressed formats (JPEG, MP4, ZIP, docx, AI/InDesign): stored as-is (`none`) — PDF is *not* in this group, see below
 - Raw/uncompressed image formats (TIFF, RAW, EXR) and 3D interchange formats (OBJ/FBX/GLB/STL/PLY): `zstd` at `Best` level (level 19 — levels 20-22 are deliberately never used, they OOM under parallel adds for <0.5% extra ratio)
 - PSD and other creative project files (After Effects, Premiere, Blender, Maya, ...), plus PDF/SVG: `zstd` at `Default` level (level 3)
@@ -244,11 +230,9 @@ prefix = ""
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `max_concurrency` | integer | CPU count (min 4) | Max parallel operations |
 | `upload_concurrency` | integer | unset | Override for client-side parallel chunk uploads. Falls back to `MEDIAGIT_UPLOAD_CONCURRENCY` / internal default (`32`) when unset. |
 | `download_concurrency` | integer | unset | Override for client-side parallel chunk downloads. Falls back to `MEDIAGIT_DOWNLOAD_CONCURRENCY` / internal default (`24`) when unset. |
 | `pack_workers` | integer | unset | Override for server-side concurrent pack-write workers. Falls back to `MEDIAGIT_PACK_WORKERS` / internal default (`8`) when unset. |
-| `chunk_write_concurrency` | integer | unset | Override for parallel chunk write concurrency during `add`. Falls back to `MEDIAGIT_CHUNK_WRITE_CONCURRENCY` / internal default (`num_cpus`) when unset. |
 | `buffer_size` | integer | `65536` | I/O buffer size in bytes (64 KB) |
 
 ### `[performance.cache]`
@@ -261,23 +245,10 @@ prefix = ""
 | `ttl` | integer | `3600` | Cache entry TTL in seconds |
 | `compression` | bool | `false` | Compress cached objects |
 
-### `[performance.connection_pool]`
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `min_connections` | integer | `1` | Minimum pool connections |
-| `max_connections` | integer | `10` | Maximum pool connections |
-| `timeout` | integer | `30` | Connection timeout in seconds |
-| `idle_timeout` | integer | `600` | Idle connection timeout in seconds |
-
-### `[performance.timeouts]`
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `request` | integer | `60` | Total request timeout in seconds |
-| `read` | integer | `30` | Read timeout in seconds |
-| `write` | integer | `30` | Write timeout in seconds |
-| `connection` | integer | `30` | Connection timeout in seconds |
+> `[performance.connection_pool]` and `[performance.timeouts]` were removed in
+> v0.4.0. Both were parsed and round-tripped but never read by any consumer. The
+> HTTP pool and timeout settings that are genuinely live are environment knobs —
+> see [Environment Variables](environment.md).
 
 ---
 

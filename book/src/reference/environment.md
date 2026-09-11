@@ -165,13 +165,14 @@ MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurre
 > `MEDIAGIT_METRICS_ENABLED` / `_PORT`, `MEDIAGIT_COMPRESSION_ENABLED` /
 > `_LEVEL`, `MEDIAGIT_MAX_CONCURRENCY`, `MEDIAGIT_BUFFER_SIZE` and
 > `MEDIAGIT_HTTPS_ENABLED` / `MEDIAGIT_AUTH_ENABLED` were documented here but
-> have never done anything. Two independent reasons, either sufficient:
-> `ConfigLoader::apply_env_overrides` — the only code that reads them — is
-> never called on any load path, and the `[app]`, `[observability]`,
-> `[compression]` and `[performance] max_concurrency` fields it writes are
-> read nowhere outside `mediagit-config`'s own tests. The server's real
-> settings live in `ServerConfig` (`mediagit-server.toml`), a different type
-> these variables do not touch.
+> never did anything: they were read only by an env-var overlay on
+> `ConfigLoader` that no load path ever called, writing into `[app]`,
+> `[observability]`, `[compression]` and `[performance] max_concurrency`
+> fields that nothing outside `mediagit-config`'s own tests read either. As of
+> v0.4.0 that overlay and those dead config fields have been deleted outright
+> (see [`env-knobs.md`](https://github.com/winnyboy5/mediagit-core/blob/main/env-knobs.md#server-app-config-overrides--removed)).
+> The server's real settings live in `ServerConfig` (`mediagit-server.toml`),
+> a different type these variables never touched.
 >
 > Set the corresponding key in `mediagit-server.toml` instead. Every variable
 > still listed above is read directly by the code that acts on it.

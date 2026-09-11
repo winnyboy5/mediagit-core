@@ -133,9 +133,11 @@ a user-facing knob.
 ## Performance Tuning
 
 `max_concurrency`, `[performance.connection_pool]` and `[performance.timeouts]`
-are parsed into the config struct but nothing outside `mediagit-config`
-reads them back out — setting them changes no actual behavior. The knobs
-that do gate concurrency are the other `[performance]` fields:
+were **removed in v0.4.0**. They had parsed into the config struct and
+round-tripped faithfully, but nothing outside `mediagit-config` ever read them
+back out, so setting them changed no behavior. They are now unknown keys and are
+ignored with a warning. The knobs that do gate concurrency are the other
+`[performance]` fields:
 
 ```toml
 [performance]
