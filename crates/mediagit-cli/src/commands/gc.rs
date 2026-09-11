@@ -40,6 +40,25 @@ fn gc_reflog_horizon_days() -> i64 {
         .unwrap_or(DEFAULT_GC_REFLOG_HORIZON_DAYS)
 }
 
+/// How recently an object must have been written to be spared by gc.
+///
+/// Default one hour. The window only has to exceed the realistic gap between
+/// "chunk uploaded" and "the commit referencing it lands" — minutes, even for a
+/// 10 GB push — so an hour is generous without letting real garbage accumulate.
+/// Real systems in this class use anywhere from an hour to several days.
+///
+/// `MEDIAGIT_GC_GRACE_SECS` overrides it. `0` disables the protection, which is
+/// the pre-VC-2 behaviour and is a deliberate data-loss risk on any repo with
+/// concurrent writers.
+fn grace_period() -> std::time::Duration {
+    const DEFAULT_GRACE_SECS: u64 = 3600;
+    let secs = std::env::var("MEDIAGIT_GC_GRACE_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_GRACE_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
 /// Clean up repository and optimize storage
 #[derive(Parser, Debug)]
 pub struct GcCmd {
@@ -677,7 +696,7 @@ impl GarbageCollector {
     }
 
     /// List all objects in ODB
-    async fn list_all_objects(&self) -> Result<Vec<(Oid, u64)>> {
+    async fn list_all_objects(&self) -> Result<Vec<(Oid, u64, String)>> {
         debug!("Enumerating all objects in storage");
         let mut objects = Vec::new();
 
@@ -699,7 +718,10 @@ impl GarbageCollector {
                     // here is what pegged the CPU as history grew (measured
                     // 2026-08-03: 500-commit churn went 125s -> 1620s per 100).
                     let size = self.storage.head(&key).await.ok().flatten().unwrap_or(0);
-                    objects.push((oid, size));
+                    // Key carried so the grace-period check below can ask the
+                    // backend for this object's age; it cannot be rederived
+                    // from the oid without duplicating backend layout rules.
+                    objects.push((oid, size, key.clone()));
                 }
             }
         }
@@ -712,21 +734,90 @@ impl GarbageCollector {
     async fn find_unreachable_objects(&self, reachable: &HashSet<Oid>) -> Result<Vec<(Oid, u64)>> {
         let all_objects = self.list_all_objects().await?;
 
-        let unreachable: Vec<(Oid, u64)> = all_objects
+        let candidates: Vec<(Oid, u64, String)> = all_objects
             .into_iter()
-            .filter(|(oid, _)| !reachable.contains(oid))
+            .filter(|(oid, _, _)| !reachable.contains(oid))
             .collect();
 
-        // NOTE (VC-2): a prune grace period — refusing to delete objects
-        // written in the last few minutes — would be real defence in depth
-        // here, because rooting is inherently racy against a concurrent
-        // writer mid-`add`/`push`/rebase. It is NOT implemented, because
-        // `StorageBackend` exposes no modification time: `head` returns size
-        // only, and loose-object paths are namespaced by the backend, so gc
-        // cannot derive an object's age without duplicating storage-layer
-        // layout logic. Implementing it requires an mtime accessor on the
-        // backend trait. Until then the ordering fix in `commit` (ref written
-        // before the index is cleared) is what closes the widest window.
+        // VC-2: prune grace period.
+        //
+        // Rooting is inherently racy against a concurrent writer. A chunk
+        // uploaded by one client but not yet referenced by any ref is
+        // unreachable, and therefore collectible, in the window before its
+        // manifest commit lands. The victim cannot recover: push dedups
+        // unconditionally and never re-verifies, so the loss only surfaces
+        // later as a terminal 404 on clone. Refusing to delete objects written
+        // in the last few minutes is the standard defence, and it is now
+        // possible because `StorageBackend::modified_at` exists.
+        //
+        // Age is queried only for unreachable candidates, never for the whole
+        // corpus: this scan runs on every add and commit via auto-gc, and
+        // statting everything is what pegged the CPU before (see
+        // `list_all_objects`). Unreachable objects are normally a small
+        // fraction, so this adds one stat per candidate rather than per object.
+        let grace = grace_period();
+        let now = std::time::SystemTime::now();
+        let mut protected = 0usize;
+        let mut unknown_age = 0usize;
+        let mut unreachable: Vec<(Oid, u64)> = Vec::with_capacity(candidates.len());
+
+        for (oid, size, key) in candidates {
+            match self.storage.modified_at(&key).await {
+                Ok(Some(mtime)) => {
+                    match now.duration_since(mtime) {
+                        // Inside the window: too young to prove garbage.
+                        Ok(age) if age < grace => {
+                            protected += 1;
+                            debug!(
+                                "gc: protecting {} (age {}s < grace {}s)",
+                                oid.to_hex(),
+                                age.as_secs(),
+                                grace.as_secs()
+                            );
+                        }
+                        // Older than the window: safe to collect.
+                        Ok(_) => unreachable.push((oid, size)),
+                        // mtime in the future (clock skew, or a backend with a
+                        // different clock). Unprovable age, so treat it as
+                        // young rather than assume it is old.
+                        Err(_) => {
+                            protected += 1;
+                            debug!("gc: protecting {} (mtime in the future)", oid.to_hex());
+                        }
+                    }
+                }
+                // Unknown age. This is NOT "old" -- it means the backend cannot
+                // tell us. Today only LocalBackend implements `modified_at`, so
+                // cloud-backed repos land here and keep the pre-existing racy
+                // behaviour rather than silently having gc become a no-op.
+                // Counted and reported so the gap is visible rather than
+                // assumed closed.
+                Ok(None) => {
+                    unknown_age += 1;
+                    unreachable.push((oid, size));
+                }
+                Err(e) => {
+                    unknown_age += 1;
+                    debug!("gc: mtime lookup failed for {}: {}", oid.to_hex(), e);
+                    unreachable.push((oid, size));
+                }
+            }
+        }
+
+        if protected > 0 {
+            info!(
+                "Protected {} recently-written object(s) from collection (grace {}s)",
+                protected,
+                grace.as_secs()
+            );
+        }
+        if unknown_age > 0 {
+            warn!(
+                "{} unreachable object(s) had no reportable age; the {}s prune grace                  period could NOT be applied to them. This backend does not implement                  StorageBackend::modified_at.",
+                unknown_age,
+                grace.as_secs()
+            );
+        }
 
         info!("Found {} unreachable objects", unreachable.len());
         Ok(unreachable)

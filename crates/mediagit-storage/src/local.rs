@@ -702,6 +702,23 @@ impl StorageBackend for LocalBackend {
         }
     }
 
+    /// Filesystem mtime of the object, for gc's prune grace period.
+    ///
+    /// `Ok(None)` for a missing object, and also on the rare platforms where
+    /// `modified()` is unsupported — both mean "unknown age", never "old".
+    async fn modified_at(&self, key: &str) -> anyhow::Result<Option<std::time::SystemTime>> {
+        if key.is_empty() {
+            return Err(anyhow::anyhow!("key cannot be empty"));
+        }
+
+        let path = self.object_path_checked(key)?;
+        match tokio::fs::metadata(&path).await {
+            Ok(m) => Ok(m.modified().ok()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Delete an object
     ///
     /// This operation is idempotent: deleting a non-existent object succeeds.
@@ -1513,6 +1530,63 @@ mod tests {
         assert_eq!(
             backend.object_path(&format!("packs/{hash}")),
             temp_dir.path().join("packs").join("de").join(hash)
+        );
+    }
+}
+
+/// VC-2: the age accessor gc's prune grace period depends on.
+///
+/// These guard the two ways the guard could be silently useless: reporting
+/// `None` for an object that exists (gc then cannot protect it), and reporting
+/// an age for an object that does not exist (gc then protects a phantom).
+#[cfg(test)]
+mod modified_at_tests {
+    use crate::{LocalBackend, StorageBackend};
+    use std::time::{Duration, SystemTime};
+
+    #[tokio::test]
+    async fn reports_a_plausible_mtime_for_an_existing_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(dir.path()).await.unwrap();
+        backend.put("abc123", b"payload").await.unwrap();
+
+        let mtime = backend
+            .modified_at("abc123")
+            .await
+            .expect("modified_at errored")
+            .expect("existing object reported no mtime -- gc could not protect it");
+
+        // Just written, so its age must be small. A backend that returned, say,
+        // the epoch would satisfy "is Some" but leave every object permanently
+        // outside any grace window, which is the failure this asserts against.
+        let age = SystemTime::now()
+            .duration_since(mtime)
+            .expect("mtime is in the future");
+        assert!(
+            age < Duration::from_secs(60),
+            "freshly written object reported an age of {age:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reports_none_for_a_missing_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(dir.path()).await.unwrap();
+        assert!(
+            backend.modified_at("nope").await.unwrap().is_none(),
+            "a missing object must report no mtime, not a fabricated one"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_key_is_rejected_like_head() {
+        assert!(
+            LocalBackend::new(tempfile::tempdir().unwrap().path())
+                .await
+                .unwrap()
+                .modified_at("")
+                .await
+                .is_err()
         );
     }
 }
