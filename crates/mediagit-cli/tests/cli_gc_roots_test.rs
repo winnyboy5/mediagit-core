@@ -13,6 +13,13 @@
 //! tests disable the reflog horizon with `MEDIAGIT_GC_REFLOG_HORIZON_DAYS=0`
 //! to assert the *intended* root actually exists rather than accidentally
 //! surviving via reflog.
+//!
+//! `MEDIAGIT_GC_GRACE_SECS=0` is disabled for the same reason. VC-2's prune
+//! grace period spares anything written in the last hour, and these fixtures
+//! build their objects seconds before invoking gc — so with it on, everything
+//! survives and these tests can no longer distinguish an intended root from a
+//! merely-recent object. Its own behaviour is covered by
+//! `cli_gc_grace_period_test.rs`.
 
 use assert_cmd::Command;
 use std::fs;
@@ -37,6 +44,15 @@ fn gc_without_reflog(dir: &Path) {
     mediagit()
         .args(["gc", "--yes"])
         .env("MEDIAGIT_GC_REFLOG_HORIZON_DAYS", "0")
+        // Same reason the reflog horizon is disabled above: isolate the ROOT SET
+        // from every other thing that can keep an object alive. VC-2's prune
+        // grace period protects anything written in the last hour, and these
+        // fixtures build their objects seconds before running gc, so leaving it
+        // on makes every object survive and these tests can no longer tell an
+        // intended root from a merely-recent object.
+        //
+        // The grace period has its own coverage in `cli_gc_grace_period_test.rs`.
+        .env("MEDIAGIT_GC_GRACE_SECS", "0")
         .current_dir(dir)
         .assert()
         .success();
