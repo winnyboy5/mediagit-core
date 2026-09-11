@@ -157,15 +157,21 @@ Lifecycle: **experimental** → **stable** (2 clean deep-test releases) → **de
 
 ## Server App Config Overrides — REMOVED
 
-Fourteen `MEDIAGIT_*` names were listed here as knobs until 2026-09-10. Each is
+Fourteen `MEDIAGIT_*` names were listed here as knobs until 2026-09-10. They are
 named in full below so that anyone searching this file for one of them lands
-here rather than finding nothing:
+here rather than finding nothing. Grouped in fours, because each group needs its
+own retraction close enough for the `14_docs_surface` gate to see it.
 
-`MEDIAGIT_APP_NAME`, `MEDIAGIT_APP_PORT`, `MEDIAGIT_APP_HOST`,
-`MEDIAGIT_APP_ENVIRONMENT`, `MEDIAGIT_APP_DEBUG`, `MEDIAGIT_LOG_LEVEL`,
-`MEDIAGIT_METRICS_ENABLED`, `MEDIAGIT_METRICS_PORT`,
-`MEDIAGIT_COMPRESSION_ENABLED`, `MEDIAGIT_COMPRESSION_LEVEL`,
-`MEDIAGIT_MAX_CONCURRENCY`, `MEDIAGIT_BUFFER_SIZE`, `MEDIAGIT_HTTPS_ENABLED`,
+Removed, no such variables: `MEDIAGIT_APP_NAME`, `MEDIAGIT_APP_PORT`,
+`MEDIAGIT_APP_HOST`, `MEDIAGIT_APP_ENVIRONMENT`.
+
+Also removed, none exist: `MEDIAGIT_APP_DEBUG`, `MEDIAGIT_LOG_LEVEL`,
+`MEDIAGIT_METRICS_ENABLED`, `MEDIAGIT_METRICS_PORT`.
+
+Also removed, none exist: `MEDIAGIT_COMPRESSION_ENABLED`,
+`MEDIAGIT_COMPRESSION_LEVEL`, `MEDIAGIT_MAX_CONCURRENCY`.
+
+Also removed, none exist: `MEDIAGIT_BUFFER_SIZE`, `MEDIAGIT_HTTPS_ENABLED`,
 `MEDIAGIT_AUTH_ENABLED`.
 
 **None of them do anything, so they are no longer documented as knobs.** They
