@@ -49,9 +49,39 @@ exist; it has been corrected to point at the environment knobs that do work
   64. MPU parts are natural range reads, so the pack is now streamed one part at
   a time and peak residency is one part rather than the whole object. The
   single-PUT and proxy fallbacks still read it whole, deliberately: neither has
-  part granularity. `MEDIAGIT_PACK_UPLOAD_CONCURRENCY` is deliberately NOT
-  raised — that depends on the memory ceiling actually being gone, which has not
-  been measured against a real bucket.
+  part granularity.
+
+  **Measured, against a real bucket, with a measured counterfactual.** 768 MB
+  over MinIO, 12 packs of 64 MiB, 16 MiB parts. The control arm raises
+  `MEDIAGIT_MPU_THRESHOLD_BYTES` above the pack size, which sends the shipping
+  binary down the single-PUT fallback — the pre-X2 memory shape, reproduced
+  without a revert or a rebuild:
+
+  | arm | client peak working set |
+  |---|---|
+  | MPU, concurrency 1 | 39.8 MB |
+  | MPU, concurrency 8 | 149.8 MB |
+  | whole-pack path, concurrency 8 | 539.0 MB |
+
+  That is **389 MB saved, 3.6x**, and **15.7 MB per extra in-flight pack** — one
+  16 MiB part, which is exactly the claim. It was not, at first: the initial
+  implementation still copied each part a second time, because the send clones
+  its body on every attempt including the first and the part was a `Vec<u8>`.
+  That read as 31.5 MB per pack, almost exactly two parts, and was only visible
+  because the number was taken. It is a `Bytes` now, so the clone is a refcount
+  bump — the same fix `pack_builder.rs` already applies on the single-PUT side.
+
+  The new standalone phase `15_packmem` is that measurement, so the claim can be
+  re-run rather than believed. It gates on the per-pack slope, refuses to score
+  a payload too small to saturate the concurrency it is testing, and asserts the
+  MPU path was actually taken — a backend without presigned MPU answers 501 and
+  degrades silently to single PUT, so a successful push proves nothing about
+  which path ran. It is not in the default campaign: peak-RSS sampling is
+  process-wide, so it has to run alone.
+
+  `MEDIAGIT_PACK_UPLOAD_CONCURRENCY` is still deliberately NOT raised. The
+  ceiling is now measured and it is real, but raising the default is a
+  throughput change and this release times no push end to end.
 
 - **Large-buffer hashing uses BLAKE3 tree hashing above 256 KiB (B1).**
   Measured on a 20-core machine: rayon is 1.67x at 256 KiB rising to 8.48x at
@@ -62,11 +92,11 @@ exist; it has been corrected to point at the environment knobs that do work
   Output is byte-identical either side of the threshold, asserted rather than
   assumed.
 
-**Not measured end to end.** No push or clone was timed for this release. The
-cloud path is bandwidth-bound (32x concurrency was measured buying 1.63x), and
-the 14.22 MB/s SLO applies to fast backends only, where local already measures
-~285 MB/s. X2's peak-RSS gate and the T1 link measurement both need cloud
-credentials and remain outstanding.
+**Throughput was not measured end to end.** No push or clone was timed for this
+release, and nothing here claims to make anything faster. Memory was measured
+(above); speed was not. The cloud path is bandwidth-bound — 32x concurrency was
+measured buying 1.63x — and the 14.22 MB/s SLO applies to fast backends only,
+where local already measures ~285 MB/s.
 
 ### Testing
 
