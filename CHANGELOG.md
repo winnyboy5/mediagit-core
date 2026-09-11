@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Removed — BREAKING (configuration)
+### Removed (configuration)
 
 Config keys that were parsed and round-tripped but never read by any consumer
 have been deleted from `schema.rs`. Each was verified to have zero read sites
@@ -30,10 +30,11 @@ them, so those variables had no effect. `MEDIAGIT_API_KEY` and
 `MEDIAGIT_CHUNK_WRITE_CONCURRENCY` were also read there but have independent
 real read sites and are unaffected.
 
-**Impact.** The crate does not set `deny_unknown_fields`, so an existing
-`config.toml` containing any of these keys still loads — the keys are now
-unknown and are ignored with a warning. No behavior changes, because nothing
-read them before either. Documentation that told users to tune compression
+**Impact: none in practice.** The crate does not set `deny_unknown_fields`, so
+an existing `config.toml` containing any of these keys still loads; they are now
+unknown keys and are ignored with a warning. Nothing read them before either, so
+no behaviour changes either way — which is why this is recorded as a plain
+removal rather than a breaking change. Documentation that told users to tune compression
 levels or raise `[performance.timeouts]` was describing controls that did not
 exist; it has been corrected to point at the environment knobs that do work
 (`MEDIAGIT_DATA_READ_TIMEOUT_SECS`, `MEDIAGIT_UPLOAD_CONCURRENCY`,
