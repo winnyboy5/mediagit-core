@@ -11,6 +11,27 @@ function _TomlVal([string]$File, [string]$Key) {
   return $m.Matches[0].Groups[1].Value.Trim().Trim('"')
 }
 
+# Same, but for a key that may sit INSIDE an inline table rather than at the
+# start of its own line.
+#
+# config_version 3 moved the Azure credentials into a tagged block --
+# `auth = { type = "account_key", account_name = "...", account_key = "..." }`
+# -- so exactly one credential kind is representable. `_TomlVal` anchors with
+# `^\s*`, so after that migration it could no longer see either value and
+# quietly returned $null for both. The result was not an error: `remote.ps1`
+# throws "SKIP: Azure not configured", and a SKIP reads as green. Azure was
+# therefore able to drop out of a run while the run still looked complete --
+# the failure shape this suite keeps finding in itself.
+#
+# `type = "account_key"` does NOT collide with the `account_key` lookup: there
+# the text is inside quotes and is not followed by `=`.
+function _TomlInlineVal([string]$File, [string]$Key) {
+  if (-not (Test-Path $File)) { return $null }
+  $m = Select-String -Path $File -Pattern ($Key + '\s*=\s*"([^"]*)"') | Select-Object -First 1
+  if (-not $m) { return $null }
+  return $m.Matches[0].Groups[1].Value
+}
+
 $aws = Join-Path $devServer "config.aws.toml"
 if (-not $env:AWS_ACCESS_KEY_ID)     { $env:AWS_ACCESS_KEY_ID     = _TomlVal $aws "access_key_id" }
 if (-not $env:AWS_SECRET_ACCESS_KEY) { $env:AWS_SECRET_ACCESS_KEY = _TomlVal $aws "secret_access_key" }
@@ -18,8 +39,14 @@ if (-not $env:AWS_DEFAULT_REGION)    { $env:AWS_DEFAULT_REGION    = _TomlVal $aw
 if (-not $env:MG_QA_AWS_BUCKET)      { $env:MG_QA_AWS_BUCKET      = _TomlVal $aws "bucket" }
 
 $az = Join-Path $devServer "config.azure.toml"
-if (-not $env:AZURE_STORAGE_ACCOUNT)  { $env:AZURE_STORAGE_ACCOUNT  = _TomlVal $az "account_name" }
-if (-not $env:AZURE_STORAGE_KEY)      { $env:AZURE_STORAGE_KEY      = _TomlVal $az "account_key" }
+if (-not $env:AZURE_STORAGE_ACCOUNT)  {
+  $v = _TomlVal $az "account_name"; if (-not $v) { $v = _TomlInlineVal $az "account_name" }
+  $env:AZURE_STORAGE_ACCOUNT = $v
+}
+if (-not $env:AZURE_STORAGE_KEY)      {
+  $v = _TomlVal $az "account_key"; if (-not $v) { $v = _TomlInlineVal $az "account_key" }
+  $env:AZURE_STORAGE_KEY = $v
+}
 if (-not $env:MG_QA_AZURE_CONTAINER)  { $env:MG_QA_AZURE_CONTAINER  = _TomlVal $az "container" }
 
 $gcs = Join-Path $devServer "config.gcs.toml"
@@ -71,6 +98,6 @@ if (-not $env:MG_QA_BACKEND_STOP_CMD -and -not $env:MG_QA_BACKEND_START_CMD) {
   }
 }
 
-$set = @("AWS_ACCESS_KEY_ID","AWS_SECRET_ACCESS_KEY","AZURE_STORAGE_ACCOUNT","AZURE_STORAGE_KEY","GCS_PROJECT_ID","GOOGLE_APPLICATION_CREDENTIALS") |
+$set = @("AWS_ACCESS_KEY_ID","AWS_SECRET_ACCESS_KEY","AZURE_STORAGE_ACCOUNT","AZURE_STORAGE_KEY","MG_QA_AZURE_CONTAINER","GCS_PROJECT_ID","GOOGLE_APPLICATION_CREDENTIALS") |
   ForEach-Object { "{0}={1}" -f $_, $(if ([Environment]::GetEnvironmentVariable($_)) { "set" } else { "MISSING" }) }
 Write-Host ("campaign_env: " + ($set -join " "))
