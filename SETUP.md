@@ -394,7 +394,7 @@ base_path = "./objects"   # absolute or relative to the repo dir
 create_dirs = true
 ```
 
-**MinIO (S3-compatible):**
+**Silo(MinIO) (S3-compatible):**
 ```toml
 [storage]
 backend = "s3"
