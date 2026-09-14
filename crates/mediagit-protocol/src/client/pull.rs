@@ -131,7 +131,16 @@ async fn get_chunk_with_retry(
         // A 429 and a 503 are not the same kind of failure and must not share
         // a budget. 503 means the server already exhausted its own storage
         // retries, so trying many more times is just delaying a real error --
-        // hence the deliberately small CHUNK_GET_MAX_RETRIES. A 429 means the
+        // hence the deliberately small CHUNK_GET_MAX_RETRIES.
+        //
+        // That sentence was an ASSUMPTION until v0.4.0 and it was false: no
+        // backend's `get_streaming` retried anything, and the server answered
+        // 200 the moment it held a stream handle, so an upstream read that died
+        // at offset 0 arrived here as a truncated body rather than as a 503 at
+        // all. `open_chunk_stream` (mediagit-server `handlers::chunks`) now
+        // proves a byte is readable before committing to a status and retries
+        // the open itself, so the small budget below is correct by construction
+        // instead of by luck. A 429 means the
         // server is healthy and asking us to slow down; the correct response is
         // to wait it out, and giving up after 3 fails a clone that only needed
         // patience. Measured: with the push path fixed, a clone against a 2 rps

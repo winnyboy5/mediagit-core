@@ -302,6 +302,375 @@ pub async fn upload_manifest(
 // Chunk Download Endpoints - For efficient large file pull/clone
 // ============================================================================
 
+#[cfg(test)]
+mod chunk_open_tests {
+    use super::{ChunkOpen, looks_like_missing, open_chunk_stream};
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use futures::StreamExt as _;
+    use mediagit_storage::StorageBackend;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// One scripted outcome of a `get_streaming` call.
+    #[derive(Clone)]
+    enum Act {
+        /// The stream yields these byte groups in order, then ends.
+        Body(Vec<&'static [u8]>),
+        /// `get_streaming` resolves fine; the FIRST poll errors. This is the
+        /// shape every one of v040-ga1's 145 aborts had.
+        FirstReadErr(&'static str),
+        /// `get_streaming` itself errors.
+        OpenErr(&'static str),
+    }
+
+    /// A backend that hands out a scripted outcome per call, so a retry can be
+    /// observed rather than assumed. The last act repeats once the script runs
+    /// out, which is what "the backend is still down" looks like.
+    #[derive(Debug)]
+    struct ScriptedBackend {
+        acts: Vec<Act>,
+        calls: AtomicUsize,
+    }
+
+    impl std::fmt::Debug for Act {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("Act")
+        }
+    }
+
+    impl ScriptedBackend {
+        fn scripted(acts: Vec<Act>) -> Arc<dyn StorageBackend> {
+            Arc::new(Self {
+                acts,
+                calls: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl StorageBackend for ScriptedBackend {
+        async fn get_streaming(
+            &self,
+            _key: &str,
+        ) -> anyhow::Result<
+            std::pin::Pin<Box<dyn futures::Stream<Item = anyhow::Result<Bytes>> + Send + 'static>>,
+        > {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            let act = self.acts[n.min(self.acts.len() - 1)].clone();
+            match act {
+                Act::OpenErr(msg) => anyhow::bail!("{msg}"),
+                Act::FirstReadErr(msg) => Ok(Box::pin(futures::stream::once(async move {
+                    Err(anyhow::anyhow!("{msg}"))
+                }))),
+                Act::Body(parts) => Ok(Box::pin(futures::stream::iter(
+                    parts.into_iter().map(|p| Ok(Bytes::from_static(p))),
+                ))),
+            }
+        }
+
+        async fn get(&self, _key: &str) -> anyhow::Result<Vec<u8>> {
+            anyhow::bail!("unused")
+        }
+        async fn put(&self, _key: &str, _data: &[u8]) -> anyhow::Result<()> {
+            anyhow::bail!("unused")
+        }
+        async fn exists(&self, _key: &str) -> anyhow::Result<bool> {
+            anyhow::bail!("unused")
+        }
+        async fn delete(&self, _key: &str) -> anyhow::Result<()> {
+            anyhow::bail!("unused")
+        }
+        async fn list_objects(&self, _prefix: &str) -> anyhow::Result<Vec<String>> {
+            anyhow::bail!("unused")
+        }
+        async fn head(&self, _key: &str) -> anyhow::Result<Option<u64>> {
+            anyhow::bail!("unused")
+        }
+    }
+
+    async fn drain(stream: super::ChunkByteStream) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut s = stream;
+        while let Some(item) = s.next().await {
+            out.extend_from_slice(&item.expect("body item"));
+        }
+        out
+    }
+
+    /// The bytes must come back whole and IN ORDER. The first item is pulled
+    /// off to prove the read works and then pushed back on the front, so an
+    /// off-by-one here would silently drop or duplicate the head of every
+    /// chunk the fallback path serves.
+    #[tokio::test]
+    async fn ready_stream_returns_every_byte_in_order() {
+        let b = ScriptedBackend::scripted(vec![Act::Body(vec![b"head-", b"middle-", b"tail"])]);
+        match open_chunk_stream(&b, "chunks/x", "x").await {
+            ChunkOpen::Ready(s) => assert_eq!(drain(s).await, b"head-middle-tail"),
+            _ => panic!("expected Ready"),
+        }
+    }
+
+    /// An empty object is a legitimate 200, not a failure. It is the one case
+    /// where no first byte exists and nothing is wrong.
+    #[tokio::test]
+    async fn empty_object_is_ready_not_an_error() {
+        let b = ScriptedBackend::scripted(vec![Act::Body(vec![])]);
+        match open_chunk_stream(&b, "chunks/x", "x").await {
+            ChunkOpen::Ready(s) => assert!(drain(s).await.is_empty()),
+            _ => panic!("empty object must be Ready with an empty body"),
+        }
+    }
+
+    /// THE ga1 SHAPE: open succeeds, first read dies. Before this existed the
+    /// handler had already answered 200 and the client got a truncated body it
+    /// had to diagnose from broken chunked framing.
+    #[tokio::test]
+    async fn transient_first_read_is_retried_and_then_succeeds() {
+        let b = ScriptedBackend::scripted(vec![
+            Act::FirstReadErr("connection reset by peer"),
+            Act::Body(vec![b"recovered"]),
+        ]);
+        match open_chunk_stream(&b, "chunks/x", "x").await {
+            ChunkOpen::Ready(s) => assert_eq!(drain(s).await, b"recovered"),
+            _ => panic!("a transient first read must be retried, not surfaced"),
+        }
+    }
+
+    /// When it does not recover it must be 503 material — never a 200, and
+    /// never routed into the pack/delta fallback, which would report a present
+    /// chunk as missing.
+    #[tokio::test]
+    async fn persistent_transient_failure_becomes_transient_not_absent() {
+        let b = ScriptedBackend::scripted(vec![Act::FirstReadErr("connection reset by peer")]);
+        match open_chunk_stream(&b, "chunks/x", "x").await {
+            ChunkOpen::Transient(_) => {}
+            ChunkOpen::Absent(_) => panic!("a backend failure must not read as a missing chunk"),
+            ChunkOpen::Ready(_) => panic!("must not answer 200"),
+        }
+    }
+
+    /// A backend is free to defer its not-found to the first poll. That must
+    /// still reach the pack-index and chunk-delta fallbacks, because a chunk
+    /// living inside a pack is legitimately absent from its loose key.
+    #[tokio::test]
+    async fn not_found_on_first_read_is_absent_not_transient() {
+        let b =
+            ScriptedBackend::scripted(vec![Act::FirstReadErr("NoSuchKey: the key does not exist")]);
+        match open_chunk_stream(&b, "chunks/x", "x").await {
+            ChunkOpen::Absent(_) => {}
+            _ => panic!("deferred not-found must route to the fallback chain"),
+        }
+    }
+
+    /// The pre-existing behaviour: not-found at open time still routes to the
+    /// fallback chain, unchanged by any of the above.
+    #[tokio::test]
+    async fn not_found_on_open_is_absent() {
+        let b = ScriptedBackend::scripted(vec![Act::OpenErr("NoSuchKey")]);
+        match open_chunk_stream(&b, "chunks/x", "x").await {
+            ChunkOpen::Absent(_) => {}
+            _ => panic!("open-time not-found must route to the fallback chain"),
+        }
+    }
+
+    /// `service error` is an aws-sdk-s3 wrapper string that also covers
+    /// throttling, so it is NOT evidence of absence on a read that has already
+    /// opened successfully. Treating it as absence would answer 404 for a chunk
+    /// that exists and is merely being throttled — a terminal answer to a
+    /// transient condition, and a clone failure with the wrong cause attached.
+    ///
+    /// The open path keeps the broader reading; only the first read is strict.
+    #[tokio::test]
+    async fn service_error_on_first_read_is_transient_not_absent() {
+        let b = ScriptedBackend::scripted(vec![Act::FirstReadErr(
+            "service error: SlowDown, please reduce your request rate",
+        )]);
+        match open_chunk_stream(&b, "chunks/x", "x").await {
+            ChunkOpen::Transient(_) => {}
+            ChunkOpen::Absent(_) => {
+                panic!("a throttled read must not be reported as a missing chunk")
+            }
+            ChunkOpen::Ready(_) => panic!("must not answer 200"),
+        }
+    }
+
+    #[test]
+    fn open_path_keeps_the_broader_reading() {
+        // Pre-existing behaviour, pinned so narrowing it stays a deliberate act.
+        assert!(super::looks_like_missing(&anyhow::anyhow!("service error")));
+        assert!(!super::unambiguously_missing(&anyhow::anyhow!(
+            "service error"
+        )));
+    }
+
+    #[test]
+    fn missing_predicate_separates_absence_from_illness() {
+        assert!(looks_like_missing(&anyhow::anyhow!("NoSuchKey")));
+        assert!(looks_like_missing(&anyhow::anyhow!("404 Not Found")));
+        assert!(!looks_like_missing(&anyhow::anyhow!(
+            "connection reset by peer"
+        )));
+        assert!(!looks_like_missing(&anyhow::anyhow!("dispatch failure")));
+    }
+}
+
+/// Does this error name the object as absent, unambiguously?
+///
+/// Only markers that mean absence and nothing else. There is no typed error
+/// across five SDKs to match on, so this matches their wording — but only the
+/// wording that cannot mean anything but "not there".
+fn unambiguously_missing(e: &anyhow::Error) -> bool {
+    let chain = format!("{e:#}").to_lowercase();
+    chain.contains("nosuchkey")
+        || chain.contains("no such key")
+        || chain.contains("404")
+        || chain.contains("not found")
+}
+
+/// The OPEN path's reading of "not there", which is broader.
+///
+/// `service error` is an `aws-sdk-s3` wrapper string that also covers
+/// throttling and other transient conditions, so it is weaker evidence than the
+/// markers above. It stays here because this is pre-existing behaviour on the
+/// open path and narrowing it is a separate change with its own risk.
+///
+/// It deliberately does NOT apply to a first-read failure. Every backend issues
+/// its GET inside `get_streaming` — s3.rs awaits `get_object().send()`, azure.rs
+/// awaits `read_stream` — so not-found surfaces at the open and an error on the
+/// first read is a body failure. Accepting `service error` there would convert a
+/// throttled read into a terminal 404 for a chunk that exists.
+fn looks_like_missing(e: &anyhow::Error) -> bool {
+    unambiguously_missing(e) || format!("{e:#}").to_lowercase().contains("service error")
+}
+
+type ChunkByteStream =
+    std::pin::Pin<Box<dyn futures::Stream<Item = anyhow::Result<bytes::Bytes>> + Send + 'static>>;
+
+/// What opening a chunk for streaming produced.
+enum ChunkOpen {
+    /// Open succeeded AND the first byte is in hand. Safe to answer 200.
+    Ready(ChunkByteStream),
+    /// The object is not at this key. The caller runs the pack-index and
+    /// chunk-delta fallbacks; this is a routine miss, not a failure.
+    Absent(anyhow::Error),
+    /// The backend is unwell. Never a 200, never the fallback chain.
+    Transient(anyhow::Error),
+}
+
+/// How many times to re-open a chunk whose read fails transiently.
+///
+/// Small on purpose. This runs per request on the degraded path, so a generous
+/// loop here ties up connections precisely when the server has fewest to spare;
+/// the client has its own larger budget on top of this one.
+fn chunk_open_retries() -> u32 {
+    std::env::var("MEDIAGIT_CHUNK_OPEN_RETRIES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2)
+}
+
+/// Open a chunk for streaming and **prove a byte can be read** before the
+/// caller commits to a status code.
+///
+/// WHY THIS IS NOT JUST `get_streaming`. That future resolves as soon as the
+/// backend hands back a stream handle — no byte has been read. Answer 200 on
+/// the strength of it and an upstream read that dies at offset 0 becomes a
+/// *truncated 200*: the client sees broken chunked framing and has to infer a
+/// transport failure, and the server's own log records a healthy
+/// `status=200 latency=1 ms`. Campaign v040-ga1 lost a 2 GB Azure clone exactly
+/// that way — 145 mid-body aborts, every single one at `bytes_before_failure: 0`,
+/// which is this shape and only this shape.
+///
+/// A status code that can turn into a truncated body is not a status code. So
+/// the first item is pulled here, and then prepended back so the caller streams
+/// the whole object unchanged.
+///
+/// The retry exists because the client already assumes it. `get_chunk_with_retry`
+/// deliberately keeps a SMALL 503 budget, and says why: *"503 means the server
+/// already exhausted its own storage retries, so trying many more times is just
+/// delaying a real error."* No backend's `get_streaming` had any retry at all,
+/// so that assumption was false and the client was being careful on behalf of
+/// work nobody did. Now it is true.
+///
+/// Not-found is not retried and never becomes 503: it is routed to the caller's
+/// pack-index and chunk-delta fallbacks, which is where a chunk that lives
+/// inside a pack is legitimately found. The classification is checked on the
+/// first READ as well as on the open, because a backend is free to defer its
+/// not-found to the first poll, and turning that into a 503 would break the
+/// fallback chain for any backend that does.
+async fn open_chunk_stream(
+    storage: &std::sync::Arc<dyn mediagit_storage::StorageBackend>,
+    chunk_key: &str,
+    chunk_id: &str,
+) -> ChunkOpen {
+    use futures::StreamExt as _;
+
+    let max = chunk_open_retries();
+    let mut attempt = 0u32;
+    loop {
+        let opened = storage.get_streaming(chunk_key).await;
+        // Which stage failed decides how much evidence "absent" needs — see
+        // `looks_like_missing`. An open failure keeps the historical, broader
+        // reading; a first-read failure demands an unambiguous marker, because
+        // every backend issues its GET at open time and a body that dies is a
+        // body that dies.
+        let (err, missing) = match opened {
+            Ok(stream) => {
+                let mut stream = stream;
+                match stream.next().await {
+                    // A byte is in hand. Put it back on the front; from here
+                    // the response body is exactly what it always was.
+                    Some(Ok(first)) => {
+                        let rest = futures::stream::once(async move { Ok(first) }).chain(stream);
+                        return ChunkOpen::Ready(Box::pin(rest));
+                    }
+                    // Empty object. Legitimate, and a correct empty 200 —
+                    // distinguishing it from a failure is the reason this
+                    // matches three ways instead of using `?`.
+                    None => {
+                        return ChunkOpen::Ready(Box::pin(futures::stream::empty()));
+                    }
+                    Some(Err(e)) => {
+                        let m = unambiguously_missing(&e);
+                        (e, m)
+                    }
+                }
+            }
+            Err(e) => {
+                let m = looks_like_missing(&e);
+                (e, m)
+            }
+        };
+
+        if missing {
+            return ChunkOpen::Absent(err);
+        }
+        if attempt >= max {
+            tracing::warn!(
+                chunk = %chunk_id,
+                attempts = attempt + 1,
+                err = %format!("{err:#}"),
+                "chunk open/first-read failed after retries; answering 503 rather than a truncated 200"
+            );
+            return ChunkOpen::Transient(err);
+        }
+        // Short and bounded: 250ms, 500ms. The client's own backoff supplies
+        // the patience; this only covers a backend blipping between the open
+        // and the first byte.
+        let backoff_ms = 250u64 << attempt;
+        tracing::warn!(
+            chunk = %chunk_id,
+            attempt = attempt + 1,
+            backoff_ms,
+            err = %format!("{err:#}"),
+            "chunk open/first-read failed; retrying before answering"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+        attempt += 1;
+    }
+}
+
 /// GET /:repo/chunks/:chunk_id - Download a single chunk
 ///
 /// Returns raw compressed chunk data, or 409 JSON `{"kind":"delta","base_id":"<hex>"}` if
@@ -358,27 +727,20 @@ pub async fn download_chunk(
     // the alternative (a HEAD/size probe per chunk) would add a round trip to
     // every download to restore a header nothing reads.
     //
-    // Errors still surface from the `await` below rather than mid-stream, so
-    // the NoSuchKey -> pack-index -> chunk-delta fallback chain is unchanged.
-    match storage.get_streaming(&chunk_key).await {
-        Ok(stream) => {
+    // `open_chunk_stream` proves a byte is readable before this answers 200 —
+    // see its doc comment for the truncated-200 failure that motivated it. The
+    // NoSuchKey -> pack-index -> chunk-delta fallback chain below is reached by
+    // `Absent` and is otherwise unchanged.
+    match open_chunk_stream(&storage, &chunk_key, &chunk_id).await {
+        ChunkOpen::Ready(stream) => {
             tracing::debug!(chunk = %chunk_id, "Chunk download started (streaming)");
-            // Log a mid-body failure before it reaches axum, because after this
-            // point NOTHING else will.
-            //
-            // `get_streaming` resolves as soon as the backend has a stream, so
-            // 200 and the headers are already on the wire. If the upstream read
-            // then dies, `Body::from_stream` just stops producing bytes: the
-            // client sees a truncated chunked body ("unexpected EOF during
-            // chunk size line") and the server's own record shows a healthy
-            // `status=200 latency=1 ms` and nothing more.
-            //
-            // That is not hypothetical. Campaign v040-ga1 lost an Azure S5
-            // clone to 145 mid-body aborts, and the server log for the exact
-            // chunk that killed it read 200/1ms with no error anywhere --
-            // "product or link?" could not be answered from the run's own
-            // record, which is the whole purpose of that record. Behaviour is
-            // unchanged; only the silence is.
+            // A failure PAST the first byte is still possible and still ends as
+            // a truncated body — headers are committed by then and no status
+            // can be revised. Nothing downstream logs it: `Body::from_stream`
+            // just stops producing items, so the request record would read
+            // `status=200` with no error anywhere. Diagnosing v040-ga1's clone
+            // took two logs, a link-probe TSV and a timezone conversion to
+            // reach what this one line says outright.
             use futures::TryStreamExt as _;
             let chunk_for_log = chunk_id.clone();
             let logged = stream.inspect_err(move |e| {
@@ -395,13 +757,19 @@ pub async fn download_chunk(
             )
                 .into_response())
         }
-        Err(e) => {
-            let chain = format!("{:#}", e).to_lowercase();
-            if chain.contains("nosuchkey")
-                || chain.contains("no such key")
-                || chain.contains("404")
-                || chain.contains("not found")
-                || chain.contains("service error")
+        ChunkOpen::Transient(e) => {
+            // 503, not a truncated 200. The client retries this status and its
+            // comment explains the budget it uses; `open_chunk_stream` has
+            // already spent the server-side retries that comment assumes.
+            tracing::warn!(
+                repo = %repo,
+                chunk = %chunk_id,
+                err = %format!("{e:#}"),
+                "Chunk unreadable from storage; answering 503"
+            );
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        }
+        ChunkOpen::Absent(e) => {
             {
                 // Check pack index first — in-memory, free (D1: this used to run
                 // after the chunk-deltas storage GET below, costing an extra
@@ -503,19 +871,16 @@ pub async fn download_chunk(
                     )
                         .into_response());
                 }
-                tracing::warn!(chunk = %chunk_id, key = %chunk_key, "Chunk not found in storage");
-                Err(StatusCode::NOT_FOUND)
-            } else {
-                // dispatch failure, connection refused, timeout — storage backend unreachable.
-                // Return 503 so clients distinguish "chunk missing" (404) from "backend down" (503).
-                tracing::error!(
+                // The cause is kept: `looks_like_missing` matches on wording
+                // across five SDKs, so the line that produced the verdict is
+                // worth having when one of them changes its phrasing.
+                tracing::warn!(
                     chunk = %chunk_id,
                     key = %chunk_key,
-                    error = %e,
-                    cause = %format!("{:#}", e),
-                    "Chunk storage error: backend unreachable"
+                    cause = %format!("{e:#}"),
+                    "Chunk not found in storage"
                 );
-                Err(StatusCode::SERVICE_UNAVAILABLE)
+                Err(StatusCode::NOT_FOUND)
             }
         }
     }
