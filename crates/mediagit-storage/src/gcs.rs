@@ -616,6 +616,70 @@ impl fmt::Debug for GcsBackend {
     }
 }
 
+/// Part size for a GCS XML-API multipart upload.
+///
+/// GCS's XML API is S3-compatible here, so the limits and the reasoning are the
+/// same as `mpu_part_size_s3`: at most 10,000 parts, 5 MiB minimum except for
+/// the last one, and a 16 MiB floor so media-sized objects do not turn into
+/// thousands of tiny round trips. Kept as its own function rather than shared
+/// with s3.rs so a future divergence in GCS's limits has somewhere to land.
+fn mpu_part_size_gcs(total_size: u64) -> u64 {
+    const MIN_PART: u64 = 5 * 1024 * 1024;
+    const MAX_PART: u64 = 5 * 1024 * 1024 * 1024;
+    const MAX_PARTS: u64 = 10_000;
+    const TARGET_PARTS: u64 = 96;
+    const FLOOR: u64 = 16 * 1024 * 1024;
+
+    if let Some(v) = std::env::var("MEDIAGIT_MPU_PART_SIZE")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&n| (MIN_PART..=MAX_PART).contains(&n))
+    {
+        return v;
+    }
+    let by_count = total_size.div_ceil(MAX_PARTS).max(MIN_PART);
+    let by_target = total_size.div_ceil(TARGET_PARTS).max(MIN_PART);
+    FLOOR.max(by_count).max(by_target).min(MAX_PART)
+}
+
+/// Pull `<UploadId>` out of an `InitiateMultipartUploadResult`.
+///
+/// Deliberately a string scan rather than an XML parser: the response is a
+/// fixed four-element document defined by the XML API, this reads exactly one
+/// element from it, and an XML dependency for that is not worth carrying. It
+/// returns `None` rather than guessing if the element is absent, so a changed
+/// response shape surfaces as a clean fallback to single PUT instead of an
+/// upload against an empty id.
+fn parse_upload_id(xml: &str) -> Option<String> {
+    let start = xml.find("<UploadId>")? + "<UploadId>".len();
+    let end = xml[start..].find("</UploadId>")? + start;
+    let id = xml[start..end].trim();
+    if id.is_empty() {
+        None
+    } else {
+        Some(id.to_string())
+    }
+}
+
+/// Build the `CompleteMultipartUpload` document.
+///
+/// ETags are echoed back exactly as the part PUTs returned them, quotes and
+/// all; GCS compares them verbatim. XML-escaping the ETag matters because it is
+/// server-supplied text going into a document, even though in practice it is a
+/// quoted hex digest.
+fn complete_mpu_xml(parts: &[crate::MpuCompletedPart]) -> String {
+    let mut out = String::from("<CompleteMultipartUpload>");
+    for p in parts {
+        let etag = p.etag.replace('&', "&amp;").replace('<', "&lt;");
+        out.push_str(&format!(
+            "<Part><PartNumber>{}</PartNumber><ETag>{}</ETag></Part>",
+            p.part_number, etag
+        ));
+    }
+    out.push_str("</CompleteMultipartUpload>");
+    out
+}
+
 #[async_trait]
 impl StorageBackend for GcsBackend {
     /// Retrieve an object from GCS.
@@ -1020,6 +1084,170 @@ impl StorageBackend for GcsBackend {
         Ok(out)
     }
 
+    /// Presigned multipart upload over the GCS **XML API** (item 29).
+    ///
+    /// WHY THE XML API. The v1 SDK's native upload is *resumable*: one sequential
+    /// session writing to a growing object, with no parallel byte-range upload
+    /// and no per-part retry. S3-style multipart only exists on the XML API, and
+    /// that API is what `SignedUrlBuilder` already signs -- it emits
+    /// `https://storage.googleapis.com/<bucket>/<key>`, which is the XML
+    /// endpoint.
+    ///
+    /// Without this, every GCS pack upload was one all-or-nothing PUT: a
+    /// transport failure at 63 of 64 MiB re-sent all 64, and the client had to
+    /// hold the whole pack in memory to be able to retry at all. Measured on a
+    /// 10.03 GB push: 1,075.7 MB peak client working set on GCS against 365.2 MB
+    /// on S3, which had this path. See FUTURE_TODOS item 33.
+    ///
+    /// Initiate, complete and abort are themselves presigned and then called
+    /// unauthenticated, rather than carrying an OAuth token through this
+    /// backend: it reuses the one signing path `presign_put` already uses, so
+    /// there is a single place where GCS credentials turn into requests.
+    ///
+    /// `with_query_param("uploads", "")` serializes as `?uploads=`, not bare
+    /// `?uploads`, because the signer runs every parameter through
+    /// `form_urlencoded::append_pair`. Verified against the live XML API that
+    /// both forms return an UploadId, so the signed form is accepted.
+    async fn create_presigned_mpu(
+        &self,
+        key: &str,
+        total_size: u64,
+        ttl: std::time::Duration,
+    ) -> anyhow::Result<Option<crate::PresignedMpu>> {
+        const MAX_GCS_TTL: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+        if ttl > MAX_GCS_TTL || std::env::var_os("MEDIAGIT_GCS_DISABLE_PRESIGN").is_some() {
+            return Ok(None);
+        }
+        if std::env::var_os("MEDIAGIT_GCS_DISABLE_MPU").is_some() {
+            return Ok(None);
+        }
+        let Some(signer) = self.signer.as_ref() else {
+            return Ok(None);
+        };
+        let key = crate::prefixed_key(&self.config.prefix, key);
+
+        let init_url = SignedUrlBuilder::for_object(self.bucket_path(), &key)
+            .with_method(http::Method::POST)
+            .with_expiration(ttl)
+            .with_query_param("uploads", "")
+            .sign_with(signer)
+            .await
+            .map_err(|e| anyhow::anyhow!("GCS presign mpu initiate: {e}"))?;
+
+        // Every failure below returns Ok(None), never Err: the caller treats
+        // that as "this backend has no MPU" and falls back to a single PUT,
+        // which still works. Turning a transient initiate failure into a hard
+        // error would fail a push that had a working path available.
+        let resp = match reqwest::Client::new()
+            .post(&init_url)
+            .header(reqwest::header::CONTENT_LENGTH, 0)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(target: "mediagit_storage::gcs", error = %e, "GCS MPU initiate failed; falling back to single PUT");
+                return Ok(None);
+            }
+        };
+        if !resp.status().is_success() {
+            warn!(target: "mediagit_storage::gcs", status = resp.status().as_u16(), "GCS MPU initiate non-2xx; falling back to single PUT");
+            return Ok(None);
+        }
+        let body = resp.text().await.unwrap_or_default();
+        let Some(upload_id) = parse_upload_id(&body) else {
+            warn!(target: "mediagit_storage::gcs", "GCS MPU initiate returned no UploadId; falling back to single PUT");
+            return Ok(None);
+        };
+
+        let part_size = mpu_part_size_gcs(total_size);
+        let num_parts = total_size.div_ceil(part_size).max(1) as i32;
+        let mut parts = Vec::with_capacity(num_parts as usize);
+        for part_number in 1..=num_parts {
+            let url = SignedUrlBuilder::for_object(self.bucket_path(), &key)
+                .with_method(http::Method::PUT)
+                .with_expiration(ttl)
+                .with_query_param("partNumber", part_number.to_string())
+                .with_query_param("uploadId", upload_id.clone())
+                .sign_with(signer)
+                .await
+                .map_err(|e| anyhow::anyhow!("GCS presign mpu part {part_number}: {e}"))?;
+            parts.push(crate::PresignedMpuPart { part_number, url });
+        }
+
+        debug!(
+            target: "mediagit_storage::gcs",
+            key = %key, parts = num_parts, part_size,
+            "GCS presigned MPU created"
+        );
+        Ok(Some(crate::PresignedMpu {
+            upload_id,
+            parts,
+            part_size,
+        }))
+    }
+
+    async fn complete_presigned_mpu(
+        &self,
+        key: &str,
+        upload_id: &str,
+        parts: Vec<crate::MpuCompletedPart>,
+    ) -> anyhow::Result<()> {
+        let Some(signer) = self.signer.as_ref() else {
+            anyhow::bail!("GCS complete_presigned_mpu called without a signer");
+        };
+        let key = crate::prefixed_key(&self.config.prefix, key);
+        let url = SignedUrlBuilder::for_object(self.bucket_path(), &key)
+            .with_method(http::Method::POST)
+            .with_expiration(std::time::Duration::from_secs(3600))
+            .with_query_param("uploadId", upload_id.to_string())
+            .sign_with(signer)
+            .await
+            .map_err(|e| anyhow::anyhow!("GCS presign mpu complete: {e}"))?;
+
+        let xml = complete_mpu_xml(&parts);
+        let resp = reqwest::Client::new()
+            .post(&url)
+            .header(reqwest::header::CONTENT_TYPE, "application/xml")
+            .body(xml)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("GCS mpu complete: {e}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("GCS mpu complete returned {status}: {}", body.trim());
+        }
+        // The XML API can answer 200 and still report failure in the body --
+        // it keeps the connection open while finalizing. Treating that as
+        // success would register a pack that does not exist.
+        let body = resp.text().await.unwrap_or_default();
+        if body.contains("<Error>") {
+            anyhow::bail!("GCS mpu complete reported an error body: {}", body.trim());
+        }
+        Ok(())
+    }
+
+    async fn abort_presigned_mpu(&self, key: &str, upload_id: &str) -> anyhow::Result<()> {
+        // Best effort, like s3.rs: an orphaned upload costs storage until the
+        // bucket lifecycle reaps it, but failing the caller over a cleanup it
+        // cannot act on is worse.
+        let Some(signer) = self.signer.as_ref() else {
+            return Ok(());
+        };
+        let key = crate::prefixed_key(&self.config.prefix, key);
+        if let Ok(url) = SignedUrlBuilder::for_object(self.bucket_path(), &key)
+            .with_method(http::Method::DELETE)
+            .with_expiration(std::time::Duration::from_secs(3600))
+            .with_query_param("uploadId", upload_id.to_string())
+            .sign_with(signer)
+            .await
+        {
+            let _ = reqwest::Client::new().delete(&url).send().await;
+        }
+        Ok(())
+    }
+
     async fn presign_put(
         &self,
         key: &str,
@@ -1378,5 +1606,113 @@ mod tests {
             format!("projects/_/buckets/{}", config.bucket_name),
             expected
         );
+    }
+}
+
+#[cfg(test)]
+mod gcs_mpu_tests {
+    use super::{complete_mpu_xml, mpu_part_size_gcs, parse_upload_id};
+
+    /// The real shape GCS returns from `POST ?uploads=`, captured from the live
+    /// XML API rather than invented, so a changed response format shows up here.
+    const REAL_INITIATE: &str = concat!(
+        r#"<?xml version='1.0' encoding='UTF-8'?>"#,
+        "<InitiateMultipartUploadResult xmlns=\"http://doc.s3.amazonaws.com/2006-03-01\">",
+        "<Bucket>mediagit-dev2-storage</Bucket>",
+        "<Key>probe/object.bin</Key>",
+        "<UploadId>ABPnzm7tEXAMPLEuploadIDvalue</UploadId>",
+        "</InitiateMultipartUploadResult>"
+    );
+
+    #[test]
+    fn upload_id_is_read_from_a_real_initiate_response() {
+        assert_eq!(
+            parse_upload_id(REAL_INITIATE).as_deref(),
+            Some("ABPnzm7tEXAMPLEuploadIDvalue")
+        );
+    }
+
+    /// Absent or empty must be `None`, never `Some("")`. An empty upload id
+    /// would be signed into part URLs and every part would fail against an
+    /// upload that does not exist -- far worse than declining MPU and taking
+    /// the single-PUT fallback, which is what `None` causes.
+    #[test]
+    fn a_missing_or_empty_upload_id_declines_rather_than_guesses() {
+        assert_eq!(
+            parse_upload_id("<Error><Code>AccessDenied</Code></Error>"),
+            None
+        );
+        assert_eq!(parse_upload_id("<UploadId></UploadId>"), None);
+        assert_eq!(parse_upload_id("<UploadId>   </UploadId>"), None);
+        assert_eq!(parse_upload_id(""), None);
+        // Truncated: opening tag with no close must not panic or slice wrongly.
+        assert_eq!(parse_upload_id("<UploadId>abc"), None);
+    }
+
+    #[test]
+    fn complete_document_lists_parts_in_order_with_etags() {
+        let parts = vec![
+            crate::MpuCompletedPart {
+                part_number: 1,
+                etag: "\"aaa\"".into(),
+            },
+            crate::MpuCompletedPart {
+                part_number: 2,
+                etag: "\"bbb\"".into(),
+            },
+        ];
+        let xml = complete_mpu_xml(&parts);
+        assert!(xml.starts_with("<CompleteMultipartUpload>"));
+        assert!(xml.ends_with("</CompleteMultipartUpload>"));
+        assert!(xml.contains("<PartNumber>1</PartNumber><ETag>\"aaa\"</ETag>"));
+        assert!(xml.contains("<PartNumber>2</PartNumber><ETag>\"bbb\"</ETag>"));
+        assert!(
+            xml.find("<PartNumber>1<") < xml.find("<PartNumber>2<"),
+            "parts must stay in ascending order"
+        );
+    }
+
+    /// The ETag is server-supplied text going into a document. In practice it is
+    /// a quoted hex digest, but escaping it is the difference between a
+    /// well-formed request and a malformed one if that ever stops being true.
+    #[test]
+    fn etag_is_xml_escaped() {
+        let parts = vec![crate::MpuCompletedPart {
+            part_number: 1,
+            etag: "a&b<c".into(),
+        }];
+        let xml = complete_mpu_xml(&parts);
+        assert!(xml.contains("a&amp;b&lt;c"));
+    }
+
+    /// Part sizing has to satisfy GCS's XML-API limits, which match S3's: no
+    /// more than 10,000 parts, and at least 5 MiB per part except the last.
+    #[test]
+    fn part_size_respects_the_limits_at_every_scale() {
+        for total in [
+            1u64,
+            64 * 1024 * 1024,
+            10 * 1024 * 1024 * 1024,
+            5 * 1024u64.pow(4),
+        ] {
+            let ps = mpu_part_size_gcs(total);
+            assert!(ps >= 5 * 1024 * 1024, "part {ps} under the 5 MiB minimum");
+            assert!(
+                ps <= 5 * 1024 * 1024 * 1024,
+                "part {ps} over the 5 GiB maximum"
+            );
+            assert!(
+                total.div_ceil(ps) <= 10_000,
+                "total {total} needs more than 10,000 parts at {ps}"
+            );
+        }
+    }
+
+    /// A 64 MiB pack is the payload this exists for; it must land on the 16 MiB
+    /// floor, i.e. 4 parts, not one part or sixty-four.
+    #[test]
+    fn a_64mib_pack_uses_the_16mib_floor() {
+        let ps = mpu_part_size_gcs(64 * 1024 * 1024);
+        assert_eq!(ps, 16 * 1024 * 1024);
     }
 }

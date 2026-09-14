@@ -18,7 +18,7 @@ publish = false
 
 [features]
 azure = ["dep:opendal", "dep:reqsign-azure-storage", "dep:reqsign-core", "dep:http", "dep:reqwest", "dep:rustls"]
-gcs = ["dep:google-cloud-storage", "dep:google-cloud-auth", "dep:google-cloud-gax", "dep:http", "dep:serde_json"]
+gcs = ["dep:google-cloud-storage", "dep:google-cloud-auth", "dep:google-cloud-gax", "dep:http", "dep:serde_json", "dep:reqwest"]
 all = ["azure", "gcs"]
 
 [dependencies]
