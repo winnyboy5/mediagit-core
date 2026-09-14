@@ -629,6 +629,72 @@ impl AzureBackend {
     }
 }
 
+/// Block size for an Azure block-blob upload.
+///
+/// Azure's limits differ from S3's: up to 50,000 blocks per blob and 4000 MiB
+/// per block, so the binding constraint is far looser. The 16 MiB floor is kept
+/// anyway for the same reason as the other backends -- media-sized objects
+/// should not become thousands of small round trips -- and so a pack behaves
+/// the same shape everywhere.
+fn block_size_azure(total_size: u64) -> u64 {
+    const MAX_BLOCKS: u64 = 50_000;
+    const MAX_BLOCK: u64 = 4000 * 1024 * 1024;
+    const TARGET_PARTS: u64 = 96;
+    const FLOOR: u64 = 16 * 1024 * 1024;
+
+    if let Some(v) = std::env::var("MEDIAGIT_MPU_PART_SIZE")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&n| n > 0 && n <= MAX_BLOCK)
+    {
+        return v;
+    }
+    let by_count = total_size.div_ceil(MAX_BLOCKS).max(1);
+    let by_target = total_size.div_ceil(TARGET_PARTS).max(1);
+    FLOOR.max(by_count).max(by_target).min(MAX_BLOCK)
+}
+
+/// Block id for a part.
+///
+/// Azure requires every block id in one blob to be the same length and
+/// base64-encoded. Deriving it from the part number rather than storing it
+/// means `complete_presigned_mpu` can rebuild the list without the client
+/// having to send ids back -- which matters because the shared
+/// `MpuCompletedPart` carries an ETag, and Azure's commit wants ids.
+///
+/// Deterministic ids are also what makes a retried upload safe: re-uploading
+/// part N overwrites the same uncommitted block rather than adding a second
+/// one. Pack keys are content-addressed, so two uploads of one key are the
+/// same bytes.
+fn block_id_for_part(part_number: i32) -> String {
+    // 16 zero-padded digits. Azure requires a base64 string of consistent
+    // length; it does not care what that decodes to. Digits are all in the
+    // base64 alphabet and 16 is a multiple of 4, so this IS valid base64 --
+    // and, unlike a real base64 encoding, it contains no `+`, `/` or `=`, so
+    // it needs no URL-encoding when it goes into the query string.
+    //
+    // That is worth the two lines of explanation: it removes a base64 and a
+    // urlencoding dependency from this crate for a value nothing ever decodes.
+    // Verified against live Azure -- staged, committed, and read back correct.
+    format!("{part_number:016}")
+}
+
+/// Append a query parameter to an already-signed URL.
+///
+/// Safe on Azure specifically, and NOT a pattern to copy to the other backends:
+/// a service SAS signs a fixed set of FIELDS, so extra query parameters leave
+/// the signature intact. AWS SigV4 and GCS V4 sign the whole canonical query
+/// string, where the same move would invalidate it. Verified against live Azure
+/// before this was written: a write-SAS with `comp=block&blockid=...` appended
+/// returns 201 and the committed blob reads back byte-correct.
+fn append_query(url: &str, extra: &str) -> String {
+    if url.contains('?') {
+        format!("{url}&{extra}")
+    } else {
+        format!("{url}?{extra}")
+    }
+}
+
 #[async_trait]
 impl StorageBackend for AzureBackend {
     async fn get(&self, key: &str) -> anyhow::Result<Vec<u8>> {
@@ -744,6 +810,123 @@ impl StorageBackend for AzureBackend {
         // Contract: callers rely on sorted output.
         keys.sort();
         Ok(keys)
+    }
+
+    /// Presigned multipart upload for Azure, over **Put Block / Put Block List**.
+    ///
+    /// Azure has no S3-style multipart and no upload id: blocks are staged
+    /// against the blob with client-chosen ids and then committed in one call.
+    /// That maps onto this trait with two consequences worth stating, because
+    /// neither is obvious from the S3 shape:
+    ///
+    /// * `upload_id` is a SENTINEL, not a server handle. Azure never issues
+    ///   one. Block ids are derived from the part number instead, so `complete`
+    ///   can rebuild the list without it.
+    /// * The client's reported ETags are unused here. Azure's commit takes
+    ///   block ids; the part NUMBERS are what carry the information.
+    ///
+    /// Without this, every Azure pack upload was one all-or-nothing PUT with
+    /// the whole 64 MiB pack held in memory to make retry possible -- measured
+    /// at 1,075.2 MB peak client working set on a 10.03 GB push, against
+    /// 365.2 MB on S3. See FUTURE_TODOS items 29 and 33.
+    async fn create_presigned_mpu(
+        &self,
+        key: &str,
+        total_size: u64,
+        ttl: Duration,
+    ) -> anyhow::Result<Option<crate::PresignedMpu>> {
+        if std::env::var_os("MEDIAGIT_AZURE_DISABLE_MPU").is_some() {
+            return Ok(None);
+        }
+        Self::validate_key(key)?;
+        let full = self.full_key(key);
+
+        let part_size = block_size_azure(total_size);
+        let num_parts = total_size.div_ceil(part_size).max(1) as i32;
+
+        let mut parts = Vec::with_capacity(num_parts as usize);
+        for part_number in 1..=num_parts {
+            // Presign failure is never fatal: Ok(None) sends the caller to the
+            // single PUT, which still works. Failing here would abandon a push
+            // that had a usable path.
+            let req = match self.op.presign_write(&full, ttl).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::debug!(err = %e, "Azure presign_write unavailable; declining MPU");
+                    return Ok(None);
+                }
+            };
+            let block_id = block_id_for_part(part_number);
+            let url = append_query(
+                &req.uri().to_string(),
+                &format!("comp=block&blockid={block_id}"),
+            );
+            parts.push(crate::PresignedMpuPart { part_number, url });
+        }
+
+        tracing::debug!(
+            key = %full, parts = num_parts, part_size,
+            "Azure block-blob staged upload created"
+        );
+        Ok(Some(crate::PresignedMpu {
+            // Not a server handle -- see the doc comment. Named so it is
+            // recognisable in a log rather than looking like a lost id.
+            upload_id: "azure-blocklist".to_string(),
+            parts,
+            part_size,
+        }))
+    }
+
+    async fn complete_presigned_mpu(
+        &self,
+        key: &str,
+        _upload_id: &str,
+        parts: Vec<crate::MpuCompletedPart>,
+    ) -> anyhow::Result<()> {
+        Self::validate_key(key)?;
+        let full = self.full_key(key);
+
+        // Commit order is the blob's byte order, so the list is sorted by part
+        // number rather than trusting the order the client reported completions
+        // in -- those arrive from concurrent uploads.
+        let mut numbers: Vec<i32> = parts.iter().map(|p| p.part_number).collect();
+        numbers.sort_unstable();
+        let mut xml = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?><BlockList>");
+        for n in numbers {
+            xml.push_str(&format!("<Latest>{}</Latest>", block_id_for_part(n)));
+        }
+        xml.push_str("</BlockList>");
+
+        let req = self
+            .op
+            .presign_write(&full, Duration::from_secs(3600))
+            .await
+            .map_err(|e| anyhow::anyhow!("Azure presign blocklist: {e}"))?;
+        let url = append_query(&req.uri().to_string(), "comp=blocklist");
+
+        let resp = reqwest::Client::new()
+            .put(&url)
+            .header(reqwest::header::CONTENT_TYPE, "application/xml")
+            .body(xml)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Azure put block list: {e}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Azure put block list returned {status}: {}", body.trim());
+        }
+        Ok(())
+    }
+
+    async fn abort_presigned_mpu(&self, _key: &str, _upload_id: &str) -> anyhow::Result<()> {
+        // Azure has no abort, and needs none: blocks that are staged but never
+        // committed are invisible to readers and the service garbage-collects
+        // them after a week. There is deliberately no DELETE here -- deleting
+        // the blob would destroy a PREVIOUS committed version of the same key,
+        // which on a content-addressed store is the same object other repos are
+        // already reading.
+        Ok(())
     }
 
     async fn presign_put(
@@ -1008,5 +1191,94 @@ mod tests {
         assert_eq!(super::parse_io_timeout_secs(Some("0".into())), 120);
         assert_eq!(super::parse_io_timeout_secs(Some("45".into())), 45);
         assert_eq!(super::parse_io_timeout_secs(Some("  300  ".into())), 300);
+    }
+}
+
+#[cfg(test)]
+mod azure_block_mpu_tests {
+    use super::{append_query, block_id_for_part, block_size_azure};
+
+    /// Azure's contract: every block id in one blob must be the same length and
+    /// a valid base64 string. These ids are digits only, which satisfies both
+    /// and additionally needs no URL-encoding -- the property that let this
+    /// crate avoid a base64 and a urlencoding dependency.
+    #[test]
+    fn block_ids_are_equal_length_valid_base64_and_url_safe() {
+        let ids: Vec<String> = [1, 2, 99, 12_345, 50_000]
+            .iter()
+            .map(|n| block_id_for_part(*n))
+            .collect();
+        let len = ids[0].len();
+        for id in &ids {
+            assert_eq!(id.len(), len, "Azure rejects mixed-length block ids: {id}");
+            assert_eq!(id.len() % 4, 0, "base64 length must be a multiple of 4");
+            assert!(
+                id.chars().all(|c| c.is_ascii_digit()),
+                "id must stay URL-safe: {id}"
+            );
+        }
+    }
+
+    /// Ids must be distinct per part and ordered, because the commit list is
+    /// built from part numbers and defines the blob's byte order.
+    #[test]
+    fn block_ids_are_distinct_and_ordered() {
+        let a = block_id_for_part(1);
+        let b = block_id_for_part(2);
+        let c = block_id_for_part(10);
+        assert_ne!(a, b);
+        assert!(a < b && b < c, "lexical order must match numeric order");
+    }
+
+    /// Retry safety: the id depends only on the part number, so re-uploading a
+    /// part overwrites the same staged block instead of adding a duplicate that
+    /// would appear twice in the committed blob.
+    #[test]
+    fn a_part_always_gets_the_same_id() {
+        assert_eq!(block_id_for_part(7), block_id_for_part(7));
+    }
+
+    /// A SAS carries its own query string, so the separator has to adapt. Doing
+    /// this wrong produces a URL with two `?` that Azure rejects with a signature
+    /// error -- which reads like a credentials problem, not a string-building one.
+    #[test]
+    fn query_is_appended_with_the_right_separator() {
+        assert_eq!(
+            append_query("https://x/blob?sv=2021&sig=abc", "comp=block"),
+            "https://x/blob?sv=2021&sig=abc&comp=block"
+        );
+        assert_eq!(
+            append_query("https://x/blob", "comp=block"),
+            "https://x/blob?comp=block"
+        );
+    }
+
+    /// Azure's ceiling is 50,000 blocks; a payload must never need more.
+    #[test]
+    fn block_size_keeps_the_count_under_azures_limit() {
+        for total in [
+            1u64,
+            64 * 1024 * 1024,
+            10 * 1024 * 1024 * 1024,
+            4 * 1024u64.pow(4),
+        ] {
+            let bs = block_size_azure(total);
+            assert!(bs > 0);
+            assert!(
+                bs <= 4000 * 1024 * 1024,
+                "block {bs} over Azure's 4000 MiB maximum"
+            );
+            assert!(
+                total.div_ceil(bs) <= 50_000,
+                "total {total} needs more than 50,000 blocks at {bs}"
+            );
+        }
+    }
+
+    /// A 64 MiB pack is the payload this exists for: four 16 MiB blocks, the
+    /// same shape the other backends use, so behaviour is comparable across them.
+    #[test]
+    fn a_64mib_pack_uses_four_16mib_blocks() {
+        assert_eq!(block_size_azure(64 * 1024 * 1024), 16 * 1024 * 1024);
     }
 }
