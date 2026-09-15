@@ -1466,6 +1466,218 @@ fn pack_verify_budget() -> std::time::Duration {
 /// 56.6s over a 512 MB GCS payload), reproducing the link-thrashing described
 /// above. More permits is the intuitive fix for a clone blocked on verification
 /// and it is the wrong one.
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Record that a transfer just used the link. Called from the data-plane
+/// handlers only — control-plane chatter (refs, manifests) is cheap and must
+/// not hold verification off.
+pub(crate) fn note_data_plane_activity(state: &AppState) {
+    state
+        .data_plane_activity
+        .store(now_millis(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Seconds the data plane must be idle before a pack is verified.
+fn verify_quiet_secs() -> u64 {
+    std::env::var("MEDIAGIT_PACK_VERIFY_QUIET_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(5)
+}
+
+/// Upper bound on deferral, so continuous traffic cannot postpone verification
+/// forever. 0 disables waiting entirely (verify immediately, pre-2026-09-15
+/// behaviour).
+fn verify_max_defer_secs() -> u64 {
+    std::env::var("MEDIAGIT_PACK_VERIFY_MAX_DEFER_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(900)
+}
+
+/// Hold a pack's verification until the link is quiet.
+///
+/// WHY. Verification re-reads every pushed pack out of the bucket, and it was
+/// doing that WHILE the client cloned from the same bucket over the same link.
+/// Measured 2026-09-15 on the 16 GB corpus, counting only what verification
+/// moved during each clone's own window:
+///
+///   backend | clone     | verify during clone | combined
+///   aws     | 6.70 MB/s | 0.97 MB/s           | 7.67 MB/s
+///   gcs     | 4.60 MB/s | 4.57 MB/s           | 9.17 MB/s
+///   azure   | 7.81 MB/s | 1.55 MB/s           | 9.36 MB/s
+///
+/// The combined figure is near-constant — that is the link ceiling — and gcs
+/// clones at 47% of its own push purely because its verifier got through 157
+/// packs (10.21 GiB) during the clone while aws managed 22. Same mechanism,
+/// different verifier progress; no transport difference needed to explain it.
+///
+/// NOTHING IS SKIPPED. Verification still runs, still quarantines, same budget,
+/// same code path — only its timing moves. That is safe ONLY because minting a
+/// presigned URL no longer waits on verification: before that change, deferring
+/// would have made clones WORSE by keeping packs unverified and therefore
+/// unmintable. The two changes compose in this order and not the other.
+///
+/// Reads served out of an unverified pack are unaffected: `download_chunk`
+/// verifies the requested slice inline before serving it, so no read can block
+/// on a deferred verification.
+async fn wait_for_data_plane_quiet(state: &AppState, repo: &str, pack_oid: &str) {
+    wait_for_data_plane_quiet_with(
+        repo,
+        pack_oid,
+        verify_quiet_secs(),
+        verify_max_defer_secs(),
+        &state.data_plane_activity,
+    )
+    .await
+}
+
+/// The scheduling mechanism, with its policy passed in.
+///
+/// Split from the env-reading wrapper so the behaviour can be tested at real
+/// timescales without mutating process-global state. Both the policy AND the
+/// clock are injected, and the clock matters as much as the policy: an earlier
+/// version of these tests stamped the real global, and four unrelated
+/// `complete_pack` verification tests running in parallel then saw a busy link
+/// and deferred past their own poll bounds. A test that reaches into a global
+/// does not just risk being flaky itself — it makes every concurrent test flaky.
+async fn wait_for_data_plane_quiet_with(
+    repo: &str,
+    pack_oid: &str,
+    quiet: u64,
+    max_defer: u64,
+    activity: &std::sync::atomic::AtomicU64,
+) {
+    if quiet == 0 || max_defer == 0 {
+        return;
+    }
+    let started = std::time::Instant::now();
+    let mut waited_any = false;
+    loop {
+        let last = activity.load(std::sync::atomic::Ordering::Relaxed);
+        let idle_ms = now_millis().saturating_sub(last);
+        if last == 0 || idle_ms >= quiet * 1000 {
+            break;
+        }
+        if started.elapsed().as_secs() >= max_defer {
+            tracing::debug!(
+                repo,
+                pack_oid,
+                deferred_s = started.elapsed().as_secs(),
+                "pack verification deferred to its cap while transfers stayed active; \
+                 proceeding so a busy server cannot postpone it indefinitely"
+            );
+            break;
+        }
+        waited_any = true;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    if waited_any {
+        tracing::debug!(
+            repo,
+            pack_oid,
+            deferred_s = started.elapsed().as_secs(),
+            "pack verification waited for the data plane to go quiet"
+        );
+    }
+}
+
+/// The verification scheduler: it must yield the link to transfers, AND it must
+/// never be postponed indefinitely by them.
+///
+/// Measured 2026-09-15 on the 16 GB corpus, counting only what verification
+/// moved during each clone's OWN window:
+///
+///   backend | clone     | verify during clone | combined
+///   aws     | 6.70 MB/s | 0.97 MB/s           | 7.67 MB/s
+///   gcs     | 4.60 MB/s | 4.57 MB/s           | 9.17 MB/s
+///   azure   | 7.81 MB/s | 1.55 MB/s           | 9.36 MB/s
+///
+/// The combined column is near-constant — that is the link ceiling — and gcs
+/// clones at 47% of its own push only because its verifier consumed half the
+/// downlink re-reading 10.21 GiB while the clone ran.
+#[cfg(test)]
+mod data_plane_quiet_tests {
+    use super::*;
+
+    /// Each test gets its OWN clock, so none of them touches the process-global
+    /// one. That is not tidiness: stamping the real global made four unrelated
+    /// `complete_pack` verification tests fail, because they run in parallel in
+    /// the same binary and saw a link that looked busy.
+    fn busy_now() -> std::sync::atomic::AtomicU64 {
+        std::sync::atomic::AtomicU64::new(now_millis())
+    }
+
+    /// Both halves, because either alone is satisfiable by a broken
+    /// implementation: "returns immediately" passes a scheduler that never
+    /// defers, and "waits" passes one that deadlocks a busy server forever.
+    #[tokio::test]
+    async fn verification_waits_for_a_busy_link_then_proceeds() {
+        // Quiet period long enough that an immediate return is unambiguous;
+        // defer cap short enough to keep the test fast.
+        let clock = busy_now(); // link busy right now
+
+        let started = std::time::Instant::now();
+        wait_for_data_plane_quiet_with("repo", "pack", 30, 1, &clock).await;
+        let waited = started.elapsed();
+
+        // HALF 1 — it actually deferred. Without this, a no-op scheduler passes.
+        assert!(
+            waited >= std::time::Duration::from_millis(400),
+            "verification did not wait at all ({waited:?}) despite the data plane \
+             being active — it would keep stealing downlink from the clone, which \
+             measured 4.57 of 9.17 MB/s on gcs"
+        );
+        // HALF 2 — it gave up at the cap. Without this, a busy server defers
+        // verification forever and packs are never quarantined.
+        assert!(
+            waited < std::time::Duration::from_secs(20),
+            "verification waited {waited:?}, past its 1s cap: continuous traffic can \
+             postpone it indefinitely, so corrupt packs would never be found"
+        );
+    }
+
+    /// An idle link must not be waited on at all — the steady state, and the
+    /// one that would quietly add latency to every verification if wrong.
+    #[tokio::test]
+    async fn an_idle_link_is_not_waited_on() {
+        // Last activity far enough in the past to count as quiet.
+        let clock = std::sync::atomic::AtomicU64::new(now_millis().saturating_sub(60_000));
+
+        let started = std::time::Instant::now();
+        wait_for_data_plane_quiet_with("repo", "pack", 1, 900, &clock).await;
+        let waited = started.elapsed();
+
+        assert!(
+            waited < std::time::Duration::from_millis(200),
+            "waited {waited:?} on an idle link — verification should start immediately \
+             when nothing is using the link"
+        );
+    }
+
+    /// The escape hatch has to work, or an operator who hits an unforeseen
+    /// interaction has no way back to the previous behaviour.
+    #[tokio::test]
+    async fn the_scheduler_can_be_disabled() {
+        let clock = busy_now();
+
+        let started = std::time::Instant::now();
+        wait_for_data_plane_quiet_with("repo", "pack", 0, 900, &clock).await;
+        let waited = started.elapsed();
+
+        assert!(
+            waited < std::time::Duration::from_millis(200),
+            "MEDIAGIT_PACK_VERIFY_QUIET_SECS=0 did not restore immediate verification \
+             ({waited:?}); the documented escape hatch is dead"
+        );
+    }
+}
+
 fn pack_verify_semaphore() -> &'static tokio::sync::Semaphore {
     static VERIFY_SEM: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
     VERIFY_SEM.get_or_init(|| {
@@ -1556,6 +1768,10 @@ pub(crate) async fn verify_pack_in_background(
     // would conflate "this pack is slow" with "this pack has not begun". Held
     // across the whole call, so the lane is given up on return — including the
     // budget-exceeded return — which is the behaviour the timeout below relies on.
+    // BEFORE the permit, not after: there is exactly one permit, so a pack
+    // waiting for quiet while holding it would stall every other pack's
+    // verification behind a queue that cannot drain.
+    wait_for_data_plane_quiet(&state, &repo, &pack_oid).await;
     let _permit = pack_verify_semaphore().acquire().await.ok();
     verify_pack_with_budget(
         state,
@@ -1891,6 +2107,17 @@ pub async fn complete_pack(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<CompletePackRequest>,
 ) -> Result<StatusCode, StatusCode> {
+    // DELIBERATELY NOT stamping data-plane activity here.
+    //
+    // A push's remaining uploads use the UPLINK; verification re-reads use the
+    // DOWNLINK, and the contention that was actually measured on 2026-09-15 was
+    // downlink-vs-downlink — verification stealing 4.57 of 9.17 MB/s from a
+    // CLONE. There is no measurement showing a push is hurt by concurrent
+    // verification, and deferring here would also postpone verification through
+    // every push, which is when a freshly uploaded pack is most worth checking.
+    //
+    // Stamps live on the download side only (presign_pack_downloads,
+    // download_chunk, batch_get_pack_chunks). Fix what was measured.
     check_permission(
         auth_user.as_deref(),
         "repo:write",

@@ -1060,6 +1060,10 @@ pub async fn presign_pack_downloads(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<PresignPackDownloadRequest>,
 ) -> Result<Json<std::collections::HashMap<String, Option<PresignedGetJson>>>, StatusCode> {
+    // A clone asking for pack URLs is about to saturate the link. Hold
+    // background verification off it while that happens — see
+    // handlers::repo::wait_for_data_plane_quiet for the measurement.
+    crate::handlers::repo::note_data_plane_activity(&state);
     check_permission(
         auth_user.as_deref(),
         "repo:read",

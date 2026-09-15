@@ -201,6 +201,20 @@ pub struct AppState {
     /// survived a crash.
     pub unverified_packs: RwLock<HashMap<String, HashSet<String>>>,
 
+    /// Millis-since-epoch of the last DATA-PLANE request this server saw
+    /// (presigned pack URL mint, chunk download, batch-get). Background pack
+    /// verification waits for this to go quiet before re-reading a pack out of
+    /// the bucket — see `handlers::repo::wait_for_data_plane_quiet`.
+    ///
+    /// On AppState rather than a process-global static, and that is
+    /// load-bearing for tests: as a global it coupled every test in the binary,
+    /// because a test exercising `presign_pack_downloads` would stamp it and
+    /// four unrelated `complete_pack` verification tests running in parallel
+    /// would then see a busy link and defer past their own poll bounds. One
+    /// server process has exactly one AppState, so per-state and per-process
+    /// mean the same thing in production.
+    pub data_plane_activity: std::sync::atomic::AtomicU64,
+
     /// D3 dedup guard for presign-triggered full-pack verification
     /// (`ensure_pack_verified_for_presign` in `handlers/transfer.rs`).
     /// Minting a presigned URL is irrevocable, so an unverified pack must be
@@ -295,6 +309,7 @@ impl AppState {
             odb_cache: RwLock::new(HashMap::new()),
             pack_index: RwLock::new(HashMap::new()),
             unverified_packs: RwLock::new(HashMap::new()),
+            data_plane_activity: std::sync::atomic::AtomicU64::new(0),
             pack_verify_inflight: Mutex::new(HashMap::new()),
             locks: RwLock::new(HashMap::new()),
             auth_layer: None,
@@ -335,6 +350,7 @@ impl AppState {
             odb_cache: RwLock::new(HashMap::new()),
             pack_index: RwLock::new(HashMap::new()),
             unverified_packs: RwLock::new(HashMap::new()),
+            data_plane_activity: std::sync::atomic::AtomicU64::new(0),
             pack_verify_inflight: Mutex::new(HashMap::new()),
             locks: RwLock::new(HashMap::new()),
             auth_layer: Some(auth_layer),
@@ -382,6 +398,7 @@ impl AppState {
             odb_cache: RwLock::new(HashMap::new()),
             pack_index: RwLock::new(HashMap::new()),
             unverified_packs: RwLock::new(HashMap::new()),
+            data_plane_activity: std::sync::atomic::AtomicU64::new(0),
             pack_verify_inflight: Mutex::new(HashMap::new()),
             locks: RwLock::new(HashMap::new()),
             auth_layer: Some(auth_layer),
