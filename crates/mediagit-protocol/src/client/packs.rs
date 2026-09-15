@@ -620,8 +620,15 @@ impl ProtocolClient {
                 let progress = on_progress.clone();
                 let bench = bench.cloned();
                 async move {
+                    // Chunks are written to the ODB AS EACH RANGE ARRIVES, via
+                    // the sink, rather than collected per-pack and written
+                    // after. Under buffer_unordered this is the difference
+                    // between holding one coalesced range and holding a whole
+                    // 66 MB pack, per in-flight task — measured 1,594 MB client
+                    // peak before. See PackChunkSink.
+                    let mut sink = PackChunkSink::new(&odb, progress.as_ref());
                     let fetch_start = std::time::Instant::now();
-                    let out: Vec<(Oid, Vec<u8>)> = match task {
+                    match task {
                         PackFetchTask::Presigned {
                             chunks,
                             url,
@@ -636,6 +643,7 @@ impl ProtocolClient {
                                 cmb,
                                 &comp_hashes,
                                 bench.as_ref(),
+                                &mut sink,
                             )
                             .await?
                         }
@@ -646,34 +654,23 @@ impl ProtocolClient {
                                 &pack_oid,
                                 &chunks,
                                 &comp_hashes,
+                                &mut sink,
                             )
                             .await?
                         }
                     };
                     if let Some(b) = &bench {
-                        let fetched: u64 = out.iter().map(|(_, d)| d.len() as u64).sum();
-                        b.record_pack(fetched);
+                        b.record_pack(sink.bytes);
                         // Feeds throughput_mbs; pack mode is the default pull
                         // path, so without this a pack-mode clone reports zero
-                        // throughput. Timed around the fetch only, excluding
-                        // the ODB writes below, to match the push side's
-                        // transfer-only accounting.
-                        b.record_batch(out.len() as u64, fetched, fetch_start.elapsed());
+                        // throughput. Transfer-only accounting, to match the
+                        // push side: the ODB writes now happen INSIDE the fetch,
+                        // so their accumulated time is subtracted rather than
+                        // silently folded into throughput.
+                        let net = fetch_start.elapsed().saturating_sub(sink.write_time);
+                        b.record_batch(sink.written.len() as u64, sink.bytes, net);
                     }
-                    // Write to ODB and report progress as each chunk arrives, without
-                    // buffering all pack results first (eliminates the collect().await pattern).
-                    let mut written: Vec<Oid> = Vec::new();
-                    for (oid, data) in out {
-                        let chunk_size = data.len() as u64;
-                        odb.put_compressed_chunk(&oid, &data)
-                            .await
-                            .with_context(|| format!("write chunk {} to ODB", oid))?;
-                        if let Some(ref cb) = progress {
-                            cb(chunk_size);
-                        }
-                        written.push(oid);
-                    }
-                    Ok::<Vec<Oid>, anyhow::Error>(written)
+                    Ok::<Vec<Oid>, anyhow::Error>(sink.written)
                 }
             })
             .buffer_unordered(download_concurrency)
@@ -699,6 +696,68 @@ impl ProtocolClient {
             );
         }
         Ok(written_set)
+    }
+}
+
+/// Where a pack fetch puts each verified chunk, and what it reports back.
+///
+/// EXISTS TO BOUND MEMORY. Both fetch functions used to return
+/// `Vec<(Oid, Vec<u8>)>` — every chunk of one pack — and the caller wrote them
+/// afterwards. Under `buffer_unordered(N)` that is N WHOLE PACKS resident at
+/// once. Measured 2026-09-15 on the 16 GB corpus: 66 MB packs at N=24 gave a
+/// client peak of 1,594 MB (gcs) / 1,157 MB (aws, azure) — against a push peak
+/// of ~293 MB on the same run, and a figure this project had previously driven
+/// from 1,075 MB down to 289 MB.
+///
+/// Writing each chunk as its range is sliced holds ONE RANGE (<= the coalesce
+/// cap, 8 MiB) per task instead of a whole pack, without touching concurrency,
+/// so there is no throughput trade.
+///
+/// The integrity check is unchanged and unmoved: `put_compressed_chunk`
+/// decompresses and refuses to store unless BLAKE3 matches the chunk_id the
+/// client itself asked for. This runs exactly where the caller's loop used to
+/// run it, only earlier in time.
+///
+/// `write_time` is accumulated so the caller can subtract it and keep `[bench]`
+/// throughput meaning transfer-only, which is what it documented before the
+/// writes moved inside.
+struct PackChunkSink<'a> {
+    odb: &'a ObjectDatabase,
+    progress: Option<&'a std::sync::Arc<dyn Fn(u64) + Send + Sync>>,
+    written: Vec<Oid>,
+    bytes: u64,
+    write_time: std::time::Duration,
+}
+
+impl<'a> PackChunkSink<'a> {
+    fn new(
+        odb: &'a ObjectDatabase,
+        progress: Option<&'a std::sync::Arc<dyn Fn(u64) + Send + Sync>>,
+    ) -> Self {
+        Self {
+            odb,
+            progress,
+            written: Vec::new(),
+            bytes: 0,
+            write_time: std::time::Duration::ZERO,
+        }
+    }
+
+    /// Store one verified slice. `data` is borrowed and not retained, so the
+    /// range body it points into can be dropped as soon as the range is done.
+    async fn accept(&mut self, oid: Oid, data: &[u8]) -> Result<()> {
+        let started = std::time::Instant::now();
+        self.odb
+            .put_compressed_chunk(&oid, data)
+            .await
+            .with_context(|| format!("write chunk {} to ODB", oid))?;
+        self.write_time += started.elapsed();
+        self.bytes += data.len() as u64;
+        if let Some(cb) = self.progress {
+            cb(data.len() as u64);
+        }
+        self.written.push(oid);
+        Ok(())
     }
 }
 
@@ -795,9 +854,9 @@ async fn fetch_pack_slices_presigned(
     coalesce_max_bytes: u64,
     comp_hashes: &std::collections::HashMap<String, String>,
     bench: Option<&Arc<crate::bench::BenchSession>>,
-) -> Result<Vec<(Oid, Vec<u8>)>> {
+    sink: &mut PackChunkSink<'_>,
+) -> Result<()> {
     let ranges = coalesce_chunk_ranges(chunks, coalesce_max_gap, coalesce_max_bytes);
-    let mut out: Vec<(Oid, Vec<u8>)> = Vec::new();
 
     for (range_start, range_end) in ranges {
         // A request is "coalesced" when this one Range covers more than one
@@ -923,10 +982,13 @@ async fn fetch_pack_slices_presigned(
                 continue;
             }
 
-            out.push((oid, data.to_vec()));
+            // Written HERE, not accumulated: `data` borrows `body`, so the range
+            // body is the only pack bytes resident and it is dropped at the end
+            // of this iteration. See PackChunkSink for the measurement.
+            sink.accept(oid, data).await?;
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Fetch requested (chunk_oid, offset, length) slices out of one pack via
@@ -940,16 +1002,26 @@ async fn fetch_pack_slices_presigned(
 /// not found in the server's pack index) and is skipped here, falling
 /// through to the per-chunk path same as a presigned-slice verify failure.
 ///
-/// On HTTP 404 (server predates this endpoint) returns `Ok(vec![])` rather
-/// than erroring, so only this pack's chunks fall back to per-chunk —
-/// other packs in the same pull are unaffected.
+/// On HTTP 404 (server predates this endpoint) returns `Ok(())` having written
+/// nothing, so only this pack's chunks fall back to per-chunk — other packs in
+/// the same pull are unaffected.
+///
+/// MEMORY, stated honestly: writing through the sink removes the accumulated
+/// copy of the pack, but this path still buffers the whole RESPONSE body plus
+/// the frames parsed out of it, because batch-get answers one pack in one
+/// response — that is the endpoint's shape, not something this function can
+/// stream around. So it improves from roughly 3x pack size to 2x, where the
+/// presigned path (the default, and the one measured at 1,594 MB) drops to one
+/// coalesced range. This path is the GCS-ADC fallback and was not exercised in
+/// the 16 GB runs (`presign_urls == pack_count` on all three backends).
 async fn fetch_pack_slices_batch(
     client: &reqwest::Client,
     base_url: &str,
     pack_oid: &str,
     chunks: &[(String, u64, u32)],
     comp_hashes: &std::collections::HashMap<String, String>,
-) -> Result<Vec<(Oid, Vec<u8>)>> {
+    sink: &mut PackChunkSink<'_>,
+) -> Result<()> {
     #[derive(serde::Serialize, Clone)]
     struct Entry<'a> {
         chunk_oid: &'a str,
@@ -986,7 +1058,7 @@ async fn fetch_pack_slices_batch(
 
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         tracing::debug!(pack = %pack_oid, "batch-get 404 (old server); pack falls back to per-chunk");
-        return Ok(Vec::new());
+        return Ok(());
     }
     if !resp.status().is_success() {
         anyhow::bail!("batch-get returned {} for pack {}", resp.status(), pack_oid);
@@ -995,7 +1067,6 @@ async fn fetch_pack_slices_batch(
     let body = resp.bytes().await.context("read batch-get body")?;
     let frames = parse_batch_get_frames(&body, pack_oid);
 
-    let mut out: Vec<(Oid, Vec<u8>)> = Vec::new();
     for (oid, data) in frames {
         if data.is_empty() {
             // Miss frame — entry not in server's pack index. Falls through
@@ -1007,9 +1078,9 @@ async fn fetch_pack_slices_batch(
             continue;
         }
 
-        out.push((oid, data));
+        sink.accept(oid, &data).await?;
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Parse a batch-get response body into `(chunk_oid, data)` frames.
@@ -1151,6 +1222,140 @@ mod tests {
         );
     }
 
+    /// A pack's chunks must reach the ODB AS EACH RANGE ARRIVES, not be
+    /// collected and written after the whole pack is fetched.
+    ///
+    /// This is the gate for the memory fix, and it is deliberately not a
+    /// correctness test: the accumulating version this replaces produced
+    /// byte-identical results, so nothing about the stored chunks can
+    /// distinguish the two. What distinguishes them is TIMING — with
+    /// accumulation, nothing is written until every range is done.
+    ///
+    /// The payload is split across two ranges (the coalesce byte cap is set
+    /// below one entry's size so the two entries cannot merge). The mock bucket
+    /// checks, at the moment it is asked for the SECOND range, whether the
+    /// first chunk is already in the ODB. Under streaming it is; under
+    /// accumulation it cannot be.
+    ///
+    /// Why it matters: under `buffer_unordered(24)`, accumulation means 24
+    /// whole packs resident. Measured 2026-09-15 on the 16 GB corpus at 66 MB
+    /// packs — 1,594 MB client peak on gcs, 1,157 MB on aws and azure, against
+    /// a ~293 MB push peak in the same run.
+    #[tokio::test]
+    async fn pack_chunks_are_written_as_ranges_arrive_not_after_the_whole_pack() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        crate::ensure_crypto_provider();
+
+        // Two entries, each `type(1) + size(4) + data`, laid end to end.
+        let d1 = b"first-chunk-stored-bytes".to_vec();
+        let d2 = b"second-chunk-stored-bytes".to_vec();
+        let oid1 = Oid::hash(&d1);
+        let oid2 = Oid::hash(&d2);
+        let e1: u32 = (5 + d1.len()) as u32;
+        let e2: u32 = (5 + d2.len()) as u32;
+        let mut pack = vec![0u8];
+        pack.extend_from_slice(&(d1.len() as u32).to_le_bytes());
+        pack.extend_from_slice(&d1);
+        pack.push(0u8);
+        pack.extend_from_slice(&(d2.len() as u32).to_le_bytes());
+        pack.extend_from_slice(&d2);
+
+        let chunks = vec![(oid1.to_hex(), 0u64, e1), (oid2.to_hex(), e1 as u64, e2)];
+        let mut comp = std::collections::HashMap::new();
+        comp.insert(oid1.to_hex(), Oid::hash(&d1).to_hex());
+        comp.insert(oid2.to_hex(), Oid::hash(&d2).to_hex());
+
+        let (_tmp, odb) = test_odb().await;
+
+        // Serves byte ranges out of `pack`, and on the second request records
+        // whether chunk 1 has already landed in the ODB.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen_first_before_second =
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = seen_first_before_second.clone();
+        let probe_odb = odb.clone();
+        let pack_for_server = pack.clone();
+        let srv = tokio::spawn(async move {
+            let mut n = 0usize;
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                n += 1;
+                let mut buf = [0u8; 4096];
+                let read = sock.read(&mut buf).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..read]).to_string();
+
+                if n == 2 {
+                    // THE ASSERTION, made from the server side: by the time the
+                    // client asks for the second range, the first range's chunk
+                    // must already be stored.
+                    if probe_odb.chunk_exists(&oid1).await.unwrap_or(false) {
+                        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+
+                // Parse "Range: bytes=START-END" (inclusive end).
+                let (mut start, mut end) = (0usize, pack_for_server.len() - 1);
+                if let Some(idx) = head.to_lowercase().find("range: bytes=") {
+                    let tail = &head[idx + "range: bytes=".len()..];
+                    let spec: String = tail
+                        .chars()
+                        .take_while(|c| *c != '\r' && *c != '\n')
+                        .collect();
+                    if let Some((a, b)) = spec.split_once('-') {
+                        start = a.trim().parse().unwrap_or(0);
+                        end = b.trim().parse().unwrap_or(pack_for_server.len() - 1);
+                    }
+                }
+                let end = end.min(pack_for_server.len().saturating_sub(1));
+                let body = &pack_for_server[start..=end];
+                let mut resp = format!(
+                    "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .into_bytes();
+                resp.extend_from_slice(body);
+                let _ = sock.write_all(&resp).await;
+                let _ = sock.flush().await;
+            }
+        });
+
+        let mut sink = PackChunkSink::new(&odb, None);
+        let client = reqwest::Client::new();
+        // max_gap 0 and a byte cap below one entry: the two entries cannot be
+        // coalesced, so this is genuinely two Range-GETs.
+        fetch_pack_slices_presigned(
+            &client,
+            &format!("http://{addr}/pack"),
+            "packtest",
+            &chunks,
+            0,
+            (e1 as u64).saturating_sub(1),
+            &comp,
+            None,
+            &mut sink,
+        )
+        .await
+        .expect("two-range fetch must succeed");
+
+        srv.abort();
+
+        assert_eq!(
+            sink.written.len(),
+            2,
+            "expected both chunks stored, got {:?}",
+            sink.written.len()
+        );
+        assert!(
+            seen_first_before_second.load(std::sync::atomic::Ordering::SeqCst),
+            "the first chunk was NOT in the ODB when the second range was requested — \
+             the fetch is accumulating the whole pack before writing, which is what \
+             put 24 concurrent packs (1,594 MB) in memory on a 16 GB clone"
+        );
+    }
+
     /// A pack Range-GET must RIDE OUT a transient failure rather than bailing
     /// the whole range on the first one.
     ///
@@ -1172,8 +1377,10 @@ mod tests {
         let (url, hits, _srv) = spawn_range_server(RangeServerMode::FailThenServe(2)).await;
 
         let (chunks, comp_hashes, want_oid, want_data) = single_chunk_fixture();
+        let (_tmp, odb) = test_odb().await;
+        let mut sink = PackChunkSink::new(&odb, None);
         let client = reqwest::Client::new();
-        let out = fetch_pack_slices_presigned(
+        fetch_pack_slices_presigned(
             &client,
             &url,
             "packtest",
@@ -1182,15 +1389,20 @@ mod tests {
             8 << 20,
             &comp_hashes,
             None,
+            &mut sink,
         )
         .await
         .expect("transient failures must be retried, not fatal");
 
-        assert_eq!(out.len(), 1, "expected the slice back after retrying");
-        assert_eq!(out[0].0, want_oid);
+        assert_eq!(sink.written.len(), 1, "expected the slice after retrying");
+        assert_eq!(sink.written[0], want_oid);
+        // The ODB accepted it, which means put_compressed_chunk's BLAKE3 check
+        // passed against the requested chunk_id — a stronger statement than
+        // comparing the returned buffer used to be.
         assert_eq!(
-            out[0].1, want_data,
-            "retried slice returned the wrong bytes"
+            sink.bytes,
+            want_data.len() as u64,
+            "retried slice stored the wrong number of bytes"
         );
         let seen = hits.load(std::sync::atomic::Ordering::SeqCst);
         assert!(
@@ -1209,6 +1421,8 @@ mod tests {
         let (url, hits, _srv) = spawn_range_server(RangeServerMode::AlwaysStatus(404)).await;
 
         let (chunks, comp_hashes, _, _) = single_chunk_fixture();
+        let (_tmp, odb) = test_odb().await;
+        let mut sink = PackChunkSink::new(&odb, None);
         let client = reqwest::Client::new();
         let started = std::time::Instant::now();
         let res = fetch_pack_slices_presigned(
@@ -1220,6 +1434,7 @@ mod tests {
             8 << 20,
             &comp_hashes,
             None,
+            &mut sink,
         )
         .await;
 
@@ -1258,9 +1473,11 @@ mod tests {
         crate::ensure_crypto_provider();
         let (url, _hits, _srv) = spawn_range_server(RangeServerMode::ServeCorrupted).await;
 
-        let (chunks, comp_hashes, _oid, want_data) = single_chunk_fixture();
+        let (chunks, comp_hashes, _oid, _want_data) = single_chunk_fixture();
+        let (_tmp, odb) = test_odb().await;
+        let mut sink = PackChunkSink::new(&odb, None);
         let client = reqwest::Client::new();
-        let out = fetch_pack_slices_presigned(
+        fetch_pack_slices_presigned(
             &client,
             &url,
             "packtest",
@@ -1269,22 +1486,22 @@ mod tests {
             8 << 20,
             &comp_hashes,
             None,
+            &mut sink,
         )
         .await
         .expect("a failed hash check is a skip, not a hard error — the caller falls back");
 
         assert!(
-            out.is_empty(),
-            "fetch_pack_slices_presigned returned {} slice(s) whose bytes do not match \
+            sink.written.is_empty(),
+            "fetch_pack_slices_presigned accepted {} slice(s) whose bytes do not match \
              the manifest hash. slice_verifies is not wired into this path, so corrupt \
              pack bytes would reach put_compressed_chunk — and a presigned URL is now \
              minted for unverified packs precisely because this refusal exists.",
-            out.len()
+            sink.written.len()
         );
-        assert!(
-            !out.iter().any(|(_, d)| *d == want_data),
-            "the corrupted fixture accidentally returned the correct bytes; the test is \
-             not exercising what it claims"
+        assert_eq!(
+            sink.bytes, 0,
+            "corrupt bytes were written to the ODB rather than refused"
         );
     }
 
@@ -1306,10 +1523,30 @@ mod tests {
         Vec<u8>,
     );
 
+    /// A temp-backed ObjectDatabase for the sink to write into.
+    ///
+    /// Unkeyed, so `smart_compressor` is `None` and `put_compressed_chunk`
+    /// takes its plain arm: it hashes the stored bytes directly, which is why
+    /// the fixture below uses `Oid::hash(&data)` as the chunk id. A real ODB
+    /// rather than a stand-in, so these tests exercise the actual
+    /// write-and-verify path the production sink uses.
+    async fn test_odb() -> (tempfile::TempDir, ObjectDatabase) {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let backend = std::sync::Arc::new(
+            mediagit_storage::LocalBackend::new(tmp.path().to_str().unwrap())
+                .await
+                .expect("local backend"),
+        );
+        let odb = ObjectDatabase::new(backend, 16);
+        (tmp, odb)
+    }
+
     /// One pack entry laid out as `type(1) + size(4) + data`, at offset 0.
     fn single_chunk_fixture() -> ChunkFixture {
         let data = b"the-stored-chunk-bytes".to_vec();
-        let oid = Oid::hash(b"chunk-identity");
+        // Must be the hash of the STORED bytes: that is what the ODB recomputes
+        // on write, and what slice_verifies compares against.
+        let oid = Oid::hash(&data);
         let hex = oid.to_hex();
         let entry_len = (5 + data.len()) as u32;
         let mut m = std::collections::HashMap::new();

@@ -48,3 +48,8 @@ mediagit-versioning = { path = "../mediagit-versioning" }
 [dev-dependencies]
 # Synthesising responses for the 429-backoff tests without a live server.
 http = "1"
+# A real ObjectDatabase for the pack-fetch tests: since fetches write through
+# PackChunkSink rather than returning a Vec, the tests exercise the actual
+# put_compressed_chunk path (BLAKE3 vs the requested chunk_id) instead of a
+# stand-in. Already a transitive dependency via mediagit-versioning.
+mediagit-storage = { path = "../mediagit-storage" }

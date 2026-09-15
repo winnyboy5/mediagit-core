@@ -3491,6 +3491,7 @@ dependencies = [
  "futures",
  "hex",
  "http 1.4.2",
+ "mediagit-storage",
  "mediagit-versioning",
  "reqwest",
  "rustls",
