@@ -1060,10 +1060,13 @@ pub async fn presign_pack_downloads(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<PresignPackDownloadRequest>,
 ) -> Result<Json<std::collections::HashMap<String, Option<PresignedGetJson>>>, StatusCode> {
-    // A clone asking for pack URLs is about to saturate the link. Hold
-    // background verification off it while that happens — see
-    // handlers::repo::wait_for_data_plane_quiet for the measurement.
-    crate::handlers::repo::note_data_plane_activity(&state);
+    // A clone asking for pack URLs is about to saturate the link, and once the
+    // URLs are out the server sees NOTHING until it is done — that is the point
+    // of presigning. So this declares the transfer's expected size rather than
+    // merely stamping "something happened"; see
+    // handlers::repo::note_data_plane_activity_for for the measurement showing
+    // why a timestamp alone was useless here.
+    crate::handlers::repo::note_data_plane_activity_for(&state, req.pack_ids.len());
     check_permission(
         auth_user.as_deref(),
         "repo:read",
@@ -2147,6 +2150,15 @@ mod presign_pack_downloads_verification_tests {
         .await
         .expect("handler itself must succeed; any refusal is per-pack, not a 5xx");
 
+        // Neutralise the presign LEASE. presign_pack_downloads now declares an
+        // expected transfer (bytes implied by the pack count) so background
+        // verification yields the link to it; for one pack that is ~32s, which
+        // this test would otherwise sit through. The lease is covered by
+        // handlers::repo::data_plane_quiet_tests — here it is noise.
+        state
+            .data_plane_activity
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+
         // (1) a URL was minted despite the pack being unverified.
         assert!(
             resp.0.get(&pack_oid).is_some_and(Option::is_some),
@@ -2413,6 +2425,16 @@ mod presign_pack_downloads_verification_tests {
         )
         .await
         .expect("handler must succeed");
+
+        // Neutralise the presign LEASE. presign_pack_downloads now declares an
+        // expected transfer (bytes implied by the pack count) so background
+        // verification yields the link to it; for one pack that is ~32s, which
+        // this test would otherwise sit through. The lease is covered by
+        // handlers::repo::data_plane_quiet_tests — here it is noise.
+        state
+            .data_plane_activity
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+
         assert!(
             first.0.get(&pack_oid).is_some_and(Option::is_some),
             "first request must mint even though the pack is not verified yet — \

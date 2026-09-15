@@ -1477,9 +1477,59 @@ fn now_millis() -> u64 {
 /// handlers only — control-plane chatter (refs, manifests) is cheap and must
 /// not hold verification off.
 pub(crate) fn note_data_plane_activity(state: &AppState) {
+    note_data_plane_activity_for(state, 0);
+}
+
+/// Declare a transfer of `packs` packs as starting now.
+///
+/// WHY A LEASE AND NOT JUST A TIMESTAMP. Stamping "activity happened" works only
+/// while the server is IN the data path. On the presigned fast path it is
+/// deliberately not: the client mints URLs and then reads straight from the
+/// bucket, so the server goes silent for the entire transfer.
+///
+/// Measured 2026-09-15 on the 16 GB corpus, aws arm: 151
+/// `presign-download-urls` requests arrived in FOUR distinct seconds
+/// (13:56:46, 13:56:49, 13:59:22, then nothing until 14:21:03). The server saw
+/// no data-plane traffic for ~21 of the clone's 23 minutes. A 5s quiet window
+/// therefore expired almost immediately and verification ran through the whole
+/// clone anyway — 34 packs / 2.22 GiB / 1.63 MB/s of stolen downlink, WORSE
+/// than the 22 packs measured before the scheduler existed. The first version
+/// of this fix did not work, and only a measurement showed it.
+///
+/// So a presign request is treated as what it actually is: a DECLARATION that
+/// the client is about to pull those packs. The lease is derived from the bytes
+/// implied by the pack count (each pack is capped at `pack_bytes_cap`) against
+/// a deliberately pessimistic floor rate, and is clamped by the same
+/// max-defer cap that bounds everything else here — so the worst case is
+/// unchanged and verification still cannot be postponed indefinitely.
+///
+/// HONEST LIMIT: this is a bound, not knowledge. The server never learns when a
+/// pull actually finishes, so the lease can expire mid-clone (verification then
+/// resumes and competes) or outlast a cancelled one (verification starts later
+/// than it could). Knowing would need either a client-side heartbeat or a
+/// "pull complete" signal — a protocol change — or removing the read-back
+/// entirely via upload-time provider attestation, which is the real fix.
+pub(crate) fn note_data_plane_activity_for(state: &AppState, packs: usize) {
+    let now = now_millis();
+    let lease_ms = if packs == 0 {
+        0
+    } else {
+        let bytes = (packs as u64).saturating_mul(mediagit_versioning::pack_bytes_cap());
+        let floor_mbps = std::env::var("MEDIAGIT_PACK_VERIFY_ASSUMED_MBPS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(2);
+        let secs = (bytes / (1024 * 1024)) / floor_mbps;
+        secs.min(verify_max_defer_secs()).saturating_mul(1000)
+    };
+    // Storing a FUTURE instant: the wait loop reads this as "the link is busy
+    // until then", so one value expresses both "just happened" (lease 0) and
+    // "expected to be busy for a while".
+    let until = now.saturating_add(lease_ms);
     state
         .data_plane_activity
-        .store(now_millis(), std::sync::atomic::Ordering::Relaxed);
+        .fetch_max(until, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Seconds the data plane must be idle before a pack is verified.
@@ -1639,6 +1689,38 @@ mod data_plane_quiet_tests {
             waited < std::time::Duration::from_secs(20),
             "verification waited {waited:?}, past its 1s cap: continuous traffic can \
              postpone it indefinitely, so corrupt packs would never be found"
+        );
+    }
+
+    /// A LEASE — an activity timestamp in the FUTURE — must keep the waiter
+    /// waiting until it passes.
+    ///
+    /// This is the mechanism the presign path depends on. Stamping "activity
+    /// happened" is useless there: measured on the aws 16 GB arm, 151
+    /// presign-download requests arrived within four seconds and then the
+    /// server saw nothing for ~21 of the clone's 23 minutes, because presigned
+    /// URLs take the server out of the data path by design. Verification ran
+    /// straight through the clone and stole MORE downlink than before the
+    /// scheduler existed (34 packs vs 22). Expressing "busy until T" is what
+    /// makes the declaration usable.
+    #[tokio::test]
+    async fn a_future_lease_keeps_the_link_busy_until_it_expires() {
+        // Busy for ~600ms from now.
+        let clock = std::sync::atomic::AtomicU64::new(now_millis() + 600);
+
+        let started = std::time::Instant::now();
+        // quiet=0 would disable; use 1s quiet and a cap well past the lease so
+        // the LEASE is what releases it, not the cap.
+        wait_for_data_plane_quiet_with("repo", "pack", 1, 900, &clock).await;
+        let waited = started.elapsed();
+
+        assert!(
+            waited >= std::time::Duration::from_millis(400),
+            "a future lease did not hold verification off ({waited:?}); on the              presigned fast path this is the ONLY signal that a transfer is running,              so without it verification competes for the whole clone"
+        );
+        assert!(
+            waited < std::time::Duration::from_secs(10),
+            "waited {waited:?} — the lease never expired, so verification would be              postponed past the transfer it was yielding to"
         );
     }
 
