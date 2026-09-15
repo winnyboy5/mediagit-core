@@ -702,6 +702,24 @@ impl ProtocolClient {
     }
 }
 
+/// Wall-clock budget for retrying ONE pack Range-GET, via
+/// `MEDIAGIT_PACK_RANGE_GET_RETRY_BUDGET_SECS` (default 120s).
+///
+/// Deliberately a separate name from `MEDIAGIT_PACK_PUT_RETRY_BUDGET_SECS`:
+/// they bound opposite directions of transfer, and this codebase has already
+/// paid for one env var silently driving two axes. Same default, because the
+/// same reasoning applies — long enough to ride out a WAN blip, short enough
+/// that a genuinely dead range reaches the per-chunk fallback while the clone
+/// still has somewhere to go.
+fn pack_range_get_retry_budget() -> std::time::Duration {
+    let secs = std::env::var("MEDIAGIT_PACK_RANGE_GET_RETRY_BUDGET_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(120);
+    std::time::Duration::from_secs(secs)
+}
+
 /// Whether a Range-GET's HTTP status can be sliced with `rel = off - range_start`.
 ///
 /// A compliant server answers a Range request with 206 (partial content). A 200
@@ -793,43 +811,95 @@ async fn fetch_pack_slices_presigned(
             b.record_range_get(covered > 1);
         }
         let hdr = format!("bytes={}-{}", range_start, range_end.saturating_sub(1));
-        // Presigned direct-to-bucket GET — not routed through
-        // send_with_rate_limit_retry, which only applies to the server's own
-        // 429s and Retry-After semantics.
-        let resp = client
-            .get(url)
-            .header("Range", &hdr)
-            .send()
-            .await
-            .with_context(|| format!("Range-GET {} range {}", pack_oid, hdr))?;
-
-        let status = resp.status().as_u16();
-        if !range_status_trusted(status, range_start) {
-            anyhow::bail!(
-                "Range-GET returned {} (want 206) for pack {} range {}",
-                status,
-                pack_oid,
-                hdr
-            );
-        }
-
-        let body = resp.bytes().await.context("read Range-GET body")?;
 
         // The requested range maps 1:1 onto real chunk offsets, so a compliant
         // body is at least `range_end - range_start` long. A shorter body means a
         // truncated/partial response (a backend degrading under load returns
         // short reads) — a chunk near the tail would then mis-slice or silently
-        // shrink. Bail to the per-chunk fallback rather than trust it.
+        // shrink, so a short body is a failed attempt, never trusted.
         let expected_len = (range_end - range_start) as usize;
-        if body.len() < expected_len {
-            anyhow::bail!(
-                "Range-GET short body for pack {} range {}: got {} of {} bytes",
-                pack_oid,
-                hdr,
-                body.len(),
-                expected_len
+
+        // RETRIED, since 2026-09-15. This had NO retry at all: one transport
+        // error, one non-206, or one short body bailed the whole range, and
+        // `pull_chunks_via_packs`'s `try_fold` then short-circuited the batch —
+        // dropping the clone onto the per-chunk proxy path, which on the 16 GB
+        // corpus is 4,073 requests against 155. A single blip on a WAN link
+        // therefore cost a ~26x slowdown. The upload side already learned this
+        // (MEDIAGIT_PACK_PUT_RETRY_BUDGET_SECS); the download side had nothing.
+        //
+        // Budget is elapsed-time, not an attempt count, and is measured from the
+        // first attempt so a slow failing attempt spends its own time — the same
+        // shape as the PUT budget, and deliberately NOT a fixed per-attempt
+        // timer, which is a cliff against bandwidth-dependent work.
+        //
+        // Permanent outcomes still bail immediately: falling back to per-chunk
+        // is correct for a genuinely absent or forbidden object, and retrying it
+        // would burn the budget to reach the same place. `RefreshUrl` (an
+        // expired signature) also bails, because this function holds no server
+        // handle to re-presign with — the per-chunk fallback re-presigns
+        // naturally. That is a real limitation, recorded rather than hidden.
+        //
+        // Presigned direct-to-bucket GET — not routed through
+        // send_with_rate_limit_retry, which only applies to the server's own
+        // 429s and Retry-After semantics.
+        let started = std::time::Instant::now();
+        let budget = pack_range_get_retry_budget();
+        let mut attempt: u32 = 0;
+        let body = loop {
+            attempt += 1;
+            let why: String = match client.get(url).header("Range", &hdr).send().await {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    if !range_status_trusted(status, range_start) {
+                        let text = resp.text().await.unwrap_or_default();
+                        match crate::error_class::classify_auto_get(status, url, "", "", &text) {
+                            crate::error_class::TransferOutcome::Transient => {
+                                format!("status {status} (want 206)")
+                            }
+                            other => anyhow::bail!(
+                                "Range-GET returned {} (want 206) for pack {} range {} — \
+                                 not retryable ({:?}); falling back to per-chunk",
+                                status,
+                                pack_oid,
+                                hdr,
+                                other
+                            ),
+                        }
+                    } else {
+                        match resp.bytes().await {
+                            Ok(b) if b.len() >= expected_len => break b,
+                            Ok(b) => {
+                                format!("short body: got {} of {} bytes", b.len(), expected_len)
+                            }
+                            Err(e) => format!("read body: {e}"),
+                        }
+                    }
+                }
+                Err(e) => format!("transport: {e}"),
+            };
+
+            let elapsed = started.elapsed();
+            if elapsed >= budget {
+                anyhow::bail!(
+                    "Range-GET for pack {} range {} failed after {} attempt(s) in {:?} \
+                     (budget {:?}, MEDIAGIT_PACK_RANGE_GET_RETRY_BUDGET_SECS): {}",
+                    pack_oid,
+                    hdr,
+                    attempt,
+                    elapsed,
+                    budget,
+                    why
+                );
+            }
+            tracing::debug!(
+                pack = %pack_oid, range = %hdr, attempt, elapsed_ms = elapsed.as_millis() as u64,
+                why = %why, "pack Range-GET attempt failed; retrying"
             );
-        }
+            // 200ms, 400, 800, 1600, 3200, then flat — capped so a long budget
+            // does not turn into a few very late attempts.
+            let shift = attempt.min(5) - 1;
+            tokio::time::sleep(std::time::Duration::from_millis(200u64 << shift)).await;
+        };
 
         for (hex, off, len) in chunks {
             if *off < range_start || *off + *len as u64 > range_end {
@@ -1079,5 +1149,238 @@ mod tests {
             !slice_verifies(&hex, data, &m),
             "a slice whose bytes do not match the manifest was accepted"
         );
+    }
+
+    /// A pack Range-GET must RIDE OUT a transient failure rather than bailing
+    /// the whole range on the first one.
+    ///
+    /// Before 2026-09-15 this path had no retry at all: one transport error,
+    /// one non-206, or one short body bailed, and `pull_chunks_via_packs`'s
+    /// `try_fold` short-circuited the batch, dropping the clone onto the
+    /// per-chunk proxy path — 4,073 requests against 155 packs on the 16 GB
+    /// corpus. A single WAN blip therefore bought a ~26x slowdown.
+    ///
+    /// Serves 503 twice, then the real bytes. Asserts the slice comes back AND
+    /// that it took more than one request, so this cannot pass against a server
+    /// that never failed in the first place.
+    #[tokio::test]
+    async fn pack_range_get_rides_out_a_transient_failure() {
+        // Required before building a reqwest::Client: the rustls provider is
+        // process-global and installed by whichever test runs first, so without
+        // this the test passes in a full run and panics when run filtered.
+        crate::ensure_crypto_provider();
+        let (url, hits, _srv) = spawn_range_server(RangeServerMode::FailThenServe(2)).await;
+
+        let (chunks, comp_hashes, want_oid, want_data) = single_chunk_fixture();
+        let client = reqwest::Client::new();
+        let out = fetch_pack_slices_presigned(
+            &client,
+            &url,
+            "packtest",
+            &chunks,
+            1 << 20,
+            8 << 20,
+            &comp_hashes,
+            None,
+        )
+        .await
+        .expect("transient failures must be retried, not fatal");
+
+        assert_eq!(out.len(), 1, "expected the slice back after retrying");
+        assert_eq!(out[0].0, want_oid);
+        assert_eq!(
+            out[0].1, want_data,
+            "retried slice returned the wrong bytes"
+        );
+        let seen = hits.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            seen >= 3,
+            "server saw only {seen} request(s) — the transient failures were not \
+             retried, so this test would also pass against a server that never failed"
+        );
+    }
+
+    /// The other half: a PERMANENT status must NOT be retried. Burning the
+    /// budget to reach the same answer only delays the per-chunk fallback, which
+    /// is the correct destination for a genuinely absent object.
+    #[tokio::test]
+    async fn pack_range_get_does_not_retry_a_permanent_status() {
+        crate::ensure_crypto_provider();
+        let (url, hits, _srv) = spawn_range_server(RangeServerMode::AlwaysStatus(404)).await;
+
+        let (chunks, comp_hashes, _, _) = single_chunk_fixture();
+        let client = reqwest::Client::new();
+        let started = std::time::Instant::now();
+        let res = fetch_pack_slices_presigned(
+            &client,
+            &url,
+            "packtest",
+            &chunks,
+            1 << 20,
+            8 << 20,
+            &comp_hashes,
+            None,
+        )
+        .await;
+
+        assert!(
+            res.is_err(),
+            "a 404 range must surface as an error, not as an empty success"
+        );
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a permanent status was retried; it must bail straight to the per-chunk fallback"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "permanent failure took {:?} — it burned retry budget it should not have",
+            started.elapsed()
+        );
+    }
+
+    /// A pack whose bytes do not match the manifest must be REFUSED by the
+    /// fetch path, not returned to the caller.
+    ///
+    /// `slice_verifies` has three unit tests above, but they call it directly.
+    /// They prove the function is correct; they prove NOTHING about whether
+    /// `fetch_pack_slices_presigned` actually calls it — the same "unit-tested
+    /// guard that is never invoked" shape that was found in
+    /// `presign_pack_downloads` on 2026-09-15, where sabotaging the call site
+    /// left four unit tests green while the gate did nothing.
+    ///
+    /// This matters more since presigned URLs are now minted for UNVERIFIED
+    /// packs: the client's own refusal is what makes that safe. Returning an
+    /// empty set is the correct outcome — the caller's set-diff then refetches
+    /// those chunks via the per-chunk path, which verifies independently.
+    #[tokio::test]
+    async fn a_corrupted_pack_slice_is_refused_by_the_fetch_path() {
+        crate::ensure_crypto_provider();
+        let (url, _hits, _srv) = spawn_range_server(RangeServerMode::ServeCorrupted).await;
+
+        let (chunks, comp_hashes, _oid, want_data) = single_chunk_fixture();
+        let client = reqwest::Client::new();
+        let out = fetch_pack_slices_presigned(
+            &client,
+            &url,
+            "packtest",
+            &chunks,
+            1 << 20,
+            8 << 20,
+            &comp_hashes,
+            None,
+        )
+        .await
+        .expect("a failed hash check is a skip, not a hard error — the caller falls back");
+
+        assert!(
+            out.is_empty(),
+            "fetch_pack_slices_presigned returned {} slice(s) whose bytes do not match \
+             the manifest hash. slice_verifies is not wired into this path, so corrupt \
+             pack bytes would reach put_compressed_chunk — and a presigned URL is now \
+             minted for unverified packs precisely because this refusal exists.",
+            out.len()
+        );
+        assert!(
+            !out.iter().any(|(_, d)| *d == want_data),
+            "the corrupted fixture accidentally returned the correct bytes; the test is \
+             not exercising what it claims"
+        );
+    }
+
+    enum RangeServerMode {
+        /// Answer 503 this many times, then serve the real bytes.
+        FailThenServe(usize),
+        /// Always answer this status.
+        AlwaysStatus(u16),
+        /// Serve 206 with bytes that do NOT match the manifest's hash.
+        ServeCorrupted,
+    }
+
+    /// `(chunks, comp_hashes, expected_oid, expected_stored_bytes)` — the four
+    /// things every range-fetch test needs to drive the call and check it.
+    type ChunkFixture = (
+        Vec<(String, u64, u32)>,
+        std::collections::HashMap<String, String>,
+        Oid,
+        Vec<u8>,
+    );
+
+    /// One pack entry laid out as `type(1) + size(4) + data`, at offset 0.
+    fn single_chunk_fixture() -> ChunkFixture {
+        let data = b"the-stored-chunk-bytes".to_vec();
+        let oid = Oid::hash(b"chunk-identity");
+        let hex = oid.to_hex();
+        let entry_len = (5 + data.len()) as u32;
+        let mut m = std::collections::HashMap::new();
+        // slice_verifies compares BLAKE3 of the STORED bytes.
+        m.insert(hex.clone(), Oid::hash(&data).to_hex());
+        (vec![(hex, 0u64, entry_len)], m, oid, data)
+    }
+
+    fn pack_body() -> Vec<u8> {
+        let (_, _, _, data) = single_chunk_fixture();
+        let mut body = vec![0u8];
+        body.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        body.extend_from_slice(&data);
+        body
+    }
+
+    /// Minimal HTTP/1.1 server answering one Range-GET per connection. Raw TCP
+    /// rather than a framework: this crate has no test HTTP server, and the
+    /// status line needs to be controlled exactly.
+    #[allow(clippy::type_complexity)]
+    async fn spawn_range_server(
+        mode: RangeServerMode,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hits2 = hits.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let n = hits2.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let resp: Vec<u8> = match mode {
+                    RangeServerMode::AlwaysStatus(code) => format!(
+                        "HTTP/1.1 {code} Err\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                    .into_bytes(),
+                    RangeServerMode::FailThenServe(fail_n) if n <= fail_n => {
+                        "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_string()
+                            .into_bytes()
+                    }
+                    RangeServerMode::FailThenServe(_) | RangeServerMode::ServeCorrupted => {
+                        let mut body = pack_body();
+                        if matches!(mode, RangeServerMode::ServeCorrupted) {
+                            // Flip a payload byte: same length, same framing,
+                            // wrong content — exactly what a mis-assembled
+                            // multipart object or a bit-flip looks like.
+                            *body.last_mut().unwrap() ^= 0xFF;
+                        }
+                        let mut head = format!(
+                            "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .into_bytes();
+                        head.extend_from_slice(&body);
+                        head
+                    }
+                };
+                let _ = sock.write_all(&resp).await;
+                let _ = sock.flush().await;
+            }
+        });
+        (format!("http://{addr}/pack"), hits, handle)
     }
 }
