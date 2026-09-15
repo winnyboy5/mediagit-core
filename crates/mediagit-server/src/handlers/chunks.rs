@@ -681,6 +681,9 @@ pub async fn download_chunk(
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
 ) -> Result<Response, StatusCode> {
+    // Data-plane traffic: hold background pack verification off the link
+    // while a transfer is using it (see handlers::repo::wait_for_data_plane_quiet).
+    crate::handlers::repo::note_data_plane_activity(&state);
     check_permission(
         auth_user.as_deref(),
         "repo:read",
@@ -1300,6 +1303,9 @@ pub async fn batch_get_pack_chunks(
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<BatchGetRequest>,
 ) -> Result<Response, StatusCode> {
+    // Data-plane traffic: hold background pack verification off the link
+    // while a transfer is using it (see handlers::repo::wait_for_data_plane_quiet).
+    crate::handlers::repo::note_data_plane_activity(&state);
     check_permission(
         auth_user.as_deref(),
         "repo:read",
