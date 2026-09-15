@@ -604,7 +604,34 @@ impl ProtocolClient {
             })
             .collect();
 
+        // TWO clients, deliberately, and they are not interchangeable.
+        //
+        // `client` (control plane) talks to OUR server: /packs/batch-get needs
+        // the `x-api-key` default header it carries.
+        //
+        // `direct_client` (data plane) talks to the BUCKET via presigned URLs,
+        // and this path was using the control-plane client for that until
+        // 2026-09-15. Two consequences, both real:
+        //
+        //  1. The control-plane client enables HTTP/2 (adaptive window, 32 MiB
+        //     connection window). Against a backend that negotiates h2 — GCS
+        //     does — all 24 concurrent Range-GETs multiplex onto ONE TCP
+        //     connection and share one congestion/flow-control window. Measured
+        //     on the 16 GB corpus: the gcs clone held **1** established
+        //     connection where aws held 24 and azure 18-25.
+        //     `data_plane_client_builder` is `.http1_only()` precisely because
+        //     "parallel TCP sockets beat h2 multiplexing for large bodies,
+        //     since parallel congestion windows beat one" — its own words, and
+        //     this call site was the one place not honouring them.
+        //  2. It sends `x-api-key` to the bucket. The data-plane builder states
+        //     the rule outright ("must never reach a bucket"), and the sibling
+        //     per-chunk path in pull.rs repeats it; only this path broke it.
+        //
+        // Credential-free fallback for the same reason as pull.rs:845.
         let client = self.client.clone();
+        let direct_client = super::data_plane_client_builder()
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         let base_url = self.base_url.clone();
         // Clone odb so it can move into concurrent async tasks (all fields are Arc-wrapped).
         let odb = odb.clone();
@@ -612,6 +639,7 @@ impl ProtocolClient {
         let written_set: std::collections::HashSet<Oid> = futures::stream::iter(tasks)
             .map(|task| {
                 let client = client.clone();
+                let direct_client = direct_client.clone();
                 let base_url = base_url.clone();
                 let cmg = coalesce_max_gap;
                 let cmb = coalesce_max_bytes;
@@ -635,7 +663,8 @@ impl ProtocolClient {
                             pack_oid,
                         } => {
                             fetch_pack_slices_presigned(
-                                &client,
+                                // Bucket-bound: data-plane client, h1, no creds.
+                                &direct_client,
                                 &url,
                                 &pack_oid,
                                 &chunks,
@@ -1354,6 +1383,159 @@ mod tests {
              the fetch is accumulating the whole pack before writing, which is what \
              put 24 concurrent packs (1,594 MB) in memory on a 16 GB clone"
         );
+    }
+
+    /// Presigned pack Range-GETs must go out on the DATA-PLANE client, not the
+    /// control-plane one.
+    ///
+    /// Two independent defects when they don't, both observed on the 16 GB runs
+    /// of 2026-09-15:
+    ///
+    ///  1. CREDENTIAL LEAK. The control-plane client carries `x-api-key` as a
+    ///     default header, so every Range-GET hands the caller's API key to a
+    ///     third-party bucket. `data_plane_client_builder` states the rule
+    ///     outright ("must never reach a bucket") and the sibling per-chunk path
+    ///     in pull.rs repeats it; this call site was the one that broke it.
+    ///  2. ONE CONNECTION. The control-plane client enables HTTP/2 with a 32 MiB
+    ///     connection window. Against a backend that negotiates h2 — GCS does —
+    ///     all 24 concurrent Range-GETs collapse onto a single TCP connection
+    ///     and share one flow-control window. Measured: the gcs clone held 1
+    ///     established connection where aws held 24 and azure 18-25.
+    ///     `data_plane_client_builder` is `.http1_only()` for exactly this
+    ///     reason.
+    ///
+    /// Drives the REAL `pull_chunks_via_packs` rather than calling the fetch
+    /// helper directly, because the bug was never in the helper — it was in
+    /// which client the caller handed it. A test that passed its own client
+    /// would have stayed green through all of it.
+    ///
+    /// One mock stands in for both the control plane and the bucket, so the
+    /// assertion is simply "which requests carried the key".
+    #[tokio::test]
+    async fn presigned_pack_range_gets_do_not_carry_control_plane_credentials() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        crate::ensure_crypto_provider();
+
+        let data = b"the-stored-chunk-bytes".to_vec();
+        let oid = Oid::hash(&data);
+        let hex = oid.to_hex();
+        let entry_len = (5 + data.len()) as u32;
+        let mut pack = vec![0u8];
+        pack.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        pack.extend_from_slice(&data);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base = format!("http://{addr}");
+
+        // Records, per request path, whether an api key rode along.
+        let bucket_saw_key = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let control_saw_key = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let bucket_hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (bk, ck, bh) = (
+            bucket_saw_key.clone(),
+            control_saw_key.clone(),
+            bucket_hits.clone(),
+        );
+
+        let hex_srv = hex.clone();
+        let base_srv = base.clone();
+        let srv = tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let (bk, ck, bh) = (bk.clone(), ck.clone(), bh.clone());
+                let hex_srv = hex_srv.clone();
+                let base_srv = base_srv.clone();
+                let pack = pack.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 16384];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let first = head.lines().next().unwrap_or("").to_string();
+                    let has_key = head.to_lowercase().contains("x-api-key");
+
+                    let reply = |status: &str, body: Vec<u8>| {
+                        let mut r = format!(
+                            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .into_bytes();
+                        r.extend_from_slice(&body);
+                        r
+                    };
+
+                    let resp = if first.contains("/chunks/locate") {
+                        if has_key {
+                            ck.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        let body = format!(
+                            r#"{{"{hex_srv}":{{"pack_oid":"{}","offset":0,"length":{entry_len},"compressed_hash":"{hex_srv}"}}}}"#,
+                            "bb".repeat(32)
+                        );
+                        reply("200 OK", body.into_bytes())
+                    } else if first.contains("/packs/presign-download-urls") {
+                        if has_key {
+                            ck.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        // Point the "presigned" URL back at this same server.
+                        let body = format!(
+                            r#"{{"{}":{{"url":"{base_srv}/bucket/pack","headers":[],"method":"GET","expires_in_secs":3600}}}}"#,
+                            "bb".repeat(32)
+                        );
+                        reply("200 OK", body.into_bytes())
+                    } else if first.contains("/bucket/pack") {
+                        bh.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        if has_key {
+                            bk.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        let mut r = format!(
+                            "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            pack.len()
+                        )
+                        .into_bytes();
+                        r.extend_from_slice(&pack);
+                        r
+                    } else {
+                        reply("404 Not Found", b"{}".to_vec())
+                    };
+                    let _ = sock.write_all(&resp).await;
+                    let _ = sock.flush().await;
+                });
+            }
+        });
+
+        let (_tmp, odb) = test_odb().await;
+        let client = crate::ProtocolClient::new(&base)
+            .with_credentials(crate::client::Credentials::ApiKey("secret-key".into()));
+
+        let written = client
+            .pull_chunks_via_packs(&[oid], &odb, None, None)
+            .await
+            .expect("pack-mode pull must succeed against the mock");
+
+        srv.abort();
+
+        assert!(
+            bucket_hits.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            "the bucket was never contacted — the test did not exercise the presigned \
+             path, so its assertions prove nothing"
+        );
+        assert!(
+            control_saw_key.load(std::sync::atomic::Ordering::SeqCst),
+            "the control plane did NOT receive x-api-key; the fixture is wrong, and a \
+             'bucket saw no key' result would be vacuous"
+        );
+        assert!(
+            !bucket_saw_key.load(std::sync::atomic::Ordering::SeqCst),
+            "x-api-key was sent to the BUCKET on a presigned Range-GET. That is the \
+             control-plane client being used for data-plane traffic: it leaks the \
+             caller's credential to a third party, and it enables HTTP/2, which \
+             collapses 24 parallel Range-GETs onto one connection (measured: gcs 1 \
+             connection vs aws 24)."
+        );
+        assert_eq!(written.len(), 1, "expected the chunk to land in the ODB");
     }
 
     /// A pack Range-GET must RIDE OUT a transient failure rather than bailing
