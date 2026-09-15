@@ -957,15 +957,17 @@ pub struct PresignPackDownloadRequest {
     pub pack_ids: Vec<String>,
 }
 
-/// D3 (never-speculative reads): gate presigned-URL minting on content
-/// verification for a pack that's still pending it (`state.unverified_packs`
-/// — see `complete_pack`'s async PAC verification). Minting a presigned URL
-/// is irrevocable: once issued, the server is permanently out of that
-/// request path, with only the URL's TTL left to bound exposure. So unlike
-/// D1/D2 (which verify only the requested slice), this verifies the WHOLE
-/// pack before a URL for it goes out — reusing `verify_pack_in_background`
-/// (repo.rs), the exact same verify-and-quarantine logic the background
-/// worker uses, not a second implementation.
+/// Verify a pack that is still pending content verification
+/// (`state.unverified_packs` — see `complete_pack`'s async PAC verification),
+/// reusing `verify_pack_in_background` (repo.rs), the exact same
+/// verify-and-quarantine logic the background worker uses, not a second
+/// implementation.
+///
+/// This used to gate presigned-URL minting (D3, "never-speculative reads").
+/// It no longer does — see the block comment on `presign_pack_downloads` for
+/// the measurement that changed it. Callers now use it to *drive and
+/// deduplicate* verification, not to decide whether bytes may be served.
+/// Its return value still matters to callers that serve bytes themselves.
 ///
 /// Concurrent callers for the same (repo, pack_oid) — multiple pullers, or a
 /// presign racing the background worker spawned by `complete_pack` — must
@@ -1086,13 +1088,53 @@ pub async fn presign_pack_downloads(
         .filter(|n: &usize| *n > 0)
         .unwrap_or(64);
 
-    // THIS HANDLER NEVER WAITS FOR VERIFICATION.
+    // THIS HANDLER NEVER WAITS FOR VERIFICATION, AND NO LONGER WITHHOLDS A URL
+    // BECAUSE OF IT.
     //
-    // D3 requires that no URL is minted for a pack whose contents have not been
-    // verified, because a presigned URL takes the server out of the data path
-    // permanently — there is no revocation. That requirement is kept exactly.
-    // What changed is that an unverified pack is answered `None` IMMEDIATELY
-    // instead of the request blocking until verification finishes.
+    // D3 used to require that no URL was minted for a pack whose contents had
+    // not been verified, because a presigned URL takes the server out of the
+    // data path permanently — there is no revocation. Answering `None` was
+    // believed near-free: the client simply fetches that pack through the
+    // per-chunk proxy, which "moves the check onto the read the client was
+    // going to perform regardless".
+    //
+    // MEASURED 2026-09-15 — aws, 15.53 GB corpus, 10.03 GB ODB, 4,073 chunks,
+    // 155 packs. That equivalence is false. Direct is ONE range-GET per pack;
+    // the proxy is one request per CHUNK — 4,073 against 155, a 26x request
+    // amplification, each a WAN round trip through the server — while the
+    // background verifier re-reads the same 10 GB over the same uplink one pack
+    // at a time. 88 of 155 packs answered `None`. Clone throughput collapsed
+    // 6.3 -> 0.2 MB/s, proxy chunk latency p90 164 s / max 302 s, and the first
+    // clone of that repo was tracking ~12 HOURS against a 19.9 min push. At
+    // 2 GB (32 packs) verification drains before it matters, which is why every
+    // earlier run looked healthy.
+    //
+    // WHY MINTING ANYWAY IS SAFE. The check D3 protected is not the one that
+    // guards the client's disk, and it never was. On the pack path the client
+    // applies two independent checks of its own:
+    //   1. `slice_verifies` (protocol/src/client/packs.rs) fails CLOSED — a
+    //      slice is accepted only when the manifest carries a `compressed_hash`
+    //      AND the bytes match; otherwise it is refused and falls through to
+    //      the per-chunk path.
+    //   2. `put_compressed_chunk` (odb/chunks.rs) decompresses and refuses to
+    //      store unless BLAKE3(plaintext) == the chunk_id THE CLIENT ITSELF
+    //      asked for (QA-006b), called for every pack-mode chunk.
+    // So corrupt or substituted bytes cannot reach disk whether or not the
+    // server pre-read the pack. Server-side read-back is a proactive integrity
+    // SCAN that had been wired into the serving gate; that coupling, not the
+    // scan, is what cost the 12 hours.
+    //
+    // `unverified_packs` means "not yet RESOLVED", never "known bad": a pack
+    // that fails verification has its bad entries removed by
+    // `evict_pack_entries` and is THEN dropped from the set (repo.rs). So this
+    // cannot hand out a URL for a pack already known to be corrupt.
+    //
+    // Residual cost, bounded and rare: if a pack does turn out corrupt, a
+    // client that already fetched it fails its own checks and falls back to
+    // per-chunk — today's behaviour, but only in the corrupt case instead of on
+    // every fresh push.
+    //
+    // What has NOT changed: this handler still never blocks on verification.
     //
     // Why it must not block: verification re-reads the whole pack out of the
     // bucket, so its cost is payload / bandwidth, while the client's patience
@@ -1126,7 +1168,8 @@ pub async fn presign_pack_downloads(
             let repo_path = repo_path.clone();
             let state = Arc::clone(&state);
             async move {
-                // D3: never mint for a pack that is not already verified.
+                // An unverified pack still gets a URL. See the block comment on
+                // this handler for the measurement that changed this.
                 //
                 // Read-only check, no waiting. This is the same predicate
                 // `ensure_pack_verified_for_presign` uses for its fast path.
@@ -1136,11 +1179,11 @@ pub async fn presign_pack_downloads(
                 };
 
                 if !already_verified {
-                    // Start verification if nothing is on it yet, but do NOT
-                    // await it — that wait is what failed ga46. The client is
-                    // told `None` and fetches this pack through the proxy, which
-                    // verifies every chunk inline before serving it, so nothing
-                    // unverified reaches it either way.
+                    // Kick verification off and DO NOT await it — that wait is
+                    // what failed ga46, and withholding the URL while it ran is
+                    // what cost 12 hours on the 16 GB corpus. Verification still
+                    // runs, still quarantines via `evict_pack_entries`; it just
+                    // no longer decides whether this client gets a URL.
                     //
                     // Detached rather than inline: the request must not own work
                     // whose duration is set by the bucket. The verify cell
@@ -1162,10 +1205,11 @@ pub async fn presign_pack_downloads(
                     tracing::debug!(
                         repo = %repo,
                         pack = %pack_id,
-                        "presign_pack_downloads: pack not yet verified; returning no URL so the \
-                         client proxies it, and verifying in the background"
+                        "presign_pack_downloads: pack not yet verified; minting anyway and \
+                         verifying in the background (the client BLAKE3-verifies every chunk \
+                         it stores, on this path and the proxy path alike)"
                     );
-                    return (pack_id, None);
+                    // fall through and mint
                 }
                 let key = format!("packs/{}", pack_id);
                 let entry = match storage.presign_get(&key, ttl).await {
@@ -1536,9 +1580,12 @@ mod complete_chunk_uploads_content_verification_tests {
     }
 }
 
-/// D3 (never-speculative reads): `ensure_pack_verified_for_presign` gates
-/// presigned-URL minting on full-pack content verification for a pack still
-/// pending it, and deduplicates concurrent verifications of the same pack.
+/// `ensure_pack_verified_for_presign` runs full-pack content verification for
+/// a pack still pending it, and deduplicates concurrent verifications of the
+/// same pack. Since 2026-09-15 its result no longer gates whether a presigned
+/// URL is minted (see the block comment on `presign_pack_downloads`); it is the
+/// shared entry point for verifying-and-quarantining a pack, and the dedupe is
+/// what stops a burst of pack_ids from each pulling the whole pack over the WAN.
 #[cfg(test)]
 mod presign_pack_downloads_verification_tests {
     use super::*;
@@ -2031,18 +2078,41 @@ mod presign_pack_downloads_verification_tests {
     /// green while the gate did nothing in production — a unit-tested guard
     /// that is never invoked is not a guard.
     ///
-    /// This test goes through the HANDLER. A corrupted, unverified pack must
-    /// come back mapped to `None` (the existing "client falls back" contract),
-    /// never a minted URL — because once a URL is minted the server is
-    /// permanently out of that request path and there is no revocation.
+    /// This test goes through the HANDLER, and asserts BOTH halves of the
+    /// contract that replaced D3 on 2026-09-15:
+    ///
+    ///   1. an unverified pack IS minted a URL. Withholding it sent the client
+    ///      down the per-chunk proxy — 4,073 requests against 155 packs on the
+    ///      16 GB corpus — collapsing a clone to 0.2 MB/s and ~12 h.
+    ///   2. verification still RUNS for that pack. This is the half a naive
+    ///      edit drops, by deleting the detached spawn along with the early
+    ///      return. Without it a pack stays unverified forever and its corrupt
+    ///      entries are never quarantined — a silent, much worse regression
+    ///      than the one being fixed, and invisible to (1) alone.
+    ///
+    /// Uses a VALID pack, deliberately. An earlier version of this test used a
+    /// corrupted one and flaked ~50% of runs, which is worth recording because
+    /// the cause was an invalid assertion, not a slow machine:
+    ///
+    ///   * a pack whose entries come back UNREADABLE is deliberately LEFT in
+    ///     `unverified_packs` — "resolving it either way would be wrong"
+    ///     (repo.rs, the `unreadable > 0` branch). So "left the set" is simply
+    ///     not a signal that verification ran, for that class of pack.
+    ///   * the unreadable-entry retry backs off `2^attempt` seconds — 2s then
+    ///     4s — and the poll budget here was exactly 2s, landing on the
+    ///     boundary.
+    ///
+    /// A valid pack resolves in one pass with no backoff, so both halves are
+    /// deterministic. Minting for a CORRUPTED unverified pack — the scarier
+    /// case — is asserted separately below.
     #[tokio::test]
-    async fn handler_refuses_to_mint_for_unverified_corrupted_pack() {
+    async fn handler_mints_for_unverified_pack_and_still_verifies() {
         let repo = "test-repo".to_string();
         let (_tmp, state, repo_path) = setup(&repo).await;
         let inner = get_or_init_storage(&state, &repo_path)
             .await
             .expect("storage");
-        let fixture = build_pack_with_corrupted_entry();
+        let fixture = build_valid_pack();
         let pack_oid = "d".repeat(64);
         write_pack_and_manifest(&inner, &repo_path, &pack_oid, &fixture).await;
         mark_unverified(&state, &repo, &pack_oid).await;
@@ -2071,14 +2141,101 @@ mod presign_pack_downloads_verification_tests {
             }),
         )
         .await
-        .expect("handler itself must succeed; the refusal is per-pack, not a 5xx");
+        .expect("handler itself must succeed; any refusal is per-pack, not a 5xx");
 
+        // (1) a URL was minted despite the pack being unverified.
         assert!(
-            resp.0.get(&pack_oid).map(Option::is_none).unwrap_or(true),
-            "handler minted a presigned URL for a corrupted unverified pack — the \
-                verification gate is not wired into presign_pack_downloads"
+            resp.0.get(&pack_oid).is_some_and(Option::is_some),
+            "handler withheld a presigned URL for an unverified pack — that is the \
+             behaviour that collapsed a 16 GB clone to 0.2 MB/s by diverting it onto \
+             the per-chunk proxy path"
+        );
+
+        // (2) verification still ran for it. Bounded poll, so "the spawn was
+        // dropped" fails the test instead of hanging. A VALID pack resolves in
+        // one pass and leaves `unverified_packs`, so leaving the set is a sound
+        // signal here (see the note above for why it is not, for a corrupted
+        // one). Budget is 10s — far above the ~ms this needs, because the only
+        // thing it must distinguish is "ran" from "never spawned".
+        let mut verified = false;
+        for _ in 0..1000 {
+            {
+                let unverified = state.unverified_packs.read().await;
+                if !unverified.get(&repo).is_some_and(|s| s.contains(&pack_oid)) {
+                    verified = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            verified,
+            "pack never left unverified_packs — presign_pack_downloads minted a URL but \
+             stopped kicking off background verification, so corrupt entries would never \
+             be quarantined"
         );
     }
+
+    /// The scary case, and the one the pre-2026-09-15 gate existed for: a pack
+    /// that is BOTH unverified AND corrupt still gets a URL.
+    ///
+    /// That is safe, and deliberately so. The server never sees pack bytes on
+    /// the presigned path, so its read-back was never what protected the
+    /// client's disk — the client's own checks are: `slice_verifies` refuses
+    /// any slice it cannot match against the manifest's `compressed_hash`
+    /// (fail-closed), and `put_compressed_chunk` refuses to store anything
+    /// whose BLAKE3 is not the chunk_id the client itself asked for. A corrupt
+    /// pack therefore costs one wasted download and falls back to per-chunk,
+    /// which is precisely what the old gate forced on EVERY pack of every fresh
+    /// push — 88 of 155 on the 16 GB corpus.
+    ///
+    /// Deliberately asserts ONLY the mint. Whether verification resolves is not
+    /// assertable here: a pack with unreadable entries is intentionally left in
+    /// `unverified_packs` rather than quarantined. Resolution is covered by the
+    /// valid-pack test above.
+    #[tokio::test]
+    async fn handler_mints_even_for_a_corrupted_unverified_pack() {
+        let repo = "corrupt-mint-repo".to_string();
+        let (_tmp, state, repo_path) = setup(&repo).await;
+        let inner = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        let fixture = build_pack_with_corrupted_entry();
+        let pack_oid = "d".repeat(64);
+        write_pack_and_manifest(&inner, &repo_path, &pack_oid, &fixture).await;
+        mark_unverified(&state, &repo, &pack_oid).await;
+
+        // A backend that CAN presign, so "minted" is a real assertion and not
+        // an artefact of the local backend never minting anything.
+        install_backend(
+            &state,
+            &repo_path,
+            Arc::new(CountingBackend {
+                inner: Arc::clone(&inner),
+                verify_reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }),
+        )
+        .await;
+
+        let resp = presign_pack_downloads(
+            Path(repo.clone()),
+            State(Arc::clone(&state)),
+            None,
+            Json(PresignPackDownloadRequest {
+                pack_ids: vec![pack_oid.clone()],
+            }),
+        )
+        .await
+        .expect("handler itself must succeed; any refusal is per-pack, not a 5xx");
+
+        assert!(
+            resp.0.get(&pack_oid).is_some_and(Option::is_some),
+            "handler withheld a URL for a corrupted unverified pack. Withholding is what \
+             collapsed the 16 GB clone; the client's own slice_verifies + \
+             put_compressed_chunk checks are what keep a corrupt pack from reaching disk"
+        );
+    }
+
     /// A backend whose verification reads stall, so the request-wide deadline
     /// is what decides the outcome rather than the work finishing.
     #[derive(Debug)]
@@ -2194,21 +2351,34 @@ mod presign_pack_downloads_verification_tests {
             elapsed < std::time::Duration::from_secs(5),
             "handler took {elapsed:?} against a backend stalling 30s; it must not wait              on verification at all (ga46 waited past the client's 300s)"
         );
+        // Since 2026-09-15 the handler mints for an unverified pack rather than
+        // withholding. Asserted against a backend whose verification reads stall
+        // for 30s, which makes this the strongest available statement of the new
+        // contract: minting is fully decoupled from verification, not merely
+        // faster than it. (`StallingBackend::presign_get` returns immediately;
+        // only its reads stall — so a slow mint here would be a real failure,
+        // not an artefact of the double.)
         assert!(
-            resp.0.get(&pack_oid).map(Option::is_none).unwrap_or(true),
-            "handler minted a URL for an unverified pack — a presigned URL takes the              server out of the data path permanently and cannot be revoked"
+            resp.0.get(&pack_oid).is_some_and(Option::is_some),
+            "handler withheld a URL for an unverified pack while verification was \
+             stalled — that is exactly the combination that diverted a 16 GB clone \
+             onto the per-chunk proxy path and cost ~12 h"
         );
     }
 
-    /// The other half, and the one that stops "never mint anything" from being
-    /// a passing implementation: declining must be TEMPORARY. The handler kicks
-    /// verification off in the background, so once it lands a later request
-    /// mints and clones go back to the fast direct-to-bucket path.
+    /// REWRITTEN 2026-09-15. This was "declining must be TEMPORARY" — the half
+    /// that stopped "never mint anything" from being a passing implementation.
+    /// The handler no longer declines, so that framing has no subject.
     ///
-    /// Without this, returning `None` unconditionally would satisfy the test
-    /// above while pushing every clone onto the proxy path forever.
+    /// What this test still uniquely covers, and
+    /// what nothing else does, is the SEQUENCE through the handler: a request
+    /// arriving while the pack is unverified mints; background verification
+    /// resolves the pack out of `unverified_packs`; a later request still
+    /// mints. The middle step is the one that catches an edit which drops the
+    /// detached spawn — then the pack would stay unverified forever and its
+    /// corrupt entries would never be quarantined.
     #[tokio::test]
-    async fn declining_is_temporary_and_a_later_request_mints() {
+    async fn first_and_later_requests_both_mint_and_verification_resolves_between() {
         let repo = "heals-repo".to_string();
         let (_tmp, state, repo_path) = setup(&repo).await;
         let inner = get_or_init_storage(&state, &repo_path)
@@ -2240,8 +2410,9 @@ mod presign_pack_downloads_verification_tests {
         .await
         .expect("handler must succeed");
         assert!(
-            first.0.get(&pack_oid).map(Option::is_none).unwrap_or(true),
-            "first request must decline: the pack is not verified yet"
+            first.0.get(&pack_oid).is_some_and(Option::is_some),
+            "first request must mint even though the pack is not verified yet — \
+             withholding here is what sent 88 of 155 packs down the per-chunk proxy"
         );
 
         // Wait for the spawned verification to resolve, rather than sleeping a
@@ -2257,7 +2428,8 @@ mod presign_pack_downloads_verification_tests {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "background verification never resolved; declining would be permanent                  and every clone would proxy forever"
+                "background verification never resolved — the handler mints but no longer \
+                 drives verification, so corrupt entries would never be quarantined"
             );
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
