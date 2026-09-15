@@ -21,6 +21,57 @@ fn similarity_seed_max_chunks() -> usize {
     }
 }
 
+/// Read-ahead budget IN BYTES per file while reconstructing one chunked file
+/// (`read_to_file`). Override via `MEDIAGIT_CHECKOUT_READAHEAD_BYTES`.
+///
+/// BYTES, not a chunk count, and that distinction is the whole point. A count
+/// looks bounded and is not: chunk size is tuned to FILE size
+/// (`get_chunk_params`) — 1 MB avg for files under 100 MB, 2 MB to 10 GB,
+/// 4 MB avg / 16 MB max from 10 GB, 8 MB avg / 32 MB max past 100 GB. So a
+/// fixed count of 8 costs ~512 KiB on a small file and up to 128 MB on a large
+/// one, and it is large files that this project exists for. The first version
+/// of this knob was a count of 8 with a comment claiming "~64 KiB chunks,
+/// ~512 KiB of read-ahead"; the measured corpus is 4,073 chunks over a 10.03 GB
+/// ODB, i.e. ~2.5 MB each, so that comment was wrong by ~40x and the real cost
+/// would have been ~32 MB per file.
+///
+/// It also MULTIPLIES with `MEDIAGIT_CHECKOUT_PARALLELISM` (checkout.rs), which
+/// runs up to `min(cpus, 8)` files at once: a per-file count of 8 became ~256 MB
+/// typical and ~1 GB worst case across the checkout — against a client peak RSS
+/// this project drove from 1,075 MB down to 289 MB. A byte budget holds the
+/// product to `parallelism × this`, whatever the chunk size turns out to be.
+///
+/// DELIBERATELY a different name from `MEDIAGIT_CHECKOUT_PARALLELISM`: they are
+/// independent axes, and one env var silently driving two axes with different
+/// defaults is exactly what `MEDIAGIT_PACK_VERIFY_CONCURRENCY` did before it was
+/// split.
+///
+/// Default 16 MiB per file, so the worst case across 8 concurrent files is
+/// ~128 MB — the same ceiling the pre-pipelining code had (8 files × one 16 MB
+/// chunk each). The pipelining is therefore free in memory terms.
+fn checkout_readahead_bytes() -> u64 {
+    std::env::var("MEDIAGIT_CHECKOUT_READAHEAD_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(16 * 1024 * 1024)
+}
+
+/// Turn the byte budget into a concurrent-read count for THIS file, using the
+/// manifest's own average chunk size rather than a guess.
+///
+/// Clamped to at least 2 (below that there is no pipelining left, and the
+/// caller would be back to the serial loop this replaced) and at most 32 (past
+/// which more in-flight local reads buy nothing and only add syscall churn).
+pub(crate) fn checkout_chunk_prefetch_for(total_bytes: u64, chunk_count: usize) -> usize {
+    if chunk_count == 0 {
+        return 1;
+    }
+    let avg = (total_bytes / chunk_count as u64).max(1);
+    let n = (checkout_readahead_bytes() / avg) as usize;
+    n.clamp(2, 32)
+}
+
 /// DC-7: a chunk manifest as it goes to **local** storage.
 ///
 /// A manifest names the file and lists the plaintext hash of every one of its
@@ -2097,28 +2148,74 @@ impl ObjectDatabase {
             let mut bytes_written = 0u64;
 
             let write_result: anyhow::Result<()> = async {
-                for chunk_ref in &manifest.chunks {
-                    // Use get_chunk() which handles both full and delta-encoded chunks
-                    let decompressed = self.get_chunk(&chunk_ref.id).await.map_err(|e| {
-                        anyhow::anyhow!("Failed to read chunk {}: {}", chunk_ref.id.to_hex(), e)
-                    })?;
+                use futures::StreamExt;
 
-                    // Verify chunk integrity (hash + size)
+                // ORDERED read-ahead. `buffered`, NEVER `buffer_unordered`: the
+                // file is assembled by appending, so chunk N must be written
+                // before N+1. `buffered` overlaps the reads while still
+                // yielding results in manifest order.
+                //
+                // Why this exists: this loop used to await one chunk at a time,
+                // so reconstructing a large file was
+                // read -> decompress -> hash -> write, fully serialised, with
+                // nothing overlapping. `MEDIAGIT_CHECKOUT_PARALLELISM` does not
+                // help — it parallelises across FILES, and a corpus of a few
+                // very large files (measured: a 10.18 GB parquet, ~160K chunks)
+                // has no file-level parallelism to exploit. Clone pays this
+                // stage in full after the download finishes; push has no
+                // equivalent stage at all, which is part of why clone has never
+                // matched push on any backend.
+                // Owned (id, size) per chunk, not a borrow of `manifest`: a
+                // future holding a reference into the manifest is not general
+                // enough for `checkout.rs`'s JoinSet caller (higher-ranked
+                // lifetime error at the spawn site).
+                let wanted: Vec<(Oid, usize)> =
+                    manifest.chunks.iter().map(|c| (c.id, c.size)).collect();
+
+                // Derived from THIS manifest's actual average chunk size, so
+                // the read-ahead costs the same bytes whether the file was
+                // chunked at 1 MB or 8 MB. See `checkout_readahead_bytes`.
+                let total_bytes: u64 = wanted.iter().map(|(_, s)| *s as u64).sum();
+                let prefetch = checkout_chunk_prefetch_for(total_bytes, wanted.len());
+
+                let mut stream =
+                    futures::stream::iter(wanted.into_iter().map(|(id, size)| async move {
+                        // get_chunk() handles both full and delta-encoded chunks
+                        let decompressed = self.get_chunk(&id).await.map_err(|e| {
+                            anyhow::anyhow!("Failed to read chunk {}: {}", id.to_hex(), e)
+                        })?;
+                        Ok::<_, anyhow::Error>((id, size, decompressed))
+                    }))
+                    .buffered(prefetch);
+
+                while let Some(next) = stream.next().await {
+                    let (chunk_id, chunk_size, decompressed) = next?;
+
+                    // Verify chunk integrity (hash + size).
+                    //
+                    // KEPT, not dropped as redundant. `put_compressed_chunk`
+                    // verifies the same hash at DOWNLOAD time, so on the
+                    // immediately-post-clone path this is a second check of
+                    // bytes just checked. But `read_to_file` also runs for an
+                    // ordinary `checkout` of another commit, where the bytes
+                    // have been sitting on local disk since some earlier pull
+                    // and nothing has re-read them. Removing this would trade a
+                    // real at-rest integrity check for a little CPU on one path.
                     let computed_chunk_oid = Oid::hash(&decompressed);
-                    if computed_chunk_oid != chunk_ref.id {
+                    if computed_chunk_oid != chunk_id {
                         anyhow::bail!(
                             "Chunk integrity check failed for {}: expected {}, computed {}",
-                            chunk_ref.id.to_hex(),
-                            chunk_ref.id,
+                            chunk_id.to_hex(),
+                            chunk_id,
                             computed_chunk_oid
                         );
                     }
 
-                    if decompressed.len() != chunk_ref.size {
+                    if decompressed.len() != chunk_size {
                         anyhow::bail!(
                             "Chunk size mismatch for {}: expected {}, got {}",
-                            chunk_ref.id.to_hex(),
-                            chunk_ref.size,
+                            chunk_id.to_hex(),
+                            chunk_size,
                             decompressed.len()
                         );
                     }

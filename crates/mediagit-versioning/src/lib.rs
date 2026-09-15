@@ -86,6 +86,17 @@ mod tag_object;
 mod transaction;
 mod tree;
 
+/// Test-only view of `read_to_file`'s read-ahead sizing.
+///
+/// Exposed because the bug worth pinning is arithmetic, not behaviour: a fixed
+/// read-ahead COUNT silently costs memory proportional to chunk size, and chunk
+/// size is tuned to file size. Proving that at runtime would mean pushing
+/// hundreds of MB through a unit test; proving the sizing function is cheap.
+#[doc(hidden)]
+pub fn checkout_chunk_prefetch_for_test(total_bytes: u64, chunk_count: usize) -> usize {
+    odb::chunks::checkout_chunk_prefetch_for(total_bytes, chunk_count)
+}
+
 pub use bitmap::{ReachabilityBitmap, bitmap_enabled, bitmap_key};
 pub use branch::{BranchInfo, BranchManager, DetachedHead};
 pub use checkout::{CheckoutManager, CheckoutStats, FreshCheckoutPlan};

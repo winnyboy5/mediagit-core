@@ -43,6 +43,7 @@ fastcdc = "4.0"
 memmap2 = "0.9"
 num_cpus = "1.16"
 async-channel = "2.3"
+futures = "0.3"  # ordered read-ahead when reconstructing one chunked file (read_to_file)
 zstd.workspace = true
 tempfile = "3.13"
 roaring = "0.11.4"
