@@ -159,14 +159,19 @@ pub struct ServerConfig {
     /// marker so a crash mid-verification is resumed by the startup sweep
     /// rather than silently dropped.
     ///
-    /// Defaulting on is safe because **reads are never speculative**: an
-    /// unverified pack is verified before any byte of it is served
-    /// (`download_chunk`, `batch_get_pack_chunks` verify the requested slice
-    /// inline) and before any presigned URL for it is minted
-    /// (`presign_pack_downloads` verifies the whole pack, since once a URL is
-    /// out the server has no revocation, only a 12 h expiry). A verified pack
-    /// mints immediately with zero added cost, so steady-state pulls are
-    /// unchanged and media keeps travelling client↔bucket directly.
+    /// Defaulting on is safe because bytes the server itself serves are never
+    /// speculative: `download_chunk` and `batch_get_pack_chunks` verify the
+    /// requested slice inline before serving it out of an unverified pack.
+    ///
+    /// Presigned DOWNLOAD URLs are no longer gated on this. Withholding a URL
+    /// for an unverified pack sent the client down the per-chunk proxy path —
+    /// 4,073 requests against 155 packs on the 16 GB corpus, measured
+    /// 2026-09-15 — which collapsed a clone to 0.2 MB/s and ~12 h. The client
+    /// BLAKE3-verifies every chunk it stores on both paths
+    /// (`put_compressed_chunk`, plus a fail-closed `slice_verifies`), so the
+    /// gate bought no integrity the client did not already enforce. See the
+    /// block comment on `presign_pack_downloads`. This flag still controls
+    /// whether packs are verified at all.
     ///
     /// The proxy upload path (`PUT /:repo/chunks/:id`) verifies unconditionally
     /// either way — that check is free, the server already holds those bytes.
