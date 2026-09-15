@@ -394,7 +394,11 @@ pub async fn upload_and_register(
             .await
             .context("read pack temp file")?
             .into();
-        let put_url = purl["url"].as_str().unwrap_or("").to_string();
+        // Mutable: a `RefreshUrl` outcome below re-presigns and replaces BOTH
+        // the URL and its required headers, rather than replaying a signature
+        // the backend has already rejected as expired.
+        let mut put_url = purl["url"].as_str().unwrap_or("").to_string();
+        let mut purl_val: serde_json::Value = purl.clone();
         // Presigned direct-to-bucket PUT — not server-bound, so not routed
         // through send_with_rate_limit_retry: a 429 here comes from the BUCKET,
         // not the server's limiter, and needs backend-specific classification.
@@ -439,7 +443,7 @@ pub async fn upload_and_register(
             // Rebuilt per attempt: `send()` consumes the builder, and `body` is
             // a `Bytes` clone (refcount bump, not a copy of the pack) per B5.
             let mut req = direct_client.put(&put_url).body(pack_data.clone());
-            if let Some(headers) = purl["required_headers"].as_array() {
+            if let Some(headers) = purl_val["required_headers"].as_array() {
                 for h in headers {
                     if let (Some(name), Some(val)) = (
                         h.get(0).and_then(|v| v.as_str()),
@@ -542,7 +546,8 @@ pub async fn upload_and_register(
             };
 
             use crate::error_class::{TransferOutcome, classify_auto};
-            match classify_auto(status.as_u16(), &put_url, &ct, &hdr_code, body_ref) {
+            let outcome = classify_auto(status.as_u16(), &put_url, &ct, &hdr_code, body_ref);
+            match outcome {
                 TransferOutcome::Transient | TransferOutcome::RefreshUrl => {
                     let wait = pack_put_backoff_ms(attempt);
                     if out_of_budget(attempt, wait) {
@@ -553,6 +558,55 @@ pub async fn upload_and_register(
                             attempt + 1
                         );
                     }
+
+                    // RefreshUrl means the signature is expired/invalid, not
+                    // that the bucket is busy. Retrying the SAME url — which is
+                    // what this did until 2026-09-15, by classifying RefreshUrl
+                    // identically to Transient — replays the identical dead
+                    // signature until the budget runs out, and every attempt is
+                    // guaranteed to fail the same way. The per-chunk PUT path
+                    // has re-presigned on 403 for a long time (`push.rs`); this
+                    // path simply never wired it up, even though it already
+                    // holds `base_url` and `http_client`.
+                    if matches!(outcome, TransferOutcome::RefreshUrl) {
+                        let refreshed: Option<serde_json::Value> = async {
+                            let r = send_idempotent_pack_request(
+                                "POST /packs/upload-urls (refresh)",
+                                || http_client.post(&presign_url).json(&presign_body).send(),
+                            )
+                            .await
+                            .ok()?;
+                            if !r.status().is_success() {
+                                return None;
+                            }
+                            let m: std::collections::HashMap<String, Option<serde_json::Value>> =
+                                r.json().await.ok()?;
+                            m.get(&pack_oid_hex).cloned().flatten()
+                        }
+                        .await;
+
+                        match refreshed {
+                            Some(v) => {
+                                put_url = v["url"].as_str().unwrap_or("").to_string();
+                                purl_val = v;
+                                tracing::debug!(
+                                    pack = %pack_oid_hex,
+                                    attempt = attempt + 1,
+                                    "pack PUT signature expired; re-presigned a fresh URL"
+                                );
+                            }
+                            // Fall through and retry the old URL: the refresh
+                            // itself failing is usually the control plane being
+                            // briefly unreachable, and the budget still bounds us.
+                            None => tracing::warn!(
+                                pack = %pack_oid_hex,
+                                attempt = attempt + 1,
+                                "pack PUT signature expired but re-presign failed; \
+                                 retrying the existing URL"
+                            ),
+                        }
+                    }
+
                     tracing::debug!(
                         pack = %pack_oid_hex,
                         attempt = attempt + 1,
