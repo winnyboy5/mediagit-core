@@ -40,6 +40,9 @@ async fn serve(
     put_failures: usize,
     fail_status: &'static str,
     puts: Arc<AtomicUsize>,
+    // Counts POSTs to /packs/upload-urls, so a test can tell "re-presigned a
+    // fresh URL" apart from "replayed the same dead one".
+    presigns: Arc<AtomicUsize>,
 ) {
     loop {
         let Ok((mut sock, _)) = listener.accept().await else {
@@ -47,6 +50,7 @@ async fn serve(
         };
         let addr = addr.clone();
         let puts = Arc::clone(&puts);
+        let presigns = Arc::clone(&presigns);
         tokio::spawn(async move {
             let mut buf = Vec::new();
             let mut tmp = [0u8; 8192];
@@ -74,6 +78,7 @@ async fn serve(
             };
 
             let resp = if first.contains("/packs/upload-urls") {
+                presigns.fetch_add(1, Ordering::SeqCst);
                 // Point the presigned URL back at this same server.
                 let body = format!(
                     r#"{{"{}":{{"url":"http://{}/bucket/pack","required_headers":[]}}}}"#,
@@ -121,6 +126,7 @@ async fn a_transient_pack_put_is_retried_not_abandoned() {
         2,
         "503 Service Unavailable",
         Arc::clone(&puts),
+        Arc::new(AtomicUsize::new(0)),
     ));
 
     // std temp dir rather than adding a `tempfile` dev-dependency for two files.
@@ -200,6 +206,7 @@ async fn a_permanent_pack_put_error_is_not_retried() {
         usize::MAX,
         "400 Bad Request",
         Arc::clone(&puts),
+        Arc::new(AtomicUsize::new(0)),
     ));
 
     let tmp =
@@ -233,5 +240,76 @@ async fn a_permanent_pack_put_error_is_not_retried() {
         n, 1,
         "a PermanentConfig status must bail on the first attempt, not be retried; \
          a whole pack body is re-sent per attempt and none of them can succeed. got {n}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_expired_pack_put_signature_is_re_presigned_not_replayed() {
+    // The gap this closes was named, correctly, in the comment on the permanent
+    // test above: "`classify_by_status` maps 403 to RefreshUrl -- a presigned
+    // URL that expired is retryable BY DESIGN". It was retryable, but it was
+    // never REFRESHED: `upload_and_register` classified RefreshUrl identically
+    // to Transient and re-sent the pack against the SAME already-rejected
+    // signature, so every attempt failed the same way until the 120s budget ran
+    // out. The per-chunk PUT path has re-presigned on 403 for a long time; this
+    // path already held `base_url` and `http_client` and simply never used them.
+    //
+    // Serves 403 once, then 200. Asserts BOTH halves:
+    //   * the upload ultimately succeeds, and
+    //   * /packs/upload-urls was requested MORE THAN ONCE.
+    // The second is the load-bearing one: without it this passes against the
+    // old replay-the-dead-URL behaviour, because the stub's "expired" URL still
+    // works on the retry.
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr").to_string();
+    let puts = Arc::new(AtomicUsize::new(0));
+    let presigns = Arc::new(AtomicUsize::new(0));
+    // 403 -> RefreshUrl for every backend, via classify_by_status.
+    let server = tokio::spawn(serve(
+        listener,
+        addr.clone(),
+        1,
+        "403 Forbidden",
+        Arc::clone(&puts),
+        Arc::clone(&presigns),
+    ));
+
+    let tmp = std::env::temp_dir().join(format!("mg-packretry-refresh-{}.tmp", std::process::id()));
+
+    mediagit_protocol::ensure_crypto_provider();
+    let http = reqwest::Client::builder().build().unwrap();
+    let direct = reqwest::Client::builder().build().unwrap();
+
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        mediagit_protocol::pack_builder::upload_and_register(
+            pack_result(&tmp),
+            &format!("http://{addr}/repo"),
+            &http,
+            &direct,
+            &[],
+        ),
+    )
+    .await
+    .expect("upload_and_register hung");
+
+    server.abort();
+
+    assert!(
+        out.is_ok(),
+        "an expired signature must be recovered from, not fatal. err={:?}",
+        out.err()
+    );
+    assert_eq!(
+        puts.load(Ordering::SeqCst),
+        2,
+        "expected 1 rejected attempt + 1 success to reach the bucket"
+    );
+    assert!(
+        presigns.load(Ordering::SeqCst) >= 2,
+        "only {} POST(s) to /packs/upload-urls: the 403 was retried against the SAME \
+         dead signature instead of re-presigning. On a real backend every such retry \
+         fails identically until the budget expires.",
+        presigns.load(Ordering::SeqCst)
     );
 }
