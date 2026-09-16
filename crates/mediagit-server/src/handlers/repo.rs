@@ -1577,14 +1577,34 @@ fn verify_max_defer_secs() -> u64 {
 /// verifies the requested slice inline before serving it, so no read can block
 /// on a deferred verification.
 async fn wait_for_data_plane_quiet(state: &AppState, repo: &str, pack_oid: &str) {
-    wait_for_data_plane_quiet_with(
-        repo,
-        pack_oid,
-        verify_quiet_secs(),
-        verify_max_defer_secs(),
-        &state.data_plane_activity,
-    )
-    .await
+    let (quiet, max_defer) = (verify_quiet_secs(), verify_max_defer_secs());
+    log_verify_policy_once(quiet, max_defer);
+    wait_for_data_plane_quiet_with(repo, pack_oid, quiet, max_defer, &state.data_plane_activity)
+        .await
+}
+
+/// Emit the effective verification-scheduling policy once per process.
+///
+/// WHY AT `info`. Both outcomes of this scheduler are otherwise invisible at
+/// the default log level: the cap-hit and the waited-and-proceeded lines are
+/// `debug!`, and when the policy is working correctly NEITHER fires — so a run
+/// that deferred perfectly and a run where the knob never reached the server
+/// produce byte-identical logs. Measuring a change to
+/// `MEDIAGIT_PACK_VERIFY_MAX_DEFER_SECS` against that is measuring nothing.
+/// This line makes the value the server actually used a fact in the log.
+///
+/// Deliberately NOT cached beyond the log: the callers above re-read the env
+/// every time, so the knob stays live even though this line prints once.
+fn log_verify_policy_once(quiet: u64, max_defer: u64) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        tracing::info!(
+            quiet_secs = quiet,
+            max_defer_secs = max_defer,
+            "pack verification scheduling policy in effect \
+             (MEDIAGIT_PACK_VERIFY_QUIET_SECS / MEDIAGIT_PACK_VERIFY_MAX_DEFER_SECS)"
+        );
+    });
 }
 
 /// The scheduling mechanism, with its policy passed in.
