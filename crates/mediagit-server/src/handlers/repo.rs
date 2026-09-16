@@ -2307,7 +2307,51 @@ pub async fn complete_pack(
     // knob as the loose-chunk path (one policy, not a second knob an operator
     // could half-disable without realising) — when it's off, none of this
     // runs and behavior is identical to today.
-    if state.verify_chunks_on_complete {
+    // PHASE B: a provider-attested pack needs no read-back.
+    //
+    // Verification exists to prove the bucket holds the bytes we pushed. When
+    // the storage service validated a full-object checksum at upload it has
+    // already proven exactly that, and re-reading 10 GB to learn it again is
+    // ~17-19 min of link time on a 26-31 min push — measured across six 16 GB
+    // runs, and NOT fixable by scheduling, which is why this gate exists.
+    //
+    // This asks the PROVIDER (one metadata request, no body) rather than
+    // trusting our own memory of having sent a checksum. Any error, any
+    // non-attesting backend, any unattested object ⇒ `false` ⇒ the read-back
+    // runs exactly as before. Only a positive answer skips it.
+    //
+    // WHAT THIS DOES NOT SKIP. Attestation proves storage integrity, not that
+    // the pack's contents match its manifest. That is a different property and
+    // it stays enforced on the READ path, which fails closed twice:
+    // `slice_verifies` (compressed_hash) and `put_compressed_chunk`
+    // (decompress, BLAKE3 == chunk_id). Nothing serves unverified bytes.
+    //
+    // All three effects are skipped together — marker, unverified-set, and the
+    // background task. Skipping only the task would leave a marker the startup
+    // sweep re-reads on the next boot, doing the same work later.
+    let attested = match storage.attested_checksum(&pack_key).await {
+        Ok(Some(sum)) => {
+            tracing::info!(
+                repo = %repo,
+                pack = %req.pack_oid,
+                checksum = %sum,
+                "pack is provider-attested; skipping the read-back"
+            );
+            true
+        }
+        Ok(None) => false,
+        Err(e) => {
+            tracing::warn!(
+                repo = %repo,
+                pack = %req.pack_oid,
+                error = %e,
+                "could not read the pack's attestation; verifying by read-back"
+            );
+            false
+        }
+    };
+
+    if state.verify_chunks_on_complete && !attested {
         let marker_path = pending_marker_path(&repo_path, &req.pack_oid);
         if let Some(parent) = marker_path.parent() {
             tokio::fs::create_dir_all(parent)
@@ -2389,7 +2433,7 @@ pub async fn complete_pack(
                 },
             );
         }
-        if state.verify_chunks_on_complete {
+        if state.verify_chunks_on_complete && !attested {
             let mut unverified = state.unverified_packs.write().await;
             unverified
                 .entry(repo.clone())
@@ -2398,7 +2442,7 @@ pub async fn complete_pack(
         }
     }
 
-    if state.verify_chunks_on_complete {
+    if state.verify_chunks_on_complete && !attested {
         let state2 = Arc::clone(&state);
         let repo_path2 = repo_path.clone();
         let repo2 = repo.clone();
