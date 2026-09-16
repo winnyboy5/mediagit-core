@@ -683,6 +683,11 @@ pub struct MpuStartResponse {
     upload_id: String,
     parts: Vec<MpuPartUrl>,
     part_size: u64,
+    /// Checksum algorithm the client must attest each part with, when this
+    /// backend attests. Omitted entirely when unattested, so an older client
+    /// sees byte-identical JSON to what it saw before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checksum: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -702,6 +707,11 @@ pub struct MpuCompleteRequest {
 pub struct MpuCompletedPartJson {
     part_number: i32,
     etag: String,
+    /// Base64 part checksum. `serde(default)` so a client predating
+    /// attestation still completes — the upload is simply unattested, which
+    /// leaves the pack read-back in place rather than failing the push.
+    #[serde(default)]
+    checksum: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -772,6 +782,7 @@ async fn mpu_start_for(
                     })
                     .collect(),
                 part_size: mpu.part_size,
+                checksum: mpu.checksum.map(|c| c.as_wire_str().to_string()),
             }))
         }
         Ok(None) => {
@@ -841,6 +852,7 @@ async fn mpu_complete_for(
         .map(|p| mediagit_storage::MpuCompletedPart {
             part_number: p.part_number,
             etag: p.etag,
+            checksum: p.checksum,
         })
         .collect();
 

@@ -1206,6 +1206,10 @@ impl StorageBackend for GcsBackend {
             upload_id,
             parts,
             part_size,
+            // Unattested for now: this backend keeps the pack read-back, which
+            // is the pre-attestation behaviour and so not a regression. S3 is
+            // being proven end-to-end first.
+            checksum: None,
         }))
     }
 
@@ -1677,10 +1681,12 @@ mod gcs_mpu_tests {
             crate::MpuCompletedPart {
                 part_number: 1,
                 etag: "\"aaa\"".into(),
+                checksum: None,
             },
             crate::MpuCompletedPart {
                 part_number: 2,
                 etag: "\"bbb\"".into(),
+                checksum: None,
             },
         ];
         let xml = complete_mpu_xml(&parts);
@@ -1702,6 +1708,7 @@ mod gcs_mpu_tests {
         let parts = vec![crate::MpuCompletedPart {
             part_number: 1,
             etag: "a&b<c".into(),
+            checksum: None,
         }];
         let xml = complete_mpu_xml(&parts);
         assert!(xml.contains("a&amp;b&lt;c"));

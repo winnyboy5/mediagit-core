@@ -3487,7 +3487,10 @@ name = "mediagit-protocol"
 version = "0.4.0-rc.1"
 dependencies = [
  "anyhow",
+ "base64",
  "bytes",
+ "crc-fast",
+ "crc32c",
  "futures",
  "hex",
  "http 1.4.2",

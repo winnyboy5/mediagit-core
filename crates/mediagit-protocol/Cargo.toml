@@ -34,6 +34,13 @@ reqwest = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 bytes = { workspace = true }
 tokio-util = { version = "0.7", features = ["io"] }
+# Upload attestation (A3): per-part CRC the provider validates at upload, so a
+# pushed pack need not be read back out of the bucket to prove it stored
+# intact. Both are ALREADY in the tree via aws-sdk-s3 -> aws-smithy-checksums,
+# so this adds no new third-party code, only a direct edge to it.
+crc-fast = "1.10"
+crc32c = "0.6"
+base64 = "0.22"
 futures = "0.3"
 
 tempfile = { workspace = true }

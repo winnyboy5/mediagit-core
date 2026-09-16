@@ -1364,6 +1364,11 @@ pub(crate) async fn upload_object_mpu(
         upload_id: String,
         parts: Vec<PartUrl>,
         part_size: u64,
+        /// Checksum the backend wants each part attested with, when it attests.
+        /// `serde(default)` so a server predating attestation still parses —
+        /// the upload is then unattested and the server keeps its read-back.
+        #[serde(default)]
+        checksum: Option<String>,
     }
     #[derive(serde::Deserialize)]
     struct PartUrl {
@@ -1385,6 +1390,10 @@ pub(crate) async fn upload_object_mpu(
     struct CompletedPart {
         part_number: i32,
         etag: String,
+        /// Base64 checksum of this part, omitted entirely when unattested so an
+        /// older server sees exactly the payload it saw before.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        checksum: Option<String>,
     }
     #[derive(serde::Serialize)]
     struct AbortReq<'a> {
@@ -1471,6 +1480,31 @@ pub(crate) async fn upload_object_mpu(
             }
         };
 
+        // ATTESTATION. Computed ONCE per part, outside the attempt loop, for
+        // the same reason the bytes are read once: every retry re-sends
+        // identical bytes, so the digest cannot differ between attempts.
+        //
+        // Sent as a header on the PUT as well as reported at Complete. The
+        // header is what makes S3 reject a corrupted part AT UPLOAD with
+        // BadDigest, so a bad part fails on its own request rather than
+        // surfacing as an opaque Complete failure after every part is up.
+        let part_checksum: Option<String> = mpu.checksum.as_deref().map(|alg| {
+            let raw = match alg {
+                "Crc32c" => (crc32c::crc32c(&part_data) as u64).to_be_bytes()[4..].to_vec(),
+                // Crc64Nvme is the default; an unknown name is treated as it
+                // rather than silently skipping attestation, because a skipped
+                // checksum on an upload that DECLARED one fails at Complete,
+                // which is far harder to diagnose than a wrong-algorithm error.
+                _ => crc_fast::crc64_nvme(&part_data).to_be_bytes().to_vec(),
+            };
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(raw)
+        });
+        let checksum_header = mpu.checksum.as_deref().map(|alg| match alg {
+            "Crc32c" => "x-amz-checksum-crc32c",
+            _ => "x-amz-checksum-crc64nvme",
+        });
+
         let mut part_etag: Option<String> = None;
         for attempt in 0..MAX_PART_ATTEMPTS {
             if attempt > 0 {
@@ -1489,12 +1523,13 @@ pub(crate) async fn upload_object_mpu(
             // this path treats as "backend has no MPU, fall back to single PUT".
             // Getting it wrong would not error; it would silently demote every
             // pack to the slower path while the logs looked healthy.
-            let result = direct_client
+            let mut req = direct_client
                 .put(&part.url)
-                .header(reqwest::header::CONTENT_LENGTH, part_data.len())
-                .body(part_data.clone())
-                .send()
-                .await;
+                .header(reqwest::header::CONTENT_LENGTH, part_data.len());
+            if let (Some(h), Some(v)) = (checksum_header, part_checksum.as_deref()) {
+                req = req.header(h, v);
+            }
+            let result = req.body(part_data.clone()).send().await;
 
             match result {
                 Ok(r) if r.status().is_success() => {
@@ -1582,6 +1617,7 @@ pub(crate) async fn upload_object_mpu(
             Some(etag) => completed_parts.push(CompletedPart {
                 part_number: part.part_number,
                 etag,
+                checksum: part_checksum,
             }),
             None => {
                 tracing::debug!(
