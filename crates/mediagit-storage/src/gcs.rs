@@ -158,12 +158,39 @@ pub struct GcsBackend {
     /// ~20-25 s when too many concurrent uploads land on the same host.
     /// Configurable via MEDIAGIT_GCS_UPLOAD_CONCURRENCY (default 4).
     upload_semaphore: Arc<tokio::sync::Semaphore>,
-    /// V4 URL signer. `None` when ADC resolved to a credential that cannot
-    /// sign locally or remotely (e.g. workload-identity-federation without
-    /// IAM signBlob). When `None`, `presign_put`/`presign_get` return
-    /// `Ok(None)` and the caller falls back to server-proxied transfer.
-    /// Set `MEDIAGIT_GCS_DISABLE_PRESIGN=1` to force `None` at runtime.
+    /// V4 URL signer. `None` only when `MEDIAGIT_GCS_DISABLE_PRESIGN` is set:
+    /// ADC that cannot sign is a construction error, not a silent downgrade
+    /// (see [`signer_or_opt_out`]). When `None`, `presign_put`/`presign_get`
+    /// return `Ok(None)` and the caller falls back to server-proxied transfer.
     signer: Option<Signer>,
+}
+
+/// Decide what an ADC signer failure means.
+///
+/// A credential that cannot sign V4 URLs (workload-identity federation, or a
+/// default service account without `iam.serviceAccounts.signBlob`) used to be
+/// downgraded to the server-proxy path behind a single `warn` line. That path
+/// costs ~26x the requests — 4,073 against 155 packs on a 16 GB repo — for the
+/// life of the process, so it must be an explicit choice rather than a default.
+///
+/// `MEDIAGIT_GCS_DISABLE_PRESIGN` is that choice; without it, a signer failure
+/// is a construction error.
+fn signer_or_opt_out<S>(
+    built: Result<S, String>,
+    presign_disabled: bool,
+) -> anyhow::Result<Option<S>> {
+    if presign_disabled {
+        return Ok(None);
+    }
+    built.map(Some).map_err(|e| {
+        anyhow::anyhow!(
+            "GCS signer unavailable ({e}): these credentials cannot sign V4 URLs, so every \
+             transfer would be proxied through the server at ~26x the requests. Grant the \
+             service account `iam.serviceAccounts.signBlob`, or point \
+             GOOGLE_APPLICATION_CREDENTIALS at a service-account key file. To accept the \
+             proxy path deliberately, set MEDIAGIT_GCS_DISABLE_PRESIGN=1."
+        )
+    })
 }
 
 impl GcsBackend {
@@ -443,17 +470,12 @@ impl GcsBackend {
 
         let (storage, control) = Self::build_clients(&gcs_config, None).await?;
 
-        let signer = match google_cloud_auth::credentials::Builder::default().build_signer() {
-            Ok(s) => Some(s),
-            Err(e) => {
-                warn!(
-                    target: "mediagit_storage::gcs",
-                    error = %e,
-                    "GCS signer unavailable; presigned URLs disabled, falling back to server proxy"
-                );
-                None
-            }
-        };
+        let signer = signer_or_opt_out(
+            google_cloud_auth::credentials::Builder::default()
+                .build_signer()
+                .map_err(|e| e.to_string()),
+            std::env::var_os("MEDIAGIT_GCS_DISABLE_PRESIGN").is_some(),
+        )?;
 
         Ok(GcsBackend {
             storage: Arc::new(storage),
@@ -1714,5 +1736,33 @@ mod gcs_mpu_tests {
     fn a_64mib_pack_uses_the_16mib_floor() {
         let ps = mpu_part_size_gcs(64 * 1024 * 1024);
         assert_eq!(ps, 16 * 1024 * 1024);
+    }
+}
+
+#[cfg(test)]
+mod signer_opt_out_tests {
+    use super::signer_or_opt_out;
+
+    #[test]
+    fn an_unsignable_credential_is_an_error_not_a_silent_proxy_downgrade() {
+        let err = signer_or_opt_out::<()>(Err("no signBlob".into()), false)
+            .expect_err("must not fall back to the proxy without an explicit opt-out");
+        let msg = err.to_string();
+        assert!(msg.contains("no signBlob"), "{msg}");
+        assert!(msg.contains("MEDIAGIT_GCS_DISABLE_PRESIGN"), "{msg}");
+    }
+
+    #[test]
+    fn the_opt_out_accepts_the_proxy_path() {
+        assert!(
+            signer_or_opt_out::<()>(Err("no signBlob".into()), true)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_working_signer_is_kept() {
+        assert!(signer_or_opt_out(Ok(()), false).unwrap().is_some());
     }
 }
