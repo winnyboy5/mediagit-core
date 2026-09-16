@@ -690,6 +690,26 @@ pub trait StorageBackend: Send + Sync + Debug {
     /// does not. Propagates other errors (permission denied, I/O failure, etc.).
     async fn head(&self, key: &str) -> anyhow::Result<Option<u64>>;
 
+    /// The checksum the PROVIDER recorded for this object, if it validated one
+    /// at upload.
+    ///
+    /// `Some` means the storage service itself computed a checksum over the
+    /// assembled object and accepted it — so the bytes in the bucket are the
+    /// bytes that were uploaded, proven by the provider rather than by us
+    /// reading them back.
+    ///
+    /// ASKS THE PROVIDER, rather than remembering what we sent. Those are
+    /// different claims: our own record would only say "we asked for a
+    /// checksum", while this says "the service has one on file for the object
+    /// that is actually there". Only the second justifies skipping a read-back.
+    ///
+    /// Costs one metadata request and downloads no body. Returns `Ok(None)`
+    /// for backends that do not attest, which keeps the caller's existing
+    /// verification — the fail-closed direction.
+    async fn attested_checksum(&self, _key: &str) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
+
     /// Last modification time of an object, if this backend can report one.
     ///
     /// `Ok(None)` means **unknown** — either the object is absent or this
