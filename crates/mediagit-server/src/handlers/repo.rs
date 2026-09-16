@@ -1510,19 +1510,27 @@ pub(crate) fn note_data_plane_activity(state: &AppState) {
 /// "pull complete" signal — a protocol change — or removing the read-back
 /// entirely via upload-time provider attestation, which is the real fix.
 pub(crate) fn note_data_plane_activity_for(state: &AppState, packs: usize) {
+    let bytes = (packs as u64).saturating_mul(mediagit_versioning::pack_bytes_cap());
+    note_data_plane_transfer_bytes(state, bytes)
+}
+
+/// Declare a transfer of a known byte count as starting now.
+///
+/// The counterpart to [`note_data_plane_activity_for`] for callers that know
+/// the exact size rather than a pack count — `mpu_start_for` is handed
+/// `chunk_size` outright, so it need not round up to `pack_bytes_cap`.
+///
+/// WHY UPLOADS NEED THIS AT ALL. Every caller of the lease used to be a READ
+/// path (`presign_pack_downloads`, `download_chunk`, `batch_get_pack_chunks`).
+/// A push therefore stamped nothing: `data_plane_activity` stayed at its
+/// initial `0`, the wait loop's `last == 0` arm fired, and verification ran
+/// through the whole push completely unscheduled — measured 2026-09-16 on the
+/// 16 GB aws arm, 64 packs verified DURING the push at concurrency 16, against
+/// the same bucket over the same link the push was using. The scheduler was
+/// inert on exactly the leg that moves the most bytes.
+pub(crate) fn note_data_plane_transfer_bytes(state: &AppState, bytes: u64) {
     let now = now_millis();
-    let lease_ms = if packs == 0 {
-        0
-    } else {
-        let bytes = (packs as u64).saturating_mul(mediagit_versioning::pack_bytes_cap());
-        let floor_mbps = std::env::var("MEDIAGIT_PACK_VERIFY_ASSUMED_MBPS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(2);
-        let secs = (bytes / (1024 * 1024)) / floor_mbps;
-        secs.min(verify_max_defer_secs()).saturating_mul(1000)
-    };
+    let lease_ms = lease_ms_for_bytes(bytes);
     // Storing a FUTURE instant: the wait loop reads this as "the link is busy
     // until then", so one value expresses both "just happened" (lease 0) and
     // "expected to be busy for a while".
@@ -1530,6 +1538,24 @@ pub(crate) fn note_data_plane_activity_for(state: &AppState, packs: usize) {
     state
         .data_plane_activity
         .fetch_max(until, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// How long a transfer of `bytes` is assumed to occupy the link, in ms.
+///
+/// Split out so the arithmetic is testable without an `AppState`. Zero bytes
+/// means "no declared transfer" and yields no lease, which is what keeps a
+/// bare `note_data_plane_activity()` stamp behaving as a plain timestamp.
+fn lease_ms_for_bytes(bytes: u64) -> u64 {
+    if bytes == 0 {
+        return 0;
+    }
+    let floor_mbps = std::env::var("MEDIAGIT_PACK_VERIFY_ASSUMED_MBPS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(2);
+    let secs = (bytes / (1024 * 1024)) / floor_mbps;
+    secs.min(verify_max_defer_secs()).saturating_mul(1000)
 }
 
 /// Seconds the data plane must be idle before a pack is verified.
@@ -1681,6 +1707,36 @@ mod data_plane_quiet_tests {
     /// the same binary and saw a link that looked busy.
     fn busy_now() -> std::sync::atomic::AtomicU64 {
         std::sync::atomic::AtomicU64::new(now_millis())
+    }
+
+    /// A push declares its size, so an upload leaves a lease behind.
+    ///
+    /// REGRESSION GUARD. Every lease caller used to be a read path, so a push
+    /// stamped nothing at all: `data_plane_activity` stayed `0`, the wait
+    /// loop's `last == 0` arm fired, and verification ran through the entire
+    /// push unscheduled — 64 packs verified DURING the 16 GB aws push on
+    /// 2026-09-16, at concurrency 16, over the link the push was using.
+    #[test]
+    fn a_declared_upload_leaves_a_lease() {
+        let one_pack = 64 * 1024 * 1024;
+        let lease = lease_ms_for_bytes(one_pack);
+        assert!(
+            lease > 0,
+            "a 64 MiB upload produced no lease, so verification will treat the              link as idle while the client is still uploading to the bucket"
+        );
+        // 64 MiB at the 2 MB/s pessimistic floor is ~32 s. Assert the shape,
+        // not the constant, so retuning the floor does not fail this.
+        assert!(
+            lease >= 10_000,
+            "lease {lease}ms is shorter than a realistic 64 MiB upload; the 5s              quiet window would expire mid-transfer"
+        );
+    }
+
+    /// The bare stamp must stay a plain timestamp, or control-plane chatter
+    /// would start holding verification off.
+    #[test]
+    fn an_undeclared_stamp_leases_nothing() {
+        assert_eq!(lease_ms_for_bytes(0), 0);
     }
 
     /// Both halves, because either alone is satisfiable by a broken

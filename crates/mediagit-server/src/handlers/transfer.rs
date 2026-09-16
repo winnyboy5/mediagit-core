@@ -60,6 +60,9 @@ pub async fn presign_pack_uploads(
     if !repo_path.exists() {
         return Err(StatusCode::NOT_FOUND);
     }
+    // The single-PUT fallback for backends or servers without pack MPU. Same
+    // declaration as `mpu_start_for`, by pack count rather than exact bytes.
+    crate::handlers::repo::note_data_plane_activity_for(&state, req.pack_ids.len());
     let storage = get_or_init_storage(&state, &repo_path).await?;
     let ttl = std::time::Duration::from_secs(state.presigned_url_ttl_secs);
 
@@ -739,6 +742,13 @@ async fn mpu_start_for(
     let storage = get_or_init_storage(&state, &repo_path).await?;
     let ttl = std::time::Duration::from_secs(state.presigned_url_ttl_secs);
     let key = format!("{}/{}", prefix, req.chunk_id);
+
+    // An MPU start is a declaration that the client is about to push
+    // `chunk_size` bytes straight to the bucket, after which the server sees
+    // nothing until `complete`. Same reasoning as the download side — and this
+    // is the ONLY upload-side stamp, so without it a push defers no
+    // verification at all.
+    crate::handlers::repo::note_data_plane_transfer_bytes(&state, req.chunk_size);
 
     match storage
         .create_presigned_mpu(&key, req.chunk_size, ttl)
