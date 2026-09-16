@@ -241,3 +241,95 @@ async fn a_corrupted_part_is_rejected() {
         "refused somewhere other than Complete, so the control does not apply: {msg}"
     );
 }
+
+/// HALF 3 — VERSION SKEW. Can an OLD client still push to a NEW server?
+///
+/// `create_presigned_mpu` declares a checksum algorithm on every AWS upload.
+/// A client that predates attestation sends no per-part checksums, so
+/// `combine_part_crc64` yields `None` and Complete is called WITHOUT a checksum
+/// on an MPU that DECLARED one.
+///
+/// The design assumes that degrades to "unattested" — the upload lands, the
+/// object carries no provider checksum, and `attested_checksum` later reports
+/// `None`, so the pack read-back stays on. That is the fail-closed direction
+/// and it is what makes the rollout safe.
+///
+/// If instead S3 REFUSES the Complete, every old client is locked out of a
+/// server that upgraded — a silent compatibility break, and one the
+/// `serde(default)` wire-compat work does NOT protect against, because the
+/// rejection happens at the S3 API rather than in our own decoding.
+///
+/// This is asserted rather than assumed because the whole rollout story rests
+/// on it.
+#[tokio::test]
+#[ignore = "needs real AWS S3: set MG_S3_ATTEST_BUCKET"]
+async fn an_unattested_complete_still_succeeds() {
+    let Some(bkt) = bucket() else {
+        panic!("MG_S3_ATTEST_BUCKET not set");
+    };
+    ensure_tls();
+    let be = backend(&bkt).await;
+    let key = format!("skew-{}", std::process::id());
+    let data = vec![3u8; PART];
+
+    let mpu = be
+        .create_presigned_mpu(&key, data.len() as u64, std::time::Duration::from_secs(900))
+        .await
+        .expect("create mpu")
+        .expect("S3 must support presigned MPU");
+    assert!(
+        mpu.checksum.is_some(),
+        "this test is only meaningful when the MPU actually declared an algorithm"
+    );
+
+    let part = &mpu.parts[0];
+    let resp = reqwest::Client::new()
+        .put(&part.url)
+        .header("content-length", data.len())
+        .body(data.clone())
+        .send()
+        .await
+        .expect("PUT part");
+    assert!(
+        resp.status().is_success(),
+        "part PUT failed: {}",
+        resp.status()
+    );
+    let etag = resp
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    // Exactly what an old client produces: an ETag and nothing else.
+    let outcome = be
+        .complete_presigned_mpu(
+            &key,
+            &mpu.upload_id,
+            vec![MpuCompletedPart {
+                part_number: part.part_number,
+                etag,
+                checksum: None,
+                length: None,
+            }],
+        )
+        .await;
+
+    if outcome.is_err() {
+        let _ = be.abort_presigned_mpu(&key, &mpu.upload_id).await;
+    }
+    let landed = be.head(&key).await.ok().flatten();
+    let _ = be.delete(&key).await;
+
+    outcome.expect(
+        "S3 REFUSED a Complete with no checksum on an MPU that declared an algorithm. \
+         Every client predating attestation is then locked out of an upgraded server — \
+         declaring the algorithm must become conditional on the client supporting it.",
+    );
+    assert_eq!(
+        landed,
+        Some(data.len() as u64),
+        "Complete succeeded but the object is not there at full size"
+    );
+}

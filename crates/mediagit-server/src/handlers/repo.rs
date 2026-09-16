@@ -2329,25 +2329,47 @@ pub async fn complete_pack(
     // All three effects are skipped together — marker, unverified-set, and the
     // background task. Skipping only the task would leave a marker the startup
     // sweep re-reads on the next boot, doing the same work later.
-    let attested = match storage.attested_checksum(&pack_key).await {
-        Ok(Some(sum)) => {
-            tracing::info!(
-                repo = %repo,
-                pack = %req.pack_oid,
-                checksum = %sum,
-                "pack is provider-attested; skipping the read-back"
-            );
-            true
-        }
-        Ok(None) => false,
-        Err(e) => {
-            tracing::warn!(
-                repo = %repo,
-                pack = %req.pack_oid,
-                error = %e,
-                "could not read the pack's attestation; verifying by read-back"
-            );
-            false
+    // KILL SWITCH. `MEDIAGIT_PACK_ATTEST_SKIP_READBACK=0` forces the read-back
+    // even for an attested pack, restoring pre-attestation behaviour exactly.
+    //
+    // Two reasons it exists. Operationally it is the escape hatch for a
+    // provider whose checksum turns out not to mean what we think. For
+    // measurement it is what makes an A/B possible on ONE link: p18 ran phase B
+    // active on the worst link of the series (99 stream errors, 4.69 MB/s push)
+    // while its comparison ran on the best, so the clone difference could not
+    // be attributed. Toggling behaviour without rebuilding removes that
+    // confound.
+    let skip_enabled = !matches!(
+        std::env::var("MEDIAGIT_PACK_ATTEST_SKIP_READBACK")
+            .ok()
+            .as_deref(),
+        Some("0") | Some("off") | Some("false")
+    );
+    let attested = if !skip_enabled {
+        // Forced off: do not even ask, so the A arm costs exactly what it did
+        // before attestation existed — no extra HEAD per pack.
+        false
+    } else {
+        match storage.attested_checksum(&pack_key).await {
+            Ok(Some(sum)) => {
+                tracing::info!(
+                    repo = %repo,
+                    pack = %req.pack_oid,
+                    checksum = %sum,
+                    "pack is provider-attested; skipping the read-back"
+                );
+                true
+            }
+            Ok(None) => false,
+            Err(e) => {
+                tracing::warn!(
+                    repo = %repo,
+                    pack = %req.pack_oid,
+                    error = %e,
+                    "could not read the pack's attestation; verifying by read-back"
+                );
+                false
+            }
         }
     };
 
