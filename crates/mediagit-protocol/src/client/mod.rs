@@ -1394,6 +1394,10 @@ pub(crate) async fn upload_object_mpu(
         /// older server sees exactly the payload it saw before.
         #[serde(skip_serializing_if = "Option::is_none")]
         checksum: Option<String>,
+        /// Byte length, needed server-side to fold the per-part CRCs into the
+        /// assembled object's CRC.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        length: Option<u64>,
     }
     #[derive(serde::Serialize)]
     struct AbortReq<'a> {
@@ -1500,11 +1504,6 @@ pub(crate) async fn upload_object_mpu(
             use base64::Engine as _;
             base64::engine::general_purpose::STANDARD.encode(raw)
         });
-        let checksum_header = mpu.checksum.as_deref().map(|alg| match alg {
-            "Crc32c" => "x-amz-checksum-crc32c",
-            _ => "x-amz-checksum-crc64nvme",
-        });
-
         let mut part_etag: Option<String> = None;
         for attempt in 0..MAX_PART_ATTEMPTS {
             if attempt > 0 {
@@ -1523,13 +1522,19 @@ pub(crate) async fn upload_object_mpu(
             // this path treats as "backend has no MPU, fall back to single PUT".
             // Getting it wrong would not error; it would silently demote every
             // pack to the slower path while the logs looked healthy.
-            let mut req = direct_client
+            // NO CHECKSUM HEADER HERE. A presigned URL signs a fixed header
+            // set, and AWS rejects anything extra:
+            //   AccessDenied / "There were headers present in the request which
+            //   were not signed" / HeadersNotSigned: x-amz-checksum-crc64nvme
+            // (measured against real S3, 2026-09-16). The attestation instead
+            // travels in the Complete report, which the SERVER signs with its
+            // own credentials and can therefore carry freely.
+            let result = direct_client
                 .put(&part.url)
-                .header(reqwest::header::CONTENT_LENGTH, part_data.len());
-            if let (Some(h), Some(v)) = (checksum_header, part_checksum.as_deref()) {
-                req = req.header(h, v);
-            }
-            let result = req.body(part_data.clone()).send().await;
+                .header(reqwest::header::CONTENT_LENGTH, part_data.len())
+                .body(part_data.clone())
+                .send()
+                .await;
 
             match result {
                 Ok(r) if r.status().is_success() => {
@@ -1618,6 +1623,7 @@ pub(crate) async fn upload_object_mpu(
                 part_number: part.part_number,
                 etag,
                 checksum: part_checksum,
+                length: Some(part_data.len() as u64),
             }),
             None => {
                 tracing::debug!(

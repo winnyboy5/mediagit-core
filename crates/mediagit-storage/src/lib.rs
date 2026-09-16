@@ -236,6 +236,11 @@ pub struct MpuCompletedPart {
     /// than failing the push.
     #[serde(default)]
     pub checksum: Option<String>,
+    /// Byte length of this part. Needed to FOLD per-part CRCs into the
+    /// assembled object's CRC — combining is defined in terms of the length of
+    /// the trailing run, so a digest without its length cannot be combined.
+    #[serde(default)]
+    pub length: Option<u64>,
 }
 
 /// Checksum algorithm a backend wants a multipart upload attested with.

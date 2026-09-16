@@ -713,6 +713,35 @@ impl MinIOBackend {
         &self.config.endpoint
     }
 
+    /// Which checksum this endpoint's uploads are attested with, if any.
+    ///
+    /// THIS BACKEND SERVES BOTH real AWS and actual MinIO — the server builds
+    /// the "aws" backend from `MinIOConfig` with an
+    /// `https://s3.<region>.amazonaws.com` endpoint (`handlers/mod.rs`), so
+    /// `S3Backend` in `s3.rs` is NOT on the AWS path at all; only `b2_spaces`
+    /// constructs that. Attestation therefore has to live here to affect
+    /// anything.
+    ///
+    /// Gated on the endpoint host because the capability differs: AWS validates
+    /// full-object CRC64NVME, MinIO does not implement it, and declaring an
+    /// algorithm an endpoint ignores would produce a checksum nobody checks —
+    /// which is worse than none, because phase B would then skip the pack
+    /// read-back on the strength of it.
+    ///
+    /// `MEDIAGIT_S3_ATTEST=off` forces it off, `=on` forces it on for a
+    /// non-AWS endpoint that does support it. Escape hatches, not tuning: with
+    /// attestation off the read-back stays, so correctness is unchanged.
+    fn attestation_algorithm(&self) -> Option<crate::ChecksumAlgorithm> {
+        let host_is_aws = self.config.endpoint.contains(".amazonaws.com");
+        match std::env::var("MEDIAGIT_S3_ATTEST").ok().as_deref() {
+            Some("off") | Some("0") | Some("false") => None,
+            Some("crc32c") => Some(crate::ChecksumAlgorithm::Crc32c),
+            Some("on") | Some("1") => Some(crate::ChecksumAlgorithm::Crc64Nvme),
+            _ if host_is_aws => Some(crate::ChecksumAlgorithm::Crc64Nvme),
+            _ => None,
+        }
+    }
+
     pub fn bucket(&self) -> &str {
         &self.bucket
     }
@@ -1392,11 +1421,21 @@ impl StorageBackend for MinIOBackend {
                 .acquire()
                 .await
                 .map_err(|e| anyhow!("mpu semaphore: {}", e))?;
-            let resp = self
+            // ATTESTATION. Declaring the algorithm is what makes the provider
+            // validate the ASSEMBLED object at Complete and reject a mismatch
+            // with BadDigest — the property that lets the server stop reading
+            // every pushed pack back out of the bucket to check it.
+            let mut create = self
                 .client
                 .create_multipart_upload()
                 .bucket(&self.config.bucket)
-                .key(&wire_key)
+                .key(&wire_key);
+            if let Some(alg) = self.attestation_algorithm() {
+                create = create
+                    .checksum_algorithm(aws_sdk_s3::types::ChecksumAlgorithm::from(alg.as_s3_str()))
+                    .checksum_type(aws_sdk_s3::types::ChecksumType::FullObject);
+            }
+            let resp = create
                 .send()
                 .await
                 .map_err(|e| anyhow!("create_multipart_upload {}: {}", self.endpoint_label(), e))?;
@@ -1436,10 +1475,7 @@ impl StorageBackend for MinIOBackend {
             upload_id,
             parts,
             part_size,
-            // Unattested for now: this backend keeps the pack read-back, which
-            // is the pre-attestation behaviour and so not a regression. S3 is
-            // being proven end-to-end first.
-            checksum: None,
+            checksum: self.attestation_algorithm(),
         }))
     }
 
@@ -1450,6 +1486,27 @@ impl StorageBackend for MinIOBackend {
         parts: Vec<crate::MpuCompletedPart>,
     ) -> anyhow::Result<()> {
         let wire_key = self.full_key(key);
+        // ATTESTATION TRAVELS HERE, NOT ON THE PART PUTs.
+        //
+        // The parts are uploaded through PRESIGNED urls, and a presigned URL
+        // signs a fixed header set — AWS rejects a part carrying an extra
+        // `x-amz-checksum-*` with `AccessDenied` / "There were headers present
+        // in the request which were not signed" (measured against real S3,
+        // 2026-09-16). So the client cannot attest its own PUTs.
+        //
+        // This call is different: the SERVER makes it, with its own
+        // credentials, so it can sign a checksum header freely. CRC64NVME is
+        // linearly combinable, so the per-part digests the client reports fold
+        // into the checksum of the ASSEMBLED object, which S3 then validates
+        // and rejects with `BadDigest` on mismatch. Same full-object guarantee,
+        // no signing problem.
+        let alg = self.attestation_algorithm();
+        let full_object = match alg {
+            Some(crate::ChecksumAlgorithm::Crc64Nvme) => combine_part_crc64(&parts),
+            // crc32c is not combinable the same way here; treated as unattested
+            // rather than sending something unverifiable.
+            _ => None,
+        };
         let completed: Vec<_> = parts
             .into_iter()
             .map(|p| {
@@ -1464,7 +1521,8 @@ impl StorageBackend for MinIOBackend {
             .acquire()
             .await
             .map_err(|e| anyhow!("mpu semaphore: {}", e))?;
-        self.client
+        let mut complete = self
+            .client
             .complete_multipart_upload()
             .bucket(&self.config.bucket)
             .key(&wire_key)
@@ -1473,7 +1531,11 @@ impl StorageBackend for MinIOBackend {
                 aws_sdk_s3::types::CompletedMultipartUpload::builder()
                     .set_parts(Some(completed))
                     .build(),
-            )
+            );
+        if let Some(sum) = full_object {
+            complete = complete.checksum_crc64_nvme(sum);
+        }
+        complete
             .send()
             .await
             .map_err(|e| anyhow!("complete_multipart_upload {}: {}", self.endpoint_label(), e))?;
@@ -1492,6 +1554,34 @@ impl StorageBackend for MinIOBackend {
             .await;
         Ok(())
     }
+}
+
+/// Fold per-part CRC64NVME digests into the checksum of the assembled object.
+///
+/// CRC64NVME is linearly combinable: given two CRCs and the byte length of the
+/// second run, the CRC of the concatenation is computable without the bytes.
+/// That is what lets the server attest an upload it never saw — the client
+/// hashes each part it sends, and these fold into the whole.
+///
+/// Returns `None` if any part is missing a digest or a length, because a
+/// partial fold would be a checksum of the wrong thing. `None` means
+/// "unattested", which keeps the pack read-back — the fail-closed direction.
+fn combine_part_crc64(parts: &[crate::MpuCompletedPart]) -> Option<String> {
+    use base64::Engine as _;
+    let mut ordered: Vec<&crate::MpuCompletedPart> = parts.iter().collect();
+    ordered.sort_by_key(|p| p.part_number);
+
+    let mut acc: Option<u64> = None;
+    for p in ordered {
+        let (raw, len) = (p.checksum.as_deref()?, p.length?);
+        let bytes = base64::engine::general_purpose::STANDARD.decode(raw).ok()?;
+        let crc = u64::from_be_bytes(<[u8; 8]>::try_from(bytes.as_slice()).ok()?);
+        acc = Some(match acc {
+            None => crc,
+            Some(a) => crc_fast::checksum_combine(crc_fast::CrcAlgorithm::Crc64Nvme, a, crc, len),
+        });
+    }
+    acc.map(|v| base64::engine::general_purpose::STANDARD.encode(v.to_be_bytes()))
 }
 
 #[cfg(test)]

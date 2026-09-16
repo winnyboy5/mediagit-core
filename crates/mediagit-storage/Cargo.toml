@@ -60,6 +60,11 @@ serde_json = { workspace = true, optional = true }
 # Same signer OpenDAL uses internally, so we do not hand-roll Shared Key.
 # Unauthenticated/simple HTTP for the signed container-create call.
 reqwest = { workspace = true, optional = true }
+# Upload attestation: fold per-part CRC64NVME digests into the assembled
+# object's checksum, which the server supplies at CompleteMultipartUpload.
+# Already in the tree via aws-sdk-s3 -> aws-smithy-checksums at these versions.
+crc-fast = "1.10"
+base64 = "0.22"
 reqsign-azure-storage = { version = "3.1", optional = true }
 reqsign-core = { version = "3.1", optional = true }
 # Provider install for the reqwest rustls-no-provider policy (see azure.rs).
@@ -69,6 +74,15 @@ opendal = { version = "0.57", optional = true, default-features = false, feature
 [dev-dependencies]
 tempfile.workspace = true
 criterion = { version = "0.8", features = ["async_tokio"] }
+# s3_attestation_live: computes the same CRC the client does, and PUTs a part
+# directly at a presigned URL to check the provider's own validation.
+crc-fast = "1.10"
+base64 = "0.22"
+reqwest = { workspace = true }
+# reqwest uses `rustls-no-provider`, so a provider must be installed before any
+# Client is built. RING, not aws-lc-rs: the workspace standardises on ring and
+# pulling aws-lc in here would undo that deliberately.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 
 [[test]]
 name = "azure_azurite_tests"

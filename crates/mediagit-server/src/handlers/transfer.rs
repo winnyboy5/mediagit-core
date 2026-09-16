@@ -712,6 +712,11 @@ pub struct MpuCompletedPartJson {
     /// leaves the pack read-back in place rather than failing the push.
     #[serde(default)]
     checksum: Option<String>,
+    /// Byte length of the part. Needed to FOLD the per-part CRCs into the
+    /// assembled object's CRC — combining is defined in terms of the length of
+    /// the trailing run, so a digest without its length cannot be combined.
+    #[serde(default)]
+    length: Option<u64>,
 }
 
 #[derive(serde::Deserialize)]
@@ -853,6 +858,7 @@ async fn mpu_complete_for(
             part_number: p.part_number,
             etag: p.etag,
             checksum: p.checksum,
+            length: p.length,
         })
         .collect();
 
