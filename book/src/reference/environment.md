@@ -147,7 +147,7 @@ MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurre
 | `MEDIAGIT_MINIO_MPU_CONCURRENCY` / `MEDIAGIT_MINIO_OP_CONCURRENCY` | Concurrent MinIO MPU creations, and concurrent in-flight `with_retry` operations. | `16` / `64` |
 | `MEDIAGIT_AZURE_PUT_BLOCK_CONCURRENCY` | Concurrent block uploads per blob for Azure. | `8` |
 | `MEDIAGIT_GCS_UPLOAD_CONCURRENCY` | Upload semaphore capacity for the GCS proxy-path uploader. | `4` |
-| `MEDIAGIT_GCS_DISABLE_PRESIGN` | Any value forces GCS transfers through the server proxy, skipping presigned URLs. | unset |
+| `MEDIAGIT_GCS_DISABLE_PRESIGN` | Any value forces GCS transfers through the server proxy, skipping presigned URLs. Required to run the proxy path at all: credentials that cannot sign V4 URLs otherwise fail backend construction rather than downgrading silently. | unset |
 
 ### Server (mediagit-server)
 
