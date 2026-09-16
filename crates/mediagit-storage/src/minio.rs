@@ -1271,13 +1271,24 @@ impl StorageBackend for MinIOBackend {
             .checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled)
             .send()
             .await;
-        Ok(match resp {
-            Ok(r) => r
+        match resp {
+            Ok(r) => Ok(r
                 .checksum_crc64_nvme()
                 .map(str::to_string)
-                .or_else(|| r.checksum_crc32_c().map(str::to_string)),
-            Err(_) => None,
-        })
+                .or_else(|| r.checksum_crc32_c().map(str::to_string))),
+            // PROPAGATED, not swallowed. The caller turns any error into "not
+            // attested" anyway, so behaviour is the same — but it logs the
+            // reason, and that difference matters: an earlier version returned
+            // `Ok(None)` here and a HEAD failure was then indistinguishable
+            // from an object that genuinely carries no checksum. The whole
+            // feature can be inert and look identical to "the provider does
+            // not attest".
+            Err(e) => Err(anyhow!(
+                "head_object checksum {}: {}",
+                self.endpoint_label(),
+                e
+            )),
+        }
     }
 
     /// Delete an object from MinIO
