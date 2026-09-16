@@ -743,12 +743,12 @@ async fn mpu_start_for(
     let ttl = std::time::Duration::from_secs(state.presigned_url_ttl_secs);
     let key = format!("{}/{}", prefix, req.chunk_id);
 
-    // An MPU start is a declaration that the client is about to push
-    // `chunk_size` bytes straight to the bucket, after which the server sees
-    // nothing until `complete`. Same reasoning as the download side — and this
-    // is the ONLY upload-side stamp, so without it a push defers no
-    // verification at all.
-    crate::handlers::repo::note_data_plane_transfer_bytes(&state, req.chunk_size);
+    // EXACT, not estimated. An MPU has a completion call, so the server knows
+    // when this upload ends rather than having to predict it — which the lease
+    // did badly here: a 67 MB pack leased ~33 s against real inter-start gaps
+    // of up to 76 s, so the link read as idle mid-push. The count is released
+    // in `mpu_complete_for`/`mpu_abort_for`.
+    crate::handlers::repo::note_upload_started(&state);
 
     match storage
         .create_presigned_mpu(&key, req.chunk_size, ttl)
@@ -823,6 +823,11 @@ async fn mpu_complete_for(
         return Err(StatusCode::BAD_REQUEST);
     }
 
+    // Release the in-flight count taken by `mpu_start_for`. Done HERE, before
+    // the work and before any later error return, so a failing complete or
+    // abort still frees the link rather than pinning it until the defer cap.
+    crate::handlers::repo::note_upload_finished(&state);
+
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
         return Err(StatusCode::NOT_FOUND);
@@ -874,6 +879,11 @@ async fn mpu_abort_for(
         tracing::warn!(repo = %repo, chunk_id = %req.chunk_id, "Rejecting mpu_abort: chunk_id is not hex");
         return Err(StatusCode::BAD_REQUEST);
     }
+
+    // Release the in-flight count taken by `mpu_start_for`. Done HERE, before
+    // the work and before any later error return, so a failing complete or
+    // abort still frees the link rather than pinning it until the defer cap.
+    crate::handlers::repo::note_upload_finished(&state);
 
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
