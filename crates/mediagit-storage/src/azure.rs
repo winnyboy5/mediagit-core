@@ -874,6 +874,11 @@ impl StorageBackend for AzureBackend {
             upload_id: "azure-blocklist".to_string(),
             parts,
             part_size,
+            // Unattested: Azure has no validated whole-blob hash
+            // (`x-ms-blob-content-md5` is stored, NOT checked), so it needs the
+            // per-block CRC64 + stored-metadata design rather than this one.
+            // Keeps the pack read-back meanwhile, i.e. current behaviour.
+            checksum: None,
         }))
     }
 

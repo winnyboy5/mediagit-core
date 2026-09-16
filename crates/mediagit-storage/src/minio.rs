@@ -1436,6 +1436,10 @@ impl StorageBackend for MinIOBackend {
             upload_id,
             parts,
             part_size,
+            // Unattested for now: this backend keeps the pack read-back, which
+            // is the pre-attestation behaviour and so not a regression. S3 is
+            // being proven end-to-end first.
+            checksum: None,
         }))
     }
 

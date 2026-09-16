@@ -206,6 +206,14 @@ pub struct PresignedMpu {
     pub parts: Vec<PresignedMpuPart>,
     /// Recommended part size in bytes; the last part may be smaller.
     pub part_size: u64,
+    /// Checksum the client must compute per part and report back, when this
+    /// backend attests uploads. `None` means unattested — the caller keeps
+    /// whatever verification it would otherwise have done.
+    ///
+    /// `#[serde(default)]` so a server response predating attestation still
+    /// deserializes on a newer client.
+    #[serde(default)]
+    pub checksum: Option<ChecksumAlgorithm>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -219,6 +227,62 @@ pub struct PresignedMpuPart {
 pub struct MpuCompletedPart {
     pub part_number: i32,
     pub etag: String,
+    /// Base64 checksum of this part's bytes, in the algorithm the matching
+    /// [`PresignedMpu::checksum`] asked for. `None` from a client that predates
+    /// attestation, or when the backend asked for no checksum.
+    ///
+    /// `#[serde(default)]` so an older client's report still deserializes —
+    /// it degrades to an unattested upload, which keeps the read-back, rather
+    /// than failing the push.
+    #[serde(default)]
+    pub checksum: Option<String>,
+}
+
+/// Checksum algorithm a backend wants a multipart upload attested with.
+///
+/// WHY ATTESTATION EXISTS. Verifying a pushed pack used to mean re-reading all
+/// of it back out of the bucket — 10.03 GB after a 16 GB push, on a link whose
+/// ceiling is ~9-10 MB/s and symmetric. Measured across four 16 GB runs
+/// (2026-09-16), scheduling WHEN that read happens cannot win: it is ~60%
+/// additional link load however it is timed. A checksum the provider validates
+/// at upload proves the same storage-integrity property for free.
+///
+/// It does NOT prove the pack's contents match its manifest — that is a
+/// separate, content-level property, and it stays enforced on the read path
+/// (`slice_verifies` plus `put_compressed_chunk`, both fail-closed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ChecksumAlgorithm {
+    /// S3 full-object CRC64NVME: declared at CreateMultipartUpload, supplied at
+    /// Complete, validated server-side (`BadDigest` on mismatch), and readable
+    /// afterwards via `HeadObject` with no body download.
+    Crc64Nvme,
+    /// GCS per-part crc32c (`x-goog-hash`); the assembled object's crc32c comes
+    /// back in the Complete response.
+    Crc32c,
+}
+
+impl ChecksumAlgorithm {
+    /// The `x-amz-checksum-algorithm` spelling.
+    pub fn as_s3_str(&self) -> &'static str {
+        match self {
+            Self::Crc64Nvme => "CRC64NVME",
+            Self::Crc32c => "CRC32C",
+        }
+    }
+
+    /// The spelling sent to clients in the MPU start response.
+    ///
+    /// EXPLICIT, not `format!("{self:?}")`. Deriving the wire value from the
+    /// `Debug` impl would make renaming a variant a silent protocol break: the
+    /// client would stop recognising the algorithm, and nothing would fail at
+    /// compile time. This match IS the contract — changing a string here is
+    /// visibly a wire change.
+    pub fn as_wire_str(&self) -> &'static str {
+        match self {
+            Self::Crc64Nvme => "Crc64Nvme",
+            Self::Crc32c => "Crc32c",
+        }
+    }
 }
 
 #[async_trait]

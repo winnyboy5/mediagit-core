@@ -1168,11 +1168,28 @@ impl StorageBackend for S3Backend {
     ) -> anyhow::Result<Option<crate::PresignedMpu>> {
         let key = crate::prefixed_key(&self.config.prefix, key);
         let part_size = mpu_part_size_s3(total_size);
-        let resp = self
+        // ATTESTATION. Declaring the algorithm here is what makes S3 validate
+        // the assembled object at Complete and reject a mismatch with
+        // `BadDigest`, which is the property that lets the server stop
+        // re-reading the whole pack back out of the bucket to check it.
+        //
+        // FULL_OBJECT, not COMPOSITE: a composite checksum is a checksum OF THE
+        // PART CHECKSUMS, so it only proves the parts arrived intact, not that
+        // they assembled into the object we meant. Full-object covers the
+        // assembled bytes and is readable afterwards from `HeadObject` with no
+        // body download — the whole point.
+        let attest = attestation_algorithm();
+        let mut create = self
             .client
             .create_multipart_upload()
             .bucket(&self.config.bucket)
-            .key(key.as_str())
+            .key(key.as_str());
+        if let Some(alg) = attest {
+            create = create
+                .checksum_algorithm(aws_sdk_s3::types::ChecksumAlgorithm::from(alg.as_s3_str()))
+                .checksum_type(aws_sdk_s3::types::ChecksumType::FullObject);
+        }
+        let resp = create
             .send()
             .await
             .map_err(|e| anyhow!("create_multipart_upload s3: {}", e))?;
@@ -1205,6 +1222,7 @@ impl StorageBackend for S3Backend {
             upload_id,
             parts,
             part_size,
+            checksum: attest,
         }))
     }
 
@@ -1215,13 +1233,25 @@ impl StorageBackend for S3Backend {
         parts: Vec<crate::MpuCompletedPart>,
     ) -> anyhow::Result<()> {
         let key = crate::prefixed_key(&self.config.prefix, key);
+        // Carry each part's checksum through when the client reported one. S3
+        // needs the per-part values to compute and validate the full-object
+        // checksum; omitting them on an upload that DECLARED an algorithm makes
+        // Complete fail, which is the fail-closed direction — an unattested
+        // push is refused rather than silently landing unverified.
         let completed: Vec<_> = parts
             .into_iter()
             .map(|p| {
-                aws_sdk_s3::types::CompletedPart::builder()
+                let mut b = aws_sdk_s3::types::CompletedPart::builder()
                     .part_number(p.part_number)
-                    .e_tag(p.etag)
-                    .build()
+                    .e_tag(p.etag);
+                if let Some(sum) = p.checksum {
+                    b = match attestation_algorithm() {
+                        Some(crate::ChecksumAlgorithm::Crc64Nvme) => b.checksum_crc64_nvme(sum),
+                        Some(crate::ChecksumAlgorithm::Crc32c) => b.checksum_crc32_c(sum),
+                        None => b,
+                    };
+                }
+                b.build()
             })
             .collect();
         self.client
@@ -1255,6 +1285,34 @@ impl StorageBackend for S3Backend {
 }
 
 // Helper methods for S3Backend (not part of StorageBackend trait)
+/// Which checksum S3 uploads are attested with, or `None` to disable.
+///
+/// Default CRC64NVME: it is the algorithm AWS computes fastest, it supports
+/// FULL_OBJECT, and it is returned by `HeadObject` so a later scrub can confirm
+/// storage integrity without downloading a byte.
+///
+/// `MEDIAGIT_S3_ATTEST=off` disables it. That is an escape hatch for an
+/// S3-compatible endpoint whose CreateMultipartUpload rejects the checksum
+/// headers, NOT a tuning knob: with attestation off the pack read-back stays
+/// on, so correctness is unchanged and only the cost differs.
+fn attestation_algorithm() -> Option<crate::ChecksumAlgorithm> {
+    attestation_from(std::env::var("MEDIAGIT_S3_ATTEST").ok().as_deref())
+}
+
+/// The knob's policy, without reading the environment.
+///
+/// Split out so tests never mutate a process-global: a test that sets an env
+/// var couples every other test in the binary, and this codebase has already
+/// lost a day to exactly that (four unrelated `complete_pack` tests failing
+/// because one test stamped a shared value).
+fn attestation_from(setting: Option<&str>) -> Option<crate::ChecksumAlgorithm> {
+    match setting {
+        Some("off") | Some("0") | Some("false") => None,
+        Some("crc32c") => Some(crate::ChecksumAlgorithm::Crc32c),
+        _ => Some(crate::ChecksumAlgorithm::Crc64Nvme),
+    }
+}
+
 impl S3Backend {
     /// Upload small objects using direct put_object
     async fn put_simple(&self, key: &str, data: &[u8]) -> Result<()> {
@@ -1454,5 +1512,51 @@ mod tests {
             ..Default::default()
         };
         let _ = format!("{:?}", config);
+    }
+}
+
+#[cfg(test)]
+mod attestation_tests {
+    use super::attestation_from;
+    use crate::ChecksumAlgorithm;
+
+    /// Attestation is ON by default. If it silently defaulted off, phase B
+    /// would skip the pack read-back on uploads nothing ever validated.
+    #[test]
+    fn attestation_is_on_unless_turned_off() {
+        assert_eq!(attestation_from(None), Some(ChecksumAlgorithm::Crc64Nvme));
+        assert_eq!(
+            attestation_from(Some("anything-else")),
+            Some(ChecksumAlgorithm::Crc64Nvme)
+        );
+    }
+
+    /// The escape hatch for an S3-compatible endpoint that rejects the headers.
+    #[test]
+    fn the_escape_hatch_disables_it() {
+        for off in ["off", "0", "false"] {
+            assert_eq!(attestation_from(Some(off)), None, "{off} should disable");
+        }
+    }
+
+    #[test]
+    fn crc32c_can_be_selected() {
+        assert_eq!(
+            attestation_from(Some("crc32c")),
+            Some(ChecksumAlgorithm::Crc32c)
+        );
+    }
+
+    /// The wire spelling is a CONTRACT, not a formatting detail.
+    ///
+    /// The client matches on these exact strings to pick its digest. Deriving
+    /// them from `Debug` would let a variant rename break the protocol with no
+    /// compile error, so this pins them.
+    #[test]
+    fn wire_spellings_are_pinned() {
+        assert_eq!(ChecksumAlgorithm::Crc64Nvme.as_wire_str(), "Crc64Nvme");
+        assert_eq!(ChecksumAlgorithm::Crc32c.as_wire_str(), "Crc32c");
+        assert_eq!(ChecksumAlgorithm::Crc64Nvme.as_s3_str(), "CRC64NVME");
+        assert_eq!(ChecksumAlgorithm::Crc32c.as_s3_str(), "CRC32C");
     }
 }
