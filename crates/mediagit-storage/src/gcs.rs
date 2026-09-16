@@ -1682,11 +1682,13 @@ mod gcs_mpu_tests {
                 part_number: 1,
                 etag: "\"aaa\"".into(),
                 checksum: None,
+                length: None,
             },
             crate::MpuCompletedPart {
                 part_number: 2,
                 etag: "\"bbb\"".into(),
                 checksum: None,
+                length: None,
             },
         ];
         let xml = complete_mpu_xml(&parts);
@@ -1709,6 +1711,7 @@ mod gcs_mpu_tests {
             part_number: 1,
             etag: "a&b<c".into(),
             checksum: None,
+            length: None,
         }];
         let xml = complete_mpu_xml(&parts);
         assert!(xml.contains("a&amp;b&lt;c"));
