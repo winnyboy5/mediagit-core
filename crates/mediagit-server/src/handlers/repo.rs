@@ -1510,143 +1510,26 @@ pub(crate) fn note_data_plane_activity(state: &AppState) {
 /// "pull complete" signal — a protocol change — or removing the read-back
 /// entirely via upload-time provider attestation, which is the real fix.
 pub(crate) fn note_data_plane_activity_for(state: &AppState, packs: usize) {
-    let bytes = (packs as u64).saturating_mul(mediagit_versioning::pack_bytes_cap());
-    note_data_plane_transfer_bytes(state, bytes)
-}
-
-/// Declare a transfer of a known byte count as starting now.
-///
-/// The counterpart to [`note_data_plane_activity_for`] for callers that know
-/// the exact size rather than a pack count — `mpu_start_for` is handed
-/// `chunk_size` outright, so it need not round up to `pack_bytes_cap`.
-///
-/// WHY UPLOADS NEED THIS AT ALL. Every caller of the lease used to be a READ
-/// path (`presign_pack_downloads`, `download_chunk`, `batch_get_pack_chunks`).
-/// A push therefore stamped nothing: `data_plane_activity` stayed at its
-/// initial `0`, the wait loop's `last == 0` arm fired, and verification ran
-/// through the whole push completely unscheduled — measured 2026-09-16 on the
-/// 16 GB aws arm, 64 packs verified DURING the push at concurrency 16, against
-/// the same bucket over the same link the push was using. The scheduler was
-/// inert on exactly the leg that moves the most bytes.
-pub(crate) fn note_data_plane_transfer_bytes(state: &AppState, bytes: u64) {
-    note_transfer_on(&state.data_plane_activity, bytes)
-}
-
-/// The lease arithmetic, against a bare clock.
-///
-/// Split from the `AppState` wrapper for the same reason
-/// `wait_for_data_plane_quiet_with` is: reaching into the process-wide state
-/// from a test couples every test in the binary, and four unrelated
-/// `complete_pack` tests already failed once that way.
-fn note_transfer_on(activity: &std::sync::atomic::AtomicU64, bytes: u64) {
     let now = now_millis();
-    let lease_ms = lease_ms_for_bytes(bytes);
-    if lease_ms == 0 {
-        // A bare "something happened" stamp — no declared size, so it expresses
-        // an instant, not an occupancy.
-        activity.fetch_max(now, std::sync::atomic::Ordering::Relaxed);
-        return;
-    }
-
-    // ACCUMULATE, do not max. Transfers queue on one link, so two concurrent
-    // 64 MiB uploads occupy it for twice as long as one — but `fetch_max` of
-    // `now + lease` collapses them to a single lease, because both compute the
-    // same instant. Measured 2026-09-16 on the 16 GB aws push: 67 MB packs
-    // leased ~33 s each while real gaps between MPU starts reached 76 s, so the
-    // link read as idle mid-push and verification ran straight through it.
-    //
-    // Extending from the existing deadline models the queue: each declaration
-    // adds its own drain time to whatever is already outstanding. Clamped to
-    // `now + max_defer` so an accumulating lease can never postpone
-    // verification longer than the cap already allows.
-    let ceiling = now.saturating_add(verify_max_defer_secs().saturating_mul(1000));
-    let mut cur = activity.load(std::sync::atomic::Ordering::Relaxed);
-    loop {
-        let base = cur.max(now);
-        let next = base.saturating_add(lease_ms).min(ceiling);
-        if next <= cur {
-            // Already at or beyond the ceiling — nothing to extend.
-            return;
-        }
-        match activity.compare_exchange_weak(
-            cur,
-            next,
-            std::sync::atomic::Ordering::Relaxed,
-            std::sync::atomic::Ordering::Relaxed,
-        ) {
-            Ok(_) => return,
-            Err(observed) => cur = observed,
-        }
-    }
-}
-
-/// Record that an upload the server orchestrates has started.
-///
-/// Pairs with [`note_upload_finished`]. See `AppState::uploads_in_flight` for
-/// why uploads get an exact in-flight count while downloads get an estimate.
-pub(crate) fn note_upload_started(state: &AppState) {
+    let lease_ms = if packs == 0 {
+        0
+    } else {
+        let bytes = (packs as u64).saturating_mul(mediagit_versioning::pack_bytes_cap());
+        let floor_mbps = std::env::var("MEDIAGIT_PACK_VERIFY_ASSUMED_MBPS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(2);
+        let secs = (bytes / (1024 * 1024)) / floor_mbps;
+        secs.min(verify_max_defer_secs()).saturating_mul(1000)
+    };
+    // Storing a FUTURE instant: the wait loop reads this as "the link is busy
+    // until then", so one value expresses both "just happened" (lease 0) and
+    // "expected to be busy for a while".
+    let until = now.saturating_add(lease_ms);
     state
-        .uploads_in_flight
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// Record that an orchestrated upload finished (completed OR aborted).
-///
-/// Saturates at zero: an abort following a completion, or a duplicate retry of
-/// either, must not drive the count negative and make a busy link read idle.
-pub(crate) fn note_upload_finished(state: &AppState) {
-    let _ = state.uploads_in_flight.fetch_update(
-        std::sync::atomic::Ordering::Relaxed,
-        std::sync::atomic::Ordering::Relaxed,
-        |n| Some((n - 1).max(0)),
-    );
-}
-
-/// Is the link carrying a transfer right now?
-///
-/// Two independent signals, because they answer the question with different
-/// certainty. `uploads_in_flight` is KNOWN — the server is told when an upload
-/// starts and when it ends. The lease is INFERRED, and is all that downloads
-/// can offer, since a presigned GET never reports back.
-/// Returns the REASON the link is busy, or `None` when it is quiet.
-///
-/// A reason rather than a bool so the decision is evident in the log: "this
-/// verification deferred" is far less useful than which of the two signals held
-/// it off, and the estimated one is the one that has been wrong before.
-fn link_busy_reason(
-    activity: &std::sync::atomic::AtomicU64,
-    inflight: &std::sync::atomic::AtomicI64,
-    quiet_secs: u64,
-) -> Option<&'static str> {
-    if inflight.load(std::sync::atomic::Ordering::Relaxed) > 0 {
-        return Some("upload-in-flight");
-    }
-    let last = activity.load(std::sync::atomic::Ordering::Relaxed);
-    if last == 0 {
-        return None;
-    }
-    if now_millis().saturating_sub(last) < quiet_secs.saturating_mul(1000) {
-        return Some("transfer-lease");
-    }
-    None
-}
-
-/// How long a transfer of `bytes` is assumed to occupy the link, in ms.
-///
-/// Split out so the arithmetic is testable without an `AppState`. Zero bytes
-/// means "no declared transfer" and yields no lease, which is what keeps a
-/// bare `note_data_plane_activity()` stamp behaving as a plain timestamp.
-fn lease_ms_for_bytes(bytes: u64) -> u64 {
-    if bytes == 0 {
-        return 0;
-    }
-    let floor_mbps = std::env::var("MEDIAGIT_PACK_VERIFY_ASSUMED_MBPS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(2);
-    let secs = (bytes / (1024 * 1024)) / floor_mbps;
-    secs.min(verify_max_defer_secs()).saturating_mul(1000)
+        .data_plane_activity
+        .fetch_max(until, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Seconds the data plane must be idle before a pack is verified.
@@ -1665,6 +1548,39 @@ fn verify_max_defer_secs() -> u64 {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(900)
+}
+
+/// Hold a pack's verification until the link is quiet.
+///
+/// WHY. Verification re-reads every pushed pack out of the bucket, and it was
+/// doing that WHILE the client cloned from the same bucket over the same link.
+/// Measured 2026-09-15 on the 16 GB corpus, counting only what verification
+/// moved during each clone's own window:
+///
+///   backend | clone     | verify during clone | combined
+///   aws     | 6.70 MB/s | 0.97 MB/s           | 7.67 MB/s
+///   gcs     | 4.60 MB/s | 4.57 MB/s           | 9.17 MB/s
+///   azure   | 7.81 MB/s | 1.55 MB/s           | 9.36 MB/s
+///
+/// The combined figure is near-constant — that is the link ceiling — and gcs
+/// clones at 47% of its own push purely because its verifier got through 157
+/// packs (10.21 GiB) during the clone while aws managed 22. Same mechanism,
+/// different verifier progress; no transport difference needed to explain it.
+///
+/// NOTHING IS SKIPPED. Verification still runs, still quarantines, same budget,
+/// same code path — only its timing moves. That is safe ONLY because minting a
+/// presigned URL no longer waits on verification: before that change, deferring
+/// would have made clones WORSE by keeping packs unverified and therefore
+/// unmintable. The two changes compose in this order and not the other.
+///
+/// Reads served out of an unverified pack are unaffected: `download_chunk`
+/// verifies the requested slice inline before serving it, so no read can block
+/// on a deferred verification.
+async fn wait_for_data_plane_quiet(state: &AppState, repo: &str, pack_oid: &str) {
+    let (quiet, max_defer) = (verify_quiet_secs(), verify_max_defer_secs());
+    log_verify_policy_once(quiet, max_defer);
+    wait_for_data_plane_quiet_with(repo, pack_oid, quiet, max_defer, &state.data_plane_activity)
+        .await
 }
 
 /// Emit the effective verification-scheduling policy once per process.
@@ -1706,41 +1622,36 @@ async fn wait_for_data_plane_quiet_with(
     quiet: u64,
     max_defer: u64,
     activity: &std::sync::atomic::AtomicU64,
-    inflight: &std::sync::atomic::AtomicI64,
 ) {
     if quiet == 0 || max_defer == 0 {
         return;
     }
     let started = std::time::Instant::now();
     let mut waited_any = false;
-    let mut last_reason = "";
-    while let Some(reason) = link_busy_reason(activity, inflight, quiet) {
-        last_reason = reason;
+    loop {
+        let last = activity.load(std::sync::atomic::Ordering::Relaxed);
+        let idle_ms = now_millis().saturating_sub(last);
+        if last == 0 || idle_ms >= quiet * 1000 {
+            break;
+        }
         if started.elapsed().as_secs() >= max_defer {
-            tracing::info!(
+            tracing::debug!(
                 repo,
                 pack_oid,
                 deferred_s = started.elapsed().as_secs(),
-                reason,
                 "pack verification deferred to its cap while transfers stayed active; \
                  proceeding so a busy server cannot postpone it indefinitely"
             );
-            return;
+            break;
         }
         waited_any = true;
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
-    // At `info`, not `debug`. These two lines and the cap line above are the
-    // ONLY evidence that this scheduler did anything, and the harness runs at
-    // `info`: with them at `debug` a run that deferred perfectly and a run
-    // where the mechanism was inert produced identical logs, which is how the
-    // push path stayed unscheduled through two 16 GB measurements.
     if waited_any {
-        tracing::info!(
+        tracing::debug!(
             repo,
             pack_oid,
             deferred_s = started.elapsed().as_secs(),
-            reason = last_reason,
             "pack verification waited for the data plane to go quiet"
         );
     }
@@ -1772,196 +1683,6 @@ mod data_plane_quiet_tests {
         std::sync::atomic::AtomicU64::new(now_millis())
     }
 
-    /// No upload declared — the counter half of the busy check is inert, so a
-    /// test exercises the lease half alone.
-    fn idle_uploads() -> std::sync::atomic::AtomicI64 {
-        std::sync::atomic::AtomicI64::new(0)
-    }
-
-    /// Clearing the quiet gate must not licence work that STARTS much later.
-    ///
-    /// Reproduces the measured failure: the pack passes the wait while the link
-    /// is quiet, queues behind the one permit, and the link goes busy while it
-    /// waits. Without the post-permit re-check it would verify straight into a
-    /// live transfer, which is what produced verifications running end-to-start
-    /// through the whole 16 GB push.
-    #[tokio::test]
-    async fn a_pack_that_queued_while_quiet_rechecks_before_working() {
-        let activity = std::sync::atomic::AtomicU64::new(0);
-        let inflight = std::sync::atomic::AtomicI64::new(0); // quiet at first
-        let sem = tokio::sync::Semaphore::new(1);
-
-        // Someone else holds the only permit, so our pack must queue.
-        let held = sem.acquire().await.unwrap();
-
-        let started = std::time::Instant::now();
-        let gate =
-            acquire_verify_permit_when_quiet("repo", "pack", 1, 30, &activity, &inflight, &sem);
-        tokio::pin!(gate);
-
-        // It clears the quiet gate, then blocks on the permit.
-        tokio::select! {
-            _ = &mut gate => panic!("took a permit that was never available"),
-            _ = tokio::time::sleep(std::time::Duration::from_millis(300)) => {}
-        }
-
-        // Link goes busy WHILE our pack is queued, then the permit frees up.
-        inflight.store(1, std::sync::atomic::Ordering::Relaxed);
-        drop(held);
-
-        // It must NOT proceed now — the link is busy again.
-        tokio::select! {
-            _ = &mut gate => panic!(
-                "verification started into a busy link: the permit was taken on a                  stale quiet check, which is the bug this re-check exists to close"
-            ),
-            _ = tokio::time::sleep(std::time::Duration::from_millis(700)) => {}
-        }
-
-        // Once the link really is idle it proceeds.
-        inflight.store(0, std::sync::atomic::Ordering::Relaxed);
-        let permit = tokio::time::timeout(std::time::Duration::from_secs(10), gate)
-            .await
-            .expect("never proceeded even after the link went idle");
-        assert!(permit.is_some());
-        assert!(
-            started.elapsed() >= std::time::Duration::from_millis(900),
-            "returned too early to have re-waited"
-        );
-    }
-
-    /// An in-flight upload holds the link busy on its own, with no lease.
-    ///
-    /// This is the signal the push path was missing entirely: every lease
-    /// caller was a read path, so a push left `data_plane_activity` at 0 and
-    /// the wait returned instantly.
-    #[tokio::test]
-    async fn an_in_flight_upload_alone_defers_verification() {
-        let idle_clock = std::sync::atomic::AtomicU64::new(0); // no lease at all
-        let uploading = std::sync::atomic::AtomicI64::new(1);
-
-        let started = std::time::Instant::now();
-        wait_for_data_plane_quiet_with("repo", "pack", 30, 1, &idle_clock, &uploading).await;
-        let waited = started.elapsed();
-
-        assert!(
-            waited >= std::time::Duration::from_millis(400),
-            "an upload in flight did not defer verification ({waited:?}); the push              leg would verify straight through itself, as it did on 2026-09-16"
-        );
-        assert!(
-            waited < std::time::Duration::from_secs(20),
-            "waited {waited:?} past the 1s cap — a leaked in-flight count would              postpone verification forever instead of costing one capped wait"
-        );
-    }
-
-    /// Finishing the upload releases the link.
-    #[tokio::test]
-    async fn a_finished_upload_stops_deferring() {
-        let idle_clock = std::sync::atomic::AtomicU64::new(0);
-        let uploads = std::sync::atomic::AtomicI64::new(1);
-        uploads.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-
-        let started = std::time::Instant::now();
-        wait_for_data_plane_quiet_with("repo", "pack", 30, 900, &idle_clock, &uploads).await;
-
-        assert!(
-            started.elapsed() < std::time::Duration::from_millis(400),
-            "verification still deferred after the upload finished — the count              is not being released, so the link never reads idle again"
-        );
-    }
-
-    /// The release saturates at zero.
-    ///
-    /// An abort after a completion, or a retried complete, must not drive the
-    /// count negative — a negative count would make a genuinely busy link read
-    /// idle and silently disable the scheduler for the rest of the process.
-    #[test]
-    fn releasing_more_than_started_cannot_go_negative() {
-        let uploads = std::sync::atomic::AtomicI64::new(0);
-        for _ in 0..3 {
-            let _ = uploads.fetch_update(
-                std::sync::atomic::Ordering::Relaxed,
-                std::sync::atomic::Ordering::Relaxed,
-                |n| Some((n - 1).max(0)),
-            );
-        }
-        assert_eq!(uploads.load(std::sync::atomic::Ordering::Relaxed), 0);
-    }
-
-    /// A push declares its size, so an upload leaves a lease behind.
-    ///
-    /// REGRESSION GUARD. Every lease caller used to be a read path, so a push
-    /// stamped nothing at all: `data_plane_activity` stayed `0`, the wait
-    /// loop's `last == 0` arm fired, and verification ran through the entire
-    /// push unscheduled — 64 packs verified DURING the 16 GB aws push on
-    /// 2026-09-16, at concurrency 16, over the link the push was using.
-    #[test]
-    fn a_declared_upload_leaves_a_lease() {
-        let one_pack = 64 * 1024 * 1024;
-        let lease = lease_ms_for_bytes(one_pack);
-        assert!(
-            lease > 0,
-            "a 64 MiB upload produced no lease, so verification will treat the              link as idle while the client is still uploading to the bucket"
-        );
-        // 64 MiB at the 2 MB/s pessimistic floor is ~32 s. Assert the shape,
-        // not the constant, so retuning the floor does not fail this.
-        assert!(
-            lease >= 10_000,
-            "lease {lease}ms is shorter than a realistic 64 MiB upload; the 5s              quiet window would expire mid-transfer"
-        );
-    }
-
-    /// The bare stamp must stay a plain timestamp, or control-plane chatter
-    /// would start holding verification off.
-    #[test]
-    fn an_undeclared_stamp_leases_nothing() {
-        assert_eq!(lease_ms_for_bytes(0), 0);
-    }
-
-    /// Concurrent declarations must ADD, not collapse.
-    ///
-    /// Transfers queue on one link, so two concurrent 64 MiB uploads occupy it
-    /// for twice as long as one. `fetch_max(now + lease)` collapsed them to a
-    /// single lease because both compute the same instant — measured on the
-    /// 16 GB aws push as 67 MB packs leasing ~33 s against real gaps of up to
-    /// 76 s, i.e. the link reading idle while it was saturated.
-    #[test]
-    fn concurrent_declarations_extend_the_same_lease() {
-        let activity = std::sync::atomic::AtomicU64::new(0);
-        let horizon = || activity.load(std::sync::atomic::Ordering::Relaxed);
-
-        note_transfer_on(&activity, 64 * 1024 * 1024);
-        let one = horizon();
-        note_transfer_on(&activity, 64 * 1024 * 1024);
-        let two = horizon();
-
-        assert!(
-            two >= one + 10_000,
-            "second concurrent declaration extended the lease by only {}ms;              N transfers must reserve N transfers' worth of link, or the              scheduler reads a saturated link as idle",
-            two.saturating_sub(one)
-        );
-    }
-
-    /// Accumulation cannot outrun the cap.
-    ///
-    /// Without a ceiling, a busy push would push the horizon arbitrarily far
-    /// out and verification would never run — trading one bug for a worse one.
-    #[test]
-    fn accumulation_is_clamped_to_the_defer_cap() {
-        let activity = std::sync::atomic::AtomicU64::new(0);
-        for _ in 0..500 {
-            note_transfer_on(&activity, 64 * 1024 * 1024);
-        }
-
-        let cap_ms = verify_max_defer_secs() * 1000;
-        let ahead = activity
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .saturating_sub(now_millis());
-        assert!(
-            ahead <= cap_ms + 2_000,
-            "lease ran {ahead}ms ahead, past the {cap_ms}ms cap: continuous              traffic could postpone verification indefinitely"
-        );
-    }
-
     /// Both halves, because either alone is satisfiable by a broken
     /// implementation: "returns immediately" passes a scheduler that never
     /// defers, and "waits" passes one that deadlocks a busy server forever.
@@ -1972,7 +1693,7 @@ mod data_plane_quiet_tests {
         let clock = busy_now(); // link busy right now
 
         let started = std::time::Instant::now();
-        wait_for_data_plane_quiet_with("repo", "pack", 30, 1, &clock, &idle_uploads()).await;
+        wait_for_data_plane_quiet_with("repo", "pack", 30, 1, &clock).await;
         let waited = started.elapsed();
 
         // HALF 1 — it actually deferred. Without this, a no-op scheduler passes.
@@ -2010,7 +1731,7 @@ mod data_plane_quiet_tests {
         let started = std::time::Instant::now();
         // quiet=0 would disable; use 1s quiet and a cap well past the lease so
         // the LEASE is what releases it, not the cap.
-        wait_for_data_plane_quiet_with("repo", "pack", 1, 900, &clock, &idle_uploads()).await;
+        wait_for_data_plane_quiet_with("repo", "pack", 1, 900, &clock).await;
         let waited = started.elapsed();
 
         assert!(
@@ -2031,7 +1752,7 @@ mod data_plane_quiet_tests {
         let clock = std::sync::atomic::AtomicU64::new(now_millis().saturating_sub(60_000));
 
         let started = std::time::Instant::now();
-        wait_for_data_plane_quiet_with("repo", "pack", 1, 900, &clock, &idle_uploads()).await;
+        wait_for_data_plane_quiet_with("repo", "pack", 1, 900, &clock).await;
         let waited = started.elapsed();
 
         assert!(
@@ -2048,7 +1769,7 @@ mod data_plane_quiet_tests {
         let clock = busy_now();
 
         let started = std::time::Instant::now();
-        wait_for_data_plane_quiet_with("repo", "pack", 0, 900, &clock, &idle_uploads()).await;
+        wait_for_data_plane_quiet_with("repo", "pack", 0, 900, &clock).await;
         let waited = started.elapsed();
 
         assert!(
@@ -2135,52 +1856,6 @@ pub(crate) async fn get_or_create_pack_verify_cell(
 /// via `tokio::spawn` here) so D3's `ensure_pack_verified_for_presign`
 /// (`handlers/transfer.rs`) can await it directly — same verify-and-resolve
 /// logic, not a second implementation.
-/// Wait for a quiet link, take the verify permit, then RE-CHECK before working.
-///
-/// TWO GATES, because one is not enough. The wait is a snapshot: a pack that
-/// finds the link quiet and then queues behind the single permit can sit there
-/// for minutes and begin work into a link that went busy again. Measured
-/// 2026-09-16 on the 16 GB aws push — verifications ran seamlessly end-to-start
-/// (…10:02→10:27, 10:26→10:49, 10:48→11:09) straight through a push, because
-/// they had all cleared the gate during one quiet moment.
-///
-/// Re-checking BEFORE the permit and waiting AFTER it would serialise the
-/// waits — each pack burning its own full cap in turn, `max_defer` x N rather
-/// than `max_defer` total — which is the trap the original ordering was built
-/// to avoid. Release and re-wait instead, bounded by the same overall cap.
-///
-/// Split out of [`verify_pack_in_background`] so the ordering is testable
-/// without a live `AppState`, a storage backend and a real pack — which is
-/// exactly why the one-shot version went unnoticed through two 16 GB runs.
-#[allow(clippy::too_many_arguments)]
-async fn acquire_verify_permit_when_quiet<'a>(
-    repo: &str,
-    pack_oid: &str,
-    quiet: u64,
-    max_defer: u64,
-    activity: &std::sync::atomic::AtomicU64,
-    inflight: &std::sync::atomic::AtomicI64,
-    sem: &'a tokio::sync::Semaphore,
-) -> Option<tokio::sync::SemaphorePermit<'a>> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(max_defer);
-    loop {
-        wait_for_data_plane_quiet_with(repo, pack_oid, quiet, max_defer, activity, inflight).await;
-        let permit = sem.acquire().await.ok();
-        if link_busy_reason(activity, inflight, quiet).is_none()
-            || std::time::Instant::now() >= deadline
-        {
-            return permit;
-        }
-        tracing::info!(
-            repo,
-            pack_oid,
-            "link went busy again while this pack queued for its verify permit; \
-             yielding the permit and waiting again"
-        );
-        drop(permit);
-    }
-}
-
 pub(crate) async fn verify_pack_in_background(
     state: Arc<AppState>,
     repo_path: std::path::PathBuf,
@@ -2198,29 +1873,8 @@ pub(crate) async fn verify_pack_in_background(
     // BEFORE the permit, not after: there is exactly one permit, so a pack
     // waiting for quiet while holding it would stall every other pack's
     // verification behind a queue that cannot drain.
-    // TWO GATES, because one is not enough. The wait below is a snapshot: a
-    // pack that finds the link quiet then queues behind the single permit can
-    // sit there for minutes and start work into a link that went busy again.
-    // Measured 2026-09-16 on the 16 GB aws push — verifications ran seamlessly
-    // end-to-start (…10:02→10:27, 10:26→10:49, 10:48→11:09) straight through
-    // a push, because they had all cleared the gate during one quiet moment.
-    //
-    // So: wait, take the permit, then re-check. Re-checking BEFORE the permit
-    // and waiting AFTER it would serialise the waits — each pack burning its
-    // own full cap in turn, `max_defer` x N rather than `max_defer` total —
-    // which is the trap the ordering here was built to avoid in the first
-    // place. Release and re-wait instead, bounded by the same overall cap.
-    log_verify_policy_once(verify_quiet_secs(), verify_max_defer_secs());
-    let _permit = acquire_verify_permit_when_quiet(
-        &repo,
-        &pack_oid,
-        verify_quiet_secs(),
-        verify_max_defer_secs(),
-        &state.data_plane_activity,
-        &state.uploads_in_flight,
-        pack_verify_semaphore(),
-    )
-    .await;
+    wait_for_data_plane_quiet(&state, &repo, &pack_oid).await;
+    let _permit = pack_verify_semaphore().acquire().await.ok();
     verify_pack_with_budget(
         state,
         repo_path,

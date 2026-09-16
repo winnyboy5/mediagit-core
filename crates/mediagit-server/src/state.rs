@@ -215,24 +215,6 @@ pub struct AppState {
     /// mean the same thing in production.
     pub data_plane_activity: std::sync::atomic::AtomicU64,
 
-    /// Uploads the server has been told are in progress but not yet finished:
-    /// incremented by `mpu/start`, decremented by `mpu/complete` and
-    /// `mpu/abort`.
-    ///
-    /// WHY THIS IS EXACT WHERE THE LEASE IS A GUESS. `data_plane_activity` has
-    /// to estimate a duration because a presigned GET takes the server out of
-    /// the data path — it never learns when a pull ends. An upload is not like
-    /// that: `mpu/complete` IS a server call, so for uploads "is a transfer
-    /// running right now" is knowable rather than predictable, and guessing it
-    /// was measurably wrong (a 67 MB pack leases ~33 s against real inter-start
-    /// gaps of up to 76 s, so the link looked idle mid-push).
-    ///
-    /// A client that starts an upload and dies would pin this above zero. That
-    /// is bounded, not unbounded: `MEDIAGIT_PACK_VERIFY_MAX_DEFER_SECS` caps
-    /// total deferral, so a leaked count costs one capped wait and then
-    /// verification proceeds.
-    pub uploads_in_flight: std::sync::atomic::AtomicI64,
-
     /// D3 dedup guard for presign-triggered full-pack verification
     /// (`ensure_pack_verified_for_presign` in `handlers/transfer.rs`).
     /// Minting a presigned URL is irrevocable, so an unverified pack must be
@@ -328,7 +310,6 @@ impl AppState {
             pack_index: RwLock::new(HashMap::new()),
             unverified_packs: RwLock::new(HashMap::new()),
             data_plane_activity: std::sync::atomic::AtomicU64::new(0),
-            uploads_in_flight: std::sync::atomic::AtomicI64::new(0),
             pack_verify_inflight: Mutex::new(HashMap::new()),
             locks: RwLock::new(HashMap::new()),
             auth_layer: None,
@@ -370,7 +351,6 @@ impl AppState {
             pack_index: RwLock::new(HashMap::new()),
             unverified_packs: RwLock::new(HashMap::new()),
             data_plane_activity: std::sync::atomic::AtomicU64::new(0),
-            uploads_in_flight: std::sync::atomic::AtomicI64::new(0),
             pack_verify_inflight: Mutex::new(HashMap::new()),
             locks: RwLock::new(HashMap::new()),
             auth_layer: Some(auth_layer),
@@ -419,7 +399,6 @@ impl AppState {
             pack_index: RwLock::new(HashMap::new()),
             unverified_packs: RwLock::new(HashMap::new()),
             data_plane_activity: std::sync::atomic::AtomicU64::new(0),
-            uploads_in_flight: std::sync::atomic::AtomicI64::new(0),
             pack_verify_inflight: Mutex::new(HashMap::new()),
             locks: RwLock::new(HashMap::new()),
             auth_layer: Some(auth_layer),

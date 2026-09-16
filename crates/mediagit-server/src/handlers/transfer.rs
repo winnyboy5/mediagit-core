@@ -60,9 +60,6 @@ pub async fn presign_pack_uploads(
     if !repo_path.exists() {
         return Err(StatusCode::NOT_FOUND);
     }
-    // The single-PUT fallback for backends or servers without pack MPU. Same
-    // declaration as `mpu_start_for`, by pack count rather than exact bytes.
-    crate::handlers::repo::note_data_plane_activity_for(&state, req.pack_ids.len());
     let storage = get_or_init_storage(&state, &repo_path).await?;
     let ttl = std::time::Duration::from_secs(state.presigned_url_ttl_secs);
 
@@ -758,13 +755,6 @@ async fn mpu_start_for(
     let ttl = std::time::Duration::from_secs(state.presigned_url_ttl_secs);
     let key = format!("{}/{}", prefix, req.chunk_id);
 
-    // EXACT, not estimated. An MPU has a completion call, so the server knows
-    // when this upload ends rather than having to predict it — which the lease
-    // did badly here: a 67 MB pack leased ~33 s against real inter-start gaps
-    // of up to 76 s, so the link read as idle mid-push. The count is released
-    // in `mpu_complete_for`/`mpu_abort_for`.
-    crate::handlers::repo::note_upload_started(&state);
-
     match storage
         .create_presigned_mpu(&key, req.chunk_size, ttl)
         .await
@@ -839,11 +829,6 @@ async fn mpu_complete_for(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // Release the in-flight count taken by `mpu_start_for`. Done HERE, before
-    // the work and before any later error return, so a failing complete or
-    // abort still frees the link rather than pinning it until the defer cap.
-    crate::handlers::repo::note_upload_finished(&state);
-
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
         return Err(StatusCode::NOT_FOUND);
@@ -897,11 +882,6 @@ async fn mpu_abort_for(
         tracing::warn!(repo = %repo, chunk_id = %req.chunk_id, "Rejecting mpu_abort: chunk_id is not hex");
         return Err(StatusCode::BAD_REQUEST);
     }
-
-    // Release the in-flight count taken by `mpu_start_for`. Done HERE, before
-    // the work and before any later error return, so a failing complete or
-    // abort still frees the link rather than pinning it until the defer cap.
-    crate::handlers::repo::note_upload_finished(&state);
 
     let repo_path = state.repos_dir.join(&repo);
     if !repo_path.exists() {
