@@ -1894,6 +1894,10 @@ pub(crate) async fn verify_pack_in_background(
     // verification behind a queue that cannot drain.
     wait_for_data_plane_quiet(&state, &repo, &pack_oid).await;
     let _permit = pack_verify_semaphore().acquire().await.ok();
+    // Stays a bool: every caller of this one asks only "is it safe to mint a
+    // presigned URL for this pack", and `Quarantined` and `Incomplete` are both
+    // correctly "no". The scrub is the caller that needs to tell them apart, and
+    // it calls `verify_pack_with_budget` directly.
     verify_pack_with_budget(
         state,
         repo_path,
@@ -1904,6 +1908,45 @@ pub(crate) async fn verify_pack_in_background(
         pack_verify_budget(),
     )
     .await
+    .is_clean()
+}
+
+/// What a content verification actually concluded.
+///
+/// This was a bare `bool`, which conflated "found corruption" with "could not
+/// finish" — two results with opposite consequences. Measured on the GCS 16 GB
+/// run (2026-09-17): a pack blew its wall-clock budget and logged "Pack stays
+/// unverified (nothing quarantined)", and 2 ms later the scrub reported "had
+/// bad entries; they were quarantined" about the same pack. Same `false`. The
+/// scrub then dropped that pack's `.attested` marker on the strength of the
+/// wrong reading, so a pack whose content was never checked would never be
+/// scrubbed again — the exact hole phase C exists to close.
+///
+/// The ambiguity was at the source, so every caller inherited it; naming the
+/// three outcomes here fixes it once rather than at each call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PackVerdict {
+    /// Every entry read back and matched the manifest. The pack is resolved.
+    Clean,
+    /// Bad entries were found AND quarantined. The pack is resolved: re-running
+    /// verification would re-read a problem already recorded and acted on.
+    Quarantined,
+    /// Verification did not finish — wall-clock budget, entries still unreadable
+    /// after retries, or an unreadable at-rest key. NOTHING was quarantined and
+    /// the pack's status is UNKNOWN, so a caller must retry it later rather than
+    /// treat it as settled either way.
+    Incomplete,
+}
+
+impl PackVerdict {
+    /// True only when the pack is known good.
+    ///
+    /// Keeps the old boolean at the call sites that genuinely only ask "is it
+    /// safe to presign this pack" — for which `Quarantined` and `Incomplete`
+    /// are both correctly "no".
+    pub(crate) fn is_clean(self) -> bool {
+        matches!(self, PackVerdict::Clean)
+    }
 }
 
 /// Budget taken as an argument rather than read from the environment, so the
@@ -1927,7 +1970,7 @@ pub(crate) async fn verify_pack_with_budget(
     storage: Arc<dyn StorageBackend>,
     manifest: Vec<ManifestEntry>,
     budget: std::time::Duration,
-) -> bool {
+) -> PackVerdict {
     let compressor = match crate::handlers::repo_compressor(&state, &repo_path) {
         Ok(c) => Arc::new(c),
         Err(_) => {
@@ -1936,7 +1979,8 @@ pub(crate) async fn verify_pack_with_budget(
                 pack = %pack_oid,
                 "Cannot verify pack: this repository's at-rest key is unreadable"
             );
-            return false;
+            // Nothing was read, so nothing is known and nothing was quarantined.
+            return PackVerdict::Incomplete;
         }
     };
 
@@ -1999,7 +2043,7 @@ pub(crate) async fn verify_pack_with_budget(
                      (nothing quarantined). Raise MEDIAGIT_PACK_VERIFY_BUDGET_SECS if this \
                      link is legitimately this slow"
                 );
-                return false;
+                return PackVerdict::Incomplete;
             }
         };
         bad.extend(corrupt.iter().filter_map(|&i| outstanding.get(i).cloned()));
@@ -2042,7 +2086,7 @@ pub(crate) async fn verify_pack_with_budget(
             "background pack verification: incomplete after retries (entries unreadable); \
              pack stays unverified for a later sweep, nothing quarantined"
         );
-        return false;
+        return PackVerdict::Incomplete;
     }
 
     if clean {
@@ -2130,7 +2174,14 @@ pub(crate) async fn verify_pack_with_budget(
         }
     }
 
-    clean
+    // `unreadable > 0` returned above, so reaching here means every entry was
+    // read: `clean` is exactly "no bad entries", and a false is corruption that
+    // the branch above has already quarantined.
+    if clean {
+        PackVerdict::Clean
+    } else {
+        PackVerdict::Quarantined
+    }
 }
 
 /// PHASE C: content-scrub ONE attested pack, if any is waiting.
@@ -2216,7 +2267,7 @@ pub async fn scrub_one_attested_pack(
     };
 
     tracing::info!(repo, pack_oid, "scrub: content-verifying an attested pack");
-    let clean = verify_pack_with_budget(
+    let verdict = verify_pack_with_budget(
         Arc::clone(state),
         repo_path.clone(),
         repo.clone(),
@@ -2227,19 +2278,38 @@ pub async fn scrub_one_attested_pack(
     )
     .await;
 
-    // Clear the marker either way. On success the pack is checked. On failure
-    // `verify_pack_with_budget` has ALREADY quarantined the bad entries and
-    // recorded that — leaving the marker would re-scrub a pack whose problem is
-    // already known and handled, burning the same bandwidth every tick.
-    let _ = tokio::fs::remove_file(attested_marker_path(&repo_path, &pack_oid)).await;
-    if clean {
-        tracing::info!(repo, pack_oid, "scrub: attested pack verified clean");
-    } else {
-        tracing::error!(
-            repo,
-            pack_oid,
-            "scrub: attested pack had bad entries; they were quarantined"
-        );
+    // The marker is cleared only when the pack is RESOLVED — verified clean, or
+    // found bad and quarantined. Both are settled: re-scrubbing would re-read a
+    // question already answered, burning the same bandwidth every tick.
+    //
+    // `Incomplete` is not settled, and this used to be treated as though it
+    // were. On the GCS 16 GB run (2026-09-17) a pack blew its wall-clock budget
+    // — nothing read, nothing quarantined — and the old code both logged it as
+    // corruption and dropped its marker, so the one pack in the run whose
+    // content was never checked became the one pack that would never be
+    // checked. On a WAN link where these read-backs measured 0.34-0.93 MB/s,
+    // running out of budget is the ORDINARY case, not the exception.
+    match verdict {
+        PackVerdict::Clean => {
+            let _ = tokio::fs::remove_file(attested_marker_path(&repo_path, &pack_oid)).await;
+            tracing::info!(repo, pack_oid, "scrub: attested pack verified clean");
+        }
+        PackVerdict::Quarantined => {
+            let _ = tokio::fs::remove_file(attested_marker_path(&repo_path, &pack_oid)).await;
+            tracing::error!(
+                repo,
+                pack_oid,
+                "scrub: attested pack had bad entries; they were quarantined"
+            );
+        }
+        PackVerdict::Incomplete => {
+            // Marker deliberately LEFT IN PLACE so a later tick retries.
+            tracing::warn!(
+                repo,
+                pack_oid,
+                "scrub: verification did not finish (nothing quarantined); leaving the                  marker so a later tick retries this pack"
+            );
+        }
     }
     Some(pack_oid)
 }
@@ -3537,6 +3607,69 @@ mod complete_pack_content_verification_tests {
         );
     }
 
+    /// A scrub that could NOT FINISH must leave the marker in place.
+    ///
+    /// The counterpart to the test above: that one proves a RESOLVED pack stops
+    /// being re-read, this one proves an UNRESOLVED pack keeps being re-read.
+    ///
+    /// The old code cleared the marker unconditionally, on the stated assumption
+    /// that a false verdict meant `verify_pack_with_budget` "has ALREADY
+    /// quarantined the bad entries". That holds for corruption and fails for a
+    /// timeout or an unreadable entry — and the GCS 16 GB run (2026-09-17)
+    /// hit exactly the latter: the one pack in the run whose content was never
+    /// checked became the one pack that would never be checked, while an ERROR
+    /// claimed entries had been quarantined that never existed.
+    #[tokio::test]
+    async fn the_scrub_keeps_the_marker_when_verification_could_not_finish() {
+        let repo = "test-repo".to_string();
+        let (_tmp, state, repo_path) = setup(&repo).await;
+        let repos_dir = repo_path.parent().expect("repos dir").to_path_buf();
+        let storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        let fixture = build_valid_pack();
+        let pack_oid = "cc77dd88ee";
+        let pack_key = format!("packs/{pack_oid}");
+        let full_bytes = fixture.pack_bytes.clone();
+        storage.put(&pack_key, &full_bytes).await.expect("put pack");
+
+        complete_pack(
+            Path(repo.clone()),
+            State(Arc::clone(&state)),
+            None,
+            Json(CompletePackRequest {
+                pack_oid: pack_oid.to_string(),
+                manifest: fixture.manifest,
+            }),
+        )
+        .await
+        .expect("complete_pack");
+        wait_until_pack_verified(&state, &repo, pack_oid).await;
+
+        // Truncate, so verification runs out of readable bytes rather than
+        // finding corruption — an INCOMPLETE answer, not a bad one. Same
+        // mechanism as `unreadable_pack_is_left_unverified_and_never_quarantined`.
+        storage
+            .put(&pack_key, &full_bytes[..full_bytes.len() / 2])
+            .await
+            .expect("truncate pack");
+
+        let marker = attested_marker_path(&repo_path, pack_oid);
+        mediagit_versioning::atomic_write::write_atomic(&marker, b"").expect("mark");
+        assert!(marker.exists(), "precondition: marker present");
+
+        let scrubbed = scrub_one_attested_pack(&state, &repos_dir).await;
+        assert_eq!(
+            scrubbed.as_deref(),
+            Some(pack_oid),
+            "scrub did not pick up the marked pack"
+        );
+        assert!(
+            marker.exists(),
+            "the marker was dropped although verification never concluded — this              pack's content would never be checked again, which is the hole the scrub              exists to close"
+        );
+    }
+
     /// nothing evicted, pack stays unverified, `.pending` marker survives.
     #[tokio::test]
     async fn unreadable_pack_is_left_unverified_and_never_quarantined() {
@@ -4016,7 +4149,7 @@ mod pack_verify_budget_tests {
     }
 
     struct Outcome {
-        clean: bool,
+        verdict: PackVerdict,
         elapsed: std::time::Duration,
         pack_still_intact: bool,
     }
@@ -4059,7 +4192,7 @@ mod pack_verify_budget_tests {
         });
 
         let started = std::time::Instant::now();
-        let clean = verify_pack_with_budget(
+        let verdict = verify_pack_with_budget(
             Arc::clone(&state),
             repo_path.clone(),
             repo.clone(),
@@ -4081,7 +4214,7 @@ mod pack_verify_budget_tests {
             .unwrap_or(false);
 
         Outcome {
-            clean,
+            verdict,
             elapsed,
             pack_still_intact,
         }
@@ -4107,9 +4240,14 @@ mod pack_verify_budget_tests {
         )
         .await;
 
-        assert!(
-            !out.clean,
-            "a pack that blew its wall-clock budget must not be reported clean"
+        // INCOMPLETE specifically, not merely "not clean". `!clean` was what the
+        // old bool gave, and it is exactly the ambiguity that let the scrub read
+        // a timeout as corruption, log "they were quarantined", and drop the
+        // pack's marker so it was never re-checked (GCS 16 GB run, 2026-09-17).
+        assert_eq!(
+            out.verdict,
+            PackVerdict::Incomplete,
+            "a pack that blew its wall-clock budget is UNKNOWN, not corrupt: reporting              anything else lets a caller treat it as resolved and stop retrying it"
         );
         assert!(
             out.elapsed < std::time::Duration::from_secs(5),
@@ -4132,8 +4270,9 @@ mod pack_verify_budget_tests {
             std::time::Duration::from_secs(30),
         )
         .await;
-        assert!(
-            out.clean,
+        assert_eq!(
+            out.verdict,
+            PackVerdict::Clean,
             "a fast, valid pack must verify clean and must NOT be tripped by the budget"
         );
         assert!(out.pack_still_intact, "a clean pack must not be evicted");
