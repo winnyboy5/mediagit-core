@@ -811,6 +811,47 @@ function Drill-S5-ThroughputDedup {
           $fp.Offered, $fp.Completed, $fp.ChunkPuts, $(if ($fpPass) { "" } else { " - FAST PATH BROKE: $($fp.Offered - $fp.Completed) of $($fp.Offered) packs never registered; the push fell back to the per-chunk path and will be multi-x slower regardless of the MB/s above" }))
       }
 
+      # ATTESTATION: did phase B actually fire, and only where it may?
+      #
+      # Read here, beside packfastpath and BEFORE the clone, for the same reason:
+      # clone traffic must not enter the counts.
+      #
+      # TWO-SIDED on purpose. The positive half catches the regression already on
+      # record (2026-09-16: NamespacedBackend stopped forwarding
+      # attested_checksum, attestation fired 0 times across 155 packs, every gate
+      # green and the push FASTER than ever). The negative half catches the
+      # opposite and worse fault - a backend claiming an attestation its provider
+      # cannot substantiate, which would skip a real integrity check on the
+      # strength of nothing.
+      $at = Get-QaAttestationCounts $srv.OutLog
+      $attests = Test-QaBackendAttests $backend
+      $killSwitch = $env:MEDIAGIT_PACK_ATTEST_SKIP_READBACK
+      if ($null -eq $at) {
+        Rec $drill $backend "attestation" "" "SKIP" "server log unreadable at $($srv.OutLog)"
+      } elseif ($killSwitch -eq '0') {
+        # The read-back was forced on deliberately. Attested==0 is then CORRECT,
+        # and gating on it would be a false failure.
+        Rec $drill $backend "attestation" $at.Attested "SKIP" "MEDIAGIT_PACK_ATTEST_SKIP_READBACK=0 forces the read-back"
+      } elseif ($at.Registered -le 0) {
+        # No packs landed at all, so there is nothing that COULD have been
+        # attested. Passing here would be a gate that cannot fail.
+        Rec $drill $backend "attestation" 0 "SKIP" "no packs registered"
+      } elseif ($attests) {
+        # Ratio is REPORTED, not gated. A pack whose MPU initiate hit a transient
+        # fault falls back to a single PUT and is legitimately unattested - p23
+        # measured 158/160 on a healthy GCS run. Requiring 100% would fail on
+        # ordinary WAN behaviour, which is how a gate earns being ignored.
+        # Attested==0 while packs registered is the unambiguous signal.
+        $ok = ($at.Attested -gt 0)
+        Rec $drill $backend "attestation" $at.Attested $ok ("attested={0} registered={1}{2}" -f `
+          $at.Attested, $at.Registered, $(if ($ok) { "" } else { " - ATTESTATION NEVER FIRED on a backend that supports it; the read-back is running on every pack" }))
+      } else {
+        # Fail-closed: a non-attesting backend must report nothing.
+        $ok = ($at.Attested -eq 0)
+        Rec $drill $backend "attestation" $at.Attested $ok ("attested={0} registered={1} (backend cannot attest){2}" -f `
+          $at.Attested, $at.Registered, $(if ($ok) { "" } else { " - CLAIMED ATTESTATION it cannot substantiate; a real integrity check was skipped" }))
+      }
+
       if ($r.Exit -ne 0) { continue }
 
       $clone = Join-Path $QA.Work "scale10-s5-clone-$backend"
