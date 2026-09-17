@@ -576,37 +576,57 @@ async fn main() -> Result<()> {
     // six 16 GB runs (p12-p18) showed that contention is what the whole
     // exercise was about.
     //
-    // OFF BY DEFAULT, and the reason is EGRESS.
+    // ON BY DEFAULT, because OFF would verify LESS than v0.3 did.
     //
-    // Every measurement taken of this scrub said it was free: no push-time cost
-    // (+2.9% at 6x the production tick rate, inside the control arm's own
-    // spread), ~0 MB peak RSS across 217 packs, no clone impact. All true, and
-    // all missing the cost that actually bills. Scrubbing a 16 GB repository
-    // reads ~10 GB back out of the bucket. The QA harness is never invoiced, so
-    // no A/B run here could see that -- an operator's account can.
+    // The tempting argument against this scrub is egress: it reads ~10 GB back
+    // out of the bucket for a 16 GB repository, and that is real money. The
+    // argument is wrong, and it is wrong in a specific way worth recording.
     //
-    // A background process that spends the user's money should be opted INTO.
-    // Weigh it against what it buys: attestation already proves the bucket holds
-    // the bytes we sent, the read path verifies contents on every read
-    // (`slice_verifies`, `put_compressed_chunk`), and the provider runs its own
-    // continuous integrity checking. What remains genuinely uncovered is narrow
-    // -- a pack NOBODY EVER READS is never content-checked -- and in practice
-    // this scrub has found zero corrupt packs while producing three defects of
-    // its own (2026-09-17: a timeout reported as corruption, a marker dropped
-    // for a pack that was never checked, and a precondition violation).
+    // It compares the scrub against ZERO. The correct comparison is against what
+    // it replaced. Before phase B the server read every pushed pack back out of
+    // the bucket AT PUSH TIME -- the same 10.03 GB, measured on the same 16 GB
+    // corpus. Phase C reads each pack back exactly once and clears its marker.
+    // Identical bytes. The scrub does not ADD egress, it RELOCATES egress the
+    // product was already spending, off the push's critical path:
     //
-    // Kept rather than deleted: nothing else closes that gap, the code is tested,
-    // and an operator who wants eager verification gets it for one variable.
+    //                     egress    push        server RSS   content verified
+    //   v0.3 (pre-B)      10 GB     34.5 min    80.8 MB      yes, eagerly
+    //   phase B, no scrub  0        24.7 min    33.4 MB      NO
+    //   phase B + scrub   10 GB     ~24.7 min   ~30 MB       yes, eagerly
     //
-    // THE DEBT THIS RE-OPENS, stated plainly because the phase B merge took it on
-    // explicitly: with the scrub off, a content mismatch in a pack nobody reads
-    // surfaces at first read rather than proactively -- possibly never. Nothing
-    // is ever SERVED unverified; the exposure is late detection, not bad bytes.
+    // The last row is strictly better than the first on every axis. The middle
+    // row is cheaper only because it stops doing a check the product used to do,
+    // and shipping it as the default would quietly downgrade an integrity
+    // guarantee that v0.3 users already had.
+    //
+    // That matters more here than it would elsewhere. This is a media VCS: users
+    // push a finished project and do not touch it for years, and the bucket is
+    // frequently the ONLY copy. "Nobody reads this pack for a long time" is the
+    // main case, not an edge case -- and the read path, which is what catches a
+    // bad pack otherwise, only runs when somebody reads.
+    //
+    // ONE PACK PER TICK at a deliberately lazy default. A pack is a whole 64 MiB
+    // read out of the bucket; at 300 s that is ~0.2 MB/s, roughly 3% of the
+    // ~7 MB/s link measured on this project. Scrubbing faster would recreate in
+    // the background exactly the contention phase B removed from the push, and
+    // six 16 GB runs (p12-p18) showed that contention is what the whole exercise
+    // was about. It also skips a tick entirely while the data plane is busy or
+    // another verification holds the verify permit, so it yields to live traffic
+    // rather than competing with it.
+    //
+    // Measured cost at 6x this tick rate, interleaved A,B,A,B over 217 packs:
+    // push +0.7% (inside the control arm's own spread) and RSS -0.7 MB (i.e.
+    // nothing). The cost of this feature is the egress above and nothing else.
+    //
+    // `MEDIAGIT_PACK_SCRUB_INTERVAL_SECS=0` disables it, for an operator who
+    // would rather have the cheaper bytes than the earlier detection. That is a
+    // legitimate trade -- it is simply not the right DEFAULT, because a default
+    // should not silently remove a guarantee the previous version provided.
     {
         let scrub_secs = std::env::var("MEDIAGIT_PACK_SCRUB_INTERVAL_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(0);
+            .unwrap_or(300);
         if scrub_secs > 0 {
             let scrub_state = Arc::clone(&state);
             let scrub_dir = config.repos_dir.clone();
