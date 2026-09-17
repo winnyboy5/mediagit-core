@@ -1555,6 +1555,16 @@ impl StorageBackend for MinIOBackend {
             // rather than sending something unverifiable.
             _ => None,
         };
+        // SORTED: S3 rejects an unordered part list with `InvalidPartOrder`.
+        // The client reports parts in a sequential loop today, so they arrive
+        // ascending by accident of the caller rather than by guarantee -- the
+        // day part upload is parallelised, every part is already in the bucket
+        // when the commit fails. `combine_part_crc64` above already sorts its
+        // own copy, so the attestation was never order-dependent; only this
+        // list was. Measured on GCS 2026-09-17 (400 InvalidPartOrder); S3
+        // documents the same requirement.
+        let mut parts = parts;
+        parts.sort_by_key(|p| p.part_number);
         let completed: Vec<_> = parts
             .into_iter()
             .map(|p| {
