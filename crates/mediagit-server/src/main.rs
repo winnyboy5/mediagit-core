@@ -561,6 +561,53 @@ async fn main() -> Result<()> {
         }
     }
 
+    // PHASE C: slow background content-scrub of provider-attested packs.
+    //
+    // Phase B stops re-reading a pushed pack when the provider attested it.
+    // That proves the bytes stored intact, NOT that a pack's contents match its
+    // manifest — and the read path only catches that for packs somebody
+    // actually reads. This walks the `.attested` markers and content-verifies
+    // one pack per interval so a pack nobody reads is still checked eventually.
+    //
+    // ONE PACK PER TICK at a deliberately lazy default. A pack is a whole 64 MiB
+    // read out of the bucket; at 300 s that is ~0.2 MB/s, roughly 3% of the
+    // ~7 MB/s link measured on this project. Scrubbing faster would recreate in
+    // the background exactly the contention phase B removed from the push, and
+    // six 16 GB runs (p12-p18) showed that contention is what the whole
+    // exercise was about.
+    //
+    // `MEDIAGIT_PACK_SCRUB_INTERVAL_SECS=0` disables it entirely. That is a
+    // real choice, not a bug: with the scrub off, an unread attested pack is
+    // never content-checked, which is exactly the pre-phase-C state.
+    {
+        let scrub_secs = std::env::var("MEDIAGIT_PACK_SCRUB_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(300);
+        if scrub_secs > 0 {
+            let scrub_state = Arc::clone(&state);
+            let scrub_dir = config.repos_dir.clone();
+            tracing::info!(
+                interval_secs = scrub_secs,
+                "pack content-scrub enabled (MEDIAGIT_PACK_SCRUB_INTERVAL_SECS)"
+            );
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(scrub_secs));
+                // Skip missed ticks rather than firing them back-to-back: if the
+                // host was asleep or a scrub ran long, a burst of catch-up reads
+                // is the one thing this must never do.
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tick.tick().await;
+                    mediagit_server::handlers::scrub_one_attested_pack(&scrub_state, &scrub_dir)
+                        .await;
+                }
+            });
+        } else {
+            tracing::info!("pack content-scrub DISABLED; attested packs are checked only on read");
+        }
+    }
+
     // P1-1: optional Prometheus /metrics endpoint on a separate listener, off
     // by default. Set MEDIAGIT_METRICS_ADDR=host:port to enable (e.g.
     // 127.0.0.1:9090). Pure wiring of the existing mediagit-metrics crate —
