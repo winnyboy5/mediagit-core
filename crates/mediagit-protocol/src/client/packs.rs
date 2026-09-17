@@ -636,8 +636,15 @@ impl ProtocolClient {
         // Clone odb so it can move into concurrent async tasks (all fields are Arc-wrapped).
         let odb = odb.clone();
 
+        // Counted, because per-pack warnings alone do not answer "how bad was
+        // it" when reading a log after the fact - which is exactly the question
+        // the p26 clone investigation had to reconstruct by hand.
+        let failed_packs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let total_packs = tasks.len();
+
         let written_set: std::collections::HashSet<Oid> = futures::stream::iter(tasks)
             .map(|task| {
+                let failed_packs = std::sync::Arc::clone(&failed_packs);
                 let client = client.clone();
                 let direct_client = direct_client.clone();
                 let base_url = base_url.clone();
@@ -656,7 +663,11 @@ impl ProtocolClient {
                     // peak before. See PackChunkSink.
                     let mut sink = PackChunkSink::new(&odb, progress.as_ref());
                     let fetch_start = std::time::Instant::now();
-                    match task {
+                    let pack_oid_log = match &task {
+                        PackFetchTask::Presigned { pack_oid, .. } => pack_oid.clone(),
+                        PackFetchTask::Batch { pack_oid, .. } => pack_oid.clone(),
+                    };
+                    let fetched = match task {
                         PackFetchTask::Presigned {
                             chunks,
                             url,
@@ -674,7 +685,7 @@ impl ProtocolClient {
                                 bench.as_ref(),
                                 &mut sink,
                             )
-                            .await?
+                            .await
                         }
                         PackFetchTask::Batch { chunks, pack_oid } => {
                             fetch_pack_slices_batch(
@@ -685,9 +696,42 @@ impl ProtocolClient {
                                 &comp_hashes,
                                 &mut sink,
                             )
-                            .await?
+                            .await
                         }
                     };
+
+                    // ONE PACK'S FAILURE IS ONE PACK'S FAILURE.
+                    //
+                    // This used to be `?`, which under `try_fold` short-circuited
+                    // the WHOLE stream - and the caller in pull.rs then discarded
+                    // the partial result entirely (`Err(_) => HashSet::new()`), so
+                    // every other pack's chunks went to the per-chunk path too.
+                    //
+                    // Measured on the p26 16 GB clone (2026-09-17): 4 presign
+                    // requests, 0 batch-gets, and 1,568 per-chunk requests, single
+                    // chunks re-requested up to 16 times, while the server logged
+                    // 56 mid-body `streaming error` aborts reading S3. A healthy
+                    // run of the same corpus (p24) used 0 per-chunk requests. One
+                    // bad pack cost the entire clone its fast path.
+                    //
+                    // A retry budget was added for this in 2026-09-15
+                    // (MEDIAGIT_PACK_RANGE_GET_RETRY_BUDGET_SECS). It reduces how
+                    // OFTEN a pack fails but cannot change what one failure costs.
+                    // That blast radius is the actual defect, and it is here.
+                    //
+                    // `sink.written` is kept deliberately: the sink writes chunks
+                    // to the ODB as each range arrives, so a pack that died 80%
+                    // through has already stored - and verified - 80% of its
+                    // chunks. Only what it did NOT fetch falls back.
+                    if let Err(e) = fetched {
+                        failed_packs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        tracing::warn!(
+                            pack = %pack_oid_log,
+                            recovered_chunks = sink.written.len(),
+                            err = %e,
+                            "pack fetch failed; only ITS unfetched chunks fall back to per-chunk - other packs are unaffected"
+                        );
+                    }
                     if let Some(b) = &bench {
                         b.record_pack(sink.bytes);
                         // Feeds throughput_mbs; pack mode is the default pull
@@ -715,14 +759,34 @@ impl ProtocolClient {
                 e.context("pack Range-GET failed; caller should use per-chunk fallback")
             })?;
 
-        if written_set.is_empty() && !loc_map.is_empty() {
-            tracing::error!(
-                located = loc_map.len(),
-                "pack-mode pull: 0/{} chunks passed verify — all slices failed \
-                 compressed-hash check or bounds; server JSONL may be stale or \
-                 from a different binary. Falling back to per-chunk (slow).",
-                loc_map.len()
+        let failed = failed_packs.load(std::sync::atomic::Ordering::Relaxed);
+        if failed > 0 {
+            tracing::warn!(
+                failed_packs = failed,
+                total_packs,
+                "pack-mode pull: some packs fell back to per-chunk; the rest kept the fast path"
             );
+        }
+        if written_set.is_empty() && !loc_map.is_empty() {
+            // Two very different causes, and reporting only the first one sent
+            // the p26 investigation looking at manifests when the fault was
+            // transport.
+            if failed == total_packs && total_packs > 0 {
+                tracing::error!(
+                    located = loc_map.len(),
+                    total_packs,
+                    "pack-mode pull: every pack FAILED TO FETCH (transport, not verify); falling back to per-chunk for all {} chunks (slow)",
+                    loc_map.len()
+                );
+            } else {
+                tracing::error!(
+                    located = loc_map.len(),
+                    "pack-mode pull: 0/{} chunks passed verify — all slices failed \
+                     compressed-hash check or bounds; server JSONL may be stale or \
+                     from a different binary. Falling back to per-chunk (slow).",
+                    loc_map.len()
+                );
+            }
         }
         Ok(written_set)
     }
@@ -1404,6 +1468,146 @@ mod tests {
     ///     `data_plane_client_builder` is `.http1_only()` for exactly this
     ///     reason.
     ///
+    /// ONE bad pack must not cost every OTHER pack its fast path.
+    ///
+    /// The p26 16 GB clone (2026-09-17) fell to 1,568 per-chunk requests with
+    /// single chunks re-requested up to 16 times, while a healthy run of the
+    /// same corpus used 0. The cause was not the failure itself - WAN mid-body
+    /// aborts are expected and retried - it was the BLAST RADIUS: `try_fold`
+    /// short-circuited the whole stream on the first pack error, and the caller
+    /// in pull.rs then threw the partial result away (`Err(_) => HashSet::new()`),
+    /// so all 155 packs' chunks went per-chunk.
+    ///
+    /// Two packs here: one serves its range, one is permanently absent. The
+    /// healthy pack's chunk MUST still arrive by the pack path. Before the fix
+    /// this returned `Err` and the caller recovered nothing.
+    #[tokio::test]
+    async fn one_failing_pack_does_not_drop_the_others_to_per_chunk() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        crate::ensure_crypto_provider();
+
+        let good = b"the-healthy-pack-chunk".to_vec();
+        let good_oid = Oid::hash(&good);
+        let good_hex = good_oid.to_hex();
+        let good_len = (5 + good.len()) as u32;
+        let mut good_pack = vec![0u8];
+        good_pack.extend_from_slice(&(good.len() as u32).to_le_bytes());
+        good_pack.extend_from_slice(&good);
+
+        let bad = b"the-chunk-in-the-doomed-pack".to_vec();
+        let bad_oid = Oid::hash(&bad);
+        let bad_hex = bad_oid.to_hex();
+        let bad_len = (5 + bad.len()) as u32;
+
+        let pack_a = "aa".repeat(32);
+        let pack_b = "bb".repeat(32);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base = format!("http://{addr}");
+
+        // Counts per-chunk fallback requests. The fix is only real if the
+        // healthy pack never reaches this path.
+        let per_chunk_hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pch = per_chunk_hits.clone();
+
+        let (gh, bh2) = (good_hex.clone(), bad_hex.clone());
+        let (pa, pb) = (pack_a.clone(), pack_b.clone());
+        let base_srv = base.clone();
+        let srv = tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let (gh, bh2, pa, pb) = (gh.clone(), bh2.clone(), pa.clone(), pb.clone());
+                let base_srv = base_srv.clone();
+                let good_pack = good_pack.clone();
+                let pch = pch.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 16384];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let first = head.lines().next().unwrap_or("").to_string();
+
+                    let reply = |status: &str, body: Vec<u8>| {
+                        let mut r = format!(
+                            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .into_bytes();
+                        r.extend_from_slice(&body);
+                        r
+                    };
+
+                    let resp = if first.contains("/chunks/locate") {
+                        let body = format!(
+                            r#"{{"{gh}":{{"pack_oid":"{pa}","offset":0,"length":{good_len},"compressed_hash":"{gh}"}},"{bh2}":{{"pack_oid":"{pb}","offset":0,"length":{bad_len},"compressed_hash":"{bh2}"}}}}"#
+                        );
+                        reply("200 OK", body.into_bytes())
+                    } else if first.contains("/packs/presign-download-urls") {
+                        // BOTH packs get a URL: the failure must come from the
+                        // fetch, not from presign declining, or the test would
+                        // exercise a different branch entirely.
+                        let body = format!(
+                            r#"{{"{pa}":{{"url":"{base_srv}/bucket/good","headers":[],"method":"GET","expires_in_secs":3600}},"{pb}":{{"url":"{base_srv}/bucket/doomed","headers":[],"method":"GET","expires_in_secs":3600}}}}"#
+                        );
+                        reply("200 OK", body.into_bytes())
+                    } else if first.contains("/bucket/good") {
+                        let mut r = format!(
+                            "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            good_pack.len()
+                        )
+                        .into_bytes();
+                        r.extend_from_slice(&good_pack);
+                        r
+                    } else if first.contains("/bucket/doomed") {
+                        // 404 is PERMANENT: it bails immediately instead of
+                        // burning the 120s retry budget, so this test stays fast
+                        // and still exercises the blast-radius path.
+                        reply("404 Not Found", b"gone".to_vec())
+                    } else if first.contains("/chunks/") {
+                        pch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        reply("404 Not Found", b"no".to_vec())
+                    } else {
+                        reply("404 Not Found", b"{}".to_vec())
+                    };
+                    let _ = sock.write_all(&resp).await;
+                    let _ = sock.flush().await;
+                });
+            }
+        });
+
+        let (_tmp, odb) = test_odb().await;
+        let client = crate::ProtocolClient::new(&base);
+
+        let written = client
+            .pull_chunks_via_packs(&[good_oid, bad_oid], &odb, None, None)
+            .await
+            .expect(
+                "one failing pack must not fail the whole pack-mode pull - that is \
+                 what sent the p26 clone onto the per-chunk path for every pack",
+            );
+
+        srv.abort();
+
+        assert!(
+            written.contains(&good_oid),
+            "the HEALTHY pack's chunk did not arrive via the pack path; a single \
+             unrelated pack failure still costs every other pack its fast path"
+        );
+        assert!(
+            !written.contains(&bad_oid),
+            "the doomed pack's chunk must NOT be reported as written - its chunks \
+             are exactly what should fall back to per-chunk"
+        );
+        assert_eq!(
+            per_chunk_hits.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "pull_chunks_via_packs must not itself issue per-chunk requests; the \
+             caller does that for whatever this returns as missing"
+        );
+    }
+
     /// Drives the REAL `pull_chunks_via_packs` rather than calling the fetch
     /// helper directly, because the bug was never in the helper — it was in
     /// which client the caller handed it. A test that passed its own client
