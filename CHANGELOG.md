@@ -29,13 +29,17 @@ throughout: an unknown backend, a missing digest, a HEAD error or a permission g
 all read as "not attested" and the read-back runs.
 `MEDIAGIT_PACK_ATTEST_SKIP_READBACK=0` restores the old behaviour.
 
-An optional low-rate background scrub (`MEDIAGIT_PACK_SCRUB_INTERVAL_SECS`,
-**off by default**) content-verifies attested packs so a pack nobody reads is not
-unchecked forever. It yields to live transfers rather than competing with them.
-It is opt-in because it costs bucket egress -- scrubbing a 16 GB repository reads
-~10 GB back out of the bucket. With it off, a content mismatch in a pack nobody
-reads surfaces at first read rather than proactively; nothing is ever served
-unverified either way.
+A low-rate background scrub (`MEDIAGIT_PACK_SCRUB_INTERVAL_SECS`, default 300s,
+`0` disables) content-verifies attested packs, so a pack nobody reads is still
+checked. It yields to live transfers rather than competing with them.
+
+This preserves the integrity guarantee 0.3 already had. The pre-0.4.0 read-back
+spent the same ~10 GB of reads for a 16 GB repository — at push time, on the
+critical path. The scrub moves those reads off the push instead of adding them,
+which is why the net of this release is a faster push (34.5 → 24.7 min measured)
+and lower server memory (80.8 → 33.4 MB) at the same verification and the same
+egress. Setting `0` is a supported trade — cheaper bytes for later detection —
+but it does mean an attested pack nobody reads is never content-checked.
 
 ### Fixed — transfer resilience
 
