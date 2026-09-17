@@ -1383,6 +1383,25 @@ fn pending_marker_path(repo_path: &std::path::Path, pack_oid: &str) -> std::path
         .join(format!("{pack_oid}.pending"))
 }
 
+/// Marker for a pack whose read-back was SKIPPED because the provider attested
+/// the upload (phase B). The scrub uses it to find packs whose CONTENT has
+/// never been checked.
+///
+/// A SEPARATE extension from `.pending`, deliberately. The startup sweep
+/// re-verifies every `.pending` marker it finds, so writing one here would
+/// re-read the whole pack on the next boot and undo phase B entirely. The two
+/// markers mean different things:
+///   `.pending`  — not yet verified, and SOMETHING MUST verify it soon.
+///   `.attested` — storage integrity proven by the provider; content unchecked,
+///                 and a slow background scrub will get to it eventually.
+fn attested_marker_path(repo_path: &std::path::Path, pack_oid: &str) -> std::path::PathBuf {
+    repo_path
+        .join(".mediagit")
+        .join("packs")
+        .join(pack_shard(pack_oid))
+        .join(format!("{pack_oid}.attested"))
+}
+
 /// Reads and parses a pack's `.jsonl` manifest from disk into the
 /// `ManifestEntry` shape `verify_pack_in_background` needs. Shared by the
 /// startup sweep (`resume_pack_verification`) and the presign-triggered
@@ -2114,6 +2133,117 @@ pub(crate) async fn verify_pack_with_budget(
     clean
 }
 
+/// PHASE C: content-scrub ONE attested pack, if any is waiting.
+///
+/// Phase B stopped re-reading every pushed pack on the provider's attestation
+/// that the bytes stored intact. That leaves one property unchecked for packs
+/// nobody reads: whether a pack's CONTENTS match its manifest. The read path
+/// still catches it (`slice_verifies` + `put_compressed_chunk`, both fail
+/// closed), but only when someone actually reads that pack — so a pack nobody
+/// touches could sit wrong indefinitely.
+///
+/// This closes that, slowly and cheaply. It picks ONE `.attested` marker per
+/// call and runs the same verifier `complete_pack` used to run inline; the
+/// caller decides the cadence, so the bandwidth cost is a policy choice rather
+/// than something buried here.
+///
+/// ONE PACK PER CALL, deliberately. Verification is a whole-pack read out of
+/// the bucket — 64 MiB apiece — and doing several per tick would recreate in
+/// the background exactly the link contention phase B removed from the push.
+///
+/// Returns the pack it scrubbed, or `None` when there was nothing to do.
+pub async fn scrub_one_attested_pack(
+    state: &Arc<AppState>,
+    repos_dir: &std::path::Path,
+) -> Option<String> {
+    // Find the first `.attested` marker across all repos. Cheap: a directory
+    // walk over `.mediagit/packs/<shard>/`, no network.
+    let mut found: Option<(std::path::PathBuf, String, String)> = None;
+    let entries = std::fs::read_dir(repos_dir).ok()?;
+    'outer: for repo_entry in entries.filter_map(|e| e.ok()) {
+        let repo_path = repo_entry.path();
+        if !repo_path.is_dir() {
+            continue;
+        }
+        let Some(repo_name) = repo_path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let packs_dir = repo_path.join(".mediagit").join("packs");
+        let Ok(shards) = std::fs::read_dir(&packs_dir) else {
+            continue;
+        };
+        for shard in shards.filter_map(|e| e.ok()) {
+            let Ok(files) = std::fs::read_dir(shard.path()) else {
+                continue;
+            };
+            for f in files.filter_map(|e| e.ok()) {
+                let p = f.path();
+                if p.extension().and_then(|e| e.to_str()) != Some("attested") {
+                    continue;
+                }
+                let Some(oid) = p.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                found = Some((repo_path.clone(), repo_name.to_string(), oid.to_string()));
+                break 'outer;
+            }
+        }
+    }
+    let (repo_path, repo, pack_oid) = found?;
+
+    let Some(manifest) = read_pack_manifest(&repo_path, &pack_oid).await else {
+        // No manifest means nothing to check this pack against. Drop the marker
+        // rather than re-walking to the same dead entry on every tick.
+        let _ = tokio::fs::remove_file(attested_marker_path(&repo_path, &pack_oid)).await;
+        tracing::warn!(
+            repo,
+            pack_oid,
+            "scrub: no manifest for an attested pack; dropping its marker"
+        );
+        return Some(pack_oid);
+    };
+
+    let storage = match get_or_init_storage(state, &repo_path).await {
+        Ok(s) => s,
+        Err(_) => {
+            tracing::debug!(
+                repo,
+                pack_oid,
+                "scrub: storage unavailable; will retry on a later tick"
+            );
+            return None;
+        }
+    };
+
+    tracing::info!(repo, pack_oid, "scrub: content-verifying an attested pack");
+    let clean = verify_pack_with_budget(
+        Arc::clone(state),
+        repo_path.clone(),
+        repo.clone(),
+        pack_oid.clone(),
+        storage,
+        manifest,
+        pack_verify_budget(),
+    )
+    .await;
+
+    // Clear the marker either way. On success the pack is checked. On failure
+    // `verify_pack_with_budget` has ALREADY quarantined the bad entries and
+    // recorded that — leaving the marker would re-scrub a pack whose problem is
+    // already known and handled, burning the same bandwidth every tick.
+    let _ = tokio::fs::remove_file(attested_marker_path(&repo_path, &pack_oid)).await;
+    if clean {
+        tracing::info!(repo, pack_oid, "scrub: attested pack verified clean");
+    } else {
+        tracing::error!(
+            repo,
+            pack_oid,
+            "scrub: attested pack had bad entries; they were quarantined"
+        );
+    }
+    Some(pack_oid)
+}
+
 /// Startup-sweep hook (Stage C durability): given an orphaned `.pending`
 /// marker found under a repo's pack dir, mark that pack unverified and
 /// (re-)enqueue background verification. Called once per marker discovered
@@ -2387,6 +2517,39 @@ pub async fn complete_pack(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+
+    // PHASE C: record that this pack's CONTENT has never been checked.
+    //
+    // Phase B skips the read-back on the provider's word that the bytes stored
+    // intact. That proves storage integrity, NOT that the pack's contents match
+    // its manifest — a property still enforced on the read path, but only for
+    // packs somebody actually reads. Without this marker a pack nobody ever
+    // reads would go unchecked forever, and nothing would even know to look.
+    //
+    // Written AFTER the `.pending` branch above and never alongside it: the two
+    // are mutually exclusive by construction, since `attested` gates both.
+    // Failure here is logged, not fatal — a missing scrub marker costs eventual
+    // detection, while failing the push would cost the user their work for a
+    // background bookkeeping problem.
+    if attested {
+        let marker = attested_marker_path(&repo_path, &req.pack_oid);
+        if let Some(parent) = marker.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        let path = marker.clone();
+        let wrote = tokio::task::spawn_blocking(move || {
+            mediagit_versioning::atomic_write::write_atomic(&path, b"")
+        })
+        .await;
+        if !matches!(wrote, Ok(Ok(()))) {
+            tracing::warn!(
+                repo = %repo,
+                pack = %req.pack_oid,
+                "could not write the .attested scrub marker; this pack's content \
+                 will not be scrubbed until it is read"
+            );
+        }
     }
 
     // Persist to JSONL under <repo>/.mediagit/packs/<shard>/<pack_oid>.jsonl
@@ -3266,6 +3429,114 @@ mod complete_pack_content_verification_tests {
     /// the object could not be fully read on a later retry" — a crash-resume
     /// where the link is flaky. Truncating the stored object makes the range
     /// read end early, so the digest would cover a prefix. Required behaviour:
+    /// PHASE C, half 1: an UNATTESTED pack gets `.pending` and NOT `.attested`.
+    ///
+    /// The local test backend does not attest, so this is the path every
+    /// non-AWS deployment takes. Asserting BOTH markers matters: writing
+    /// `.attested` here would hand the scrub a pack the read-back is already
+    /// handling, and writing `.pending` for an attested pack would make the
+    /// startup sweep re-read it on the next boot and undo phase B.
+    #[tokio::test]
+    async fn an_unattested_pack_gets_pending_and_not_attested() {
+        let repo = "test-repo".to_string();
+        let (_tmp, state, repo_path) = setup(&repo).await;
+        let storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        let fixture = build_valid_pack();
+        let pack_oid = "cc33dd44ee";
+        storage
+            .put(&format!("packs/{pack_oid}"), &fixture.pack_bytes)
+            .await
+            .expect("put pack");
+
+        let status = complete_pack(
+            Path(repo.clone()),
+            State(Arc::clone(&state)),
+            None,
+            Json(CompletePackRequest {
+                pack_oid: pack_oid.to_string(),
+                manifest: fixture.manifest,
+            }),
+        )
+        .await
+        .expect("complete_pack");
+        assert_eq!(status, StatusCode::CREATED);
+
+        assert!(
+            !attested_marker_path(&repo_path, pack_oid).exists(),
+            "wrote .attested for a pack the provider never attested — the scrub              would then re-read a pack the read-back is already covering"
+        );
+        wait_until_pack_verified(&state, &repo, pack_oid).await;
+    }
+
+    /// PHASE C, half 2: the scrub is a NO-OP when nothing is marked.
+    ///
+    /// Without this, a scrub that verified arbitrary packs — or panicked on an
+    /// empty repo dir — would pass half 1 unnoticed. It must find nothing and
+    /// say so.
+    #[tokio::test]
+    async fn the_scrub_does_nothing_when_no_pack_is_marked() {
+        let repo = "test-repo".to_string();
+        let (_tmp, state, repo_path) = setup(&repo).await;
+        let repos_dir = repo_path.parent().expect("repos dir").to_path_buf();
+
+        assert!(
+            scrub_one_attested_pack(&state, &repos_dir).await.is_none(),
+            "scrub claimed work with no .attested marker present"
+        );
+    }
+
+    /// PHASE C, half 3: a marked pack IS scrubbed, and the marker is cleared.
+    ///
+    /// Clearing matters as much as scrubbing: a marker that survived would make
+    /// every later tick re-read the same 64 MiB forever.
+    #[tokio::test]
+    async fn the_scrub_verifies_a_marked_pack_and_clears_its_marker() {
+        let repo = "test-repo".to_string();
+        let (_tmp, state, repo_path) = setup(&repo).await;
+        let repos_dir = repo_path.parent().expect("repos dir").to_path_buf();
+        let storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        let fixture = build_valid_pack();
+        let pack_oid = "ee55ff66aa";
+        storage
+            .put(&format!("packs/{pack_oid}"), &fixture.pack_bytes)
+            .await
+            .expect("put pack");
+
+        // Register the manifest so the scrub has something to check against,
+        // then mark it as phase B would.
+        complete_pack(
+            Path(repo.clone()),
+            State(Arc::clone(&state)),
+            None,
+            Json(CompletePackRequest {
+                pack_oid: pack_oid.to_string(),
+                manifest: fixture.manifest,
+            }),
+        )
+        .await
+        .expect("complete_pack");
+        wait_until_pack_verified(&state, &repo, pack_oid).await;
+
+        let marker = attested_marker_path(&repo_path, pack_oid);
+        mediagit_versioning::atomic_write::write_atomic(&marker, b"").expect("mark");
+        assert!(marker.exists(), "precondition: marker present");
+
+        let scrubbed = scrub_one_attested_pack(&state, &repos_dir).await;
+        assert_eq!(
+            scrubbed.as_deref(),
+            Some(pack_oid),
+            "scrub did not pick up the marked pack"
+        );
+        assert!(
+            !marker.exists(),
+            "marker survived the scrub — every later tick would re-read the              same pack forever"
+        );
+    }
+
     /// nothing evicted, pack stays unverified, `.pending` marker survives.
     #[tokio::test]
     async fn unreadable_pack_is_left_unverified_and_never_quarantined() {

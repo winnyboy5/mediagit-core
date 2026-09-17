@@ -79,6 +79,11 @@ criterion = { version = "0.8", features = ["async_tokio"] }
 crc-fast = "1.10"
 base64 = "0.22"
 reqwest = { workspace = true }
+# INDEPENDENT crc32c for the GCS fold tests. Deliberately not crc-fast's own
+# `checksum()`: validating `checksum_combine` against the same library's
+# whole-buffer path would share any systematic error between them. Already in
+# the tree via mediagit-protocol.
+crc32c = "0.6"
 # reqwest uses `rustls-no-provider`, so a provider must be installed before any
 # Client is built. RING, not aws-lc-rs: the workspace standardises on ring and
 # pulling aws-lc in here would undo that deliberately.
@@ -99,6 +104,10 @@ required-features = ["gcs"]
 [[test]]
 name = "gcs_integration_tests"
 required-features = ["gcs"]
+
+[[test]]
+name = "gcs_azure_attestation_live"
+required-features = ["gcs", "azure"]
 
 [[bench]]
 name = "cache_bench"

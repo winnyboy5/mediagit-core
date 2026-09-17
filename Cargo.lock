@@ -3592,6 +3592,7 @@ dependencies = [
  "base64",
  "bytes",
  "crc-fast",
+ "crc32c",
  "criterion",
  "futures",
  "getrandom 0.4.3",
