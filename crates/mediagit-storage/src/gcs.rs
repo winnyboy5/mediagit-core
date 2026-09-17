@@ -158,6 +158,20 @@ pub struct GcsBackend {
     /// ~20-25 s when too many concurrent uploads land on the same host.
     /// Configurable via MEDIAGIT_GCS_UPLOAD_CONCURRENCY (default 4).
     upload_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Objects whose stored crc32c we COMPARED against the client's and found
+    /// matching, keyed by wire key.
+    ///
+    /// WHY A RECORD AND NOT JUST "DOES IT HAVE A CHECKSUM". GCS computes and
+    /// stores a crc32c for EVERY object, so presence proves nothing — unlike
+    /// S3, where a checksum exists only because we asked for one and the
+    /// service validated it. A presence-based gate here would tell phase B to
+    /// skip the read-back on every upload, including ones nothing ever checked.
+    ///
+    /// In-memory on purpose: a restart between `complete` and `complete_pack`
+    /// loses the record, which reads as "not attested" and runs the read-back.
+    /// Fail-closed is the correct direction for a gate that deletes an
+    /// integrity check.
+    attested_objects: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// V4 URL signer. `None` only when `MEDIAGIT_GCS_DISABLE_PRESIGN` is set:
     /// ADC that cannot sign is a construction error, not a silent downgrade
     /// (see [`signer_or_opt_out`]). When `None`, `presign_put`/`presign_get`
@@ -323,6 +337,7 @@ impl GcsBackend {
             control: Arc::new(control),
             config: gcs_config,
             upload_semaphore: Self::build_upload_semaphore(),
+            attested_objects: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             signer: Some(signer),
         })
     }
@@ -383,6 +398,7 @@ impl GcsBackend {
             control: Arc::new(control),
             config,
             upload_semaphore: Self::build_upload_semaphore(),
+            attested_objects: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             signer: Some(signer),
         })
     }
@@ -482,6 +498,7 @@ impl GcsBackend {
             control: Arc::new(control),
             config: gcs_config,
             upload_semaphore: Self::build_upload_semaphore(),
+            attested_objects: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             signer,
         })
     }
@@ -702,6 +719,51 @@ fn complete_mpu_xml(parts: &[crate::MpuCompletedPart]) -> String {
     out
 }
 
+impl GcsBackend {
+    /// The crc32c GCS itself computed for the stored object.
+    async fn stored_crc32c(&self, wire_key: &str) -> anyhow::Result<Option<u32>> {
+        let bucket_path = self.bucket_path();
+        match with_io_deadline(
+            gcs_control_deadline(),
+            "get_object (crc32c)",
+            self.control
+                .get_object()
+                .set_bucket(&bucket_path)
+                .set_object(wire_key)
+                .send(),
+        )
+        .await?
+        {
+            Ok(obj) => Ok(obj.checksums.and_then(|c| c.crc32c)),
+            Err(e) if Self::is_not_found(&e) => Ok(None),
+            Err(e) => Err(anyhow::anyhow!("GCS get_object crc32c: {e}")),
+        }
+    }
+
+    /// The provider-recorded checksum, but ONLY for an object this process
+    /// actually compared and found matching.
+    ///
+    /// Returning GCS's crc32c unconditionally would be wrong: every GCS object
+    /// has one, so phase B would skip the read-back on uploads nothing ever
+    /// validated — including those from clients too old to send digests.
+    async fn attested_checksum_for(&self, wire_key: &str) -> Option<String> {
+        let known = self
+            .attested_objects
+            .lock()
+            .ok()
+            .map(|s| s.contains(wire_key))
+            .unwrap_or(false);
+        if !known {
+            return None;
+        }
+        self.stored_crc32c(wire_key)
+            .await
+            .ok()
+            .flatten()
+            .map(|c| c.to_string())
+    }
+}
+
 #[async_trait]
 impl StorageBackend for GcsBackend {
     /// Retrieve an object from GCS.
@@ -885,6 +947,11 @@ impl StorageBackend for GcsBackend {
     }
 
     /// Return the byte length of a GCS object without downloading it.
+    async fn attested_checksum(&self, key: &str) -> anyhow::Result<Option<String>> {
+        let wire = crate::prefixed_key(&self.config.prefix, key);
+        Ok(self.attested_checksum_for(&wire).await)
+    }
+
     async fn head(&self, key: &str) -> anyhow::Result<Option<u64>> {
         if key.is_empty() {
             return Err(anyhow::anyhow!("key cannot be empty"));
@@ -1206,10 +1273,11 @@ impl StorageBackend for GcsBackend {
             upload_id,
             parts,
             part_size,
-            // Unattested for now: this backend keeps the pack read-back, which
-            // is the pre-attestation behaviour and so not a regression. S3 is
-            // being proven end-to-end first.
-            checksum: None,
+            // crc32c is what GCS itself computes for every object, so asking the
+            // client for the same algorithm lets `complete_presigned_mpu`
+            // COMPARE the two rather than merely observe that a checksum exists
+            // (it always does on GCS — see `attested_objects`).
+            checksum: Some(crate::ChecksumAlgorithm::Crc32c),
         }))
     }
 
@@ -1250,6 +1318,55 @@ impl StorageBackend for GcsBackend {
         let body = resp.text().await.unwrap_or_default();
         if body.contains("<Error>") {
             anyhow::bail!("GCS mpu complete reported an error body: {}", body.trim());
+        }
+
+        // ATTESTATION BY COMPARISON, not by presence.
+        //
+        // GCS stores a crc32c for EVERY object, so "it has a checksum" says
+        // nothing about whether anyone checked it — unlike S3, where the
+        // checksum exists only because we asked and the service validated it.
+        // The honest question here is whether GCS's crc32c for what it stored
+        // equals the crc32c of what the client says it sent.
+        //
+        // A mismatch is NOT failed here: the upload itself succeeded and the
+        // bytes may be perfectly fine (an old client sends no digests at all).
+        // It simply is not attested, so the pack read-back runs as before —
+        // the fail-closed direction.
+        if let Some(expected) = combine_part_crc32c(&parts) {
+            match self.stored_crc32c(&key).await {
+                Ok(Some(actual)) if actual == expected => {
+                    if let Ok(mut set) = self.attested_objects.lock() {
+                        set.insert(key.clone());
+                    }
+                }
+                Ok(Some(actual)) => {
+                    // Worth an error log: the bytes GCS holds are NOT the bytes
+                    // the client hashed. The read-back will catch it, but this
+                    // names it immediately.
+                    tracing::error!(
+                        target: "mediagit_storage::gcs",
+                        key = %key,
+                        expected,
+                        actual,
+                        "GCS crc32c does not match the client's; NOT attested"
+                    );
+                }
+                Ok(None) => {
+                    tracing::debug!(
+                        target: "mediagit_storage::gcs",
+                        key = %key,
+                        "GCS reported no crc32c; not attested"
+                    );
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        target: "mediagit_storage::gcs",
+                        key = %key,
+                        error = %e,
+                        "could not read GCS crc32c; not attested"
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -1343,6 +1460,37 @@ impl StorageBackend for GcsBackend {
             expires_in_secs: ttl.as_secs(),
         }))
     }
+}
+
+/// Fold per-part crc32c digests into the crc32c of the assembled object.
+///
+/// Mirrors `minio::combine_part_crc64`. crc32c IS linearly combinable — an
+/// earlier comment in `minio.rs` claimed otherwise and was simply wrong;
+/// `crc_fast::CrcAlgorithm::Crc32Iscsi` is crc32c and `checksum_combine`
+/// accepts it like any other algorithm.
+///
+/// Parts are sorted by number before folding: combination is order-dependent,
+/// and out-of-order assembly is exactly the silent corruption the 16 GB
+/// round-trip exists to catch. Returns `None` if any part lacks a digest or a
+/// length, because a partial fold would be the checksum of the wrong thing —
+/// and `None` means "not attested", which keeps the read-back.
+fn combine_part_crc32c(parts: &[crate::MpuCompletedPart]) -> Option<u32> {
+    use base64::Engine as _;
+    let mut ordered: Vec<&crate::MpuCompletedPart> = parts.iter().collect();
+    ordered.sort_by_key(|p| p.part_number);
+
+    let mut acc: Option<u64> = None;
+    for p in ordered {
+        let (raw, len) = (p.checksum.as_deref()?, p.length?);
+        let bytes = base64::engine::general_purpose::STANDARD.decode(raw).ok()?;
+        // The client sends crc32c as the low 4 bytes, big-endian.
+        let crc = u32::from_be_bytes(<[u8; 4]>::try_from(bytes.as_slice()).ok()?) as u64;
+        acc = Some(match acc {
+            None => crc,
+            Some(a) => crc_fast::checksum_combine(crc_fast::CrcAlgorithm::Crc32Iscsi, a, crc, len),
+        });
+    }
+    acc.map(|v| v as u32)
 }
 
 /// Per-IO deadline for GCS data-plane transfers, in seconds.
@@ -1631,6 +1779,89 @@ mod tests {
         assert_eq!(
             format!("projects/_/buckets/{}", config.bucket_name),
             expected
+        );
+    }
+}
+
+#[cfg(test)]
+mod gcs_attestation_tests {
+    use super::combine_part_crc32c;
+    use crate::MpuCompletedPart;
+    use base64::Engine as _;
+
+    fn part(n: i32, data: &[u8]) -> MpuCompletedPart {
+        let crc = crc32c::crc32c(data);
+        MpuCompletedPart {
+            part_number: n,
+            etag: format!("\"etag{n}\""),
+            checksum: Some(base64::engine::general_purpose::STANDARD.encode(crc.to_be_bytes())),
+            length: Some(data.len() as u64),
+        }
+    }
+
+    /// The fold must equal the crc32c of the concatenated bytes.
+    ///
+    /// This is the whole premise of GCS attestation: the server never sees the
+    /// object, so it can only compare GCS's crc32c against a value folded from
+    /// what the client reported. If the fold is wrong, every upload reads as
+    /// corrupt and nothing is ever attested — the feature would be silently
+    /// inert, which is this project's most common failure shape.
+    #[test]
+    fn the_fold_equals_the_crc_of_the_whole() {
+        let a = vec![1u8; 5000];
+        let b = vec![2u8; 3000];
+        let c = vec![3u8; 7000];
+
+        let mut whole = Vec::new();
+        whole.extend_from_slice(&a);
+        whole.extend_from_slice(&b);
+        whole.extend_from_slice(&c);
+        let expected = crc32c::crc32c(&whole);
+
+        let folded = combine_part_crc32c(&[part(1, &a), part(2, &b), part(3, &c)]).expect("fold");
+        assert_eq!(
+            folded, expected,
+            "folded crc32c != crc32c of the concatenation; GCS attestation would reject every honest upload"
+        );
+    }
+
+    /// Order matters, and the fold must impose it rather than trust the caller.
+    ///
+    /// Parts arrive from concurrent uploads in arbitrary order, and
+    /// out-of-order assembly is exactly the silent corruption the 16 GB
+    /// round-trip exists to catch.
+    #[test]
+    fn parts_are_folded_in_part_number_order() {
+        let a = vec![9u8; 4000];
+        let b = vec![8u8; 6000];
+        let in_order = combine_part_crc32c(&[part(1, &a), part(2, &b)]).expect("fold");
+        let shuffled = combine_part_crc32c(&[part(2, &b), part(1, &a)]).expect("fold");
+        assert_eq!(
+            in_order, shuffled,
+            "the fold depends on the order parts were reported in"
+        );
+    }
+
+    /// A part without a digest or a length yields no fold at all.
+    ///
+    /// A partial fold would be the checksum of the wrong thing, and comparing
+    /// it would mark good uploads corrupt. `None` means unattested, which keeps
+    /// the read-back — the fail-closed direction.
+    #[test]
+    fn an_incomplete_report_yields_no_fold() {
+        let a = vec![1u8; 100];
+        let mut no_sum = part(1, &a);
+        no_sum.checksum = None;
+        assert!(
+            combine_part_crc32c(&[no_sum]).is_none(),
+            "folded without a digest"
+        );
+
+        let mut no_len = part(1, &a);
+        no_len.length = None;
+        assert!(
+            combine_part_crc32c(&[no_len]).is_none(),
+            "folded without a length"
         );
     }
 }
