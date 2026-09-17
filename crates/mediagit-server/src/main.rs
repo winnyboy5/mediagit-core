@@ -576,14 +576,37 @@ async fn main() -> Result<()> {
     // six 16 GB runs (p12-p18) showed that contention is what the whole
     // exercise was about.
     //
-    // `MEDIAGIT_PACK_SCRUB_INTERVAL_SECS=0` disables it entirely. That is a
-    // real choice, not a bug: with the scrub off, an unread attested pack is
-    // never content-checked, which is exactly the pre-phase-C state.
+    // OFF BY DEFAULT, and the reason is EGRESS.
+    //
+    // Every measurement taken of this scrub said it was free: no push-time cost
+    // (+2.9% at 6x the production tick rate, inside the control arm's own
+    // spread), ~0 MB peak RSS across 217 packs, no clone impact. All true, and
+    // all missing the cost that actually bills. Scrubbing a 16 GB repository
+    // reads ~10 GB back out of the bucket. The QA harness is never invoiced, so
+    // no A/B run here could see that -- an operator's account can.
+    //
+    // A background process that spends the user's money should be opted INTO.
+    // Weigh it against what it buys: attestation already proves the bucket holds
+    // the bytes we sent, the read path verifies contents on every read
+    // (`slice_verifies`, `put_compressed_chunk`), and the provider runs its own
+    // continuous integrity checking. What remains genuinely uncovered is narrow
+    // -- a pack NOBODY EVER READS is never content-checked -- and in practice
+    // this scrub has found zero corrupt packs while producing three defects of
+    // its own (2026-09-17: a timeout reported as corruption, a marker dropped
+    // for a pack that was never checked, and a precondition violation).
+    //
+    // Kept rather than deleted: nothing else closes that gap, the code is tested,
+    // and an operator who wants eager verification gets it for one variable.
+    //
+    // THE DEBT THIS RE-OPENS, stated plainly because the phase B merge took it on
+    // explicitly: with the scrub off, a content mismatch in a pack nobody reads
+    // surfaces at first read rather than proactively -- possibly never. Nothing
+    // is ever SERVED unverified; the exposure is late detection, not bad bytes.
     {
         let scrub_secs = std::env::var("MEDIAGIT_PACK_SCRUB_INTERVAL_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(300);
+            .unwrap_or(0);
         if scrub_secs > 0 {
             let scrub_state = Arc::clone(&state);
             let scrub_dir = config.repos_dir.clone();
