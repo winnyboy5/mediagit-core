@@ -105,6 +105,10 @@ required-features = ["gcs"]
 name = "gcs_integration_tests"
 required-features = ["gcs"]
 
+[[test]]
+name = "gcs_azure_attestation_live"
+required-features = ["gcs", "azure"]
+
 [[bench]]
 name = "cache_bench"
 harness = false
