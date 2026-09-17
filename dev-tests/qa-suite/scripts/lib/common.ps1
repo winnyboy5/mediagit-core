@@ -971,3 +971,66 @@ function Get-QaPackFastPathCounts([string]$LogPath) {
     ChunkPuts = ([regex]::Matches($txt, "PUT chunk")).Count
   }
 }
+
+# Did upload ATTESTATION actually fire, or is the server silently reading every
+# pack back the way it did before 0.4.0?
+#
+# Same failure shape as Get-QaPackFastPathCounts above, and it has already
+# happened once. Phase B skips the post-push read-back when the storage provider
+# validated a checksum at upload. On 2026-09-16 `NamespacedBackend` did not
+# forward `attested_checksum`, so the trait default answered "not attested" for
+# every pack: attestation fired ZERO times across 155 packs while the run showed
+# the fastest push on record and every gate green. Nothing measured it, because
+# skipping a read-back makes a push FASTER - the regression and the improvement
+# look identical from the outside.
+#
+# Two INFO-level server messages, both confirmed in campaign logs p23/p24/p28:
+#   "pack is provider-attested; skipping the read-back"  pack=<oid>
+#   "Pack manifest registered"                            pack=<oid>
+#
+# INFO on purpose, like the fast-path counters: the tower_http request lines are
+# DEBUG and vanish at info, which would turn this into a gate that cannot fail.
+#
+# DISTINCT pack ids on both sides. A retried pack registers twice, and counting
+# raw lines would let one pack's duplicate mask another that never attested.
+#
+# ANSI is stripped first - tracing writes `pack<ESC>[2m=<ESC>[0m<oid>`, so a
+# plain pack=([0-9a-f]+) matches nothing against a real log.
+function Get-QaAttestationCounts([string]$LogPath) {
+  if (-not $LogPath -or -not (Test-Path $LogPath)) { return $null }
+  $txt = Get-Content $LogPath -Raw -ErrorAction SilentlyContinue
+  if (-not $txt) { return $null }
+  $txt = $txt -replace "\x1b\[[0-9;]*m", ""
+
+  $attestedIds = @{}
+  foreach ($m in [regex]::Matches($txt, "provider-attested; skipping the read-back[^\r\n]*?pack=([0-9a-f]+)")) {
+    $attestedIds[$m.Groups[1].Value] = $true
+  }
+  $registeredIds = @{}
+  foreach ($m in [regex]::Matches($txt, "Pack manifest registered[^\r\n]*?pack=([0-9a-f]+)")) {
+    $registeredIds[$m.Groups[1].Value] = $true
+  }
+
+  return [pscustomobject]@{
+    Attested   = $attestedIds.Count
+    Registered = $registeredIds.Count
+  }
+}
+
+# Can this backend's provider attest an upload, i.e. does it validate a checksum
+# of the ASSEMBLED object at upload time?
+#
+# Kept as a table rather than inferred from the log, so the gate below can be
+# TWO-SIDED. A one-sided "attested > 0 somewhere" check would pass a build that
+# attested on Azure - where no validated whole-blob digest exists and claiming
+# one would skip a real integrity check on the strength of nothing.
+#
+#   aws    full-object CRC64NVME, validated by S3 at CompleteMultipartUpload
+#   gcs    crc32c, COMPARED against the client's folded per-part digests
+#   azure  none usable: x-ms-blob-content-md5 is client-set and never validated,
+#          and per-block x-ms-content-crc64 cannot ride a presigned URL
+#   minio  gated off: attestation requires an amazonaws.com endpoint
+#   local  no provider at all
+function Test-QaBackendAttests([string]$Backend) {
+  return @('aws', 'gcs') -contains $Backend
+}
