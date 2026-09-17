@@ -874,10 +874,31 @@ impl StorageBackend for AzureBackend {
             upload_id: "azure-blocklist".to_string(),
             parts,
             part_size,
-            // Unattested: Azure has no validated whole-blob hash
-            // (`x-ms-blob-content-md5` is stored, NOT checked), so it needs the
-            // per-block CRC64 + stored-metadata design rather than this one.
-            // Keeps the pack read-back meanwhile, i.e. current behaviour.
+            // UNATTESTED, AND THIS IS A DEAD END — investigated 2026-09-17,
+            // recorded so nobody re-attempts it.
+            //
+            // Attestation needs a digest the SERVICE computed over the stored
+            // object, so the server can compare it against what the client says
+            // it sent. S3 validates a full-object CRC at CompleteMultipartUpload;
+            // GCS computes a crc32c for every object which we compare at
+            // complete. Azure offers neither for a block blob assembled by
+            // `Put Block List`:
+            //   - `x-ms-blob-content-md5` is CLIENT-SET metadata, stored and
+            //     returned verbatim, never validated against the bytes.
+            //   - per-block `x-ms-content-crc64` IS validated, but only per
+            //     block at upload time, and the client cannot attach it here —
+            //     blocks go up through PRESIGNED urls, which sign a fixed header
+            //     set (measured on S3: `AccessDenied` / `HeadersNotSigned`).
+            //   - there is no service-computed whole-blob hash to read back.
+            //
+            // A client-asserted CRC stored as metadata would NOT be equivalent:
+            // it proves nothing a faulty or hostile client could not fake, and
+            // checking it means reading the bytes — which is the read-back this
+            // was meant to remove.
+            //
+            // So Azure keeps the pack read-back. That is current behaviour, not
+            // a regression, and it is the correct answer until Azure exposes a
+            // server-side whole-blob digest.
             checksum: None,
         }))
     }
