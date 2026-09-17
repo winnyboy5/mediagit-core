@@ -353,6 +353,58 @@ flowchart LR
 
 ---
 
+## Upload Attestation (0.4.0)
+
+After a push, the server used to read every pack back out of the bucket and hash
+it, to confirm the bytes stored intact. On a 16 GB push that is **10.03 GB pulled
+back out** — roughly 60% extra load on the same link the push just used.
+
+Where the storage provider has **already validated a checksum of the assembled
+object at upload time**, that read-back proves nothing new, and MediaGit skips it.
+
+### What attestation does and does not prove
+
+| Property | Guaranteed by | Still checked? |
+|----------|---------------|----------------|
+| The bucket holds the bytes we uploaded | **Provider attestation** (this feature) | Skipped when attested |
+| A pack's contents match its manifest | **Read path** — `slice_verifies` (compressed hash) and `put_compressed_chunk` (decompress, BLAKE3 == `chunk_id`) | Always, on every read |
+
+Attestation is a **storage-integrity** claim, not a content-correctness one. Nothing
+is ever served or stored unverified: both read-path checks fail closed regardless of
+attestation, so the practical change is *when* a content mismatch surfaces — on first
+read rather than eagerly at push.
+
+### Per-backend support
+
+| Backend | Digest | How it is checked | Read-back |
+|---------|--------|-------------------|-----------|
+| **AWS S3** | Full-object CRC64NVME | Presence is sufficient — the checksum exists only because we asked for it and S3 validated it at `CompleteMultipartUpload` | **Skipped** |
+| **GCS** | crc32c | **Compared**, not merely observed. GCS stores a crc32c for *every* object, so a presence check would answer "attested" for every upload ever made. The server folds the client's per-part digests and compares against GCS's own value | **Skipped** |
+| **Azure Blob** | none usable | No validated whole-blob digest exists: `x-ms-blob-content-md5` is client-set and never validated, and per-block `x-ms-content-crc64` cannot ride a presigned URL | **Always runs** |
+| **MinIO / B2 / Spaces** | not attested | Gated on an `amazonaws.com` endpoint; `MEDIAGIT_S3_ATTEST` overrides | **Always runs** |
+
+**Fail-closed throughout.** A non-attesting backend, a missing checksum, a HEAD
+error or a permission gap all yield "not attested", and the read-back runs exactly
+as before. Only a positive answer from the provider skips it.
+`MEDIAGIT_PACK_ATTEST_SKIP_READBACK=0` forces the old behaviour everywhere.
+
+### What this means when choosing a backend
+
+**Azure pushes do measurably more I/O than S3 or GCS for the same data.** Because
+Azure cannot attest, every pushed pack is read back out of the blob store and
+hashed: a 16 GB push does ~10 GB of extra reads that S3 and GCS do not. That is
+throughput and egress, not a correctness difference — Azure's integrity guarantees
+are identical, and arguably verified more eagerly. But if push time or egress cost
+on large repositories is the deciding factor, S3 and GCS have a structural advantage
+here that Azure cannot currently match.
+
+This is a property of the Azure Blob API, not of MediaGit's Azure backend. If Azure
+ships a service-validated whole-blob digest, the same mechanism applies and the
+read-back goes away — a live test asserts Azure still reports "not attested", so
+that change would be detected rather than assumed.
+
+---
+
 ## Cross-Backend Deep-Test Parity (2026-06-02)
 
 614/614 tests passing across all four backends. All fsck + F8 compressed-hash checks clean.

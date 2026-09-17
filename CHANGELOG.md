@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — provider upload attestation
+
+The server no longer re-reads a pushed pack out of the bucket when the storage
+provider has already validated a checksum of the assembled object at upload. On a
+16 GB push that read-back was 10.03 GB pulled back out of the bucket, on the same
+link the push had just used.
+
+- **AWS S3** — full-object CRC64NVME, validated by S3 at `CompleteMultipartUpload`.
+- **GCS** — crc32c, **compared** against the client's folded per-part digests rather
+  than merely observed. GCS stores a crc32c for every object, so a presence check
+  would report "attested" for every upload ever made, including corrupt ones.
+- **Azure** — no validated whole-blob digest exists, so Azure keeps the read-back.
+  A 16 GB Azure push therefore does ~10 GB of reads that S3 and GCS do not. See
+  `CLOUD_ARCHITECTURE.md` → Upload Attestation.
+
+Attestation proves the bucket holds the bytes we sent. It does **not** prove a
+pack's contents match its manifest — that is enforced on the read path
+(`slice_verifies`, `put_compressed_chunk`), unchanged and always on. Fail-closed
+throughout: an unknown backend, a missing digest, a HEAD error or a permission gap
+all read as "not attested" and the read-back runs.
+`MEDIAGIT_PACK_ATTEST_SKIP_READBACK=0` restores the old behaviour.
+
+A low-rate background scrub (`MEDIAGIT_PACK_SCRUB_INTERVAL_SECS`, default 300s,
+`0` disables) content-verifies attested packs so a pack nobody reads is not
+unchecked forever. It yields to live transfers rather than competing with them.
+
+### Fixed — transfer resilience
+
+- **A single failing pack no longer drops the whole clone to the per-chunk path.**
+  One pack's fetch error short-circuited the entire pack-mode pull, and the caller
+  then discarded every pack that had succeeded. On a degraded link this turned a
+  22-minute clone into 1,568 per-chunk requests with single chunks re-requested up
+  to 16 times. A failed pack now keeps the chunks it did fetch (they are written
+  and verified as each range arrives) and only its missing chunks fall back.
+  Present since 2026-06-02; latent until a link is bad enough to trigger it.
+- **Multipart commit lists are now sorted by part number on GCS and S3.** Both
+  providers reject an unordered list (`InvalidPartOrder`) and neither backend
+  sorted. This worked only because the client happens to upload parts
+  sequentially — parallelising part upload would have failed every commit *after*
+  all parts were uploaded and paid for.
+- **A verification that could not finish is no longer reported as corruption.**
+  The scrub treated "wall-clock budget exhausted" and "found bad entries" as the
+  same result, logging a false quarantine claim and dropping the pack's marker, so
+  the one pack whose content had never been checked became the one pack that never
+  would be.
+- **The scrub yields the link.** It now skips a tick while the data plane is busy
+  or another verification holds the verify permit, instead of reading packs out of
+  the bucket while a push saturates the same connection.
+
+
 ### Removed (configuration)
 
 Config keys that were parsed and round-tripped but never read by any consumer
