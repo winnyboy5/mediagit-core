@@ -1602,6 +1602,39 @@ async fn wait_for_data_plane_quiet(state: &AppState, repo: &str, pack_oid: &str)
         .await
 }
 
+/// Is the data plane idle RIGHT NOW?
+///
+/// The scrub's counterpart to `wait_for_data_plane_quiet`, and deliberately a
+/// CHECK rather than a wait. That function defers only up to `max_defer` and
+/// then proceeds regardless, which is correct for a push-path verification: the
+/// pack is unverified, reads are gating on it, and postponing it forever would
+/// be worse than competing for the link.
+///
+/// The scrub has no such deadline. Its packs are already provider-attested and
+/// already served by a read path that verifies independently, so a scrub can
+/// wait hours at no cost and the next tick is only `MEDIAGIT_PACK_SCRUB_SECS`
+/// away. Skipping is therefore strictly better than deferring-then-proceeding.
+///
+/// Measured on p24 (2026-09-17, AWS 16 GB): with no check at all, the scrub
+/// pulled whole packs out of S3 while a push saturated the link with 16
+/// connections. Two packs failed with `unreadable=11` and `unreadable=10` after
+/// ~250s of attempts each — zero transport errors, zero corruption, the reads
+/// simply starved behind the push. Retrying into a saturated link cannot
+/// succeed, and since an unfinished scrub now correctly keeps its marker, it
+/// would have retried every tick for the length of the push.
+fn data_plane_is_quiet(state: &AppState) -> bool {
+    let quiet = verify_quiet_secs();
+    if quiet == 0 {
+        return true;
+    }
+    // Same predicate as the wait loop's break condition: `0` means no transfer
+    // has ever been recorded, not "busy since the epoch".
+    let last = state
+        .data_plane_activity
+        .load(std::sync::atomic::Ordering::Relaxed);
+    last == 0 || now_millis().saturating_sub(last) >= quiet * 1000
+}
+
 /// Emit the effective verification-scheduling policy once per process.
 ///
 /// WHY AT `info`. Both outcomes of this scheduler are otherwise invisible at
@@ -2207,6 +2240,37 @@ pub async fn scrub_one_attested_pack(
     state: &Arc<AppState>,
     repos_dir: &std::path::Path,
 ) -> Option<String> {
+    scrub_one_attested_pack_with(state, repos_dir, pack_verify_semaphore()).await
+}
+
+/// The scrub with its verify permit injected.
+///
+/// Split for the same reason `wait_for_data_plane_quiet_with` and
+/// `verify_pack_with_budget`'s budget argument are: the real permit is a
+/// PROCESS-GLOBAL `OnceLock`, so a test that held it made every other test in
+/// the binary see a busy verifier. That is not hypothetical — it is what the
+/// first version of these tests did, failing
+/// `the_scrub_verifies_a_marked_pack_and_clears_its_marker` and
+/// `the_scrub_keeps_the_marker_when_verification_could_not_finish` in the full
+/// suite while passing a filtered `cargo test scrub` run, which cannot see
+/// cross-test interference at all.
+async fn scrub_one_attested_pack_with(
+    state: &Arc<AppState>,
+    repos_dir: &std::path::Path,
+    verify_sem: &tokio::sync::Semaphore,
+) -> Option<String> {
+    // PHASE C IS THE LOWEST-PRIORITY READER IN THE SYSTEM.
+    //
+    // Every pack it looks at is already provider-attested and already covered
+    // on the read path, so nothing is waiting on this work. A push is the
+    // opposite: a user is watching it. When the two want the same link, the
+    // scrub yields — and yields by SKIPPING, not by waiting, because the next
+    // tick costs nothing and a wait would just move the collision.
+    if !data_plane_is_quiet(state) {
+        tracing::debug!("scrub: data plane busy; skipping this tick");
+        return None;
+    }
+
     // Find the first `.attested` marker across all repos. Cheap: a directory
     // walk over `.mediagit/packs/<shard>/`, no network.
     let mut found: Option<(std::path::PathBuf, String, String)> = None;
@@ -2264,6 +2328,23 @@ pub async fn scrub_one_attested_pack(
             );
             return None;
         }
+    };
+
+    // `verify_pack_with_budget` documents that its caller already holds this
+    // permit, and the scrub was the one caller that did not — so a scrub could
+    // run a whole-pack read concurrently with a background verification, which
+    // is exactly what the single permit exists to prevent.
+    //
+    // `try_acquire`, not `acquire`: queueing would make the scrub wait for the
+    // verification it should be yielding to, and then start reading at the
+    // moment that one finishes. Skipping keeps it out of the way.
+    let Ok(_permit) = verify_sem.try_acquire() else {
+        tracing::debug!(
+            repo,
+            pack_oid,
+            "scrub: a pack verification is already running; skipping this tick"
+        );
+        return None;
     };
 
     tracing::info!(repo, pack_oid, "scrub: content-verifying an attested pack");
@@ -3595,7 +3676,11 @@ mod complete_pack_content_verification_tests {
         mediagit_versioning::atomic_write::write_atomic(&marker, b"").expect("mark");
         assert!(marker.exists(), "precondition: marker present");
 
-        let scrubbed = scrub_one_attested_pack(&state, &repos_dir).await;
+        // Local semaphore: the public wrapper takes the PROCESS-GLOBAL permit,
+        // which any other test verifying a pack right now may be holding — that
+        // is cross-test interference a filtered run cannot see.
+        let sem = tokio::sync::Semaphore::new(1);
+        let scrubbed = scrub_one_attested_pack_with(&state, &repos_dir, &sem).await;
         assert_eq!(
             scrubbed.as_deref(),
             Some(pack_oid),
@@ -3605,6 +3690,116 @@ mod complete_pack_content_verification_tests {
             !marker.exists(),
             "marker survived the scrub — every later tick would re-read the              same pack forever"
         );
+    }
+
+    /// A busy data plane must STOP the scrub, not merely delay it.
+    ///
+    /// The guard that matters most, because its absence is invisible in a
+    /// healthy run and only shows up as someone else's push getting slower. On
+    /// p24 (2026-09-17) the unguarded scrub read whole packs out of S3 while a
+    /// push saturated the link, and two packs starved out at `unreadable=11`
+    /// and `unreadable=10` after ~250s each with zero transport errors.
+    #[tokio::test]
+    async fn a_busy_data_plane_skips_the_scrub() {
+        let repo = "test-repo".to_string();
+        let (_tmp, state, repo_path) = setup(&repo).await;
+        let repos_dir = repo_path.parent().expect("repos dir").to_path_buf();
+        let storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        let fixture = build_valid_pack();
+        let pack_oid = "dd88ee99ff";
+        storage
+            .put(&format!("packs/{pack_oid}"), &fixture.pack_bytes)
+            .await
+            .expect("put pack");
+        complete_pack(
+            Path(repo.clone()),
+            State(Arc::clone(&state)),
+            None,
+            Json(CompletePackRequest {
+                pack_oid: pack_oid.to_string(),
+                manifest: fixture.manifest,
+            }),
+        )
+        .await
+        .expect("complete_pack");
+        wait_until_pack_verified(&state, &repo, pack_oid).await;
+
+        let marker = attested_marker_path(&repo_path, pack_oid);
+        mediagit_versioning::atomic_write::write_atomic(&marker, b"").expect("mark");
+
+        // A transfer just happened. This is the ONLY difference from
+        // `the_scrub_verifies_a_marked_pack_and_clears_its_marker`, which runs
+        // the same marked pack to completion — so a scrub that ran anyway would
+        // be caught here rather than passing both ways.
+        note_data_plane_activity(&state);
+
+        // Local semaphore: the public wrapper takes the PROCESS-GLOBAL permit,
+        // which any other test verifying a pack right now may be holding — that
+        // is cross-test interference a filtered run cannot see.
+        let sem = tokio::sync::Semaphore::new(1);
+        let scrubbed = scrub_one_attested_pack_with(&state, &repos_dir, &sem).await;
+        assert_eq!(
+            scrubbed, None,
+            "the scrub read a pack while the data plane was busy; it competes with              the push for the same link and starves rather than finishing"
+        );
+        assert!(
+            marker.exists(),
+            "a skipped tick must leave the marker so the pack is scrubbed once the              link is free"
+        );
+    }
+
+    /// The scrub must not verify alongside a background verification.
+    ///
+    /// `verify_pack_with_budget` documents that its caller already holds the
+    /// single `pack_verify_semaphore` permit; the scrub was the one caller that
+    /// did not, so two whole-pack reads could run at once against the exact
+    /// limit built to prevent that.
+    #[tokio::test]
+    async fn the_scrub_yields_to_an_in_flight_verification() {
+        let repo = "test-repo".to_string();
+        let (_tmp, state, repo_path) = setup(&repo).await;
+        let repos_dir = repo_path.parent().expect("repos dir").to_path_buf();
+        let storage = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        let fixture = build_valid_pack();
+        let pack_oid = "ff99aa00bb";
+        storage
+            .put(&format!("packs/{pack_oid}"), &fixture.pack_bytes)
+            .await
+            .expect("put pack");
+        complete_pack(
+            Path(repo.clone()),
+            State(Arc::clone(&state)),
+            None,
+            Json(CompletePackRequest {
+                pack_oid: pack_oid.to_string(),
+                manifest: fixture.manifest,
+            }),
+        )
+        .await
+        .expect("complete_pack");
+        wait_until_pack_verified(&state, &repo, pack_oid).await;
+
+        let marker = attested_marker_path(&repo_path, pack_oid);
+        mediagit_versioning::atomic_write::write_atomic(&marker, b"").expect("mark");
+
+        // A LOCAL semaphore, never the process-global one: holding the global
+        // permit here starved every other test in the binary that verifies a
+        // pack. Standing in for an in-flight verification by exhausting this
+        // one tests the same branch with none of the blast radius.
+        let sem = tokio::sync::Semaphore::new(1);
+        let held = sem.try_acquire().expect("fresh local semaphore");
+
+        let scrubbed = scrub_one_attested_pack_with(&state, &repos_dir, &sem).await;
+        assert_eq!(
+            scrubbed, None,
+            "the scrub verified a pack while another verification held the only              permit, so two whole-pack reads ran at once"
+        );
+        assert!(marker.exists(), "a skipped tick must leave the marker");
+        drop(held);
     }
 
     /// A scrub that could NOT FINISH must leave the marker in place.
@@ -3658,7 +3853,11 @@ mod complete_pack_content_verification_tests {
         mediagit_versioning::atomic_write::write_atomic(&marker, b"").expect("mark");
         assert!(marker.exists(), "precondition: marker present");
 
-        let scrubbed = scrub_one_attested_pack(&state, &repos_dir).await;
+        // Local semaphore: the public wrapper takes the PROCESS-GLOBAL permit,
+        // which any other test verifying a pack right now may be holding — that
+        // is cross-test interference a filtered run cannot see.
+        let sem = tokio::sync::Semaphore::new(1);
+        let scrubbed = scrub_one_attested_pack_with(&state, &repos_dir, &sem).await;
         assert_eq!(
             scrubbed.as_deref(),
             Some(pack_oid),
