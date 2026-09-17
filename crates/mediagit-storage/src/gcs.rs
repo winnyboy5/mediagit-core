@@ -707,8 +707,21 @@ fn parse_upload_id(xml: &str) -> Option<String> {
 /// server-supplied text going into a document, even though in practice it is a
 /// quoted hex digest.
 fn complete_mpu_xml(parts: &[crate::MpuCompletedPart]) -> String {
+    // SORTED, because GCS rejects an unordered list outright: measured
+    // 2026-09-17, `400 InvalidPartOrder` -- "Parts list must be specified in
+    // order by part number". S3 enforces the same rule.
+    //
+    // Today's client uploads parts in a sequential loop and so happens to
+    // report them ascending, which is the only reason this ever worked. That
+    // is an accident of the caller, not a guarantee: completions arrive from
+    // concurrent uploads the moment part upload is parallelised, and the whole
+    // commit would then fail with every part already paid for and in the
+    // bucket. `azure.rs` sorts for exactly this reason.
+    let mut ordered: Vec<&crate::MpuCompletedPart> = parts.iter().collect();
+    ordered.sort_by_key(|p| p.part_number);
+
     let mut out = String::from("<CompleteMultipartUpload>");
-    for p in parts {
+    for p in ordered {
         let etag = p.etag.replace('&', "&amp;").replace('<', "&lt;");
         out.push_str(&format!(
             "<Part><PartNumber>{}</PartNumber><ETag>{}</ETag></Part>",
@@ -1797,6 +1810,31 @@ mod gcs_attestation_tests {
             checksum: Some(base64::engine::general_purpose::STANDARD.encode(crc.to_be_bytes())),
             length: Some(data.len() as u64),
         }
+    }
+
+    /// The commit XML must list parts in ASCENDING order whatever order the
+    /// client reported them in.
+    ///
+    /// GCS answers `400 InvalidPartOrder` to an unordered list and refuses the
+    /// whole commit -- with every part already uploaded and paid for. Measured
+    /// against real GCS on 2026-09-17; the live test
+    /// `a_multipart_upload_folds_to_the_crc32c_gcs_computed` reports parts
+    /// reversed and is the end-to-end half of this.
+    #[test]
+    fn the_commit_xml_is_ordered_by_part_number() {
+        let parts = vec![part(3, b"ccc"), part(1, b"a"), part(2, b"bb")];
+        let xml = super::complete_mpu_xml(&parts);
+
+        let positions: Vec<usize> = (1..=3)
+            .map(|n| {
+                xml.find(&format!("<PartNumber>{n}</PartNumber>"))
+                    .unwrap_or_else(|| panic!("part {n} missing from commit XML"))
+            })
+            .collect();
+        assert!(
+            positions.windows(2).all(|w| w[0] < w[1]),
+            "commit XML lists parts out of order, which GCS and S3 both reject: {xml}"
+        );
     }
 
     /// The fold must equal the crc32c of the concatenated bytes.
