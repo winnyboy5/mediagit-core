@@ -1612,7 +1612,7 @@ async fn wait_for_data_plane_quiet(state: &AppState, repo: &str, pack_oid: &str)
 ///
 /// The scrub has no such deadline. Its packs are already provider-attested and
 /// already served by a read path that verifies independently, so a scrub can
-/// wait hours at no cost and the next tick is only `MEDIAGIT_PACK_SCRUB_SECS`
+/// wait hours at no cost and the next tick is only `MEDIAGIT_PACK_SCRUB_INTERVAL_SECS`
 /// away. Skipping is therefore strictly better than deferring-then-proceeding.
 ///
 /// Measured on p24 (2026-09-17, AWS 16 GB): with no check at all, the scrub
