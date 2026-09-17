@@ -2307,7 +2307,73 @@ pub async fn complete_pack(
     // knob as the loose-chunk path (one policy, not a second knob an operator
     // could half-disable without realising) — when it's off, none of this
     // runs and behavior is identical to today.
-    if state.verify_chunks_on_complete {
+    // PHASE B: a provider-attested pack needs no read-back.
+    //
+    // Verification exists to prove the bucket holds the bytes we pushed. When
+    // the storage service validated a full-object checksum at upload it has
+    // already proven exactly that, and re-reading 10 GB to learn it again is
+    // ~17-19 min of link time on a 26-31 min push — measured across six 16 GB
+    // runs, and NOT fixable by scheduling, which is why this gate exists.
+    //
+    // This asks the PROVIDER (one metadata request, no body) rather than
+    // trusting our own memory of having sent a checksum. Any error, any
+    // non-attesting backend, any unattested object ⇒ `false` ⇒ the read-back
+    // runs exactly as before. Only a positive answer skips it.
+    //
+    // WHAT THIS DOES NOT SKIP. Attestation proves storage integrity, not that
+    // the pack's contents match its manifest. That is a different property and
+    // it stays enforced on the READ path, which fails closed twice:
+    // `slice_verifies` (compressed_hash) and `put_compressed_chunk`
+    // (decompress, BLAKE3 == chunk_id). Nothing serves unverified bytes.
+    //
+    // All three effects are skipped together — marker, unverified-set, and the
+    // background task. Skipping only the task would leave a marker the startup
+    // sweep re-reads on the next boot, doing the same work later.
+    // KILL SWITCH. `MEDIAGIT_PACK_ATTEST_SKIP_READBACK=0` forces the read-back
+    // even for an attested pack, restoring pre-attestation behaviour exactly.
+    //
+    // Two reasons it exists. Operationally it is the escape hatch for a
+    // provider whose checksum turns out not to mean what we think. For
+    // measurement it is what makes an A/B possible on ONE link: p18 ran phase B
+    // active on the worst link of the series (99 stream errors, 4.69 MB/s push)
+    // while its comparison ran on the best, so the clone difference could not
+    // be attributed. Toggling behaviour without rebuilding removes that
+    // confound.
+    let skip_enabled = !matches!(
+        std::env::var("MEDIAGIT_PACK_ATTEST_SKIP_READBACK")
+            .ok()
+            .as_deref(),
+        Some("0") | Some("off") | Some("false")
+    );
+    let attested = if !skip_enabled {
+        // Forced off: do not even ask, so the A arm costs exactly what it did
+        // before attestation existed — no extra HEAD per pack.
+        false
+    } else {
+        match storage.attested_checksum(&pack_key).await {
+            Ok(Some(sum)) => {
+                tracing::info!(
+                    repo = %repo,
+                    pack = %req.pack_oid,
+                    checksum = %sum,
+                    "pack is provider-attested; skipping the read-back"
+                );
+                true
+            }
+            Ok(None) => false,
+            Err(e) => {
+                tracing::warn!(
+                    repo = %repo,
+                    pack = %req.pack_oid,
+                    error = %e,
+                    "could not read the pack's attestation; verifying by read-back"
+                );
+                false
+            }
+        }
+    };
+
+    if state.verify_chunks_on_complete && !attested {
         let marker_path = pending_marker_path(&repo_path, &req.pack_oid);
         if let Some(parent) = marker_path.parent() {
             tokio::fs::create_dir_all(parent)
@@ -2389,7 +2455,7 @@ pub async fn complete_pack(
                 },
             );
         }
-        if state.verify_chunks_on_complete {
+        if state.verify_chunks_on_complete && !attested {
             let mut unverified = state.unverified_packs.write().await;
             unverified
                 .entry(repo.clone())
@@ -2398,7 +2464,7 @@ pub async fn complete_pack(
         }
     }
 
-    if state.verify_chunks_on_complete {
+    if state.verify_chunks_on_complete && !attested {
         let state2 = Arc::clone(&state);
         let repo_path2 = repo_path.clone();
         let repo2 = repo.clone();

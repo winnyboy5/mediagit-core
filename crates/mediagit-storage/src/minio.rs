@@ -1243,6 +1243,54 @@ impl StorageBackend for MinIOBackend {
         .await
     }
 
+    /// The provider-recorded checksum for `key`, if the service validated one.
+    ///
+    /// `HeadObject` returns the stored checksum for an object uploaded with
+    /// one, and downloads no body — one metadata request against a whole pack
+    /// read-back is the entire point of attestation.
+    ///
+    /// `checksum_mode(ENABLED)` is required: without it S3 omits the checksum
+    /// fields from the response and every object looks unattested, which would
+    /// silently leave the read-back on forever — a knob that appears to work
+    /// while doing nothing.
+    ///
+    /// Any error maps to `Ok(None)`, i.e. "not attested", so a network blip or
+    /// a permission gap keeps the read-back rather than skipping it. The whole
+    /// point is to only skip verification on a POSITIVE signal.
+    async fn attested_checksum(&self, key: &str) -> anyhow::Result<Option<String>> {
+        Self::validate_key(key)?;
+        if self.attestation_algorithm().is_none() {
+            return Ok(None);
+        }
+        let full = self.full_key(key);
+        let resp = self
+            .client
+            .head_object()
+            .bucket(&self.config.bucket)
+            .key(&full)
+            .checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled)
+            .send()
+            .await;
+        match resp {
+            Ok(r) => Ok(r
+                .checksum_crc64_nvme()
+                .map(str::to_string)
+                .or_else(|| r.checksum_crc32_c().map(str::to_string))),
+            // PROPAGATED, not swallowed. The caller turns any error into "not
+            // attested" anyway, so behaviour is the same — but it logs the
+            // reason, and that difference matters: an earlier version returned
+            // `Ok(None)` here and a HEAD failure was then indistinguishable
+            // from an object that genuinely carries no checksum. The whole
+            // feature can be inert and look identical to "the provider does
+            // not attest".
+            Err(e) => Err(anyhow!(
+                "head_object checksum {}: {}",
+                self.endpoint_label(),
+                e
+            )),
+        }
+    }
+
     /// Delete an object from MinIO
     async fn delete(&self, key: &str) -> anyhow::Result<()> {
         Self::validate_key(key)?;

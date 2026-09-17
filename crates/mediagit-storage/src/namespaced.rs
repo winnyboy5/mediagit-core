@@ -257,6 +257,23 @@ impl StorageBackend for NamespacedBackend {
 
     /// Forwarded, not defaulted.
     ///
+    /// Inheriting the trait's `Ok(None)` here reports "not attested" for every
+    /// object in every namespaced repo — which is every repo the server
+    /// serves, because it wraps each one. Measured 2026-09-16 (p17): the
+    /// read-back skip was fully implemented and fired ZERO times across 155
+    /// packs, because this one method was missing and the default answered for
+    /// it. The push in that run was the fastest ever recorded, which made an
+    /// inert feature look like a 41% win until the attestation count was
+    /// checked.
+    ///
+    /// Same hazard as `last_modified` above: a decorator that silently
+    /// inherits a default is indistinguishable from one that works.
+    async fn attested_checksum(&self, key: &str) -> anyhow::Result<Option<String>> {
+        self.inner.attested_checksum(&self.prefixed(key)?).await
+    }
+
+    /// Forwarded, not defaulted.
+    ///
     /// Inheriting the trait's `Ok(None)` here would silently disable gc's
     /// prune grace period for every namespaced repo — the wrapper would report
     /// "age unknown" for objects whose age the inner backend knows perfectly
@@ -403,5 +420,69 @@ mod tests {
 
         a.delete("k1").await.unwrap();
         assert!(!a.exists("k1").await.unwrap());
+    }
+
+    /// A backend that ATTESTS, so the wrapper has something real to forward.
+    ///
+    /// `MockBackend` inherits the trait default, so testing the wrapper
+    /// against it would pass whether or not the forward exists — the exact
+    /// gate-that-cannot-fail this test is here to avoid.
+    #[derive(Debug)]
+    struct AttestingBackend;
+
+    #[async_trait::async_trait]
+    impl StorageBackend for AttestingBackend {
+        async fn get(&self, _k: &str) -> anyhow::Result<Vec<u8>> {
+            Ok(vec![])
+        }
+        async fn put(&self, _k: &str, _d: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn exists(&self, _k: &str) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+        async fn delete(&self, _k: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn list_objects(&self, _p: &str) -> anyhow::Result<Vec<String>> {
+            Ok(vec![])
+        }
+        async fn head(&self, _k: &str) -> anyhow::Result<Option<u64>> {
+            Ok(Some(0))
+        }
+        /// Echoes the key back, so the test can also prove the key was
+        /// namespaced on the way through rather than passed raw.
+        async fn attested_checksum(&self, key: &str) -> anyhow::Result<Option<String>> {
+            Ok(Some(key.to_string()))
+        }
+    }
+
+    /// REGRESSION GUARD, p17 (2026-09-16).
+    ///
+    /// `attested_checksum` was added to the trait and implemented on the S3
+    /// backend, but NOT forwarded here. Every namespaced repo — which is every
+    /// repo the server serves — therefore answered "not attested" from the
+    /// trait default, and the read-back skip fired zero times across 155 packs
+    /// on a 16 GB run. The run was 5/5 green with the fastest push ever
+    /// recorded, so nothing looked wrong.
+    #[tokio::test]
+    async fn attested_checksum_is_forwarded_and_namespaced() {
+        let inner: Arc<dyn StorageBackend> = Arc::new(AttestingBackend);
+        let ns = NamespacedBackend::new(inner, "repo-a").expect("wrap");
+
+        let got = ns
+            .attested_checksum("packs/abc")
+            .await
+            .expect("forward must not error")
+            .expect("wrapper returned None for a backend that attests — it is                      inheriting the trait default instead of forwarding");
+
+        assert!(
+            got.contains("packs/abc"),
+            "forwarded, but not the key we asked for: {got}"
+        );
+        assert!(
+            got.contains("repo-a"),
+            "key reached the inner backend WITHOUT its namespace ({got}); the              lookup would miss the real object and read as unattested"
+        );
     }
 }
