@@ -148,12 +148,42 @@ pub fn init_tracing_with_config(config: LogConfig) -> Result<(), LogError> {
     Ok(())
 }
 
-/// Get the writer for the specified output
-fn get_writer(output: &LogOutput) -> fn() -> Box<dyn io::Write + Send> {
-    match output {
-        LogOutput::Stderr => || Box::new(io::stderr()),
-        LogOutput::Stdout => || Box::new(io::stdout()),
+/// A `MakeWriter` over stdout/stderr that allocates nothing per event.
+///
+/// WHY THIS IS NOT A `Box`. It was: `get_writer` returned
+/// `fn() -> Box<dyn io::Write + Send>`, so every log event heap-allocated a box
+/// and wrote through a vtable. That is a cost per LINE, and the server logs at
+/// `mediagit_server=debug,tower_http=debug` -- one span per HTTP request -- so
+/// on a push issuing thousands of chunk requests it is thousands of
+/// allocations.
+///
+/// It also arrived as a silent regression. Before the server was wired to this
+/// crate it used a bare `fmt::layer()`, whose default writer is `io::stdout`
+/// with neither an allocation nor dynamic dispatch. Wiring the crate up kept
+/// the OUTPUT byte-identical and quietly changed the COST, which is exactly the
+/// kind of "refactor" that shows up later as a throughput number nobody can
+/// explain.
+///
+/// `EitherWriter` keeps the choice of stream without erasing the type, so the
+/// write is a direct call again.
+#[derive(Clone, Copy, Debug)]
+struct StdStreamWriter(LogOutput);
+
+impl tracing_subscriber::fmt::MakeWriter<'_> for StdStreamWriter {
+    type Writer = tracing_subscriber::fmt::writer::EitherWriter<io::Stdout, io::Stderr>;
+
+    fn make_writer(&self) -> Self::Writer {
+        use tracing_subscriber::fmt::writer::EitherWriter;
+        match self.0 {
+            LogOutput::Stdout => EitherWriter::A(io::stdout()),
+            LogOutput::Stderr => EitherWriter::B(io::stderr()),
+        }
     }
+}
+
+/// Get the writer for the specified output.
+fn get_writer(output: &LogOutput) -> StdStreamWriter {
+    StdStreamWriter(*output)
 }
 
 /// Build an environment filter for the given configuration
