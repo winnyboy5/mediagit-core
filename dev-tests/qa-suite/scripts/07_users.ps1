@@ -1,7 +1,9 @@
 # Phase 7 (users) - normal-user lifecycle (§E), NO admin needed for the core path.
 # ASCII-only, PS 5.1 compatible. Uses the local (filesystem) backend so it always
-# runs; -EnableAuth leaves allow_open_registration at its struct default (true),
-# and -AdminUser bootstraps an admin via `mediagit-server admin create`.
+# runs; -OpenRegistration sets allow_open_registration = true explicitly (AU-3
+# changed the struct default to false, so U1 must ask for open signup rather
+# than inherit it), and -AdminUser bootstraps an admin via
+# `mediagit-server admin create`.
 #
 #   U1-self-service   register (open) -> login -> whoami shows role; passwd
 #                     self-change requires the current password; old password
@@ -63,7 +65,7 @@ Remove-Item Env:MEDIAGIT_TOKEN -ErrorAction SilentlyContinue
 
 $srv = $null
 try {
-  $srv = Start-QaServer -Backend "local" -Phase $Phase -EnableAuth -AdminUser "qa-admin" -AdminPass "copper-valley-signal-31"
+  $srv = Start-QaServer -Backend "local" -Phase $Phase -EnableAuth -OpenRegistration -AdminUser "qa-admin" -AdminPass "copper-valley-signal-31"
   $base = $srv.BaseUrl
 
   # ---- U1-self-service ----
@@ -115,10 +117,10 @@ try {
 
   # ---- U4-closed-reg ----
   # Flip registration closed by promoting qa-admin (already admin via bootstrap)
-  # and using POST /auth/users. First close registration: the wizard path sets it
-  # false, but Start-QaServer's server.toml leaves it default-true, so we assert
+  # and using POST /auth/users. This phase deliberately runs with
+  # -OpenRegistration (U1 needs it), so rather than restart the server we assert
   # closed-mode behaviour by driving the admin create-user route regardless, and
-  # confirm reset-password recovery.
+  # confirm reset-password recovery. 07_setup covers the genuinely-closed server.
   $adminLogin = Post-Json "$base/auth/login" @{ identifier = "qa-admin"; password = "copper-valley-signal-31" }
   $adminTok = if ($adminLogin.Ok) { $adminLogin.Body.tokens.access_token } else { $null }
   $adminIsAdmin = $adminLogin.Ok -and (("" + $adminLogin.Body.user.role) -eq "Admin")

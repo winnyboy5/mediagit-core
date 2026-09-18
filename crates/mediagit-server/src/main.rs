@@ -280,27 +280,18 @@ async fn main() -> Result<()> {
         tracing::info!("Authentication is ENABLED");
         let auth_store_dir = config.resolved_auth_store_dir();
         let state = Arc::new(attach_metrics(
-            AppState::new_with_full_auth(config.repos_dir.clone(), jwt_secret, &auth_store_dir)?
-                .with_presigned_ttl(config.presigned_url_ttl_seconds)
-                .with_verify_chunks_on_complete(config.verify_content_on_complete)
-                .with_encryption_master(encryption_master.clone()),
+            AppState::new_with_full_auth(
+                config.repos_dir.clone(),
+                jwt_secret,
+                &auth_store_dir,
+                config.allow_open_registration,
+            )?
+            .with_presigned_ttl(config.presigned_url_ttl_seconds)
+            .with_verify_chunks_on_complete(config.verify_content_on_complete)
+            .with_encryption_master(encryption_master.clone()),
             metrics_registry.clone(),
         ));
 
-        // AU-3: warn when the defaults compose into "no tenant isolation".
-        //
-        // Three separate, individually-defensible backward-compat choices
-        // combine badly: registration is open by default, self-registration
-        // assigns Role::Write, and per-repo grant enforcement only switches on
-        // once at least one grant exists (`check_permission`'s
-        // `!grants.is_empty()`). On a freshly provisioned server with no grants
-        // recorded, that means anyone who can reach POST /auth/register gets
-        // write access to every repository.
-        //
-        // Not changed silently here: closing registration or defaulting to
-        // Role::Read is a breaking change for existing deployments and for the
-        // QA drills that self-register. Warning loudly is the honest
-        // non-breaking move; the operator can then choose.
         // AU-3: a server with auth on and no admin cannot be administered.
         //
         // Self-registration deliberately creates Read-role accounts and there
@@ -326,13 +317,29 @@ async fn main() -> Result<()> {
             }
         }
 
-        if state.grants.is_empty() && config.allow_open_registration {
+        // AU-3: two independent conditions, warned about independently.
+        //
+        // These were one warning gated on `grants.is_empty() && open_registration`,
+        // which meant the flat-authorization warning went silent the moment
+        // registration was closed — even though flat authorization is exactly
+        // as active either way. A gate that can only fire in the compound case
+        // reports neither condition honestly.
+        if state.grants.is_empty() {
             tracing::warn!(
                 "SECURITY: no per-repo grants are recorded, so per-repo authorization is \
-                 INACTIVE and every authenticated user can read and write EVERY repository. \
-                 Registration is also open, and self-registered users receive write \
-                 permissions. Record at least one grant to activate per-repo enforcement, \
-                 and/or set `allow_open_registration = false` in the server config."
+                 INACTIVE and every authenticated user reaches every repository at their \
+                 flat role — a Read user can read all of them, a Write user can write all \
+                 of them. Record a grant to activate per-repo enforcement on that repo, or \
+                 set MEDIAGIT_GRANTS_ENFORCE=strict to deny on any repo with no grants."
+            );
+        }
+        if config.allow_open_registration {
+            tracing::warn!(
+                "SECURITY: `allow_open_registration = true` — POST /auth/register is open \
+                 to anonymous callers, who receive Role::Read accounts. Combined with no \
+                 per-repo grants (see above), that lets anyone who can reach this port read \
+                 every repository. The default is now closed; bootstrap accounts with \
+                 `mediagit-server admin create` unless open signup is deliberate."
             );
         }
 

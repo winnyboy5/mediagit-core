@@ -166,6 +166,74 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CREATED);
     }
 
+    /// AU-3: `allow_open_registration` must survive the trip from
+    /// `ServerConfig` to the endpoint.
+    ///
+    /// It did not. Every `AuthService` constructor hardcoded `true`, and
+    /// nothing in `mediagit-server` ever assigned the parsed config value onto
+    /// the service — so `allow_open_registration = false` in server.toml, and
+    /// the `init` wizard that writes exactly that, were both inert. The
+    /// endpoint stayed open while the config, the wizard and the QA gate all
+    /// reported success.
+    ///
+    /// Both halves are asserted, through the real `new_with_full_auth` path a
+    /// server actually uses: a config that says closed must produce 403, and a
+    /// config that says open must still produce 201. Asserting only the first
+    /// would pass against a service that rejects everyone; asserting only the
+    /// second is what the old `test_register_endpoint` already did and is what
+    /// let this go unnoticed.
+    async fn register_status_for(allow_open_registration: bool) -> StatusCode {
+        let repos = tempfile::tempdir().unwrap();
+        let auth_dir = tempfile::tempdir().unwrap();
+
+        let state = AppState::new_with_full_auth(
+            repos.path().to_path_buf(),
+            "test-secret",
+            auth_dir.path(),
+            allow_open_registration,
+        )
+        .unwrap();
+
+        let auth_service = Arc::clone(state.auth_service().expect("full auth state"));
+        let app = create_auth_router(auth_service);
+
+        let body = json!({
+            "username": "testuser",
+            "email": "test@example.com",
+            "password": "render farm quiet hum"
+        });
+
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auth/register")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+    }
+
+    #[tokio::test]
+    async fn closed_registration_config_actually_closes_the_endpoint() {
+        assert_eq!(
+            register_status_for(false).await,
+            StatusCode::FORBIDDEN,
+            "allow_open_registration = false must reject anonymous registration"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_registration_config_still_permits_registration() {
+        assert_eq!(
+            register_status_for(true).await,
+            StatusCode::CREATED,
+            "allow_open_registration = true must still admit anonymous registration"
+        );
+    }
+
     #[tokio::test]
     async fn test_login_endpoint() {
         let auth_service = Arc::new(AuthService::new("test-secret"));

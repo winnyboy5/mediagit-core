@@ -369,12 +369,26 @@ impl AppState {
     /// and API keys survive a server restart. Fails hard if a store file
     /// exists but is corrupt/unreadable — see `CredentialsStore::load_or_new`
     /// and `ApiKeyAuth::load_or_new`.
+    ///
+    /// AU-3: `allow_open_registration` is a **required** parameter, not a
+    /// `with_*` builder. It used to be neither — `AuthService` hardcoded
+    /// `true` in every constructor and nothing in this crate ever assigned
+    /// `ServerConfig::allow_open_registration` onto it, so setting
+    /// `allow_open_registration = false` in server.toml (or via the `init`
+    /// wizard, which writes exactly that) did nothing at all: the endpoint
+    /// stayed open and the config reported success. A security control that
+    /// silently no-ops is worse than one that is absent, so the decision is
+    /// now one the compiler makes every caller state.
     pub fn new_with_full_auth(
         repos_dir: PathBuf,
         jwt_secret: &str,
         auth_store_dir: &Path,
+        allow_open_registration: bool,
     ) -> anyhow::Result<Self> {
-        let auth_service = Arc::new(AuthService::new_with_store_dir(jwt_secret, auth_store_dir)?);
+        let auth_service = Arc::new(
+            AuthService::new_with_store_dir(jwt_secret, auth_store_dir)?
+                .with_open_registration(allow_open_registration),
+        );
         let api_key_auth = Arc::new(ApiKeyAuth::load_or_new(auth_store_dir)?);
         // AU-2: give the layer the live user store so every request re-derives
         // permissions instead of trusting the token's frozen snapshot.
@@ -473,6 +487,7 @@ mod tests {
             repos.path().to_path_buf(),
             "test-secret",
             auth_dir.path(),
+            true,
         )
         .unwrap();
 
@@ -495,6 +510,7 @@ mod tests {
             repos.path().to_path_buf(),
             "test-secret",
             auth_dir.path(),
+            true,
         )
         .unwrap();
         let login = state2
@@ -521,6 +537,7 @@ mod tests {
             repos.path().to_path_buf(),
             "test-secret",
             auth_dir.path(),
+            true,
         );
         assert!(result.is_err());
     }
