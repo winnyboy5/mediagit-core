@@ -678,10 +678,10 @@ The `add` command uses a **size + mtime** stat-cache to skip unchanged files:
 
 > There is no separate AWS module. `minio.rs` serves **both** real AWS S3 and
 > MinIO: the server builds its `aws` backend from a `MinIOConfig` with an
-> `https://s3.<region>.amazonaws.com` endpoint. The file that used to be
-> called `s3.rs` is the B2/Spaces driver and was renamed
-> `b2_spaces_driver.rs` on 2026-09-18 — AWS never reached it, so an AWS fix
-> landing there would have had no effect.
+> `https://s3.<region>.amazonaws.com` endpoint. The module that used to be
+> named after S3 is the B2/Spaces driver, renamed `b2_spaces_driver.rs` on
+> 2026-09-18 — AWS never reached it, so an AWS fix landing there would have
+> had no effect.
 
 ### Trait Methods
 ```rust

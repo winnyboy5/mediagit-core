@@ -90,7 +90,7 @@ project actually provides.
 role, no `~/.aws/credentials`. The chain above was documented for years and is
 dead code: see *Storage credentials are not environment variables* below, and
 note the module doc in `crates/mediagit-storage/src/b2_spaces_driver.rs` still describes
-the same non-existent chain -- though that file is the B2/Spaces driver and is not on the AWS path at all (it was `s3.rs` until 2026-09-18).
+the same non-existent chain -- though that file is the B2/Spaces driver and is not on the AWS path at all (it carried an S3 name until 2026-09-18).
 
 ---
 

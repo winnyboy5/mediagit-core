@@ -84,9 +84,9 @@ let s3 = MinIOBackend::new(config).await?;
 
 `B2SpacesDriver` (`b2_spaces_driver.rs`) is a second, independent
 S3-compatible implementation. It is reachable only through
-`B2SpacesBackend` and is **not** on the AWS path. It was called `S3Backend`
-in `s3.rs` until 2026-09-18, which meant the file named after AWS was the
-one AWS never used.
+`B2SpacesBackend` and is **not** on the AWS path. It was called `S3Backend`,
+in an S3-named module, until 2026-09-18 — which meant the file named after
+AWS was the one AWS never used.
 
 ### Azure Blob Storage
 
@@ -295,7 +295,7 @@ mediagit-storage/
 │   ├── azure.rs            # Azure Blob Storage
 │   ├── gcs.rs              # Google Cloud Storage
 │   ├── b2_spaces.rs        # B2 / DigitalOcean Spaces wrapper
-│   ├── b2_spaces_driver.rs # its S3-compatible driver (was s3.rs)
+│   ├── b2_spaces_driver.rs # its S3-compatible driver (S3-named before)
 │   ├── local.rs            # Local filesystem backend
 │   ├── mock.rs             # In-memory mock backend
 │   ├── cache.rs            # LRU caching layer

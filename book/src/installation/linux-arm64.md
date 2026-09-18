@@ -112,11 +112,11 @@ mediagit --version
 [performance]
 upload_concurrency = 4
 download_concurrency = 4
-buffer_size = 65536          # bytes
+```
 
-[performance.cache]
-enabled = true
-max_size = 268435456         # bytes — 256 MiB
+```bash
+export MEDIAGIT_ODB_CACHE_MB=256
+export MEDIAGIT_CHUNK_CACHE_BYTES=134217728   # 128 MiB
 ```
 
 ### High-Performance ARM Servers (Graviton 3, Ampere Altra)
@@ -127,16 +127,21 @@ max_size = 268435456         # bytes — 256 MiB
 upload_concurrency = 32
 download_concurrency = 24
 pack_workers = 8
-buffer_size = 1048576        # bytes — 1 MiB
-
-[performance.cache]
-enabled = true
-max_size = 4294967296        # bytes — 4 GiB
 ```
 
-Sizes are raw **bytes**. Unrecognised keys in `config.toml` are silently
-discarded, so a value written in the wrong shape — `"256MB"` — is
-indistinguishable from never having written it at all.
+```bash
+export MEDIAGIT_ODB_CACHE_MB=4096             # 4 GiB
+export MEDIAGIT_CHUNK_CACHE_BYTES=1073741824  # 1 GiB
+```
+
+Those three keys are the whole of `[performance]`. Cache sizing is an
+environment knob: `[performance.cache]` and `buffer_size` were removed in
+`config_version` 4 because nothing read them, and an older config carrying them
+is migrated automatically on first load.
+
+**Unrecognised keys are now rejected**, not silently discarded — a value
+written in the wrong shape, or a mistyped key, fails the command and names the
+offending key instead of looking like it worked.
 
 ## System Requirements
 
@@ -175,11 +180,11 @@ uname -m  # Should output: aarch64
 [performance]
 upload_concurrency = 2
 download_concurrency = 2
-buffer_size = 32768          # bytes — 32 KiB
+```
 
-[performance.cache]
-enabled = true
-max_size = 134217728         # bytes — 128 MiB
+```bash
+export MEDIAGIT_ODB_CACHE_MB=128
+export MEDIAGIT_CHUNK_CACHE_BYTES=67108864    # 64 MiB
 ```
 
 ### Slow Performance
