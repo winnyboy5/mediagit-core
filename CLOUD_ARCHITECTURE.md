@@ -79,7 +79,8 @@ flowchart LR
 `part_size`, concurrency, and retry counts are not `[storage]` config
 fields — see [Performance Tuning](#performance-tuning) below for how those
 are actually controlled. Server-side encryption (SSE-S3/SSE-KMS/SSE-C) is
-not implemented by the S3 backend (`crates/mediagit-storage/src/s3.rs`);
+not implemented by the S3 backend (`crates/mediagit-storage/src/minio.rs`,
+which serves both AWS and MinIO);
 see [Security Architecture](#security-architecture) for what encryption the
 project actually provides.
 
@@ -88,8 +89,8 @@ project actually provides.
 `.mediagit/config.toml` and nowhere else — no environment variables, no IAM
 role, no `~/.aws/credentials`. The chain above was documented for years and is
 dead code: see *Storage credentials are not environment variables* below, and
-note the module doc at `crates/mediagit-storage/src/s3.rs:59` still describes
-the same non-existent chain.
+note the module doc in `crates/mediagit-storage/src/b2_spaces_driver.rs` still describes
+the same non-existent chain -- though that file is the B2/Spaces driver and is not on the AWS path at all (it was `s3.rs` until 2026-09-18).
 
 ---
 

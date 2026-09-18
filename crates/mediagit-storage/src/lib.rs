@@ -96,6 +96,10 @@
 #[cfg(feature = "azure")]
 pub mod azure;
 pub mod b2_spaces;
+/// The S3-compatible driver that [`b2_spaces`] wraps. Named after its only
+/// consumer, not after AWS: AWS runs on [`minio`]. It was `s3.rs` until
+/// 2026-09-18, which sent AWS fixes to a file AWS never reaches.
+pub mod b2_spaces_driver;
 pub mod cache;
 pub mod error;
 #[cfg(feature = "gcs")]
@@ -105,7 +109,6 @@ pub mod local;
 pub mod minio;
 pub mod mock;
 pub mod namespaced;
-pub mod s3;
 
 use async_trait::async_trait;
 use std::fmt::Debug;
@@ -114,13 +117,13 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 #[cfg(feature = "azure")]
 pub use azure::AzureBackend;
 pub use b2_spaces::B2SpacesBackend;
+pub use b2_spaces_driver::B2SpacesDriver;
 pub use error::{StorageError, StorageResult};
 #[cfg(feature = "gcs")]
 pub use gcs::{GcsBackend, GcsConfig};
 pub use local::LocalBackend;
 pub use minio::MinIOBackend;
 pub use namespaced::{NamespacedBackend, generate_repo_id, sanitize_namespace};
-pub use s3::S3Backend;
 
 /// Storage backend trait for object storage operations
 ///

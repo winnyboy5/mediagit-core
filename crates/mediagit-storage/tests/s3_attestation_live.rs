@@ -39,11 +39,12 @@ fn bucket() -> Option<String> {
 }
 
 async fn backend(bkt: &str) -> MinIOBackend {
-    // MinIOBackend, NOT S3Backend. `s3.rs` is not on the AWS path: the server
+    // MinIOBackend, NOT B2SpacesDriver. `b2_spaces_driver.rs` (`s3.rs` until
+    // 2026-09-18) is not on the AWS path: the server
     // builds its "aws" backend from `MinIOConfig` with an
     // `https://s3.<region>.amazonaws.com` endpoint (`handlers/mod.rs`), and
-    // only `b2_spaces` constructs `S3Backend`. Testing attestation through
-    // `S3Backend` would exercise a backend no push ever uses — and would also
+    // only `b2_spaces` constructs `B2SpacesDriver`. Testing attestation through
+    // `B2SpacesDriver` would exercise a backend no push ever uses — and would also
     // hit that constructor's unconditional `create_bucket`, which omits the
     // `LocationConstraint` every non-us-east-1 region requires and so fails
     // against this bucket regardless.

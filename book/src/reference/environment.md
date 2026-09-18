@@ -39,8 +39,10 @@ Why: both the CLI and the server build every S3-family backend through
 `MinIOBackend`, and the AWS path fills its key and secret straight from the
 config file (`mediagit-server/src/handlers/mod.rs:610-638`,
 `mediagit-cli/src/repo.rs:655-668`). The AWS SDK credential chain does exist in
-`mediagit-storage/src/s3.rs`, but `S3Backend` is only ever constructed by the
-Backblaze/Spaces wrapper, so nothing a user reaches goes through it.
+`mediagit-storage/src/b2_spaces_driver.rs`, but `B2SpacesDriver` is only ever
+constructed by the Backblaze/Spaces wrapper, so nothing on the AWS path goes
+through it. (That file was `s3.rs` until 2026-09-18; the name was the whole
+reason this kept needing explaining.)
 
 Only GCS resolves credentials outside the config file
 (`mediagit-cli/src/repo.rs:745-749`).

@@ -217,14 +217,20 @@ MediaGit separates storage interface from implementation:
 graph TB
     App[Application Code] --> Trait[StorageBackend Trait]
     Trait --> Local[LocalBackend]
-    Trait --> S3[S3Backend]
     Trait --> Azure[AzureBackend]
     Trait --> GCS[GcsBackend]
+    Trait --> MinIO[MinIOBackend<br/>AWS S3 + MinIO]
     Trait --> B2Spaces[B2SpacesBackend<br/>B2 + DO Spaces]
-    Trait --> MinIO[MinIOBackend]
+    B2Spaces --> Driver[B2SpacesDriver]
 
     style Trait fill:#e1f5ff
 ```
+
+`MinIOBackend` serves **both** real AWS S3 and MinIO — the server builds its
+`aws` backend from a `MinIOConfig` pointed at
+`https://s3.<region>.amazonaws.com`. `B2SpacesDriver` (`b2_spaces_driver.rs`,
+named `S3Backend` in `s3.rs` until 2026-09-18) is a second, independent
+S3-compatible implementation reachable only through `B2SpacesBackend`.
 
 ### Backend Trait
 ```rust
