@@ -1,139 +1,106 @@
-# MediaGit Configuration File (TOML Format)
-# This file demonstrates all available configuration options
+# MediaGit — per-repository `.mediagit/config.toml`
+#
+# This is the CLIENT's per-repo config. The server never loads it; server
+# settings live in `mediagit-server.toml` (see CONFIGURATION.md Part 2).
+#
+# Every key below is real and has a read site. That is not a given: until
+# 2026-09-18 this file also advertised `[app]`, `[observability]`,
+# `[security]`, `[performance.cache]` and a `[compression]` block with zstd and
+# brotli levels. None of them were ever read, and `[compression]` had never
+# existed on the schema at all — compression is automatic and not configurable.
+#
+# Unknown keys are now REJECTED rather than ignored, so this file is also a
+# test fixture: `the_shipped_example_config_parses` loads it. If a key here
+# stops being real, that test fails.
 
-[app]
-name = "mediagit"
-version = "0.2.6-beta.1"
-environment = "development"  # development, staging, production
-port = 8080
-host = "127.0.0.1"
-debug = false
+# Written once by `mediagit init` / `clone`. Not meant to be hand-edited.
+cdc_seed = 4891203847502938471
+repo_namespace = "my-project"
+layout_version = 2
+repo_id = "a1b2c3d4e5f60718"
+config_version = 4
 
-# Storage Backend Configuration
-# Choose one of: filesystem, s3, azure, gcs, or multi
-
-# Storage Backend Configuration
-# All fields for the selected backend go directly in [storage].
-# Choose one of: filesystem, s3, azure, gcs, or multi
+# ---------------------------------------------------------------------------
+# Storage backend. Exactly one [storage] block; all fields for the selected
+# backend go directly in it.
+# ---------------------------------------------------------------------------
 
 [storage]
-# Filesystem Storage (Default)
 backend = "filesystem"
-base_path = "./data"
+base_path = "./.mediagit/objects"
 create_dirs = true
 sync = false
 file_permissions = "0644"
 
-# AWS S3 Storage Configuration (replace [storage] block above with this)
+# AWS S3, or any S3-compatible service (MinIO, B2, DigitalOcean Spaces).
+# Credentials are config-file-only — there is no environment-variable override.
+#
 # [storage]
 # backend = "s3"
 # bucket = "mediagit-bucket"
 # region = "us-east-1"
-# access_key_id = "YOUR_ACCESS_KEY"        # Or use MEDIAGIT_S3_ACCESS_KEY_ID env var
-# secret_access_key = "YOUR_SECRET_KEY"    # Or use MEDIAGIT_S3_SECRET_ACCESS_KEY env var
-# endpoint = "https://s3.amazonaws.com"    # For S3-compatible services (MinIO, etc.)
-# prefix = "media/"
-# encryption = true
-# encryption_algorithm = "AES256"          # Options: AES256, aws:kms
+# access_key_id = "..."
+# secret_access_key = "..."
+# endpoint = "https://minio.example.com"   # omit for real AWS
+# prefix = "repos/my-project"
 
-# Azure Blob Storage Configuration (replace [storage] block above with this)
-# Credentials go in a tagged `auth` block: exactly one credential, chosen
-# explicitly. The pre-config_version-3 flat form (account_name/account_key at
-# the [storage] level) is migrated automatically on first load.
+# Azure Blob Storage. `auth` is a tagged block (config_version 3+): one of
+# account_key, connection_string, sas, or emulator.
+#
 # [storage]
 # backend = "azure"
 # container = "media"
-# prefix = "files/"
-# auth = { type = "account_key", account_name = "mediagitaccount", account_key = "YOUR_ACCOUNT_KEY" }
-#
-# Other auth variants:
-# auth = { type = "connection_string", value = "DefaultEndpointsProtocol=https;AccountName=...;AccountKey=...;" }
-# auth = { type = "sas", account_name = "mediagitaccount", token = "sv=2022-11-02&sig=..." }
-# auth = { type = "emulator" }   # local Azurite, uses its published dev credentials
-# connection_string = "..."                # Alternative to account_key
+# prefix = "repos/my-project"
+# auth = { type = "account_key", account_name = "...", account_key = "..." }
 
-# Google Cloud Storage Configuration (replace [storage] block above with this)
+# Google Cloud Storage.
+#
 # [storage]
 # backend = "gcs"
 # bucket = "mediagit-bucket"
-# project_id = "your-project-id"
-# credentials_path = "/path/to/credentials.json"  # Or use MEDIAGIT_GCS_CREDENTIALS_PATH
-# prefix = "media/"
+# project_id = "my-project"
+# credentials_path = "/path/to/service-account.json"
+# prefix = "repos/my-project"
 
-# Compression Configuration
-[compression]
-enabled = true
-algorithm = "zstd"          # Options: zstd, brotli, none
-level = 3                   # zstd: 1-22, brotli: 0-11
-min_size = 1024             # Minimum file size to compress (bytes)
+# ---------------------------------------------------------------------------
+# Performance. Three keys, all optional. Each falls back to an environment
+# variable and then to an internal default, which is why an empty
+# [performance] is what `mediagit init` actually writes.
+# ---------------------------------------------------------------------------
 
-# Algorithm-specific settings
-[compression.algorithms.zstd]
-level = 3
-
-[compression.algorithms.brotli]
-level = 4
-
-# Performance Tuning
 [performance]
-max_concurrency = 4         # CPU cores or explicit number
-buffer_size = 65536         # 64KB buffer
+upload_concurrency = 32     # else MEDIAGIT_UPLOAD_CONCURRENCY, else 32
+download_concurrency = 24   # else MEDIAGIT_DOWNLOAD_CONCURRENCY, else 24
+pack_workers = 8            # else MEDIAGIT_PACK_WORKERS, else 8
 
-# Cache Configuration
-[performance.cache]
-enabled = true
-cache_type = "memory"       # Options: memory, disk, redis
-max_size = 536870912        # 512MB
-ttl = 3600                  # 1 hour (seconds)
-compression = false
+# ---------------------------------------------------------------------------
+# Identity, remotes, branches
+# ---------------------------------------------------------------------------
 
-# Connection Pool Configuration
-[performance.connection_pool]
-min_connections = 1
-max_connections = 10
-timeout = 30                # seconds
-idle_timeout = 600          # seconds
+[author]
+name = "Alice Smith"
+email = "alice@example.com"
 
-# Timeout Configuration
-[performance.timeouts]
-request = 60                # seconds
-read = 30                   # seconds
-write = 30                  # seconds
-connection = 30             # seconds
+[remotes.origin]
+url = "http://media-server.example.com/my-project"
+# token   = "..."   # plaintext; MEDIAGIT_TOKEN and the OS keychain rank higher
+# api_key = "..."   # only one of token/api_key per remote; token wins
 
-# Observability Configuration
-[observability]
-log_level = "info"          # debug, info, warn, error, trace
-log_format = "json"         # json, text
-tracing_enabled = true
-sample_rate = 0.1           # 10% of traces
+[branches.main]
+remote = "origin"
+merge = "refs/heads/main"
 
-# Metrics Configuration
-[observability.metrics]
-enabled = true
-port = 9090
-endpoint = "/metrics"
-interval = 60               # seconds
+[protected_branches.main]
+prevent_force_push = true
+prevent_deletion = true
+require_reviews = false
+min_approvals = 1
 
-# Security Configuration
-[security]
-https_enabled = false
-# tls_cert_path = "/path/to/cert.pem"
-# tls_key_path = "/path/to/key.pem"
-# api_key = "your-api-key"           # Or use MEDIAGIT_API_KEY env var
-auth_enabled = false
-cors_origins = ["http://localhost:3000", "http://localhost:8080"]
-encryption_at_rest = false
-# encryption_key_path = "/path/to/encryption.key"
+# ---------------------------------------------------------------------------
+# Your own keys. MediaGit never interprets anything here — and, unlike the
+# sections removed in config_version 4, never pretended to. This is the only
+# place a key the schema does not define is accepted.
+# ---------------------------------------------------------------------------
 
-# Rate Limiting Configuration
-[security.rate_limiting]
-enabled = false
-requests_per_second = 1000
-burst_size = 2000
-
-# Custom Settings (application-specific)
 [custom]
-# Add custom configuration here as needed
-# feature_flag = "enabled"
-# custom_timeout = 120
+# studio_pipeline_id = "vfx-42"

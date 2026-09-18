@@ -1,16 +1,39 @@
 # MediaGit Configuration Management System
 
-A comprehensive configuration management system for MediaGit Core with support for multiple file formats, environment variable overrides, validation, and migration capabilities.
+The **client's per-repository `.mediagit/config.toml`**.
+
+Scope first, because getting it wrong is what produced four separate
+dead-config incidents in this crate: this is the *client's* per-repo config,
+read by `mediagit-cli` and — for `performance.pack_workers` — by the server
+when it opens a repo. It is **not** the server's configuration. That is
+`mediagit_server::ServerConfig`, loaded from `mediagit-server.toml`, and
+nothing here reaches it. A setting that belongs to the server does not work
+here no matter how plausibly it is named.
 
 ## Features
 
-- **Multi-Format Support**: Load configuration from TOML, YAML, or JSON files
-- **Comprehensive Validation**: Detailed error messages for invalid configurations
-- **Configuration Migration**: Framework for handling schema version updates
-- **Flexible Storage Backends**: Support for filesystem, AWS S3, Azure Blob, Google Cloud Storage, and multi-backend configurations
-- **Performance Tuning**: Cache and concurrency configurations
-- **Observability**: Logging, metrics, and tracing configurations
-- **Security Settings**: TLS, encryption, CORS, rate limiting, and authentication options
+- **Multi-Format Support**: load from TOML, YAML, or JSON
+- **Strict parsing**: unknown keys are **rejected**, not silently discarded.
+  Before `config_version` 4 a typo like `cors_orgins` parsed, validated,
+  reported success and did nothing — indistinguishable from a key that had been
+  removed and from one that never existed. `[custom]` is the sanctioned place
+  for keys the schema does not define.
+- **Validation**: storage-specific rules — bucket naming, octal file
+  permissions, Azure credential shape
+- **Migration**: older `config_version`s are brought forward on load, with the
+  original preserved at `config.toml.bak`
+- **Storage backends**: filesystem, AWS S3 (and S3-compatible), Azure Blob,
+  Google Cloud Storage, multi-backend
+
+### What it does not do
+
+- **No environment-variable overrides.** This crate reads no environment
+  variables at all. `MEDIAGIT_UPLOAD_CONCURRENCY` and friends are read by the
+  *consumers* of these fields, which treat a `None` here as "fall back to the
+  env var, then to an internal default".
+- No caching, connection-pool, timeout, TLS, CORS, rate-limit, metrics or
+  logging settings. Those live in `ServerConfig`, are environment knobs in
+  `mediagit-storage`, or do not exist.
 
 ## Quick Start
 
@@ -71,13 +94,23 @@ let config = loader.load_and_merge(&[
 ### Top-Level Sections
 
 ```toml
-[app]           # Application metadata
-[storage]       # Storage backend configuration
-[performance]   # Performance tuning
-[observability] # Logging, metrics, tracing
-[security]      # TLS, encryption, authentication
-[custom]        # Custom application-specific settings
+# top level      # cdc_seed, repo_namespace, layout_version, repo_id,
+                 # config_version -- written once at init/clone
+[storage]        # storage backend
+[performance]    # upload/download concurrency, pack workers
+[author]         # commit identity
+[remotes.<name>] # remote URLs and per-remote credentials
+[branches.<name>]          # upstream tracking
+[protected_branches.<name>] # branch protection
+[custom]         # your own keys; never interpreted
 ```
+
+`config_version` 4 (2026-09-18) removed `[app]`, `[observability]`,
+`[observability.metrics]`, `[security]`, `[security.rate_limiting]`,
+`[performance.cache]` and `performance.buffer_size` — twenty-four keys with no
+read site anywhere outside this crate. Older configs migrate automatically.
+A full runnable example is in [`examples/config.toml`](examples/config.toml),
+which the test suite loads so it cannot drift from the schema.
 
 ## Storage Backends
 
@@ -150,53 +183,40 @@ for it.
 
 ```toml
 [performance]
-buffer_size = 65536         # 64KB
-
-[performance.cache]
-enabled = true
-cache_type = "memory"       # memory, disk, redis
-max_size = 536870912        # 512MB
-ttl = 3600                  # 1 hour
+upload_concurrency = 32     # else MEDIAGIT_UPLOAD_CONCURRENCY, else 32
+download_concurrency = 24   # else MEDIAGIT_DOWNLOAD_CONCURRENCY, else 24
+pack_workers = 8            # else MEDIAGIT_PACK_WORKERS, else 8
 ```
 
-`upload_concurrency`, `download_concurrency` and `pack_workers` are also live
-`[performance]` keys (each falls back to a `MEDIAGIT_*` env var, then an
-internal default — see `env-knobs.md`). `max_concurrency`,
-`[performance.connection_pool]` and `[performance.timeouts]` were removed
-from the schema in v0.4.0 as dead knobs with no read site outside this crate.
+Those three are the whole table, and all are optional — which is why an empty
+`[performance]` is what `mediagit init` writes. `buffer_size`,
+`[performance.cache]`, `max_concurrency`, `[performance.connection_pool]` and
+`[performance.timeouts]` were all removed as dead knobs with no read site
+outside this crate; the last three had never existed on the schema at all. The
+transport settings that are genuinely live are environment knobs — see
+`env-knobs.md`.
 
-## Observability Configuration
+## Removed sections
 
-```toml
-[observability]
-log_level = "info"          # debug, info, warn, error, trace
-log_format = "json"         # json or text
-tracing_enabled = true
-sample_rate = 0.1           # 10% of traces
+`[app]`, `[observability]`, `[observability.metrics]`, `[security]` and
+`[security.rate_limiting]` are gone as of `config_version` 4. Every field in
+them was parsed, validated and read by nothing.
 
-[observability.metrics]
-enabled = true
-port = 9090
-endpoint = "/metrics"
-interval = 60               # seconds
-```
+The server enforces the ones that sound load-bearing through its own,
+differently-named fields: `cors_allowed_origins`, `enable_rate_limiting`,
+`rate_limit_rps`, `rate_limit_burst`, `enable_auth`, `tls_cert_path` and
+`tls_key_path` in `mediagit-server.toml`. Client credentials are
+`[remotes.<name>].token` / `.api_key`. Metrics are `MEDIAGIT_METRICS_ADDR`.
+`[performance.cache]` has no replacement because no cache was ever
+implemented.
 
-## Security Configuration
-
-```toml
-[security]
-https_enabled = false
-tls_cert_path = "/path/to/cert.pem"
-tls_key_path = "/path/to/key.pem"
-api_key = "your-secret-key"      # or use MEDIAGIT_API_KEY
-auth_enabled = false
-cors_origins = ["http://localhost:3000"]
-
-[security.rate_limiting]
-enabled = false
-requests_per_second = 1000
-burst_size = 2000
-```
+**Why a symbol grep missed all of it**, which is the part worth carrying
+forward: two of the dead types were named `RateLimitConfig` and
+`MetricsConfig` — also the names of the genuinely live
+`mediagit_server::security::RateLimitConfig` and
+`mediagit_metrics::MetricsConfig`. Grepping the symbol found a real
+implementation and stopped. The check that works is grepping for a **read site
+outside the defining crate**.
 
 ## Environment Variable Overrides
 

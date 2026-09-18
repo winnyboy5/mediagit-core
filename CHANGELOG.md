@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — BREAKING: `config_version` 4 removes the dead-config family, and unknown keys are now rejected
+
+Twenty-four keys in `.mediagit/config.toml` were parsed, validated, and read by
+nothing. They are gone: `[app]`, `[observability]`, `[observability.metrics]`,
+`[security]`, `[security.rate_limiting]`, `[performance.cache]` and
+`performance.buffer_size`.
+
+**No action is required.** An older config migrates on first load: the original
+is copied to `config.toml.bak` and the dead sections are dropped from the
+rewritten file.
+
+**Unknown keys are now an error.** Previously a typo such as `cors_orgins`
+parsed, validated, reported success and did nothing — indistinguishable from a
+key that had been removed and from one that never existed. Put keys MediaGit
+should not interpret under `[custom]`; anything there is preserved untouched.
+
+Where the removed settings actually live: CORS, rate limiting, TLS and auth are
+`cors_allowed_origins`, `enable_rate_limiting`, `rate_limit_rps`,
+`rate_limit_burst`, `tls_cert_path`, `tls_key_path` and `enable_auth` in
+`mediagit-server.toml`; client credentials are `[remotes.<name>].token` /
+`.api_key`; metrics are `MEDIAGIT_METRICS_ADDR`. `[performance.cache]` has no
+replacement — no cache was ever implemented.
+
+This is the fourth instance of the same pattern, after `encryption_at_rest`,
+`allow_open_registration` (below) and the `[performance.connection_pool]` /
+`[performance.timeouts]` sections that had never existed on the schema at all.
+A symbol grep found none of them, because two of the dead types were named
+`RateLimitConfig` and `MetricsConfig` — which are also the names of the
+genuinely live types in `mediagit-server` and `mediagit-metrics`.
+
+### Fixed — a broken `config.toml` silently reset the repository
+
+`create_storage_backend` did `Config::load(..).unwrap_or_default()`. Since
+`Config::load` already returns the default for an *absent* file, that could only
+ever swallow a real error — and `resolve_repo_id` then persisted the resulting
+default over the real config. One command against an unreadable config and the
+repository lost `cdc_seed` (moving every future chunk boundary and destroying
+dedup against its own history), `repo_namespace` (writes landing under a
+different key prefix), `layout_version` and `storage.base_path`, then reported a
+namespace collision against itself. `add` had the same shape on `cdc_seed`.
+Both now fail the command and leave the file alone.
+
+### Fixed — `allow_open_registration` was wired to nothing (AU-3)
+
+Every `AuthService` constructor hardcoded `true`, and no code in
+`mediagit-server` assigned the parsed config value onto the service, so
+`allow_open_registration = false` in `mediagit-server.toml` — which the `init`
+wizard writes for every new install — had no effect. On a fresh authenticated
+server an anonymous caller could register, receive `Role::Read`, and read every
+repository through the no-grants fallback. Write was never exposed.
+
+**BREAKING:** the default is now `false`. A server that wants open signup must
+say so explicitly. The startup warning has also been corrected — it claimed
+self-registered users received write permissions, which stopped being true
+some time ago — and split, so the flat-authorization condition is reported
+whether or not registration is open.
+
 ### Added — provider upload attestation
 
 The server no longer re-reads a pushed pack out of the bucket when the storage

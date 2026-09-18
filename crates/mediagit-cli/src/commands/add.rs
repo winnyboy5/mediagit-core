@@ -260,10 +260,14 @@ impl AddCmd {
 
         // Repo's persisted CDC seed (0 for repos without the field / legacy repos).
         // `MEDIAGIT_CDC_SEED` env var overrides this inside the chunker itself.
-        let cdc_seed = mediagit_config::Config::load(&repo_root)
-            .await
-            .map(|c| c.cdc_seed)
-            .unwrap_or(0);
+        //
+        // Not `.unwrap_or(0)`: falling back to 0 on an unreadable config would
+        // chunk this repo's content on DIFFERENT boundaries than every object
+        // already in it, silently destroying dedup against its own history. An
+        // absent config.toml already yields the default (seed 0) through
+        // `Config::load` itself, so an `Err` here means the file exists and is
+        // broken — which is a stop, not a shrug.
+        let cdc_seed = mediagit_config::Config::load(&repo_root).await?.cdc_seed;
 
         let odb = ObjectDatabase::with_optimizations(
             storage,

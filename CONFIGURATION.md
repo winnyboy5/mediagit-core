@@ -26,18 +26,14 @@ email = "alice@example.com"
 
 ## Full example (as written by `mediagit init`)
 
-`mediagit init` writes every section below with its default values (only `[storage]` and the top-level identity keys are customized at init time) — the file is not sparse in practice, even though every key is technically optional:
+`mediagit init` writes every section below, so the file is not sparse in practice even though every key is optional:
 
 ```toml
 cdc_seed = 4891203847502938471
 repo_namespace = "my-project"
 layout_version = 2
-repo_id = "a1b2c3d4-..."
-config_version = 2
-
-[author]
-name = "Alice Smith"
-email = "alice@example.com"
+repo_id = "a1b2c3d4..."
+config_version = 4
 
 [storage]
 backend = "filesystem"
@@ -47,25 +43,10 @@ sync = false
 file_permissions = "0644"
 
 [performance]
-buffer_size = 65536
 
-[performance.cache]
-enabled = true
-cache_type = "memory"
-max_size = 536870912  # 512 MB
-ttl = 3600
-
-[observability]
-log_level = "info"
-log_format = "json"
-tracing_enabled = true
-sample_rate = 0.1
-
-[observability.metrics]
-enabled = true
-port = 9090
-endpoint = "/metrics"
-interval = 60
+[author]
+name = "Alice Smith"
+email = "alice@example.com"
 
 [remotes.origin]
 url = "http://media-server.example.com/my-project"
@@ -75,7 +56,23 @@ prevent_force_push = true
 prevent_deletion = true
 require_reviews = false
 min_approvals = 1
+
+[custom]
 ```
+
+> **`config_version = 4` (2026-09-18) removed `[app]`, `[observability]`,
+> `[observability.metrics]`, `[security]`, `[security.rate_limiting]`,
+> `[performance.cache]` and `performance.buffer_size`.** Twenty-four keys, none
+> of which had a read site anywhere outside `mediagit-config` itself. An older
+> config is migrated automatically on first load — the original is kept at
+> `config.toml.bak` and the dead sections are dropped from the rewritten file.
+> Nothing needs to be done by hand.
+>
+> **Unknown keys are now rejected rather than ignored.** Before v4 a typo such
+> as `cors_orgins` parsed, validated, reported success and did nothing, which
+> is indistinguishable from a key that was removed and from one that never
+> existed. `[custom]` is the sanctioned place for keys the schema does not
+> define; anything there is preserved untouched.
 
 ---
 
@@ -241,67 +238,54 @@ There is no `[compression]` section as of v0.4.0. It was removed from `schema.rs
 | `upload_concurrency` | usize \| absent | `None` | Client-side parallel chunk-upload concurrency override. When unset, falls back to `MEDIAGIT_UPLOAD_CONCURRENCY` env var, then an internal default of 32. Read in `crates/mediagit-cli/src/commands/push.rs`. |
 | `download_concurrency` | usize \| absent | `None` | Client-side parallel chunk-download concurrency override. Falls back to `MEDIAGIT_DOWNLOAD_CONCURRENCY`, then an internal default of 24. |
 | `pack_workers` | usize \| absent | `None` | Server-side concurrent pack-write worker override. Falls back to `MEDIAGIT_PACK_WORKERS`, then an internal default of 8. |
-| `buffer_size` | usize | `65536` (64 KB) | I/O buffer size in bytes. |
+
+Those three are the whole table. Each is an `Option` with an env var and an
+internal default behind it, which is why an empty `[performance]` is the normal
+state of a freshly initialised repository.
 
 There is no `max_concurrency` or `chunk_write_concurrency` TOML key as of v0.4.0 — both were removed from `schema.rs` as dead knobs. Chunk-write concurrency is still controllable: `MEDIAGIT_CHUNK_WRITE_CONCURRENCY` is read directly by the chunked-write worker pool (`crates/mediagit-versioning/src/odb/chunks.rs:646,1179`, falling back to `num_cpus`) and remains live — see [`env-knobs.md`](env-knobs.md).
 
-### `[performance.cache]`
+### Removed in `config_version` 4
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `enabled` | bool | `true` | Enable in-memory object cache. |
-| `cache_type` | string | `"memory"` | Cache type. |
-| `max_size` | u64 | `536870912` (512 MB) | Max cache size in bytes. |
-| `ttl` | u64 | `3600` | Cache entry TTL in seconds. |
-| `compression` | bool | `false` | Compress cached objects. |
+`[performance.cache]`, `performance.buffer_size`, `[app]`, `[observability]`,
+`[observability.metrics]`, `[security]` and `[security.rate_limiting]` are gone.
+They were parsed and validated by `mediagit-config` and **read by nothing**, so
+each one looked like a setting and was not. `[performance.connection_pool]` and
+`[performance.timeouts]` never existed on this schema at any version; they were
+being silently discarded by serde.
 
-There is no `[performance.connection_pool]` or `[performance.timeouts]` section as of v0.4.0 — both were removed from `schema.rs` as dead knobs (no read site outside `mediagit-config` itself). A request that actually needs a longer budget is governed by the transport knobs in [`env-knobs.md`](env-knobs.md), not by config.
+Where the real setting lives, for the ones that sound load-bearing:
 
-Note: `cache` is a struct field with no `#[serde(default)]` derive shown at the field level, but its type implements `Default`, and the containing `PerformanceConfig` is only ever constructed via `Default` or full deserialization — practically, an absent `[performance.cache]` table in the TOML falls back to that type's `Default` impl (`schema.rs`, `impl Default for PerformanceConfig`).
+| Removed | The thing that actually works |
+|---|---|
+| `[security] cors_origins` | `cors_allowed_origins` in `mediagit-server.toml` (Part 2) |
+| `[security.rate_limiting]` | `enable_rate_limiting` / `rate_limit_rps` / `rate_limit_burst`, same file |
+| `[security] tls_cert_path` / `tls_key_path` | `tls_cert_path` / `tls_key_path` in `mediagit-server.toml` |
+| `[security] api_key` | `[remotes.<name>].api_key`, or `MEDIAGIT_API_KEY` |
+| `[security] auth_enabled` | `enable_auth` in `mediagit-server.toml` |
+| `[observability]` logging | `RUST_LOG` on the server; `MEDIAGIT_LOG` on the CLI (Part 3) |
+| `[observability.metrics]` | `MEDIAGIT_METRICS_ADDR` (Part 3) |
+| `[performance.cache]` | nothing — no cache implementation was ever written |
+| `[performance] buffer_size` | nothing — no read site ever existed |
+| `[performance.connection_pool]` / `[timeouts]` | the transport env knobs in [`env-knobs.md`](env-knobs.md) |
+| `[app]` | nothing — a per-repo config has no application to name and no port to bind |
 
----
-
-## `[observability]` — logging and tracing
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `log_level` | string | `"info"` | `"error"` \| `"warn"` \| `"info"` \| `"debug"` \| `"trace"`. |
-| `log_format` | string | `"json"` | `"json"` or `"text"`. |
-| `tracing_enabled` | bool | `true` | Enable distributed tracing. |
-| `sample_rate` | f64 | `0.1` | Trace sampling rate (0.0–1.0). |
-
-### `[observability.metrics]`
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `enabled` | bool | `true` | Enable Prometheus metrics. |
-| `port` | u16 | `9090` | Metrics HTTP server port. |
-| `endpoint` | string | `"/metrics"` | Metrics endpoint path. |
-| `interval` | u64 | `60` | Collection interval, seconds. |
-
-This `[observability]` table is part of the client schema (round-trips through `mediagit init`); it is distinct from the server's own metrics wiring (`MEDIAGIT_METRICS_ADDR`, see Part 3), and the CLI's own logging is not observed to read `RUST_LOG` at all — see Part 3.
+`encryption_at_rest` and `encryption_key_path` were removed the same way on
+2026-08-17. At-rest encryption is per repository via `mediagit key init`; the
+server side is `[encryption]` in `mediagit-server`'s own config.
 
 ---
 
-## `[security]` — present in the schema, not applied by the client or the server
+## `[custom]` — your own keys
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `https_enabled` | bool | `false` | — |
-| `tls_cert_path` | string \| absent | absent | — |
-| `tls_key_path` | string \| absent | absent | — |
-| `api_key` | string \| absent | absent | — |
-| `auth_enabled` | bool | `false` | — |
-| `cors_origins` | array | `["http://localhost:3000"]` | — |
-| `rate_limiting` | table | `{ enabled = false, requests_per_second = 1000, burst_size = 2000 }` | — |
+```toml
+[custom]
+studio_pipeline_id = "vfx-42"
+```
 
-> `encryption_at_rest` and `encryption_key_path` were listed here until
-> 2026-08-17. They have been **removed from the schema** — nothing ever read
-> them, so they looked like an at-rest encryption switch and silently were not
-> one. At-rest encryption is per repository via `mediagit key init`; the server
-> side is `[encryption]` in `mediagit-server`'s own config.
-
-**Verified:** `config.security.*` (and `config.app.*`, also present in the schema) is never read anywhere outside `mediagit-config`'s own loader/validation/tests. `mediagit init` writes this section with its defaults into every new `config.toml`, but it has no effect on either the CLI or `mediagit-server` — the actual server security/TLS/auth/rate-limit/CORS configuration lives entirely in `mediagit-server.toml` (Part 2 of this document). Treat `[security]` in the client config as vestigial; do not rely on it to configure server behavior.
+Free-form. MediaGit never interprets anything here, and — unlike every removed
+key above — it never pretends to. This is where a key goes now that unknown
+keys at any other position are an error.
 
 ---
 

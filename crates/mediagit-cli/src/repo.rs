@@ -607,10 +607,20 @@ pub async fn create_storage_backend(repo_root: &Path) -> Result<Arc<dyn StorageB
 
     let mediagit_dir = repo_root.join(".mediagit");
 
-    // Load config (returns default if config.toml doesn't exist)
-    let config = mediagit_config::Config::load(repo_root)
-        .await
-        .unwrap_or_default();
+    // `Config::load` already returns the default when config.toml is absent,
+    // so an `Err` here means the file EXISTS and could not be read — and that
+    // must not be swallowed.
+    //
+    // It used to be (`.unwrap_or_default()`), and the consequence was silent
+    // repository damage rather than a failed command: a default config has no
+    // `repo_namespace`, no `repo_id` and `cdc_seed = 0`, so `resolve_repo_id`
+    // below would mint a fresh id and PERSIST the whole default config over the
+    // real one. The repo lost its chunking seed (changing every future chunk
+    // boundary), its storage namespace (pointing writes at a different prefix),
+    // and its identity — then reported a namespace collision with itself on the
+    // next command. Reachable from any unreadable config; found by making the
+    // parser strict, which turned "rare" into "a typo away".
+    let config = mediagit_config::Config::load(repo_root).await?;
 
     let ns = resolve_repo_namespace(repo_root, &config);
     let repo_id = resolve_repo_id(repo_root, &config).await?;

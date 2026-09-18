@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 /// Author identity configuration (used when creating commits)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
 pub struct AuthorConfig {
     /// Author display name
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -17,23 +18,63 @@ pub struct AuthorConfig {
 }
 
 /// Top-level configuration structure
+///
+/// This is the **client's per-repo `.mediagit/config.toml`**. The server never
+/// loads this type — it has its own `mediagit_server::ServerConfig`. Anything
+/// here that looks like a server setting is either a mistake or a second name
+/// for a setting that lives somewhere else; see the tombstone below.
+///
+/// `deny_unknown_fields` is load-bearing. Without it an unrecognised key — a
+/// typo, or a setting a document promised and no code ever read — parses,
+/// validates, and does nothing. That failure mode has now cost this codebase
+/// four separate incidents. `custom` is the sanctioned place for keys the
+/// schema does not know.
+//
+// TOMBSTONE — the dead-config family. Removed 2026-09-18; do not re-add
+// without a read site to point at.
+//
+//   `encryption_at_rest`, `encryption_key_path` (removed earlier)
+//       Several documents described these as the server's at-rest encryption
+//       switch. Nothing ever read them: the server loads its own
+//       `ServerConfig`, and this type's `validate()` is never called on the
+//       server path either, so even the "key path must exist" check never ran.
+//       The real switch is `[encryption]` in `mediagit-server`'s config.
+//
+//   `[security]` — the whole struct (https_enabled, tls_cert_path,
+//   tls_key_path, api_key, auth_enabled, cors_origins, rate_limiting)
+//       Same defect, same struct, one field short of the previous fix. The
+//       server enforces CORS, rate limiting and TLS through separately named
+//       fields on `ServerConfig` (`cors_allowed_origins`,
+//       `enable_rate_limiting`, `rate_limit_rps`, `rate_limit_burst`) and
+//       `mediagit-security::TlsConfig`. Client-side credentials live on
+//       `RemoteConfig.{token, api_key}`.
+//
+//   `[app]` (name, version, environment, port, host, debug)
+//       A per-repo config has no application to name and no port to bind.
+//
+//   `[observability]` + `[observability.metrics]`
+//       Prometheus is wired in the server from `mediagit-metrics`, whose own
+//       `MetricsConfig` is live. Logging is configured by
+//       `mediagit-observability`. Neither reads anything from here.
+//
+//   `[performance.cache]` and `performance.buffer_size`
+//       `cache_type` validated a closed set of memory/disk/redis with no
+//       dispatcher behind it and no Redis implementation anywhere.
+//
+// WHY A SYMBOL GREP DID NOT CATCH ANY OF IT: two of the dead types were named
+// `RateLimitConfig` and `MetricsConfig`, which are also the names of the
+// genuinely live `mediagit_server::security::RateLimitConfig` and
+// `mediagit_metrics::MetricsConfig`. Grepping the symbol found a real
+// implementation and stopped. The check that works is grepping for a *read
+// site outside the defining crate*.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
-    /// Application metadata
-    pub app: AppConfig,
-
     /// Storage backend configuration
     pub storage: StorageConfig,
 
     /// Performance tuning
     pub performance: PerformanceConfig,
-
-    /// Observability settings
-    pub observability: ObservabilityConfig,
-
-    /// Security settings
-    pub security: SecurityConfig,
 
     /// Author identity (used when creating commits)
     #[serde(default)]
@@ -99,6 +140,43 @@ pub struct Config {
     /// `#[serde(default)]` (-> 0) is for: an absent field means "v0".
     #[serde(default)]
     pub config_version: u32,
+
+    // ---- accepted, discarded, never written -------------------------
+    //
+    // Sections this schema used to have. They are what makes
+    // `deny_unknown_fields` safe for the configs already on disk: every
+    // config.toml this tool has ever written carries them, because `save()`
+    // serialized them unconditionally, so rejecting them outright would brick
+    // every existing repository.
+    //
+    // The Rust names say `deprecated_`; serde accepts the old TOML key. The
+    // contents are `serde_json::Value` because nothing looks at them — they
+    // are read in order to be thrown away. `skip_serializing` means `save()`
+    // never writes them back, so a config is cleaned the first time any
+    // command opens it. They cannot be flattened into one struct:
+    // `#[serde(flatten)]` and `deny_unknown_fields` are mutually exclusive,
+    // and these keys sit at the top level of the document.
+    //
+    // THIS IS NOT A PLACE TO PARK A SETTING. Anything added here is a setting
+    // that silently does nothing, which is the defect this change exists to
+    // end. A genuinely new setting gets a real field and a read site.
+    /// Was `AppConfig`.
+    #[serde(default, rename = "app", skip_serializing)]
+    pub deprecated_app: Option<serde_json::Value>,
+
+    /// Was `ObservabilityConfig`, including its nested `metrics` table.
+    #[serde(default, rename = "observability", skip_serializing)]
+    pub deprecated_observability: Option<serde_json::Value>,
+
+    /// Was `SecurityConfig`, including its nested `rate_limiting` table.
+    #[serde(default, rename = "security", skip_serializing)]
+    pub deprecated_security: Option<serde_json::Value>,
+
+    /// Never existed on this schema at any version. Present in real configs
+    /// and in this repository's own test fixtures, silently discarded by serde
+    /// until `deny_unknown_fields` arrived and would now be an error.
+    #[serde(default, rename = "compression", skip_serializing)]
+    pub deprecated_compression: Option<serde_json::Value>,
 }
 
 /// Current on-disk layout version new repos are initialized with.
@@ -155,10 +233,35 @@ impl Config {
     /// migrated config back before returning it. This never touches object
     /// storage layout (`layout_version` / the `LAYOUT` marker) — only the
     /// config.toml schema.
+    /// # Why the migration runs on the TYPED config, not on the raw document
+    ///
+    /// The obvious way to make `deny_unknown_fields` safe for old configs is to
+    /// parse the file permissively into a `toml::Value`, migrate that, and only
+    /// then deserialize strictly. **That does not work here, and the failure is
+    /// silent and repo-destroying.**
+    ///
+    /// TOML integers are `i64`. `cdc_seed` is a random `u64`, so roughly half
+    /// of all real repositories carry a seed above `i64::MAX` and
+    /// `toml::from_str::<toml::Value>` fails outright on them. `Config::load`
+    /// then returns `Err`, and several callers treat that as "no config" and
+    /// fall back to `Config::default()` — which has no `repo_namespace` and a
+    /// fresh `repo_id`, so the next command reports a namespace collision
+    /// between the repository and itself. Unit fixtures without a seed stay
+    /// green throughout; this was caught only by running `init` for real.
+    ///
+    /// (`deleted warn_unknown_keys` hit the same wall from the other side and
+    /// left a note about it. The note outlived the code; the trap did not.)
+    ///
+    /// So the order is: parse into `Config` — which deserializes `cdc_seed`
+    /// straight to `u64` and never materialises a `toml::Value` — then migrate
+    /// through `serde_json::Value`, which represents `u64` natively. Sections
+    /// deleted in v4 are absorbed by [`DeprecatedSections`] on the way in and
+    /// never written on the way out.
     pub async fn load(repo_root: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
         use crate::ConfigLoader;
         use crate::migration::{
             CONFIG_VERSION, MigrationManager, MigrationV0ToV1, MigrationV1ToV2, MigrationV2ToV3,
+            MigrationV3ToV4,
         };
         let config_path = repo_root.as_ref().join(".mediagit/config.toml");
 
@@ -168,7 +271,18 @@ impl Config {
         }
 
         let loader = ConfigLoader::new();
-        let config: Config = loader.load_file(&config_path).await?;
+        let config: Config = loader.load_file(&config_path).await.map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to load {}: {}.\n\
+                 Unrecognised keys are rejected rather than silently ignored — a setting this \
+                 file names but no code reads is worse than one that is absent. Put keys the \
+                 schema does not define under [custom].",
+                config_path.display(),
+                e
+            )
+        })?;
+
+        config.warn_about_deprecated_keys(&config_path);
 
         if config.config_version >= CONFIG_VERSION {
             return Ok(config);
@@ -200,7 +314,9 @@ impl Config {
         manager.register(Box::new(MigrationV0ToV1));
         manager.register(Box::new(MigrationV1ToV2));
         manager.register(Box::new(MigrationV2ToV3));
+        manager.register(Box::new(MigrationV3ToV4));
 
+        // serde_json, not toml, as the migration medium — see the note above.
         let value = serde_json::to_value(&config)
             .map_err(|e| anyhow::anyhow!("Failed to serialize config for migration: {}", e))?;
         let migrated_value = manager
@@ -213,6 +329,55 @@ impl Config {
         migrated.save(repo_root.as_ref())?;
 
         Ok(migrated)
+    }
+
+    /// Name every deprecated section present in the file, once, on load.
+    ///
+    /// The `deprecated_*` fields exist so an old config still parses, but they
+    /// leave a wart: serde's rejection message lists every field it accepts, so
+    /// a user who mistypes a key is shown `cache`, `buffer_size`,
+    /// `connection_pool` and `timeouts` among the "expected" names. Staying
+    /// silent about them would be the original defect all over again — a key
+    /// the tool appears to accept and does nothing with.
+    ///
+    /// So they are accepted, reported, and dropped on the next `save()`.
+    pub fn warn_about_deprecated_keys(&self, config_path: &std::path::Path) {
+        let present: Vec<&str> = [
+            ("app", self.deprecated_app.is_some()),
+            ("observability", self.deprecated_observability.is_some()),
+            ("security", self.deprecated_security.is_some()),
+            ("compression", self.deprecated_compression.is_some()),
+            (
+                "performance.cache",
+                self.performance.deprecated_cache.is_some(),
+            ),
+            (
+                "performance.buffer_size",
+                self.performance.deprecated_buffer_size.is_some(),
+            ),
+            (
+                "performance.connection_pool",
+                self.performance.deprecated_connection_pool.is_some(),
+            ),
+            (
+                "performance.timeouts",
+                self.performance.deprecated_timeouts.is_some(),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(name, present)| present.then_some(name))
+        .collect();
+
+        if present.is_empty() {
+            return;
+        }
+
+        tracing::warn!(
+            keys = %present.join(", "),
+            path = %config_path.display(),
+            "config.toml contains settings that nothing reads. They are ignored and will be \
+             dropped the next time this file is written. Nothing needs to be done."
+        );
     }
 
     /// Save config to repository root
@@ -313,34 +478,6 @@ impl Config {
     }
 }
 
-/// Application metadata
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AppConfig {
-    /// Application name
-    #[serde(default = "default_app_name")]
-    pub name: String,
-
-    /// Application version
-    #[serde(default = "default_app_version")]
-    pub version: String,
-
-    /// Environment (development, staging, production)
-    #[serde(default = "default_environment")]
-    pub environment: String,
-
-    /// API server port
-    #[serde(default = "default_port")]
-    pub port: u16,
-
-    /// API server host
-    #[serde(default = "default_host")]
-    pub host: String,
-
-    /// Enable debug mode
-    #[serde(default)]
-    pub debug: bool,
-}
-
 /// Storage backend configuration
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "backend")]
@@ -368,6 +505,7 @@ pub enum StorageConfig {
 
 /// Filesystem storage configuration
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct FileSystemStorage {
     /// Base directory path
     pub base_path: String,
@@ -387,6 +525,7 @@ pub struct FileSystemStorage {
 
 /// AWS S3 storage configuration
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct S3Storage {
     /// S3 bucket name
     pub bucket: String,
@@ -507,6 +646,7 @@ impl LegacyAzureFields {
 
 /// Google Cloud Storage configuration
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct GCSStorage {
     /// GCS bucket name
     pub bucket: String,
@@ -525,6 +665,7 @@ pub struct GCSStorage {
 
 /// Multi-backend storage configuration
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct MultiBackendStorage {
     /// Primary backend name
     pub primary: String,
@@ -538,7 +679,8 @@ pub struct MultiBackendStorage {
 }
 
 /// Performance tuning configuration
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct PerformanceConfig {
     /// Override for client-side parallel chunk uploads. When None, falls back
     /// to MEDIAGIT_UPLOAD_CONCURRENCY env var or the internal default (32).
@@ -555,122 +697,30 @@ pub struct PerformanceConfig {
     #[serde(default)]
     pub pack_workers: Option<usize>,
 
-    /// Buffer size for I/O operations (in bytes)
-    #[serde(default = "default_buffer_size")]
-    pub buffer_size: usize,
+    // Accepted, discarded, never written. Same contract as the
+    // `deprecated_*` fields on `Config` — see the note there.
+    /// Was `CacheConfig`. No cache dispatcher was ever written.
+    #[serde(default, rename = "cache", skip_serializing)]
+    pub deprecated_cache: Option<serde_json::Value>,
 
-    /// Cache configuration
-    pub cache: CacheConfig,
-}
+    /// Was `buffer_size`.
+    #[serde(default, rename = "buffer_size", skip_serializing)]
+    pub deprecated_buffer_size: Option<serde_json::Value>,
 
-/// Cache configuration
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct CacheConfig {
-    /// Enable caching
-    #[serde(default = "default_true")]
-    pub enabled: bool,
+    /// Never existed on this schema. `schema.rs`'s own test fixture set it,
+    /// and `mediagit-storage`'s real connection-pool knobs are env vars in
+    /// `http_pool.rs`, not config.
+    #[serde(default, rename = "connection_pool", skip_serializing)]
+    pub deprecated_connection_pool: Option<serde_json::Value>,
 
-    /// Cache type (memory, disk, redis)
-    #[serde(default = "default_cache_type")]
-    pub cache_type: String,
-
-    /// Maximum cache size (in bytes)
-    #[serde(default = "default_cache_size")]
-    pub max_size: u64,
-
-    /// Cache TTL (in seconds)
-    #[serde(default = "default_cache_ttl")]
-    pub ttl: u64,
-
-    /// Enable compression in cache
-    #[serde(default)]
-    pub compression: bool,
-}
-
-/// Observability configuration
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ObservabilityConfig {
-    /// Logging level
-    #[serde(default = "default_log_level")]
-    pub log_level: String,
-
-    /// Log format (json, text)
-    #[serde(default = "default_log_format")]
-    pub log_format: String,
-
-    /// Enable tracing
-    #[serde(default = "default_true")]
-    pub tracing_enabled: bool,
-
-    /// Trace sample rate (0.0 to 1.0)
-    #[serde(default = "default_sample_rate")]
-    pub sample_rate: f64,
-
-    /// Metrics configuration
-    pub metrics: MetricsConfig,
-}
-
-/// Metrics configuration
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct MetricsConfig {
-    /// Enable metrics collection
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-
-    /// Metrics port
-    #[serde(default = "default_metrics_port")]
-    pub port: u16,
-
-    /// Metrics endpoint path
-    #[serde(default = "default_metrics_endpoint")]
-    pub endpoint: String,
-
-    /// Metrics collection interval (in seconds)
-    #[serde(default = "default_metrics_interval")]
-    pub interval: u64,
-}
-
-/// Security configuration
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SecurityConfig {
-    /// Enable HTTPS
-    #[serde(default)]
-    pub https_enabled: bool,
-
-    /// TLS certificate path
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tls_cert_path: Option<String>,
-
-    /// TLS key path
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tls_key_path: Option<String>,
-
-    /// API key for authentication
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
-
-    /// Enable authentication
-    #[serde(default)]
-    pub auth_enabled: bool,
-
-    /// CORS allowed origins
-    #[serde(default)]
-    pub cors_origins: Vec<String>,
-
-    // `encryption_at_rest` and `encryption_key_path` used to live here, and
-    // several documents described them as the server's at-rest encryption
-    // switch. Nothing ever read them: the server loads its own `ServerConfig`,
-    // and this type's `validate()` is never called on the server path either,
-    // so even the "key path must exist" check never ran. The real switch is
-    // `[encryption]` in `mediagit-server`'s config. Removed rather than left in
-    // place, because a setting that looks like it enables encryption and
-    // silently does not is worse than no setting.
-    /// Rate limiting configuration
-    pub rate_limiting: RateLimitConfig,
+    /// Never existed on this schema. Same story as `connection_pool`.
+    #[serde(default, rename = "timeouts", skip_serializing)]
+    pub deprecated_timeouts: Option<serde_json::Value>,
 }
 
 /// Remote repository configuration
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct RemoteConfig {
     /// Remote URL (e.g., "http://localhost:3000/repo-name")
     pub url: String,
@@ -726,24 +776,9 @@ impl RemoteConfig {
     }
 }
 
-/// Rate limiting configuration
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct RateLimitConfig {
-    /// Enable rate limiting
-    #[serde(default)]
-    pub enabled: bool,
-
-    /// Requests per second
-    #[serde(default = "default_rps")]
-    pub requests_per_second: u32,
-
-    /// Burst size
-    #[serde(default = "default_burst")]
-    pub burst_size: u32,
-}
-
 /// Branch tracking configuration (similar to Git's branch.<name>.remote and branch.<name>.merge)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct BranchConfig {
     /// The remote to push/pull from by default
     pub remote: String,
@@ -764,6 +799,7 @@ impl BranchConfig {
 
 /// Branch protection rules
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
 pub struct BranchProtection {
     /// Prevent force-push to this branch
     #[serde(default = "default_true")]
@@ -813,90 +849,15 @@ fn default_true() -> bool {
     true
 }
 
-fn default_app_name() -> String {
-    "mediagit".to_string()
-}
-
-fn default_app_version() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
-}
-
-fn default_environment() -> String {
-    "development".to_string()
-}
-
-fn default_port() -> u16 {
-    8080
-}
-
-fn default_host() -> String {
-    "127.0.0.1".to_string()
-}
-
 fn default_file_permissions() -> String {
     "0644".to_string()
-}
-
-fn default_buffer_size() -> usize {
-    65536 // 64KB
-}
-
-fn default_cache_type() -> String {
-    "memory".to_string()
-}
-
-fn default_cache_size() -> u64 {
-    536870912 // 512MB
-}
-
-fn default_cache_ttl() -> u64 {
-    3600 // 1 hour
-}
-
-fn default_log_level() -> String {
-    "info".to_string()
-}
-
-fn default_log_format() -> String {
-    "json".to_string()
-}
-
-fn default_sample_rate() -> f64 {
-    0.1
-}
-
-fn default_metrics_port() -> u16 {
-    9090
-}
-
-fn default_metrics_endpoint() -> String {
-    "/metrics".to_string()
-}
-
-fn default_metrics_interval() -> u64 {
-    60
-}
-
-// Sized for bulk media transfer: the limiter covers the data plane, and a
-// large push falls back to one request per chunk when packs are
-// unavailable. Keyed per-identity (not per-IP), so this is one user's
-// budget. See mediagit-server::security::RateLimitConfig.
-fn default_rps() -> u32 {
-    1000
-}
-
-fn default_burst() -> u32 {
-    2000
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
-            app: AppConfig::default(),
             storage: StorageConfig::FileSystem(FileSystemStorage::default()),
             performance: PerformanceConfig::default(),
-            observability: ObservabilityConfig::default(),
-            security: SecurityConfig::default(),
             author: AuthorConfig::default(),
             remotes: HashMap::new(),
             branches: HashMap::new(),
@@ -907,19 +868,10 @@ impl Default for Config {
             layout_version: default_layout_version(),
             repo_id: None,
             config_version: crate::migration::CONFIG_VERSION,
-        }
-    }
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        AppConfig {
-            name: default_app_name(),
-            version: default_app_version(),
-            environment: default_environment(),
-            port: default_port(),
-            host: default_host(),
-            debug: false,
+            deprecated_app: None,
+            deprecated_observability: None,
+            deprecated_security: None,
+            deprecated_compression: None,
         }
     }
 }
@@ -935,77 +887,6 @@ impl Default for FileSystemStorage {
     }
 }
 
-impl Default for PerformanceConfig {
-    fn default() -> Self {
-        PerformanceConfig {
-            upload_concurrency: None,
-            download_concurrency: None,
-            pack_workers: None,
-            buffer_size: 65536,
-            cache: CacheConfig::default(),
-        }
-    }
-}
-
-impl Default for CacheConfig {
-    fn default() -> Self {
-        CacheConfig {
-            enabled: true,
-            cache_type: "memory".to_string(),
-            max_size: 536870912,
-            ttl: 3600,
-            compression: false,
-        }
-    }
-}
-
-impl Default for ObservabilityConfig {
-    fn default() -> Self {
-        ObservabilityConfig {
-            log_level: "info".to_string(),
-            log_format: "json".to_string(),
-            tracing_enabled: true,
-            sample_rate: 0.1,
-            metrics: MetricsConfig::default(),
-        }
-    }
-}
-
-impl Default for MetricsConfig {
-    fn default() -> Self {
-        MetricsConfig {
-            enabled: true,
-            port: 9090,
-            endpoint: "/metrics".to_string(),
-            interval: 60,
-        }
-    }
-}
-
-impl Default for SecurityConfig {
-    fn default() -> Self {
-        SecurityConfig {
-            https_enabled: false,
-            tls_cert_path: None,
-            tls_key_path: None,
-            api_key: None,
-            auth_enabled: false,
-            cors_origins: vec!["http://localhost:3000".to_string()],
-            rate_limiting: RateLimitConfig::default(),
-        }
-    }
-}
-
-impl Default for RateLimitConfig {
-    fn default() -> Self {
-        RateLimitConfig {
-            enabled: false,
-            requests_per_second: 1000,
-            burst_size: 2000,
-        }
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -1014,8 +895,8 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.app.name, "mediagit");
-        assert_eq!(config.app.port, 8080);
+        assert!(matches!(config.storage, StorageConfig::FileSystem(_)));
+        assert_eq!(config.layout_version, default_layout_version());
     }
 
     #[test]
@@ -1030,20 +911,23 @@ mod tests {
     fn test_config_without_cdc_seed_defaults_to_zero() {
         // Existing configs written before this field existed must still parse,
         // with cdc_seed defaulting to 0 (legacy/unseeded chunking).
+        //
+        // This fixture used to carry [app], [compression], [performance.cache],
+        // [performance.connection_pool], [performance.timeouts],
+        // [observability] and [security]. Four of those sections were dead and
+        // are now deleted; three -- [compression], [performance.connection_pool]
+        // and [performance.timeouts] -- never existed on this schema at all and
+        // were being silently discarded by serde every time this test ran. That
+        // is the hole `deny_unknown_fields` closes, and this fixture was the
+        // evidence it was open. Reaching a config in that shape is the
+        // migration's job, exercised by
+        // `strict_parsing_rejects_a_key_the_schema_does_not_define` and the
+        // v3 -> v4 load tests.
         let toml_str = r#"
-[app]
 [storage]
 backend = "filesystem"
 base_path = "./data"
-[compression]
 [performance]
-[performance.cache]
-[performance.connection_pool]
-[performance.timeouts]
-[observability]
-[observability.metrics]
-[security]
-[security.rate_limiting]
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.cdc_seed, 0);
@@ -1077,6 +961,247 @@ base_path = "./data"
         assert_eq!(
             config.resolve_remote_url("origin").unwrap(),
             "https://host/repo"
+        );
+    }
+
+    /// A config.toml written by v3 of this tool. Every one of them looks like
+    /// this: `save()` serialized the dead sections unconditionally, so this is
+    /// not a hypothetical shape — it is what is on disk in every repository
+    /// created before today.
+    const V3_CONFIG_AS_ACTUALLY_WRITTEN: &str = r#"
+config_version = 3
+layout_version = 2
+cdc_seed = 42
+
+[app]
+name = "mediagit"
+version = "0.3.0"
+environment = "development"
+port = 8080
+host = "127.0.0.1"
+debug = false
+
+[storage]
+backend = "filesystem"
+base_path = "./data"
+create_dirs = true
+sync = false
+file_permissions = "0644"
+
+[performance]
+buffer_size = 65536
+
+[performance.cache]
+enabled = true
+cache_type = "memory"
+max_size = 536870912
+ttl = 3600
+compression = false
+
+[observability]
+log_level = "info"
+log_format = "json"
+tracing_enabled = true
+sample_rate = 0.1
+
+[observability.metrics]
+enabled = true
+port = 9090
+endpoint = "/metrics"
+interval = 60
+
+[security]
+https_enabled = false
+auth_enabled = false
+cors_origins = ["http://localhost:3000"]
+
+[security.rate_limiting]
+enabled = false
+requests_per_second = 1000
+burst_size = 2000
+"#;
+
+    fn write_repo(dir: &std::path::Path, contents: &str) {
+        std::fs::create_dir_all(dir.join(".mediagit")).unwrap();
+        std::fs::write(dir.join(".mediagit/config.toml"), contents).unwrap();
+    }
+
+    /// The whole point of `deny_unknown_fields`. Before it, this key parsed,
+    /// validated, reported success and did nothing — which is how a CORS
+    /// setting, a TLS certificate path and a closed-registration switch all
+    /// came to be configured in a file nothing read.
+    #[tokio::test]
+    async fn strict_parsing_rejects_a_key_the_schema_does_not_define() {
+        let dir = tempfile::tempdir().unwrap();
+        write_repo(
+            dir.path(),
+            r#"
+config_version = 4
+
+[storage]
+backend = "filesystem"
+base_path = "./data"
+
+[performance]
+upload_concurency = 8
+"#,
+        );
+
+        let err = Config::load(dir.path()).await.unwrap_err().to_string();
+        assert!(
+            err.contains("upload_concurency"),
+            "the error must name the offending key, got: {err}"
+        );
+        assert!(
+            err.contains("[custom]"),
+            "the error must point at the sanctioned escape hatch, got: {err}"
+        );
+    }
+
+    /// The other half, and the one that makes the strictness shippable: a
+    /// config in the shape this tool has been writing for its whole life must
+    /// still open. If this fails, every existing repository is bricked.
+    #[tokio::test]
+    async fn a_v3_config_still_loads_and_is_migrated_not_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        write_repo(dir.path(), V3_CONFIG_AS_ACTUALLY_WRITTEN);
+
+        let config = Config::load(dir.path())
+            .await
+            .expect("a v3 config must migrate, not fail to parse");
+
+        // Migrated, and the live values carried across untouched.
+        assert_eq!(config.config_version, crate::migration::CONFIG_VERSION);
+        assert_eq!(config.cdc_seed, 42);
+        assert_eq!(config.layout_version, 2);
+
+        // The original is preserved before the rewrite.
+        assert!(
+            dir.path().join(".mediagit/config.toml.bak").exists(),
+            "the pre-migration config must be backed up"
+        );
+
+        // The dead sections are gone from the file on disk, not merely ignored
+        // in memory — otherwise the next load would reject them.
+        let rewritten = std::fs::read_to_string(dir.path().join(".mediagit/config.toml")).unwrap();
+        for dead in [
+            "[app]",
+            "[observability]",
+            "[security]",
+            "[performance.cache]",
+            "buffer_size",
+        ] {
+            assert!(
+                !rewritten.contains(dead),
+                "{dead} must not survive the migration, got:\n{rewritten}"
+            );
+        }
+    }
+
+    /// Loading twice must be stable. A migration that leaves behind something
+    /// the strict parse rejects would pass the test above and fail on the very
+    /// next command — the repo would open exactly once.
+    #[tokio::test]
+    async fn a_migrated_config_reloads_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        write_repo(dir.path(), V3_CONFIG_AS_ACTUALLY_WRITTEN);
+
+        let first = Config::load(dir.path()).await.unwrap();
+        let second = Config::load(dir.path())
+            .await
+            .expect("the rewritten config must satisfy its own strict parse");
+        assert_eq!(first, second);
+    }
+
+    /// A broken config must FAIL, not resolve to the default one.
+    ///
+    /// `mediagit-cli`'s `create_storage_backend` used to do
+    /// `Config::load(..).unwrap_or_default()`, and `resolve_repo_id` then
+    /// persisted that default over the real file — losing `cdc_seed`,
+    /// `repo_namespace` and `layout_version` in one step. `Config::load`
+    /// already returns the default for an ABSENT file, so `Err` must mean
+    /// "present and unreadable" and nothing may paper over it.
+    #[tokio::test]
+    async fn an_unreadable_config_is_an_error_not_a_default() {
+        let dir = tempfile::tempdir().unwrap();
+        write_repo(dir.path(), "this is not valid toml {{{");
+        assert!(
+            Config::load(dir.path()).await.is_err(),
+            "an unparseable config must be an error"
+        );
+
+        // And the absent-file case still yields the default, which is what
+        // makes the distinction safe to rely on.
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(Config::load(empty.path()).await.unwrap(), Config::default());
+    }
+
+    /// `cdc_seed` is a random `u64`, so about half of all real repositories
+    /// carry a value above `i64::MAX`. A `toml::Value` cannot hold one, so any
+    /// load path that goes through `toml::Value` fails on those repos — and
+    /// because the failure lands in `unwrap_or_default()` call sites, it
+    /// presents as a repository that has lost its own identity rather than as
+    /// a parse error. Fixtures without a seed stay green throughout.
+    #[tokio::test]
+    async fn a_cdc_seed_above_i64_max_loads_and_round_trips() {
+        const SEED: u64 = 17254340638138469876;
+        assert!(SEED > i64::MAX as u64, "the fixture must exercise the bug");
+
+        let dir = tempfile::tempdir().unwrap();
+        write_repo(
+            dir.path(),
+            &format!(
+                r#"
+config_version = 4
+cdc_seed = {SEED}
+repo_namespace = "r1"
+
+[storage]
+backend = "filesystem"
+base_path = "./data"
+
+[performance]
+"#
+            ),
+        );
+
+        let config = Config::load(dir.path()).await.unwrap();
+        assert_eq!(config.cdc_seed, SEED);
+        assert_eq!(config.repo_namespace.as_deref(), Some("r1"));
+
+        config.save(dir.path()).unwrap();
+        let reloaded = Config::load(dir.path()).await.unwrap();
+        assert_eq!(reloaded.cdc_seed, SEED);
+    }
+
+    /// `custom` is what the rejection message tells users to reach for, so it
+    /// has to actually work under strict parsing.
+    #[tokio::test]
+    async fn custom_is_a_real_escape_hatch_under_strict_parsing() {
+        let dir = tempfile::tempdir().unwrap();
+        write_repo(
+            dir.path(),
+            r#"
+config_version = 4
+
+[storage]
+backend = "filesystem"
+base_path = "./data"
+
+[performance]
+
+[custom]
+studio_pipeline_id = "vfx-42"
+"#,
+        );
+
+        let config = Config::load(dir.path()).await.unwrap();
+        assert_eq!(
+            config
+                .custom
+                .get("studio_pipeline_id")
+                .and_then(|v| v.as_str()),
+            Some("vfx-42")
         );
     }
 }
