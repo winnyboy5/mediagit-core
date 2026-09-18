@@ -208,6 +208,73 @@ async fn test_default_fetch_push_urls() -> Result<()> {
     Ok(())
 }
 
+/// The accessors above were only ever called by these tests. What decides where
+/// a push actually GOES is `Config::resolve_push_url`, and until 2026-09-18 it
+/// did not exist: `push` resolved through `resolve_remote_url`, which reads
+/// `url`. So `mediagit remote set-url --push <new>` stored the value, printed
+/// "Changed push URL for 'origin'", `remote show` displayed it -- and the push
+/// went to the old server anyway.
+///
+/// Both halves, because each fails for a different reason: a distinct push URL
+/// must be USED, and a remote without one must still fall back to `url` rather
+/// than erroring or resolving empty.
+#[tokio::test]
+async fn resolve_push_url_honours_a_distinct_push_url() -> Result<()> {
+    let (_temp, repo_path) = create_test_repo()?;
+
+    let mut config = Config::load(&repo_path).await?;
+    let mut remote = mediagit_config::RemoteConfig::new("https://origin.example.com/repo.git");
+    remote.push = Some("https://push.example.com/repo.git".to_string());
+    config.remotes.insert("origin".to_string(), remote);
+    config.save(&repo_path)?;
+
+    let loaded = Config::load(&repo_path).await?;
+
+    assert_eq!(
+        loaded.resolve_push_url("origin").unwrap(),
+        "https://push.example.com/repo.git",
+        "a push must go to the push URL, not to `url`"
+    );
+    // The fetch side is unchanged and must stay that way.
+    assert_eq!(
+        loaded.resolve_remote_url("origin").unwrap(),
+        "https://origin.example.com/repo.git",
+        "setting a push URL must not redirect fetches"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn resolve_push_url_falls_back_to_url_when_no_push_url_is_set() -> Result<()> {
+    let (_temp, repo_path) = create_test_repo()?;
+
+    let mut config = Config::load(&repo_path).await?;
+    config.remotes.insert(
+        "origin".to_string(),
+        mediagit_config::RemoteConfig::new("https://example.com/repo.git"),
+    );
+    config.save(&repo_path)?;
+
+    let loaded = Config::load(&repo_path).await?;
+    assert_eq!(
+        loaded.resolve_push_url("origin").unwrap(),
+        "https://example.com/repo.git"
+    );
+
+    // A bare URL passed instead of a remote name resolves to itself, matching
+    // `resolve_remote_url`.
+    assert_eq!(
+        loaded
+            .resolve_push_url("https://direct.example.com/r.git")
+            .unwrap(),
+        "https://direct.example.com/r.git"
+    );
+    assert!(loaded.resolve_push_url("nosuchremote").is_err());
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_get_remote_url() -> Result<()> {
     let (_temp, repo_path) = create_test_repo()?;
@@ -271,7 +338,6 @@ async fn test_config_format() -> Result<()> {
     let mut remote = mediagit_config::RemoteConfig::new("https://example.com/repo.git");
     remote.fetch = Some("https://fetch.example.com/repo.git".to_string());
     remote.push = Some("https://push.example.com/repo.git".to_string());
-    remote.default_fetch = Some(true);
 
     config.remotes.insert("origin".to_string(), remote);
     config.save(&repo_path)?;
