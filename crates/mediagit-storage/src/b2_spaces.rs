@@ -169,7 +169,7 @@
 //! ```
 
 use crate::StorageBackend;
-use crate::s3::{S3Backend, S3Config};
+use crate::b2_spaces_driver::{B2SpacesDriver, B2SpacesDriverConfig};
 use async_trait::async_trait;
 use std::fmt;
 use std::sync::Arc;
@@ -257,7 +257,7 @@ impl Provider {
 ///
 /// # Features
 ///
-/// - S3-compatible API operations via internal S3Backend
+/// - S3-compatible API operations via internal B2SpacesDriver
 /// - Support for both Backblaze B2 and DigitalOcean Spaces
 /// - Custom endpoint configuration per provider
 /// - Cost-effective alternatives to AWS S3
@@ -272,7 +272,7 @@ impl Provider {
 #[derive(Clone)]
 pub struct B2SpacesBackend {
     /// Internal S3 backend that handles all operations
-    inner: Arc<S3Backend>,
+    inner: Arc<B2SpacesDriver>,
     /// Provider configuration for logging and debugging
     provider: Provider,
     /// Bucket name for reference
@@ -365,14 +365,14 @@ impl B2SpacesBackend {
         );
 
         // Create S3 config with provider-specific endpoint
-        let s3_config = S3Config {
+        let s3_config = B2SpacesDriverConfig {
             bucket: bucket.to_string(),
             endpoint: Some(provider.endpoint()),
             ..Default::default()
         };
 
         // Create internal S3 backend with explicit credentials
-        let inner = S3Backend::with_credentials(
+        let inner = B2SpacesDriver::with_credentials(
             s3_config,
             access_key,
             secret_key,
@@ -486,7 +486,7 @@ impl fmt::Debug for B2SpacesBackend {
 impl StorageBackend for B2SpacesBackend {
     /// Retrieve an object from B2/Spaces
     ///
-    /// Delegates to the internal S3Backend with provider-specific endpoint.
+    /// Delegates to the internal B2SpacesDriver with provider-specific endpoint.
     async fn get(&self, key: &str) -> anyhow::Result<Vec<u8>> {
         tracing::trace!(
             provider = self.provider.name(),
@@ -500,7 +500,7 @@ impl StorageBackend for B2SpacesBackend {
         })
     }
 
-    /// Stream an object, delegating to the inner `S3Backend`.
+    /// Stream an object, delegating to the inner `B2SpacesDriver`.
     ///
     /// Without this the wrapper inherits the trait's DEFAULT `get_streaming`,
     /// which is `self.get(key).await?` wrapped in a one-shot stream — so the
@@ -531,7 +531,7 @@ impl StorageBackend for B2SpacesBackend {
 
     /// Store an object in B2/Spaces
     ///
-    /// Delegates to the internal S3Backend which handles multipart upload
+    /// Delegates to the internal B2SpacesDriver which handles multipart upload
     /// for large files automatically.
     async fn put(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
         tracing::trace!(

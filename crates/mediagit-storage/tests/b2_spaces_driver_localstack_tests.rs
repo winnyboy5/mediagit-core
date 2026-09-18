@@ -1,11 +1,24 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
-//! Integration tests for S3 backend using LocalStack
+//! Integration tests for the **B2/Spaces driver** against LocalStack.
 //!
-//! These tests verify the S3 backend implementation against a real S3-compatible
-//! service (LocalStack). They test all CRUD operations, multipart uploads, concurrent
-//! access, and error handling.
+//! # What this does and does not cover
+//!
+//! `B2SpacesDriver` (`b2_spaces_driver.rs`, called `S3Backend` in `s3.rs` until
+//! 2026-09-18) serves Backblaze B2 and DigitalOcean Spaces. **It is not the AWS
+//! backend.** `mediagit-server` builds its "aws" backend from `MinIOConfig`
+//! with an `https://s3.<region>.amazonaws.com` endpoint, so `MinIOBackend` is
+//! what AWS runs on — see the note in `s3_attestation_live.rs`.
+//!
+//! Exercising this driver against LocalStack, an AWS emulator, is part of how
+//! the confusion survived: it reads as AWS coverage and is not. It is kept
+//! because LocalStack is a generic S3-compatible endpoint and this driver
+//! speaks plain S3, which is exactly what B2 and Spaces need — but nothing
+//! here says anything about the path a real AWS push takes.
+//!
+//! They test all CRUD operations, multipart uploads, concurrent access, and
+//! error handling.
 //!
 //! # Prerequisites
 //!
@@ -25,13 +38,13 @@
 
 #[cfg(test)]
 #[allow(unsafe_code)] // edition-2024: test-only env::set_var/remove_var requires unsafe
-mod s3_localstack_tests {
-    use mediagit_storage::{StorageBackend, s3::S3Backend};
+mod b2_spaces_driver_localstack_tests {
+    use mediagit_storage::{StorageBackend, b2_spaces_driver::B2SpacesDriver};
     use std::env;
 
     /// Helper function to create a test S3 backend connected to LocalStack
-    async fn create_test_backend() -> S3Backend {
-        use mediagit_storage::s3::S3Config;
+    async fn create_test_backend() -> B2SpacesDriver {
+        use mediagit_storage::b2_spaces_driver::B2SpacesDriverConfig;
 
         // Set required environment variables for LocalStack
         // FIXME: Audit that the environment access only happens in single-threaded code.
@@ -41,15 +54,15 @@ mod s3_localstack_tests {
         // FIXME: Audit that the environment access only happens in single-threaded code.
         unsafe { env::set_var("AWS_REGION", "us-east-1") };
 
-        // Configure S3Backend to use LocalStack endpoint
+        // Configure B2SpacesDriver to use LocalStack endpoint
         // Use 127.0.0.1 instead of localhost for better compatibility
-        let config = S3Config {
+        let config = B2SpacesDriverConfig {
             bucket: "test-bucket".to_string(),
             endpoint: Some("http://127.0.0.1:4566".to_string()),
             ..Default::default()
         };
 
-        S3Backend::with_config(config)
+        B2SpacesDriver::with_config(config)
             .await
             .expect("Failed to create S3 backend for LocalStack")
     }

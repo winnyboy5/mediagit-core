@@ -8,8 +8,9 @@ Week 6 milestone verification: **75% Complete** (3/4 backends operational)
 ### 1. S3 + LocalStack ✅
 - **Status**: Fully operational
 - **Test Pass Rate**: 75% (12/16 tests)
-- **Configuration**: Endpoint via S3Config
-- **Implementation**: [src/s3.rs](src/s3.rs), [tests/s3_localstack_tests.rs](tests/s3_localstack_tests.rs)
+- **Configuration**: Endpoint via B2SpacesDriverConfig
+- **Implementation**: [src/b2_spaces_driver.rs](src/b2_spaces_driver.rs), [tests/b2_spaces_driver_localstack_tests.rs](tests/b2_spaces_driver_localstack_tests.rs)
+- **Note**: this is the B2/Spaces driver, not the AWS path. AWS runs on `minio.rs`. Both files were renamed from `s3.rs` / `s3_localstack_tests.rs` on 2026-09-18.
 
 ### 2. Azure + Azurite ✅
 - **Status**: Fully operational  
@@ -127,8 +128,8 @@ mediagit-minio-init       ✅ exited (0)
    - Removed LocalStack volume mount (WSL2 fix)
    - Added azurite-init service for container creation
 
-2. **src/s3.rs** 
-   - Added S3Config with endpoint parameter
+2. **src/b2_spaces_driver.rs** (then `src/s3.rs`) 
+   - Added B2SpacesDriverConfig with endpoint parameter
    - Enabled LocalStack endpoint configuration
 
 3. **src/minio.rs**
@@ -145,7 +146,7 @@ mediagit-minio-init       ✅ exited (0)
    - Removed non-working emulator detection attempts (clean production-only code)
 
 6. **tests/s3_localstack_tests.rs**
-   - Updated create_test_backend() to use S3Config with endpoint
+   - Updated create_test_backend() to use B2SpacesDriverConfig with endpoint
 
 7. **tests/gcs_emulator_tests.rs**
    - Added comprehensive header documentation explaining emulator limitation

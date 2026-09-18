@@ -1,9 +1,31 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
-//! AWS S3 storage backend implementation
+//! The S3-compatible driver behind [`crate::b2_spaces::B2SpacesBackend`] —
+//! Backblaze B2 and DigitalOcean Spaces.
 //!
-//! Provides a `StorageBackend` implementation for AWS S3 with:
+//! # This is not the AWS backend
+//!
+//! It was called `s3.rs` and `S3Backend` until 2026-09-18, and it is the only
+//! file in this crate named after AWS. **AWS does not use it.**
+//! `mediagit-server`'s `build_aws_s3_storage` builds a
+//! [`crate::minio::MinIOBackend`] with an `https://s3.<region>.amazonaws.com`
+//! endpoint, so `minio.rs` is the AWS driver and this one is reachable only
+//! from `b2_spaces.rs`. Two complete S3 implementations exist, and the one
+//! named after AWS was not the one AWS ran on — so an AWS fix had an even
+//! chance of landing in a file that could not affect it.
+//!
+//! Renamed after its only consumer rather than merged: the two drivers have
+//! diverged and collapsing them is a behavioural change to B2 and Spaces,
+//! which have no live credentials in the QA matrix. The name was the defect;
+//! the code was not.
+//!
+//! It still speaks plain S3 — the AWS SDK, the AWS credential chain when no
+//! custom endpoint is set, and AWS terminology throughout — because B2 and
+//! Spaces are S3-compatible services. Read "S3" below as the protocol, not as
+//! the provider.
+//!
+//! Provides a `StorageBackend` implementation with:
 //! - AWS SDK configuration using credential chains (environment, IAM, profiles)
 //! - Automatic region detection
 //! - Multipart upload for large files (>100MB)
@@ -13,8 +35,8 @@
 //!
 //! # Features
 //!
-//! - **Credential chain**: standard AWS SDK chain (environment, IAM roles, AWS profiles) *only* when no custom endpoint is set; a custom endpoint (e.g. MinIO) uses explicit `S3Config` credentials instead — see Configuration below
-//! - **Region detection**: environment variables or AWS metadata service on the plain-AWS path; `S3Config.region` (or `"us-east-1"`) on the custom-endpoint path
+//! - **Credential chain**: standard AWS SDK chain (environment, IAM roles, AWS profiles) *only* when no custom endpoint is set; a custom endpoint (e.g. MinIO) uses explicit `B2SpacesDriverConfig` credentials instead — see Configuration below
+//! - **Region detection**: environment variables or AWS metadata service on the plain-AWS path; `B2SpacesDriverConfig.region` (or `"us-east-1"`) on the custom-endpoint path
 //! - **Multipart uploads**: Automatically handles files >100MB with concurrent uploads
 //! - **Retry logic**: Exponential backoff with configurable max retries
 //! - **Performance**: Optimized for >100MB/s throughput on high-speed connections
@@ -23,12 +45,12 @@
 //! # Examples
 //!
 //! ```rust,no_run
-//! use mediagit_storage::{StorageBackend, s3::S3Backend};
+//! use mediagit_storage::{StorageBackend, b2_spaces_driver::B2SpacesDriver};
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
-//!     // Create an S3 backend with default configuration
-//!     let storage = S3Backend::new("my-bucket").await?;
+//!     // Point the driver at a bucket on an S3-compatible service
+//!     let storage = B2SpacesDriver::new("my-bucket").await?;
 //!
 //!     // Store data
 //!     storage.put("documents/resume.pdf", b"PDF content").await?;
@@ -56,9 +78,9 @@
 //! # Configuration
 //!
 //! Credential resolution is **not** uniform — it depends on whether
-//! `S3Config.endpoint` is set:
+//! `B2SpacesDriverConfig.endpoint` is set:
 //!
-//! - **No custom endpoint** (real AWS S3, e.g. via `S3Backend::new()` or
+//! - **No custom endpoint** (real AWS S3, e.g. via `B2SpacesDriver::new()` or
 //!   `with_config()` with `endpoint: None`): calls
 //!   `aws_config::defaults(...).load()`, so the standard AWS SDK credential
 //!   chain applies:
@@ -74,10 +96,10 @@
 //! - **Custom endpoint set** (S3-compatible services like MinIO, via
 //!   `with_config()` with `endpoint: Some(..)`): deliberately *skips*
 //!   `aws_config::defaults()` to avoid IMDS timeouts. Credentials come only
-//!   from `S3Config.access_key_id` / `secret_access_key`; if either is
+//!   from `B2SpacesDriverConfig.access_key_id` / `secret_access_key`; if either is
 //!   unset, no credentials provider is configured at all. AWS environment
 //!   variables, IAM roles and `~/.aws` profiles are never consulted on this
-//!   path. Region comes from `S3Config.region`, falling back to
+//!   path. Region comes from `B2SpacesDriverConfig.region`, falling back to
 //!   `"us-east-1"` — the AWS region env vars are not read here either.
 //!
 //! - **`with_credentials()`**: bypasses both of the above and always builds
@@ -109,9 +131,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tracing::{debug, warn};
 
-/// Configuration for the S3 backend
+/// Configuration for the B2/Spaces driver.
 #[derive(Clone, Debug)]
-pub struct S3Config {
+pub struct B2SpacesDriverConfig {
     /// S3 bucket name
     pub bucket: String,
 
@@ -144,9 +166,9 @@ pub struct S3Config {
     pub prefix: Option<String>,
 }
 
-impl Default for S3Config {
+impl Default for B2SpacesDriverConfig {
     fn default() -> Self {
-        S3Config {
+        B2SpacesDriverConfig {
             bucket: String::new(),
             endpoint: None,
             region: None,
@@ -161,10 +183,11 @@ impl Default for S3Config {
     }
 }
 
-/// AWS S3 storage backend
+/// The S3-compatible driver behind `B2SpacesBackend` (Backblaze B2 and
+/// DigitalOcean Spaces).
 ///
-/// Implements the `StorageBackend` trait using AWS S3.
-/// Supports both standard S3 and S3-compatible services (MinIO, DigitalOcean Spaces, etc.)
+/// Implements `StorageBackend` over the AWS SDK. Despite that, **it is not
+/// the AWS backend** — `MinIOBackend` serves AWS. See the module docs.
 ///
 /// # Thread Safety
 ///
@@ -201,9 +224,9 @@ fn mpu_part_size_s3(total_size: u64) -> u64 {
 }
 
 #[derive(Clone)]
-pub struct S3Backend {
+pub struct B2SpacesDriver {
     client: Client,
-    config: Arc<S3Config>,
+    config: Arc<B2SpacesDriverConfig>,
     stats: Arc<S3Stats>,
 }
 
@@ -225,7 +248,7 @@ impl S3Stats {
     }
 }
 
-impl S3Backend {
+impl B2SpacesDriver {
     /// Create a new S3 backend with the given bucket name
     ///
     /// Uses automatic AWS credential and region detection from:
@@ -239,22 +262,22 @@ impl S3Backend {
     ///
     /// # Returns
     ///
-    /// * `Ok(S3Backend)` - Successfully created backend
+    /// * `Ok(B2SpacesDriver)` - Successfully created backend
     /// * `Err` - If credential or region detection fails
     ///
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use mediagit_storage::s3::S3Backend;
+    /// use mediagit_storage::b2_spaces_driver::B2SpacesDriver;
     ///
     /// # #[tokio::main]
     /// # async fn main() -> anyhow::Result<()> {
-    /// let storage = S3Backend::new("my-bucket").await?;
+    /// let storage = B2SpacesDriver::new("my-bucket").await?;
     /// # Ok(())
     /// # }
     /// ```
     pub async fn new(bucket: impl Into<String>) -> Result<Self> {
-        let config = S3Config {
+        let config = B2SpacesDriverConfig {
             bucket: bucket.into(),
             ..Default::default()
         };
@@ -269,25 +292,25 @@ impl S3Backend {
     ///
     /// # Returns
     ///
-    /// * `Ok(S3Backend)` - Successfully created backend
+    /// * `Ok(B2SpacesDriver)` - Successfully created backend
     /// * `Err` - If AWS SDK initialization fails
     ///
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use mediagit_storage::s3::{S3Backend, S3Config};
+    /// use mediagit_storage::b2_spaces_driver::{B2SpacesDriver, B2SpacesDriverConfig};
     ///
     /// # #[tokio::main]
     /// # async fn main() -> anyhow::Result<()> {
-    /// let mut config = S3Config::default();
+    /// let mut config = B2SpacesDriverConfig::default();
     /// config.bucket = "my-bucket".to_string();
     /// config.endpoint = Some("https://minio.example.com".to_string());
     ///
-    /// let storage = S3Backend::with_config(config).await?;
+    /// let storage = B2SpacesDriver::with_config(config).await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn with_config(config: S3Config) -> Result<Self> {
+    pub async fn with_config(config: B2SpacesDriverConfig) -> Result<Self> {
         // Override endpoint if provided (for S3-compatible services like MinIO)
         // Skip aws_config::defaults().load() for custom endpoints to avoid IMDS timeouts
         let connect_timeout_secs: u64 = std::env::var("MEDIAGIT_AWS_CONNECT_TIMEOUT_SECS")
@@ -319,8 +342,13 @@ impl S3Backend {
             }
             if let (Some(key_id), Some(secret)) = (&config.access_key_id, &config.secret_access_key)
             {
-                let credentials =
-                    aws_sdk_s3::config::Credentials::new(key_id, secret, None, None, "S3Backend");
+                let credentials = aws_sdk_s3::config::Credentials::new(
+                    key_id,
+                    secret,
+                    None,
+                    None,
+                    "B2SpacesDriver",
+                );
                 builder = builder.credentials_provider(credentials);
             }
             Client::from_conf(builder.build())
@@ -376,7 +404,7 @@ impl S3Backend {
             config.endpoint.as_deref().unwrap_or("AWS default")
         );
 
-        Ok(S3Backend {
+        Ok(B2SpacesDriver {
             client,
             config: Arc::new(config),
             stats: Arc::new(S3Stats::new()),
@@ -397,23 +425,23 @@ impl S3Backend {
     ///
     /// # Returns
     ///
-    /// * `Ok(S3Backend)` - Successfully created backend
+    /// * `Ok(B2SpacesDriver)` - Successfully created backend
     /// * `Err` - If initialization fails
     ///
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use mediagit_storage::s3::{S3Backend, S3Config};
+    /// use mediagit_storage::b2_spaces_driver::{B2SpacesDriver, B2SpacesDriverConfig};
     ///
     /// # #[tokio::main]
     /// # async fn main() -> anyhow::Result<()> {
-    /// let config = S3Config {
+    /// let config = B2SpacesDriverConfig {
     ///     bucket: "my-bucket".to_string(),
     ///     endpoint: Some("https://s3.us-west-002.backblazeb2.com".to_string()),
     ///     ..Default::default()
     /// };
     ///
-    /// let storage = S3Backend::with_credentials(
+    /// let storage = B2SpacesDriver::with_credentials(
     ///     config,
     ///     "access_key_id",
     ///     "secret_access_key",
@@ -423,7 +451,7 @@ impl S3Backend {
     /// # }
     /// ```
     pub async fn with_credentials(
-        config: S3Config,
+        config: B2SpacesDriverConfig,
         access_key: &str,
         secret_key: &str,
         region: &str,
@@ -501,7 +529,7 @@ impl S3Backend {
             config.bucket, config.endpoint
         );
 
-        Ok(S3Backend {
+        Ok(B2SpacesDriver {
             client,
             config: Arc::new(config),
             stats: Arc::new(S3Stats::new()),
@@ -561,9 +589,9 @@ impl S3Backend {
     }
 }
 
-impl fmt::Debug for S3Backend {
+impl fmt::Debug for B2SpacesDriver {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("S3Backend")
+        f.debug_struct("B2SpacesDriver")
             .field("bucket", &self.config.bucket)
             .field("endpoint", &self.config.endpoint)
             .field("part_size", &self.config.part_size)
@@ -573,7 +601,7 @@ impl fmt::Debug for S3Backend {
 }
 
 #[async_trait]
-impl StorageBackend for S3Backend {
+impl StorageBackend for B2SpacesDriver {
     /// Retrieve an object from S3
     ///
     /// # Arguments
@@ -1262,8 +1290,8 @@ impl StorageBackend for S3Backend {
     }
 }
 
-// Helper methods for S3Backend (not part of StorageBackend trait)
-impl S3Backend {
+// Helper methods for B2SpacesDriver (not part of StorageBackend trait)
+impl B2SpacesDriver {
     /// Upload small objects using direct put_object
     async fn put_simple(&self, key: &str, data: &[u8]) -> Result<()> {
         debug!("Putting small object to S3: {} ({} bytes)", key, data.len());
@@ -1440,7 +1468,7 @@ mod tests {
 
     #[test]
     fn test_default_config() {
-        let config = S3Config::default();
+        let config = B2SpacesDriverConfig::default();
         assert_eq!(config.part_size, 100 * 1024 * 1024);
         assert_eq!(config.max_concurrent_parts, 8);
         assert_eq!(config.max_retries, 3);
@@ -1449,15 +1477,15 @@ mod tests {
 
     #[test]
     fn test_validate_key() {
-        assert!(S3Backend::validate_key("valid_key").is_ok());
-        assert!(S3Backend::validate_key("path/to/key").is_ok());
-        assert!(S3Backend::validate_key("").is_err());
-        assert!(S3Backend::validate_key("/invalid").is_err());
+        assert!(B2SpacesDriver::validate_key("valid_key").is_ok());
+        assert!(B2SpacesDriver::validate_key("path/to/key").is_ok());
+        assert!(B2SpacesDriver::validate_key("").is_err());
+        assert!(B2SpacesDriver::validate_key("/invalid").is_err());
     }
 
     #[test]
     fn test_debug_impl() {
-        let config = S3Config {
+        let config = B2SpacesDriverConfig {
             bucket: "test-bucket".to_string(),
             ..Default::default()
         };

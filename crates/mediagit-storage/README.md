@@ -34,12 +34,12 @@ tokio = { version = "1", features = ["full"] }
 ### Basic Usage
 
 ```rust
-use mediagit_storage::{StorageBackend, S3Backend};
+use mediagit_storage::{MinIOBackend, StorageBackend};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Create S3 backend
-    let storage = S3Backend::new("my-bucket").await?;
+    // AWS S3 and MinIO share one driver -- see Backend Configuration below.
+    let storage = MinIOBackend::new(config).await?;
 
     // Store data
     storage.put("media/video.mp4", &video_data).await?;
@@ -69,13 +69,24 @@ async fn main() -> anyhow::Result<()> {
 
 ### AWS S3
 
-```rust
-use mediagit_storage::S3Backend;
+**AWS runs on `MinIOBackend`, not on a module named after S3.** The server
+builds its `aws` backend from a `MinIOConfig` pointed at
+`https://s3.<region>.amazonaws.com` (`mediagit-server/src/handlers/mod.rs`),
+so `minio.rs` is one shared S3-compatible driver serving both.
 
-// S3 has no from_env(): credentials come from the repository's
+```rust
+use mediagit_storage::MinIOBackend;
+
+// No from_env(): credentials come from the repository's
 // .mediagit/config.toml, never from AWS_* environment variables.
-let s3 = S3Backend::new("my-bucket").await?;
+let s3 = MinIOBackend::new(config).await?;
 ```
+
+`B2SpacesDriver` (`b2_spaces_driver.rs`) is a second, independent
+S3-compatible implementation. It is reachable only through
+`B2SpacesBackend` and is **not** on the AWS path. It was called `S3Backend`
+in `s3.rs` until 2026-09-18, which meant the file named after AWS was the
+one AWS never used.
 
 ### Azure Blob Storage
 
@@ -280,17 +291,17 @@ cargo test --test minio_docker_tests -- --ignored
 mediagit-storage/
 ├── src/
 │   ├── lib.rs              # StorageBackend trait and exports
-│   ├── s3.rs               # AWS S3 implementation (781 lines)
-│   ├── azure.rs            # Azure Blob Storage (819 lines)
-│   ├── gcs.rs              # Google Cloud Storage (894 lines)
-│   ├── minio.rs            # MinIO S3-compatible (1,111 lines)
-│   ├── b2_spaces.rs        # B2/Spaces unified (1,267 lines)
+│   ├── minio.rs            # AWS S3 *and* MinIO -- the shared S3 driver
+│   ├── azure.rs            # Azure Blob Storage
+│   ├── gcs.rs              # Google Cloud Storage
+│   ├── b2_spaces.rs        # B2 / DigitalOcean Spaces wrapper
+│   ├── b2_spaces_driver.rs # its S3-compatible driver (was s3.rs)
 │   ├── local.rs            # Local filesystem backend
 │   ├── mock.rs             # In-memory mock backend
 │   ├── cache.rs            # LRU caching layer
 │   └── error.rs            # Error types and handling
 ├── tests/
-│   ├── s3_localstack_tests.rs      # S3 integration tests
+│   ├── b2_spaces_driver_localstack_tests.rs  # B2/Spaces driver vs LocalStack
 │   ├── azure_azurite_tests.rs      # Azure integration tests
 │   ├── gcs_emulator_tests.rs       # GCS integration tests
 │   ├── minio_docker_tests.rs       # MinIO integration tests

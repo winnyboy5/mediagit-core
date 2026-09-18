@@ -536,7 +536,7 @@ fn unambiguously_missing(e: &anyhow::Error) -> bool {
 /// open path and narrowing it is a separate change with its own risk.
 ///
 /// It deliberately does NOT apply to a first-read failure. Every backend issues
-/// its GET inside `get_streaming` — s3.rs awaits `get_object().send()`, azure.rs
+/// its GET inside `get_streaming` — minio.rs awaits `get_object().send()`, azure.rs
 /// awaits `read_stream` — so not-found surfaces at the open and an error on the
 /// first read is a body failure. Accepting `service error` there would convert a
 /// throttled read into a terminal 404 for a chunk that exists.
@@ -714,7 +714,8 @@ pub async fn download_chunk(
     // i.e. it runs precisely when the server is already degraded and least able
     // to afford the allocation.
     //
-    // `get_streaming` has existed and been overridden by s3.rs, minio.rs and
+    // `get_streaming` has existed and been overridden by minio.rs,
+    // b2_spaces_driver.rs (was s3.rs) and
     // azure.rs since B7, but NO request-serving code ever called it, so
     // `MEDIAGIT_STORAGE_STREAMING` gated a path nothing reached — a dead knob.
     // This call site is what makes that knob mean something.

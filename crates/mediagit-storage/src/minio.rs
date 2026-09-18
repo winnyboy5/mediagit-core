@@ -718,9 +718,11 @@ impl MinIOBackend {
     /// THIS BACKEND SERVES BOTH real AWS and actual MinIO — the server builds
     /// the "aws" backend from `MinIOConfig` with an
     /// `https://s3.<region>.amazonaws.com` endpoint (`handlers/mod.rs`), so
-    /// `S3Backend` in `s3.rs` is NOT on the AWS path at all; only `b2_spaces`
-    /// constructs that. Attestation therefore has to live here to affect
-    /// anything.
+    /// `B2SpacesDriver` in `b2_spaces_driver.rs` is NOT on the AWS path at
+    /// all; only `b2_spaces` constructs that. (That file was `s3.rs` with a
+    /// type called `S3Backend` until 2026-09-18 — renamed because a file named
+    /// after AWS that AWS never reaches collects AWS fixes that do nothing.)
+    /// Attestation therefore has to live here to affect anything.
     ///
     /// Gated on the endpoint host because the capability differs: AWS validates
     /// full-object CRC64NVME, MinIO does not implement it, and declaring an
