@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrading — every breaking change in one place
+
+Read this before upgrading a server or a shared repository. Four changes need a
+decision or an action; everything else migrates itself.
+
+| Change | What happens if you do nothing | Action |
+|---|---|---|
+| **`allow_open_registration` now defaults to `false`** | A server with `enable_auth = true` and no explicit setting stops accepting anonymous `POST /auth/register`. | Bootstrap with `mediagit-server admin create`, or set `allow_open_registration = true` to keep open signup. |
+| **Config keys removed (`config_version` 4)** | Nothing. Older configs migrate on first load; the original is kept at `config.toml.bak`. | None. Remove the keys from any config you generate, or they will be dropped for you. |
+| **Unknown config keys are now rejected** | A typo, or a key from a document that never matched the schema, fails the command instead of being ignored. | Put keys MediaGit should not interpret under `[custom]`. The error names the offending key. |
+| **`remote set-url --push` now takes effect** | Pushes start going to the push URL. If one was set and you were relying on it being ignored, the destination changes. | Check `mediagit remote show <name>`; it has always displayed the push URL, it just was not used. |
+
+The removed config keys are `[app]`, `[observability]`,
+`[observability.metrics]`, `[security]`, `[security.rate_limiting]`,
+`[performance.cache]`, `performance.buffer_size` and
+`[remotes.<name>].default_fetch`. All were parsed and validated and read by
+nothing. Where the settings that sound load-bearing actually live is documented
+in `CONFIGURATION.md`.
+
+### Fixed — `remote set-url --push` set a push URL that nothing pushed to
+
+`mediagit remote set-url --push <url>` stored the value, printed "Changed push
+URL for 'origin'", and `mediagit remote show` displayed it — while `push`
+resolved the destination through the fetch-side lookup and went to `url`
+regardless. An operator redirecting pushes at a new server got a success
+message, a config that agreed with them, and pushes that kept going to the old
+one.
+
+`Config::resolve_push_url` now exists and `push` uses it. A remote without a
+push URL still falls back to `url`, and setting one does not redirect fetches.
+
+### Removed — `[remotes.<name>].default_fetch`
+
+Written by `RemoteConfig::new` into every config that has ever had a remote, and
+read by nothing. Existing configs keep loading and the key is dropped the next
+time the file is written.
+
+
 ### Added — JSON and compact logging, reachable at last
 
 `mediagit-observability` has shipped a working, tested JSON log renderer for as

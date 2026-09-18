@@ -152,8 +152,12 @@ impl PushCmd {
 
         // Load config to get remote URL
         let config = mediagit_config::Config::load(&repo_root).await?;
+        // `resolve_push_url`, not `resolve_remote_url`: a remote may have a
+        // distinct push URL. Resolving through the fetch side sent every push to
+        // `url` no matter what `set-url --push` had stored -- and said it had
+        // worked.
         let remote_url = config
-            .resolve_remote_url(remote)
+            .resolve_push_url(remote)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         if self.verbose {

@@ -1,5 +1,22 @@
 metric	value
-undocumented_knobs	2
+undocumented_knobs	0
+# 2 -> 0 on 2026-09-18. Five real knobs documented, defaults read from the
+# parsing code rather than a nearby comment:
+#   MEDIAGIT_CHECKOUT_READAHEAD_BYTES   default 16 MiB  odb/chunks.rs:52
+#   MEDIAGIT_PACK_VERIFY_QUIET_SECS     default 5       handlers/repo.rs:1556
+#   MEDIAGIT_PACK_VERIFY_MAX_DEFER_SECS default 900     handlers/repo.rs:1566
+#   MEDIAGIT_PACK_VERIFY_ASSUMED_MBPS   default 2       handlers/repo.rs:1537
+#   MEDIAGIT_S3_ATTEST                  AWS-gated       minio.rs:738
+# (MEDIAGIT_LOG_FORMAT was added in the same cycle and documented with it.)
+#
+# The other two were NOT knobs and were not documented as any -- documenting
+# a phantom to turn a gate green is the defect this gate exists to catch:
+#   MEDIAGIT_AUTHOR_        the glob `MEDIAGIT_AUTHOR_*` in three comments.
+#                           The regex is MEDIAGIT_[A-Z0-9_]+, so it stops at
+#                           the `*`. Comments now name both real vars.
+#   MEDIAGIT_COMMIT_EDITMSG_ a temp FILE name in commit.rs, never an env var.
+#                           Renamed to a lowercase prefix so it no longer
+#                           reads as one.
 # 8 -> 3 on 2026-09-10. Four real knobs were documented in env-knobs.md that
 # gate run, each with its default read from the parsing code rather than a
 # nearby comment:

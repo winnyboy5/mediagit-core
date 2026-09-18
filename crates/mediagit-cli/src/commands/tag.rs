@@ -290,7 +290,8 @@ impl TagCmd {
     }
 
     /// Resolve the tagger identity for an annotated tag.
-    /// Priority: `--tagger`/`--email` flags > `MEDIAGIT_AUTHOR_*` env vars >
+    /// Priority: `--tagger`/`--email` flags > `MEDIAGIT_AUTHOR_NAME` /
+    /// `MEDIAGIT_AUTHOR_EMAIL` >
     /// `config.toml [author]` > `$USER` > defaults. Mirrors `commit`'s
     /// author-resolution precedence.
     async fn resolve_tagger(

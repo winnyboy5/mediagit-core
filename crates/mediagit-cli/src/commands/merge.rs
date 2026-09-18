@@ -346,7 +346,8 @@ impl MergeCmd {
             let tree_oid = result.tree_oid.context("No merged tree created")?;
 
             // Create commit signature
-            // Priority: MEDIAGIT_AUTHOR_* env vars > config.toml [author] > $USER > defaults
+            // Priority: MEDIAGIT_AUTHOR_NAME / MEDIAGIT_AUTHOR_EMAIL > config.toml
+            // [author] > $USER > defaults
             let config = mediagit_config::Config::load(&repo_root)
                 .await
                 .unwrap_or_default();

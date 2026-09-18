@@ -193,20 +193,51 @@ fn default_layout_version() -> u32 {
 impl Config {
     /// Get remote URL by name
     pub fn get_remote_url(&self, remote_name: &str) -> Result<String, String> {
+        // `fetch_url()`, not `url`: a remote may carry a distinct fetch URL.
+        // In practice `set-url` writes both, so this is the same string today —
+        // but reading the field is what keeps it from becoming another setting
+        // that exists and is never consulted.
         self.remotes
             .get(remote_name)
-            .map(|r| r.url.clone())
+            .map(|r| r.fetch_url().to_owned())
             .ok_or_else(|| format!("Remote '{}' not found in configuration", remote_name))
     }
 
     /// Resolve a remote argument that may be either a name or a bare URL.
     /// If `remote_or_url` already starts with a URL scheme it is returned as-is;
     /// otherwise it is looked up as a remote name.
+    ///
+    /// This is the FETCH-side resolution. Pushes must use
+    /// [`Self::resolve_push_url`] — see the note there.
     pub fn resolve_remote_url(&self, remote_or_url: &str) -> Result<String, String> {
         if remote_or_url.starts_with("http://") || remote_or_url.starts_with("https://") {
             return Ok(remote_or_url.to_owned());
         }
         self.get_remote_url(remote_or_url)
+    }
+
+    /// Resolve the URL a PUSH to `remote_or_url` should go to.
+    ///
+    /// Separate from [`Self::resolve_remote_url`] because a remote may have a
+    /// distinct push URL — `mediagit remote set-url --push <url>` sets one, the
+    /// same way git's `remote.<name>.pushurl` does.
+    ///
+    /// **This did not exist, and `remote.push` was written by nothing that read
+    /// it.** `set-url --push` stored the value, printed "Changed push URL for
+    /// 'origin'", and `remote show` displayed it — while `push` resolved
+    /// through `resolve_remote_url` and went to `url` regardless. An operator
+    /// redirecting pushes at a new server got a success message, a config that
+    /// agreed with them, and pushes that kept going to the old one. Same family
+    /// as the dead-config removals in `config_version` 4, but worse: those did
+    /// nothing, and this one did something other than what it reported.
+    pub fn resolve_push_url(&self, remote_or_url: &str) -> Result<String, String> {
+        if remote_or_url.starts_with("http://") || remote_or_url.starts_with("https://") {
+            return Ok(remote_or_url.to_owned());
+        }
+        self.remotes
+            .get(remote_or_url)
+            .map(|r| r.push_url().to_owned())
+            .ok_or_else(|| format!("Remote '{}' not found in configuration", remote_or_url))
     }
 
     /// Add or update a remote
@@ -733,10 +764,6 @@ pub struct RemoteConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub push: Option<String>,
 
-    /// Default fetch flag
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_fetch: Option<bool>,
-
     /// JWT bearer token for this remote (client auth, M2). Lowest-precedence
     /// credential source — `MEDIAGIT_TOKEN`/`MEDIAGIT_API_KEY` env vars and
     /// the OS keychain are checked first (see `resolve_credentials` in
@@ -750,6 +777,17 @@ pub struct RemoteConfig {
     /// should be set per remote (`token` wins if both are).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+
+    /// Was `default_fetch`. Accepted, discarded, never written -- the same
+    /// contract as the `deprecated_*` fields on `Config`.
+    ///
+    /// `RemoteConfig::new` set it to `Some(true)` and it was not
+    /// `skip_serializing`, so **every config that has ever had a remote
+    /// carries `default_fetch = true`** -- and nothing ever read it. Removing
+    /// it without this absorber makes `RemoteConfig`'s `deny_unknown_fields`
+    /// reject all of them.
+    #[serde(default, rename = "default_fetch", skip_serializing)]
+    pub deprecated_default_fetch: Option<serde_json::Value>,
 }
 
 impl RemoteConfig {
@@ -759,9 +797,9 @@ impl RemoteConfig {
             url: url.into(),
             fetch: None,
             push: None,
-            default_fetch: Some(true),
             token: None,
             api_key: None,
+            deprecated_default_fetch: None,
         }
     }
 
@@ -1172,6 +1210,49 @@ base_path = "./data"
         config.save(dir.path()).unwrap();
         let reloaded = Config::load(dir.path()).await.unwrap();
         assert_eq!(reloaded.cdc_seed, SEED);
+    }
+
+    /// Every config that has ever had a remote carries `default_fetch = true`:
+    /// `RemoteConfig::new` set it and it was serialized. The field is deleted,
+    /// `RemoteConfig` is `deny_unknown_fields`, and without the absorber every
+    /// one of those configs would now be rejected. Same trap as the top-level
+    /// sections, one level down, and missed on the first pass because
+    /// `RemoteConfig` is a map VALUE rather than a named section.
+    #[tokio::test]
+    async fn a_remote_carrying_default_fetch_still_loads_and_is_cleaned() {
+        let dir = tempfile::tempdir().unwrap();
+        write_repo(
+            dir.path(),
+            r#"
+config_version = 4
+
+[storage]
+backend = "filesystem"
+base_path = "./data"
+
+[performance]
+
+[remotes.origin]
+url = "https://example.com/r.git"
+default_fetch = true
+"#,
+        );
+
+        let config = Config::load(dir.path())
+            .await
+            .expect("a remote with default_fetch must load, not fail to parse");
+        assert_eq!(
+            config.remotes.get("origin").map(|r| r.url.as_str()),
+            Some("https://example.com/r.git")
+        );
+
+        config.save(dir.path()).unwrap();
+        let rewritten = std::fs::read_to_string(dir.path().join(".mediagit/config.toml")).unwrap();
+        assert!(
+            !rewritten.contains("default_fetch"),
+            "it must be dropped on the next write, got:
+{rewritten}"
+        );
     }
 
     /// `custom` is what the rejection message tells users to reach for, so it

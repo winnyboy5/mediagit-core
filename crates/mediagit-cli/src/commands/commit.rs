@@ -235,7 +235,8 @@ impl CommitCmd {
             .context("Failed to write tree object")?;
 
         // Create commit signature
-        // Priority: --author CLI flag > MEDIAGIT_AUTHOR_* env vars > config.toml [author] > $USER > defaults
+        // Priority: --author CLI flag > MEDIAGIT_AUTHOR_NAME / MEDIAGIT_AUTHOR_EMAIL
+        // > config.toml [author] > $USER > defaults
         let config = mediagit_config::Config::load(&repo_root)
             .await
             .unwrap_or_default();
@@ -464,8 +465,13 @@ fn edit_commit_message() -> Result<String> {
             }
         });
 
-    let tmp_path =
-        std::env::temp_dir().join(format!("MEDIAGIT_COMMIT_EDITMSG_{}", std::process::id()));
+    let tmp_path = std::env::temp_dir().join(
+        // Lowercase prefix on purpose: an all-caps `MEDIAGIT_...` token in source
+        // reads as an environment variable to the docs gate, and this is a temp
+        // FILE name, not a knob. Naming it like one put a phantom variable on
+        // the undocumented-knob list.
+        format!("mediagit-COMMIT_EDITMSG-{}", std::process::id()),
+    );
     std::fs::write(
         &tmp_path,
         "\n# Please enter the commit message for your changes. Lines starting\n\
