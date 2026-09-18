@@ -30,6 +30,16 @@ pub enum LogFormat {
     #[default]
     Pretty,
 
+    /// `tracing-subscriber`'s own default single-line format.
+    ///
+    /// Added 2026-09-18 when the server was wired to this crate. The server
+    /// had been building a bare `fmt::layer()`, which is this format and is
+    /// **not** `Pretty` — `Pretty` is the multi-line `.pretty()` renderer.
+    /// Without this variant, "wire the server up" would have silently changed
+    /// the shape of every line the QA harness parses out of the server log,
+    /// which is a behaviour change dressed as a refactor.
+    Full,
+
     /// Compact single-line format
     Compact,
 
@@ -42,10 +52,11 @@ impl LogFormat {
     pub fn parse(s: &str) -> Result<Self, LogError> {
         match s.to_lowercase().as_str() {
             "pretty" => Ok(LogFormat::Pretty),
+            "full" => Ok(LogFormat::Full),
             "compact" => Ok(LogFormat::Compact),
             "json" => Ok(LogFormat::Json),
             _ => Err(LogError::InvalidLogLevel(format!(
-                "Unknown format: {}. Expected one of: pretty, compact, json",
+                "Unknown format: {}. Expected one of: pretty, full, compact, json",
                 s
             ))),
         }
@@ -166,9 +177,29 @@ mod tests {
     #[test]
     fn test_log_format_parsing() {
         assert_eq!(LogFormat::parse("pretty").unwrap(), LogFormat::Pretty);
+        assert_eq!(LogFormat::parse("full").unwrap(), LogFormat::Full);
         assert_eq!(LogFormat::parse("compact").unwrap(), LogFormat::Compact);
         assert_eq!(LogFormat::parse("json").unwrap(), LogFormat::Json);
         assert!(LogFormat::parse("invalid").is_err());
+    }
+
+    /// `Full` and `Pretty` are different renderers and must stay distinct.
+    /// Collapsing them would silently reformat every `mediagit-server` log
+    /// line, which is what `Full` was added to prevent.
+    #[test]
+    fn full_and_pretty_are_not_the_same_format() {
+        assert_ne!(LogFormat::Full, LogFormat::Pretty);
+        assert_ne!(LogFormat::parse("full").unwrap(), LogFormat::Pretty);
+    }
+
+    /// The error has to name the accepted set, because the caller is usually
+    /// someone who typed `jsn` into a config file.
+    #[test]
+    fn an_unknown_format_error_lists_what_is_accepted() {
+        let msg = LogFormat::parse("jsn").unwrap_err().to_string();
+        for expected in ["pretty", "full", "compact", "json"] {
+            assert!(msg.contains(expected), "{expected} missing from: {msg}");
+        }
     }
 
     #[test]

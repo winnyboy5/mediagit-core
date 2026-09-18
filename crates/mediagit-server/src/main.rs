@@ -5,7 +5,6 @@ use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use mediagit_server::{
     AppState, RateLimitConfig, ServerConfig, create_rate_limited_router, create_router,
@@ -127,18 +126,36 @@ async fn main() -> Result<()> {
         };
     }
 
-    // Setup tracing
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                "mediagit_server=debug,tower_http=debug,mediagit_storage=warn".into()
-            }),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    // Config BEFORE tracing, because the log format comes from the config.
+    //
+    // D4: this used to be a bare `fmt::layer()` built before the config was
+    // read, and the server had no dependency on `mediagit-observability` at
+    // all. So the crate's `LogFormat::Json` — written, tested, and shipped in
+    // the workspace — was unreachable from either binary, and the server that
+    // is the whole point of structured logging emitted plain text only.
+    //
+    // `load_reporting` hands back the "no config file" warning rather than
+    // emitting it, because a `tracing::warn!` here would land before the
+    // subscriber exists and be dropped. It is logged a few lines down.
+    let (mut config, config_warning) = ServerConfig::load_reporting(&args.config)?;
 
-    // Load configuration from file (use path from --config, default is "mediagit-server.toml")
-    let mut config = ServerConfig::load(&args.config)?;
+    let log_format = config.resolve_log_format()?;
+    let log_config = mediagit_observability::LogConfig::new()
+        .with_format(log_format)
+        // Unchanged from the filter this server has always used. `RUST_LOG`
+        // still wins: `get_effective_level` only falls back to the env var
+        // when no level is set, so the level is passed only when RUST_LOG is
+        // absent.
+        .with_level(std::env::var("RUST_LOG").unwrap_or_else(|_| {
+            "mediagit_server=debug,tower_http=debug,mediagit_storage=warn".into()
+        }))
+        .with_output(mediagit_observability::LogOutput::Stdout);
+    mediagit_observability::init_tracing_with_config(log_config)
+        .map_err(|e| anyhow::anyhow!("failed to initialize logging: {e}"))?;
+
+    if let Some(w) = config_warning {
+        tracing::warn!("{w}");
+    }
 
     // Refuse to serve with at-rest encryption switched on but no usable master
     // key. Deferring this to the first escrow request would mean the operator

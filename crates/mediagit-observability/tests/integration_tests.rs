@@ -5,8 +5,20 @@
 //!
 //! Tests the logging system with different configurations and output formats.
 //!
-//! NOTE: We test configuration building but not global subscriber initialization
-//! because the global subscriber can only be set once per process lifetime.
+//! NOTE: We test configuration building but not global subscriber
+//! initialization, because the global subscriber can only be set once per
+//! process lifetime.
+//!
+//! **That note is also this file's blind spot, and it cost something.** Every
+//! test below asserts the shape of a `LogConfig`; none produces a log line. So
+//! when it turned out (2026-09-18) that neither shipping binary could select
+//! `LogFormat::Json` — the CLI hardcoded `Pretty`, the server did not depend on
+//! this crate at all — every test here stayed green throughout. A test that a
+//! variant EXISTS cannot fail when nothing can reach it.
+//!
+//! The end-to-end check lives where it can actually run: the real binary is
+//! executed and its output parsed, in
+//! `mediagit-cli/tests/cli_log_output_format_test.rs`.
 
 use mediagit_observability::{LogConfig, LogFormat, LogOutput};
 

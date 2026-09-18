@@ -182,9 +182,20 @@ sequenceDiagram
 - **Metrics**: Operation latency, object size, cache hit rate, error rate
 
 ### Logging
-- **Crate**: `mediagit-observability`
+- **Crate**: `mediagit-observability`, used by both binaries
 - **Levels**: ERROR, WARN, INFO, DEBUG, TRACE
-- **Format**: Structured JSON logging for production
+- **Formats**: `full` (the server default), `pretty` (the CLI default),
+  `compact`, `json`
+- **Selecting one**: `log_format` in `mediagit-server.toml`, or
+  `mediagit --log-format json`, or `MEDIAGIT_LOG_FORMAT` for either.
+  An unrecognised value is an error, not a silent fallback.
+- **Filter**: `RUST_LOG` on the server, `MEDIAGIT_LOG` (then `RUST_LOG`)
+  on the CLI. The filter and the format are separate settings.
+
+> Until 2026-09-18 this said "Structured JSON logging for production" and
+> that was not true of either binary: the server did not depend on the
+> crate at all and the CLI hardcoded `pretty`, so the JSON renderer was
+> unreachable. It is now selectable in both.
 
 ### Health Checks
 - `mediagit fsck`: Repository integrity verification

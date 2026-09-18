@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — JSON and compact logging, reachable at last
+
+`mediagit-observability` has shipped a working, tested JSON log renderer for as
+long as it has existed, and **neither binary could select it**. The server had
+no dependency on the crate at all and built a bare `tracing_subscriber`
+`fmt::layer()`; the CLI depended on it and hardcoded `LogFormat::Pretty`.
+
+- **Server**: `log_format` in `mediagit-server.toml` — `"full"` (default),
+  `"pretty"`, `"compact"` or `"json"`.
+- **CLI**: `mediagit --log-format json ...` — `pretty` remains the default.
+- **Either**: `MEDIAGIT_LOG_FORMAT`. The CLI flag wins over it.
+
+An unrecognised value is an error, not a silent fallback: a script that asked
+for JSON and quietly got pretty produces a log nothing can parse, and finds out
+somewhere else entirely.
+
+**Default output is unchanged on both binaries.** The server's default is
+`full` — tracing's default single-line format, which is what `fmt::layer()`
+produced — and *not* `pretty`, which is the multi-line renderer. A
+`LogFormat::Full` variant was added for exactly this reason, so that making
+JSON reachable could not silently reformat every line the QA harness parses.
+
+`RUST_LOG` (server) and `MEDIAGIT_LOG` (CLI) still control the *filter* and are
+unaffected. `RUST_LOG_FORMAT`, documented in three places, was read by no code
+at any point and is gone from the docs.
+
+### Removed — `mediagit-observability::macros`
+
+`log_info!`, `log_debug!`, `log_warn!` and `log_error!` had zero callers in the
+workspace and each was an exact alias of the `tracing::` macro of the same name,
+including the "structured fields" arm that expanded to syntax `tracing` already
+provides.
+
 ### Changed — BREAKING: `config_version` 4 removes the dead-config family, and unknown keys are now rejected
 
 Twenty-four keys in `.mediagit/config.toml` were parsed, validated, and read by

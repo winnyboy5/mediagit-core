@@ -195,8 +195,11 @@ MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurre
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `RUST_LOG` | Log filter directive (e.g., `mediagit=debug`, `info`) | `info` |
-| `RUST_LOG_FORMAT` | Log output format: `json` or `text` | `json` |
+| `RUST_LOG` | Log **filter** for the server (e.g. `mediagit=debug`). The CLI prefers `MEDIAGIT_LOG`. | `mediagit_server=debug,tower_http=debug,mediagit_storage=warn` |
+| `MEDIAGIT_LOG_FORMAT` | Log **output format** for either binary: `full`, `pretty`, `compact` or `json`. Overrides `log_format` in `mediagit-server.toml`; the CLI's `--log-format` flag wins over it. An unrecognised value is an error. | `full` (server), `pretty` (CLI) |
+
+> `RUST_LOG_FORMAT` was documented here and in two other places and was
+> read by no code at any point. Use `MEDIAGIT_LOG_FORMAT`.
 
 ### Log Filter Examples
 
@@ -210,8 +213,9 @@ export RUST_LOG=mediagit=debug,info
 # Show trace for a specific crate
 export RUST_LOG=mediagit_versioning=trace
 
-# Human-readable logs (development)
-export RUST_LOG_FORMAT=text mediagit add file.psd
+# Machine-readable logs, for a build agent or render-farm job
+mediagit --log-format json add file.psd
+MEDIAGIT_LOG_FORMAT=json mediagit add file.psd   # same switch, via the environment
 ```
 
 ## Cargo / Build (Development)

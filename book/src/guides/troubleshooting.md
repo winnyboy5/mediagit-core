@@ -354,8 +354,8 @@ RUST_LOG=mediagit=debug mediagit add file.psd
 # Specific crate
 RUST_LOG=mediagit_versioning=trace mediagit add file.psd
 
-# Human-readable format (instead of JSON)
-RUST_LOG_FORMAT=text RUST_LOG=mediagit=debug mediagit status
+# Machine-readable logs, for collection rather than reading
+MEDIAGIT_LOG=debug mediagit --log-format json status
 ```
 
 ---
