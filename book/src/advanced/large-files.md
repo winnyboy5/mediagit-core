@@ -86,19 +86,23 @@ Each worker holds one uncompressed chunk in memory. Chunk sizes are approximatel
 
 With `--jobs 16` and 32 MB average chunk size, expect ~512 MB peak memory during add.
 
-Tune the object cache separately from worker memory:
+Tune the object cache separately from worker memory. It is an **environment
+knob, not a config key** — `[performance.cache]` was removed in
+`config_version` 4 because nothing ever read it:
 
-```toml
-[performance.cache]
-max_size = 1073741824  # 1 GB — for repositories with many reads
+```bash
+export MEDIAGIT_ODB_CACHE_MB=1024        # 1 GiB — repositories with many reads
+export MEDIAGIT_CHUNK_CACHE_BYTES=536870912   # 512 MiB chunk read cache
 ```
 
 Reduce if your system has less than 8 GB RAM:
 
-```toml
-[performance.cache]
-max_size = 268435456  # 256 MB
+```bash
+export MEDIAGIT_ODB_CACHE_MB=256
 ```
+
+Defaults are 512 MiB (`MEDIAGIT_ODB_CACHE_MB`) and 256 MiB
+(`MEDIAGIT_CHUNK_CACHE_BYTES`). See [Environment Variables](../reference/environment.md).
 
 ---
 

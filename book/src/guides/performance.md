@@ -114,19 +114,23 @@ removed in v0.4.0 because nothing read them.
 
 ## Memory Usage
 
-Cache settings control how much object data MediaGit keeps in memory:
+Cache size is controlled by **environment variables, not config keys**. The
+`[performance.cache]` table was removed in `config_version` 4 — it was parsed
+and validated, and no cache ever read it:
 
-```toml
-[performance.cache]
-enabled = true
-max_size = 1073741824  # 1 GB (for large repos)
-ttl = 7200             # 2 hours
+```bash
+export MEDIAGIT_ODB_CACHE_MB=1024             # 1 GiB, for large repos
+export MEDIAGIT_CHUNK_CACHE_BYTES=536870912   # 512 MiB chunk read cache
 ```
 
-For workstations with < 8 GB RAM, reduce to 256 MB:
-```toml
-max_size = 268435456  # 256 MB
+For workstations with < 8 GB RAM:
+
+```bash
+export MEDIAGIT_ODB_CACHE_MB=256
 ```
+
+Defaults: 512 MiB and 256 MiB respectively. There is no TTL setting — neither
+cache expires by time; both evict by size.
 
 ## Clone Behaviour
 

@@ -41,8 +41,8 @@ config file (`mediagit-server/src/handlers/mod.rs:610-638`,
 `mediagit-cli/src/repo.rs:655-668`). The AWS SDK credential chain does exist in
 `mediagit-storage/src/b2_spaces_driver.rs`, but `B2SpacesDriver` is only ever
 constructed by the Backblaze/Spaces wrapper, so nothing on the AWS path goes
-through it. (That file was `s3.rs` until 2026-09-18; the name was the whole
-reason this kept needing explaining.)
+through it. (That module carried an S3 name until 2026-09-18; the name was
+the whole reason this kept needing explaining.)
 
 Only GCS resolves credentials outside the config file
 (`mediagit-cli/src/repo.rs:745-749`).

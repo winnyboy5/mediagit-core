@@ -229,7 +229,7 @@ graph TB
 `MinIOBackend` serves **both** real AWS S3 and MinIO — the server builds its
 `aws` backend from a `MinIOConfig` pointed at
 `https://s3.<region>.amazonaws.com`. `B2SpacesDriver` (`b2_spaces_driver.rs`,
-named `S3Backend` in `s3.rs` until 2026-09-18) is a second, independent
+named `S3Backend`, in an S3-named module, until 2026-09-18) is a second, independent
 S3-compatible implementation reachable only through `B2SpacesBackend`.
 
 ### Backend Trait

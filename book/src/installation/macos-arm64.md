@@ -98,15 +98,20 @@ MediaGit-Core leverages Apple Silicon features:
 [performance]
 upload_concurrency = 32
 download_concurrency = 24
-buffer_size = 1048576        # bytes — 1 MiB
-
-[performance.cache]
-enabled = true
-max_size = 2147483648        # bytes — 2 GiB, leveraging unified memory
+pack_workers = 8
 ```
 
-Cache and buffer sizes are raw **bytes**. Unrecognised keys are silently
-discarded, so `"2GB"` would be dropped without any error.
+```bash
+export MEDIAGIT_ODB_CACHE_MB=2048             # 2 GiB, leveraging unified memory
+export MEDIAGIT_CHUNK_CACHE_BYTES=536870912   # 512 MiB
+```
+
+Those three keys are the whole of `[performance]`. Cache sizing is an
+environment knob: `[performance.cache]` and `buffer_size` were removed in
+`config_version` 4 because nothing read them.
+
+**Unrecognised keys are now rejected**, not silently discarded — `"2GB"` in
+place of a byte count, or a mistyped key, fails the command and names it.
 
 ## System Requirements
 
