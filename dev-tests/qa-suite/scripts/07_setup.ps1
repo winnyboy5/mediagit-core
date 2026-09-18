@@ -107,8 +107,32 @@ try {
   $bareInit = Invoke-MG $null @("init", "--bare", $bareRepo) $Phase
   $srv = Start-FromConfig $cfgOn $baseUrl "setup-on"
   $repoUrl = "$baseUrl/$repoName"
-  Rec "S1-wizard-auth-on" (($initExit -eq 0) -and $hasSecret -and $regClosed -and $rateOn -and ($bareInit.Exit -eq 0) -and [bool]$srv) `
-    "init-exit=$initExit jwt_secret=$hasSecret reg-closed=$regClosed rate-on=$rateOn booted=$([bool]$srv)"
+
+  # EFFECT, not text. `$regClosed` above only proves the wizard WROTE the line.
+  # That is precisely the gate AU-3 walked through: `allow_open_registration`
+  # was wired to nothing for months, the endpoint stayed open, and this
+  # assertion was green the entire time -- because a written key and an
+  # honoured key are indistinguishable from the file. It would have passed
+  # identically against a build that deleted the field.
+  #
+  # So ask the booted server. Anonymous registration against the wizard's own
+  # config must be refused.
+  $regClosedEffect = $false
+  $regClosedCode = 0
+  if ($srv) {
+    try {
+      $rb = @{ username = "qa-intruder"; email = "qa-intruder@qa.local"; password = "copper-valley-signal-77" } | ConvertTo-Json
+      Invoke-RestMethod -Method Post -Uri "$baseUrl/auth/register" -ContentType "application/json" -Body $rb | Out-Null
+      # A 2xx here means the endpoint is OPEN on a config that says closed.
+      $regClosedCode = 200
+    } catch {
+      try { $regClosedCode = [int]$_.Exception.Response.StatusCode } catch { $regClosedCode = -1 }
+    }
+    $regClosedEffect = ($regClosedCode -eq 403)
+  }
+
+  Rec "S1-wizard-auth-on" (($initExit -eq 0) -and $hasSecret -and $regClosed -and $regClosedEffect -and $rateOn -and ($bareInit.Exit -eq 0) -and [bool]$srv) `
+    "init-exit=$initExit jwt_secret=$hasSecret reg-closed-written=$regClosed reg-closed-enforced=$regClosedEffect($regClosedCode want 403) rate-on=$rateOn booted=$([bool]$srv)"
 
   # ---- S2-login-no-env (the point of the whole cycle) ----
   # No MEDIAGIT_TOKEN, no config token: auth login must store the credential and
