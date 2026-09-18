@@ -107,6 +107,22 @@ pub struct ServerConfig {
     #[serde(default = "default_allow_open_registration")]
     pub allow_open_registration: bool,
 
+    /// Log output format: `"full"` (default), `"pretty"`, `"compact"` or `"json"`.
+    ///
+    /// D4: the `Json` variant has existed and been tested in
+    /// `mediagit-observability` since that crate was written, and **no shipping
+    /// binary could select it** — the server did not depend on the crate at all
+    /// and built a bare `fmt::layer()`, while the CLI depended on it and
+    /// hardcoded `LogFormat::Pretty`. A maintained, tested, unreachable code
+    /// path is a standing claim that is not true, and structured logs are the
+    /// difference between grepping a transfer incident and querying it.
+    ///
+    /// `MEDIAGIT_LOG_FORMAT` overrides this, so the format can be changed
+    /// without editing a config file mid-incident. `RUST_LOG` still controls
+    /// the filter and is unaffected.
+    #[serde(default = "default_log_format")]
+    pub log_format: String,
+
     /// TTL (seconds) for presigned PUT URLs issued to clients for direct-to-bucket uploads.
     /// 12 hours by default; may need lowering if credentials use short-lived STS sessions.
     #[serde(default = "default_presigned_url_ttl")]
@@ -216,6 +232,17 @@ pub(crate) fn default_rate_limit_burst() -> u32 {
     2000
 }
 
+fn default_log_format() -> String {
+    // `full`, NOT `pretty`. This server built a bare `tracing_subscriber`
+    // `fmt::layer()`, which is tracing's default single-line format;
+    // `LogFormat::Pretty` is the multi-line `.pretty()` renderer and looks
+    // nothing like it. `LogFormat::Full` was added to this crate's dependency
+    // for exactly this reason, so that making `json` REACHABLE could not
+    // silently change the format every existing log pipeline, drill script and
+    // QA log parser already depends on.
+    "full".to_string()
+}
+
 fn default_allow_open_registration() -> bool {
     // AU-3: closed by default.
     //
@@ -272,6 +299,7 @@ impl Default for ServerConfig {
             enable_auth: false,
             jwt_secret: None,
             allow_open_registration: default_allow_open_registration(),
+            log_format: default_log_format(),
             presigned_url_ttl_seconds: default_presigned_url_ttl(),
             enable_rate_limiting: false,
             rate_limit_rps: default_rate_limit_rps(),
@@ -290,32 +318,81 @@ impl ServerConfig {
     /// is missing, return an error instead of silently falling back — this prevents
     /// operators from thinking their S3/TLS/auth config is wired when it isn't.
     pub fn load(config_path: &str) -> Result<Self> {
+        let (config, warning) = Self::load_reporting(config_path)?;
+        if let Some(w) = warning {
+            tracing::warn!("{w}");
+        }
+        Ok(config)
+    }
+
+    /// [`Self::load`], but handing back the "no config file" warning instead of
+    /// emitting it.
+    ///
+    /// `main` needs this because the log FORMAT now comes from the config, so
+    /// the config has to be read before the tracing subscriber exists — and a
+    /// `tracing::warn!` with no subscriber installed goes nowhere. Returning
+    /// the message lets the caller log it once the subscriber is up, rather
+    /// than duplicating the "does the default path exist" condition and letting
+    /// the two drift.
+    pub fn load_reporting(config_path: &str) -> Result<(Self, Option<String>)> {
         let path = PathBuf::from(config_path);
         let is_default = config_path == "mediagit-server.toml";
 
         if path.exists() {
             let content = std::fs::read_to_string(&path).context("Failed to read config file")?;
 
-            toml::from_str(&content).with_context(|| {
+            let config: Self = toml::from_str(&content).with_context(|| {
                 format!(
                     "Failed to parse config file {} (unknown keys are rejected; \
                      check for typos or deprecated sections)",
                     path.display()
                 )
-            })
+            })?;
+            Ok((config, None))
         } else if is_default {
-            tracing::warn!(
-                "No config file at '{}'; using built-in defaults \
-                 (port=3000, host=127.0.0.1, auth=off, rate_limit=off)",
-                path.display()
-            );
-            Ok(Self::default())
+            Ok((
+                Self::default(),
+                Some(format!(
+                    "No config file at '{}'; using built-in defaults \
+                     (port=3000, host=127.0.0.1, auth=off, rate_limit=off)",
+                    path.display()
+                )),
+            ))
         } else {
             anyhow::bail!(
                 "config file not found: {} (specified via --config)",
                 path.display()
             )
         }
+    }
+
+    /// Resolve the log format, with `MEDIAGIT_LOG_FORMAT` overriding the config
+    /// file so it can be changed without editing a file mid-incident.
+    ///
+    /// An unrecognised value is an ERROR, not a silent fallback to `pretty`.
+    /// Falling back would make `log_format = "jsn"` produce a working server
+    /// whose logs are quietly in the wrong format for whatever is parsing them
+    /// — the same shape as every defect this cycle has been spent on.
+    pub fn resolve_log_format(&self) -> Result<mediagit_observability::LogFormat> {
+        self.resolve_log_format_with(std::env::var("MEDIAGIT_LOG_FORMAT").ok())
+    }
+
+    /// [`Self::resolve_log_format`] with the environment passed in.
+    ///
+    /// Split out so the precedence can be tested without mutating process
+    /// environment: this crate denies `unsafe`, `std::env::set_var` needs it in
+    /// edition 2024, and tests share a process — an env-mutating test is a
+    /// test that fails depending on what ran beside it.
+    pub fn resolve_log_format_with(
+        &self,
+        env_override: Option<String>,
+    ) -> Result<mediagit_observability::LogFormat> {
+        let (raw, source) = match env_override {
+            Some(v) if !v.trim().is_empty() => (v, "MEDIAGIT_LOG_FORMAT"),
+            _ => (self.log_format.clone(), "log_format in the config file"),
+        };
+        mediagit_observability::LogFormat::parse(raw.trim())
+            .with_context(|| format!("invalid {source}: {raw:?}"))
     }
 
     /// Get the full bind address
@@ -549,5 +626,71 @@ mod tests {
             msg.contains("1.2") && msg.contains("1.3"),
             "error should name accepted values: {msg}"
         );
+    }
+
+    // ---- D4: log format ------------------------------------------------
+
+    /// The load-bearing half of wiring `mediagit-observability` in.
+    ///
+    /// This server built a bare `tracing_subscriber::fmt::layer()`, which is
+    /// tracing's `full` format. `LogFormat::Pretty` is the multi-line
+    /// `.pretty()` renderer and looks nothing like it, so defaulting to
+    /// `Pretty` would have changed the shape of every line the QA harness
+    /// parses out of a campaign log — a behaviour change dressed as a
+    /// refactor. `LogFormat::Full` exists for this.
+    #[test]
+    fn the_default_log_format_is_what_the_server_already_emitted() {
+        let cfg = ServerConfig::default();
+        assert_eq!(cfg.log_format, "full");
+        assert_eq!(
+            cfg.resolve_log_format_with(None).unwrap(),
+            mediagit_observability::LogFormat::Full,
+            "defaulting to Pretty would silently reformat every server log line"
+        );
+    }
+
+    /// A config value must actually reach the subscriber. `log_format` joining
+    /// the dead-config family on the day it was added would be its own joke.
+    #[test]
+    fn the_config_value_selects_the_format() {
+        let cfg = ServerConfig {
+            log_format: "json".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.resolve_log_format_with(None).unwrap(),
+            mediagit_observability::LogFormat::Json
+        );
+    }
+
+    /// An unrecognised value is refused, not quietly treated as the default.
+    /// `log_format = "jsn"` must not produce a running server whose logs are in
+    /// the wrong format for whatever is parsing them.
+    #[test]
+    fn an_unknown_log_format_is_a_hard_error() {
+        let cfg = ServerConfig {
+            log_format: "jsn".to_string(),
+            ..Default::default()
+        };
+        let msg = cfg
+            .resolve_log_format_with(None)
+            .expect_err("an unknown format must be refused")
+            .to_string();
+        assert!(msg.contains("jsn"), "the error must name the value: {msg}");
+    }
+
+    /// `load_reporting` hands the "no config file" warning back instead of
+    /// logging it, because `main` now reads the config BEFORE the subscriber
+    /// exists. If it logged instead, that warning would be emitted into a
+    /// process with no subscriber installed and silently vanish.
+    #[test]
+    fn a_missing_default_config_reports_a_warning_rather_than_logging_it() {
+        let (config, warning) =
+            ServerConfig::load_reporting("mediagit-server.toml").expect("defaults are fine");
+        if !std::path::Path::new("mediagit-server.toml").exists() {
+            let w = warning.expect("a missing default config must report a warning");
+            assert!(w.contains("using built-in defaults"), "{w}");
+            assert_eq!(config.port, default_port());
+        }
     }
 }

@@ -30,7 +30,13 @@
 
 pub mod config;
 pub mod initialization;
-pub mod macros;
+
+// `macros.rs` was here: `log_info!`, `log_debug!`, `log_warn!`, `log_error!`.
+// Zero callers anywhere in the workspace, and each was an exact alias of the
+// `tracing::` macro of the same name -- including the "structured fields" arm,
+// which expanded to the field syntax `tracing` already provides natively.
+// Deleted 2026-09-18 rather than kept as a wrapper nobody used over a macro
+// everybody used directly.
 
 pub use config::{LogConfig, LogFormat, LogOutput};
 pub use initialization::{init_tracing, init_tracing_with_config};

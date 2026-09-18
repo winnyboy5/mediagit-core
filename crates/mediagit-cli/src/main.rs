@@ -51,6 +51,15 @@ struct Cli {
     /// Repository path
     #[arg(short = 'C', long, global = true, value_name = "PATH")]
     repository: Option<String>,
+
+    /// Log output format (pretty|full|compact|json)
+    ///
+    /// D4: this was hardcoded to `pretty`, so `mediagit-observability`'s JSON
+    /// renderer -- written, tested and shipped in this workspace -- could not be
+    /// selected by either binary. `MEDIAGIT_LOG_FORMAT` sets the same thing.
+    /// `MEDIAGIT_LOG` / `RUST_LOG` still control the filter, not the format.
+    #[arg(long, global = true, value_name = "FORMAT")]
+    log_format: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -510,7 +519,27 @@ async fn async_main(cli: Cli) -> Result<()> {
         // Deliberately NOT a second subscriber: installing one here made a
         // later `init_tracing_with_config` panic with "a global default trace
         // dispatcher has already been set". One subscriber, one place.
-        let format = LogFormat::Pretty; // Pretty format for CLI output
+        // `pretty` stays the default: a human at a terminal is the CLI's
+        // normal caller. `--log-format json` is for the other one -- a build
+        // agent or render-farm job whose output is being collected.
+        // The flag wins over the env var, matching how `MEDIAGIT_LOG` is
+        // resolved a few lines down. Read directly rather than via clap's
+        // `env` feature, which this crate does not enable.
+        let requested = cli.log_format.clone().or_else(|| {
+            std::env::var("MEDIAGIT_LOG_FORMAT")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        });
+        let format = match requested.as_deref() {
+            Some(raw) => LogFormat::parse(raw.trim()).unwrap_or_else(|e| {
+                // Not a silent fallback to pretty: a script that asked for
+                // json and quietly got pretty produces a log nothing can
+                // parse, and finds out downstream.
+                eprintln!("error: {e}");
+                std::process::exit(2);
+            }),
+            None => LogFormat::Pretty,
+        };
         let mut config = mediagit_observability::LogConfig::new().with_format(format);
         if let Some(filter) = tracing_filter_from_env() {
             config = config.with_level(&filter);

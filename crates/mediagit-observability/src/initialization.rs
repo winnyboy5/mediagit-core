@@ -91,6 +91,18 @@ pub fn init_tracing_with_config(config: LogConfig) -> Result<(), LogError> {
                 registry.with(layer.without_time().with_ansi(false)).init();
             }
         }
+        LogFormat::Full => {
+            // Deliberately the bare `fmt::layer()` with nothing configured on
+            // it. This variant exists to reproduce, byte for byte, what
+            // `mediagit-server` emitted before it was wired to this crate, so
+            // that wiring it up could not change the shape of a single log
+            // line. Applying `with_target`/`with_thread_ids`/timer settings
+            // here would defeat that; the other variants are where the knobs
+            // apply.
+            registry
+                .with(fmt::layer().with_writer(get_writer(&config.output)))
+                .init();
+        }
         LogFormat::Compact => {
             let layer = fmt::layer()
                 .with_writer(get_writer(&config.output))

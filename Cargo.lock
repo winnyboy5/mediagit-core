@@ -3559,6 +3559,7 @@ dependencies = [
  "mediagit-compression",
  "mediagit-config",
  "mediagit-metrics",
+ "mediagit-observability",
  "mediagit-protocol",
  "mediagit-security",
  "mediagit-storage",

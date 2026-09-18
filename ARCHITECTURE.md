@@ -67,7 +67,7 @@ graph TD
 | **mediagit-server** | HTTP server | Axum routes, `handlers/` (submodule), auth middleware, rate limiting, security |
 | **mediagit-security** | Security layer | Encryption (XAES-256-GCM), Auth (JWT + API keys), TLS, audit, KDF |
 | **mediagit-config** | Configuration | TOML config file management |
-| **mediagit-observability** | Logging/tracing | Structured tracing with env-filter |
+| **mediagit-observability** | Logging/tracing | `full`/`pretty`/`compact`/`json` renderers behind one `init_tracing_with_config`; used by both binaries |
 | **mediagit-metrics** | Prometheus metrics | Operation stats, dedup ratios |
 | **mediagit-test-utils** | Test utilities | Shared test helpers |
 
@@ -92,6 +92,7 @@ graph TD
     SRV --> CFG
     SRV --> SEC
     SRV --> MET["mediagit-metrics"]
+    SRV --> OBS
 
     PROTO --> VER
     VER --> STORE
