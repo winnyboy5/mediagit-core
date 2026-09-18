@@ -2,35 +2,49 @@
 // Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 #![allow(missing_docs)]
-//! Configuration management system for MediaGit Core
+//! The client's per-repository `.mediagit/config.toml`.
 //!
-//! This crate provides a comprehensive configuration management system with support for
-//! multiple formats (TOML, YAML, JSON), environment variable overrides, validation,
-//! and migration capabilities.
+//! **Scope, stated up front because getting it wrong is what produced four
+//! separate dead-config incidents in this crate:** this type is the *client's*
+//! per-repo config, read by `mediagit-cli` and, for `performance.pack_workers`,
+//! by the server when it opens a repo. It is **not** the server's own
+//! configuration — that is `mediagit_server::ServerConfig`, loaded from
+//! `mediagit-server.toml`, and nothing in this crate reaches it. A setting that
+//! belongs to the server does not work here no matter how plausibly it is
+//! named. See the tombstone on [`Config`].
 //!
-//! # Features
+//! # What this crate does
 //!
-//! - Multi-format configuration support (TOML, YAML, JSON)
-//! - Environment variable overrides with `MEDIAGIT_` prefix
-//! - Comprehensive configuration validation with detailed error messages
-//! - Configuration migration framework for version upgrades
-//! - Support for storage backends (filesystem, S3, Azure, GCS, multi-backend)
-//! - Performance tuning options (caching, connection pooling, timeouts)
-//! - Security settings (TLS, encryption, rate limiting, CORS)
-//! - Observability configuration (logging, metrics, tracing)
+//! - Parses TOML, YAML and JSON into one [`Config`] type
+//! - **Rejects unrecognised keys** rather than discarding them silently; put
+//!   anything the schema does not define under `[custom]`
+//! - Validates storage settings — bucket naming rules, octal file permissions,
+//!   Azure credential shape
+//! - Migrates older `config_version`s forward, with a backup, on load
+//! - Describes storage backends: filesystem, S3, Azure, GCS, multi-backend
+//!
+//! # What it does not do
+//!
+//! - **No environment-variable overrides.** This crate reads no environment
+//!   variables at all. `MEDIAGIT_UPLOAD_CONCURRENCY` and friends are read by
+//!   the consumers of these fields, which treat a `None` here as "fall back to
+//!   the env var, then to an internal default".
+//! - No caching, connection-pool, timeout, TLS, CORS, rate-limit or logging
+//!   settings. Those either live in `ServerConfig`, are env knobs in
+//!   `mediagit-storage`, or do not exist.
 //!
 //! # Example
 //!
 //! ```no_run
-//! use mediagit_config::ConfigLoader;
+//! use mediagit_config::Config;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let loader = ConfigLoader::new();
-//!     let config = loader.load_file("config.toml").await?;
+//!     // Migrates and validates on the way in.
+//!     let config = Config::load(".").await?;
 //!
-//!     println!("Loaded configuration for: {}", config.app.name);
-//!     println!("Running on: {}:{}", config.app.host, config.app.port);
+//!     println!("storage: {:?}", config.storage);
+//!     println!("remotes: {:?}", config.list_remotes());
 //!
 //!     Ok(())
 //! }
@@ -47,7 +61,7 @@ pub use error::{ConfigError, ConfigResult};
 pub use loader::{ConfigFormat, ConfigLoader};
 pub use migration::{
     CONFIG_VERSION, ConfigMigration, MigrationManager, MigrationV0ToV1, MigrationV1ToV2,
-    MigrationV2ToV3,
+    MigrationV2ToV3, MigrationV3ToV4,
 };
 pub use schema::*;
 pub use validation::Validator;
@@ -60,35 +74,21 @@ mod tests {
     #[test]
     fn test_default_config_creation() {
         let config = Config::default();
-        assert_eq!(config.app.name, "mediagit");
-        assert_eq!(config.app.port, 8080);
+        assert!(matches!(config.storage, StorageConfig::FileSystem(_)));
+        assert_eq!(config.config_version, CONFIG_VERSION);
     }
 
     #[test]
     fn test_config_serialization() {
         let config = Config::default();
         let json = serde_json::to_string_pretty(&config).unwrap();
-        assert!(json.contains("mediagit"));
+        assert!(json.contains("filesystem"));
     }
 
     #[test]
     fn test_config_validation() {
         let config = Config::default();
         assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_valid_app_port() {
-        let config = Config::default();
-        // port is u16, so it defaults to 8080 which is valid
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_invalid_log_level() {
-        let mut config = Config::default();
-        config.observability.log_level = "invalid_level".to_string();
-        assert!(config.validate().is_err());
     }
 
     #[test]

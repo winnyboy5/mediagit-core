@@ -32,20 +32,9 @@ access_key_id = "..."
 secret_access_key = "..."
 
 [performance]
-buffer_size = 65536
 upload_concurrency = 32
 download_concurrency = 24
 pack_workers = 8
-
-[performance.cache]
-enabled = true
-cache_type = "memory"
-max_size = 536870912  # 512 MB
-ttl = 3600
-
-[observability]
-log_level = "info"
-log_format = "json"
 
 [remotes.origin]
 url = "http://media-server.example.com/my-project"
@@ -73,29 +62,50 @@ Written once at `mediagit init`/`clone`; not meant to be edited by hand.
 
 ---
 
-## `[security]` — Schema-Only (not read at runtime)
+## Removed in `config_version` 4
 
-This section exists in the config schema but is **not read by the CLI or by
-`mediagit-server`** — actual server security settings live in
-`mediagit-server.toml` (see `CONFIGURATION.md` Part 2 at the repo root, and
-[Authentication](./authentication.md) for the auth model). The keys below are
-documented for schema completeness only.
+On 2026-09-18 a sweep for **read sites outside `mediagit-config`** — rather than
+for symbol names — found twenty-four keys that were parsed, validated and read
+by nothing. They are gone:
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `auth_enabled` | bool | `false` | Enable JWT/API-key authentication. The JWT secret comes from `MEDIAGIT_JWT_SECRET` (required when enabled). |
-| `https_enabled` | bool | `false` | Serve TLS (enables HTTP/2) |
-| `tls_cert_path` / `tls_key_path` | string | — | Certificate/key files for TLS |
-| `api_key` | string | — | Static API key (legacy single-key mode) |
-| `cors_origins` | array | `[]` | Allowed CORS origins |
-| `rate_limiting` | table | — | Rate-limit configuration for auth and data routes |
+`[app]`, `[observability]`, `[observability.metrics]`, `[security]`,
+`[security.rate_limiting]`, `[performance.cache]` and `performance.buffer_size`.
 
-> `encryption_at_rest` / `encryption_key_path` used to be documented here.
-> They were removed from `SecurityConfig` entirely — nothing ever read them,
-> even the "key path must exist" check never ran — and the real at-rest
-> encryption switch is `[encryption]` in `mediagit-server`'s own config. If
-> your `config.toml` still has them, they parse without complaint and do
-> nothing; remove them.
+`[performance.connection_pool]` and `[performance.timeouts]` went the same way
+earlier; neither had ever existed on this schema at all.
+
+**Nothing needs to be done.** An older `config.toml` is migrated on first load:
+the original is copied to `config.toml.bak` and the dead sections are dropped
+from the rewritten file.
+
+**Unknown keys are now an error.** Previously a typo like `cors_orgins` parsed,
+validated, reported success and did nothing — indistinguishable from a key that
+had been removed, and from one that never existed. Put keys MediaGit should not
+interpret under `[custom]`:
+
+```toml
+[custom]
+studio_pipeline_id = "vfx-42"
+```
+
+Where the settings that sound load-bearing actually live:
+
+| Removed | The thing that works |
+|---|---|
+| `[security] cors_origins` | `cors_allowed_origins` in `mediagit-server.toml` |
+| `[security.rate_limiting]` | `enable_rate_limiting` / `rate_limit_rps` / `rate_limit_burst`, same file |
+| `[security] tls_cert_path` / `tls_key_path` | the same keys in `mediagit-server.toml` |
+| `[security] api_key` | `[remotes.<name>].api_key`, or `MEDIAGIT_API_KEY` |
+| `[security] auth_enabled` | `enable_auth` in `mediagit-server.toml` |
+| `[observability.metrics]` | `MEDIAGIT_METRICS_ADDR` — see [Environment Variables](environment.md) |
+| `[performance.cache]`, `buffer_size`, `[app]` | nothing; no read site ever existed |
+
+`encryption_at_rest` / `encryption_key_path` were removed the same way earlier.
+At-rest encryption is per repository via `mediagit key init`; the server side is
+`[encryption]` in `mediagit-server`'s own config.
+
+See [Authentication](./authentication.md) for the auth model and
+`CONFIGURATION.md` Part 2 at the repo root for every server key.
 
 ---
 
@@ -233,44 +243,16 @@ Compression is decided entirely by `SmartCompressor`, per file type:
 | `upload_concurrency` | integer | unset | Override for client-side parallel chunk uploads. Falls back to `MEDIAGIT_UPLOAD_CONCURRENCY` / internal default (`32`) when unset. |
 | `download_concurrency` | integer | unset | Override for client-side parallel chunk downloads. Falls back to `MEDIAGIT_DOWNLOAD_CONCURRENCY` / internal default (`24`) when unset. |
 | `pack_workers` | integer | unset | Override for server-side concurrent pack-write workers. Falls back to `MEDIAGIT_PACK_WORKERS` / internal default (`8`) when unset. |
-| `buffer_size` | integer | `65536` | I/O buffer size in bytes (64 KB) |
 
-### `[performance.cache]`
+Those three are the whole table. Each is an `Option` with an environment
+variable and an internal default behind it, which is why an empty
+`[performance]` is the normal state of a freshly initialised repository.
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `enabled` | bool | `true` | Enable in-memory object cache |
-| `cache_type` | string | `"memory"` | Cache type (`"memory"`) |
-| `max_size` | integer | `536870912` | Max cache size in bytes (512 MB) |
-| `ttl` | integer | `3600` | Cache entry TTL in seconds |
-| `compression` | bool | `false` | Compress cached objects |
-
-> `[performance.connection_pool]` and `[performance.timeouts]` were removed in
-> v0.4.0. Both were parsed and round-tripped but never read by any consumer. The
-> HTTP pool and timeout settings that are genuinely live are environment knobs —
-> see [Environment Variables](environment.md).
-
----
-
-## `[observability]` — Logging and Tracing
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `log_level` | string | `"info"` | Log level: `"error"`, `"warn"`, `"info"`, `"debug"`, `"trace"` |
-| `log_format` | string | `"json"` | Log format: `"json"` or `"text"` |
-| `tracing_enabled` | bool | `true` | Enable distributed tracing |
-| `sample_rate` | float | `0.1` | Trace sampling rate (0.0–1.0) |
-
-Override `log_level` with the `RUST_LOG` environment variable.
-
-### `[observability.metrics]`
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `enabled` | bool | `true` | Enable Prometheus metrics |
-| `port` | integer | `9090` | Metrics HTTP server port |
-| `endpoint` | string | `"/metrics"` | Metrics endpoint path |
-| `interval` | integer | `60` | Collection interval in seconds |
+> `[performance.cache]`, `buffer_size`, `[performance.connection_pool]` and
+> `[performance.timeouts]` have all been removed — see
+> [Removed in `config_version` 4](#removed-in-config_version-4). The HTTP pool
+> and timeout settings that are genuinely live are environment knobs; see
+> [Environment Variables](environment.md).
 
 ---
 

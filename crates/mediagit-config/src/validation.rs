@@ -3,7 +3,6 @@
 
 use crate::error::{ConfigError, ConfigResult};
 use crate::schema::*;
-use std::path::Path;
 
 /// Validator for configuration settings
 pub trait Validator {
@@ -12,40 +11,8 @@ pub trait Validator {
 
 impl Validator for Config {
     fn validate(&self) -> ConfigResult<()> {
-        self.app.validate()?;
         self.storage.validate()?;
         self.performance.validate()?;
-        self.observability.validate()?;
-        self.security.validate()?;
-        Ok(())
-    }
-}
-
-impl Validator for AppConfig {
-    fn validate(&self) -> ConfigResult<()> {
-        if self.name.is_empty() {
-            return Err(ConfigError::MissingRequired("app.name".to_string()));
-        }
-
-        if self.port == 0 {
-            return Err(ConfigError::invalid_value(
-                "app.port",
-                format!("port must be between 1 and 65535, got {}", self.port),
-            ));
-        }
-
-        if self.host.is_empty() {
-            return Err(ConfigError::MissingRequired("app.host".to_string()));
-        }
-
-        let valid_environments = ["development", "staging", "production"];
-        if !valid_environments.contains(&self.environment.as_str()) {
-            return Err(ConfigError::invalid_value(
-                "app.environment",
-                format!("must be one of: {}", valid_environments.join(", ")),
-            ));
-        }
-
         Ok(())
     }
 }
@@ -263,165 +230,10 @@ impl Validator for MultiBackendStorage {
 
 impl Validator for PerformanceConfig {
     fn validate(&self) -> ConfigResult<()> {
-        if self.buffer_size == 0 {
-            return Err(ConfigError::invalid_value(
-                "performance.buffer_size",
-                "must be greater than 0",
-            ));
-        }
-
-        self.cache.validate()?;
-
-        Ok(())
-    }
-}
-
-impl Validator for CacheConfig {
-    fn validate(&self) -> ConfigResult<()> {
-        if self.enabled {
-            let valid_types = ["memory", "disk", "redis"];
-            if !valid_types.contains(&self.cache_type.as_str()) {
-                return Err(ConfigError::invalid_value(
-                    "cache.cache_type",
-                    format!("must be one of: {}", valid_types.join(", ")),
-                ));
-            }
-
-            if self.max_size == 0 {
-                return Err(ConfigError::invalid_value(
-                    "cache.max_size",
-                    "must be greater than 0",
-                ));
-            }
-
-            if self.ttl == 0 {
-                return Err(ConfigError::invalid_value(
-                    "cache.ttl",
-                    "must be greater than 0",
-                ));
-            }
-        }
-
-        Ok(())
-    }
-}
-
-impl Validator for ObservabilityConfig {
-    fn validate(&self) -> ConfigResult<()> {
-        let valid_levels = ["debug", "info", "warn", "error", "trace"];
-        if !valid_levels.contains(&self.log_level.as_str()) {
-            return Err(ConfigError::invalid_value(
-                "observability.log_level",
-                format!("must be one of: {}", valid_levels.join(", ")),
-            ));
-        }
-
-        let valid_formats = ["json", "text"];
-        if !valid_formats.contains(&self.log_format.as_str()) {
-            return Err(ConfigError::invalid_value(
-                "observability.log_format",
-                format!("must be one of: {}", valid_formats.join(", ")),
-            ));
-        }
-
-        if self.sample_rate < 0.0 || self.sample_rate > 1.0 {
-            return Err(ConfigError::invalid_value(
-                "observability.sample_rate",
-                "must be between 0.0 and 1.0",
-            ));
-        }
-
-        self.metrics.validate()?;
-
-        Ok(())
-    }
-}
-
-impl Validator for MetricsConfig {
-    fn validate(&self) -> ConfigResult<()> {
-        if self.enabled {
-            if self.port == 0 {
-                return Err(ConfigError::invalid_value(
-                    "metrics.port",
-                    format!("port must be between 1 and 65535, got {}", self.port),
-                ));
-            }
-
-            if self.endpoint.is_empty() {
-                return Err(ConfigError::MissingRequired("metrics.endpoint".to_string()));
-            }
-
-            if !self.endpoint.starts_with('/') {
-                return Err(ConfigError::invalid_value(
-                    "metrics.endpoint",
-                    "must start with /",
-                ));
-            }
-
-            if self.interval == 0 {
-                return Err(ConfigError::invalid_value(
-                    "metrics.interval",
-                    "must be greater than 0",
-                ));
-            }
-        }
-
-        Ok(())
-    }
-}
-
-impl Validator for SecurityConfig {
-    fn validate(&self) -> ConfigResult<()> {
-        if self.https_enabled {
-            if self.tls_cert_path.is_none() {
-                return Err(ConfigError::MissingRequired(
-                    "security.tls_cert_path".to_string(),
-                ));
-            }
-
-            if self.tls_key_path.is_none() {
-                return Err(ConfigError::MissingRequired(
-                    "security.tls_key_path".to_string(),
-                ));
-            }
-
-            // Validate paths exist
-            if let Some(cert_path) = &self.tls_cert_path
-                && !Path::new(cert_path).exists()
-            {
-                return Err(ConfigError::FileNotFound(cert_path.clone().into()));
-            }
-
-            if let Some(key_path) = &self.tls_key_path
-                && !Path::new(key_path).exists()
-            {
-                return Err(ConfigError::FileNotFound(key_path.clone().into()));
-            }
-        }
-
-        self.rate_limiting.validate()?;
-
-        Ok(())
-    }
-}
-
-impl Validator for RateLimitConfig {
-    fn validate(&self) -> ConfigResult<()> {
-        if self.enabled {
-            if self.requests_per_second == 0 {
-                return Err(ConfigError::invalid_value(
-                    "rate_limiting.requests_per_second",
-                    "must be greater than 0",
-                ));
-            }
-
-            if self.burst_size < self.requests_per_second {
-                return Err(ConfigError::ConflictingValues(
-                    "burst_size must be at least equal to requests_per_second".to_string(),
-                ));
-            }
-        }
-
+        // Every field here is an `Option<usize>` override with an env var and
+        // an internal default behind it, so there is nothing to reject. Kept
+        // as a named impl so `Config::validate` reads as a complete list of
+        // what this type contains rather than a selective one.
         Ok(())
     }
 }
@@ -446,39 +258,11 @@ mod tests {
     }
 
     #[test]
-    fn test_valid_port() {
-        let config = Config::default();
-        // Port is u16 and default is 8080, so it's valid
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_invalid_environment() {
-        let mut config = Config::default();
-        config.app.environment = "invalid".to_string();
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
     fn test_invalid_octal_permissions() {
         let mut config = Config::default();
         if let StorageConfig::FileSystem(fs) = &mut config.storage {
             fs.file_permissions = "644".to_string();
         }
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_cache_validation() {
-        let mut config = Config::default();
-        config.performance.cache.cache_type = "invalid".to_string();
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_log_level_validation() {
-        let mut config = Config::default();
-        config.observability.log_level = "invalid".to_string();
         assert!(config.validate().is_err());
     }
 

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use tracing::{debug, info};
 
 /// Configuration version
-pub const CONFIG_VERSION: u32 = 3;
+pub const CONFIG_VERSION: u32 = 4;
 
 /// Migration trait for handling config upgrades
 pub trait ConfigMigration {
@@ -284,6 +284,95 @@ impl ConfigMigration for MigrationV2ToV3 {
     }
 }
 
+/// v3 -> v4: drop the dead-config family.
+///
+/// `[app]`, `[observability]` (with its nested `[observability.metrics]`),
+/// `[security]` (with `[security.rate_limiting]`), `[performance.cache]` and
+/// `performance.buffer_size` were parsed and validated by this crate and read
+/// by nothing outside it. They are deleted from the schema; see the tombstone
+/// on `Config`.
+///
+/// **What actually protects existing configs is not this migration**, and the
+/// distinction matters. `Config` is `deny_unknown_fields`, so an old file has
+/// to survive *parsing* before any migration can run. That job belongs to
+/// `DeprecatedSections`/`DeprecatedPerformance`, which accept these keys and
+/// discard them, and to `skip_serializing`, which keeps `save()` from writing
+/// them back. By the time a value reaches this migration on the load path, the
+/// typed parse has usually already dropped them.
+///
+/// This migration is the `3 -> 4` step the `MigrationManager` requires, and a
+/// defensive strip for a value that did not come through that parse. It is
+/// tested directly rather than through `Config::load`, because on the load path
+/// it has nothing left to do.
+///
+/// `[compression]`, `[performance.connection_pool]` and `[performance.timeouts]`
+/// are handled with the rest. Those never existed on any version of this schema
+/// — they were being silently discarded by serde, and one of them is still
+/// sitting in a test fixture in this repository.
+pub struct MigrationV3ToV4;
+
+/// Top-level sections deleted in v4.
+const V4_REMOVED_SECTIONS: &[&str] = &[
+    "app",
+    "observability",
+    "security",
+    // Never on the schema; silently dropped until strict parsing arrived.
+    "compression",
+];
+
+/// Keys deleted from `[performance]` in v4.
+const V4_REMOVED_PERFORMANCE_KEYS: &[&str] = &[
+    "cache",
+    "buffer_size",
+    // Never on the schema; see above.
+    "connection_pool",
+    "timeouts",
+];
+
+impl ConfigMigration for MigrationV3ToV4 {
+    fn source_version(&self) -> u32 {
+        3
+    }
+
+    fn target_version(&self) -> u32 {
+        4
+    }
+
+    fn migrate(&self, mut config: Value) -> ConfigResult<Value> {
+        let mut dropped: Vec<&str> = Vec::new();
+
+        if let Some(obj) = config.as_object_mut() {
+            for key in V4_REMOVED_SECTIONS {
+                if obj.remove(*key).is_some() {
+                    dropped.push(key);
+                }
+            }
+        }
+
+        if let Some(perf) = config.get_mut("performance").and_then(Value::as_object_mut) {
+            for key in V4_REMOVED_PERFORMANCE_KEYS {
+                if perf.remove(*key).is_some() {
+                    dropped.push(key);
+                }
+            }
+        }
+
+        if dropped.is_empty() {
+            debug!("No dead config sections present (v3 -> v4)");
+        } else {
+            info!(
+                dropped = %dropped.join(", "),
+                "Removed config sections that nothing read (v3 -> v4)"
+            );
+        }
+        Ok(config)
+    }
+
+    fn description(&self) -> &str {
+        "Remove the [app], [observability], [security] and [performance.cache] dead-config family"
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -484,6 +573,63 @@ mod azure_v3_tests {
     fn config_without_storage_passes_through() {
         let cfg = json!({ "app": { "name": "mediagit" } });
         let out = MigrationV2ToV3.migrate(cfg.clone()).unwrap();
+        assert_eq!(out, cfg);
+    }
+
+    #[test]
+    fn v3_to_v4_strips_the_dead_family_and_keeps_everything_live() {
+        let cfg = json!({
+            "app": { "name": "mediagit", "port": 8080 },
+            "observability": { "log_level": "info", "metrics": { "enabled": true } },
+            "security": { "cors_origins": ["http://localhost:3000"] },
+            "compression": { "level": 9 },
+            "storage": { "backend": "filesystem", "base_path": "./data" },
+            "performance": {
+                "upload_concurrency": 8,
+                "buffer_size": 65536,
+                "cache": { "cache_type": "memory" },
+                "connection_pool": { "max_idle": 4 },
+                "timeouts": { "connect": 5 },
+            },
+            "cdc_seed": 42,
+        });
+
+        let out = MigrationV3ToV4.migrate(cfg).unwrap();
+
+        for dead in ["app", "observability", "security", "compression"] {
+            assert!(out.get(dead).is_none(), "{dead} must be removed");
+        }
+        let perf = out.get("performance").unwrap();
+        for dead in ["buffer_size", "cache", "connection_pool", "timeouts"] {
+            assert!(
+                perf.get(dead).is_none(),
+                "performance.{dead} must be removed"
+            );
+        }
+
+        // Everything that has a read site survives untouched.
+        assert_eq!(perf.get("upload_concurrency"), Some(&json!(8)));
+        assert_eq!(out.get("cdc_seed"), Some(&json!(42)));
+        assert_eq!(
+            out.get("storage").and_then(|s| s.get("base_path")),
+            Some(&json!("./data"))
+        );
+    }
+
+    #[test]
+    fn v3_to_v4_is_a_no_op_on_a_config_that_never_had_the_dead_sections() {
+        let cfg = json!({
+            "storage": { "backend": "filesystem", "base_path": "./data" },
+            "performance": { "pack_workers": 4 },
+        });
+        let out = MigrationV3ToV4.migrate(cfg.clone()).unwrap();
+        assert_eq!(out, cfg);
+    }
+
+    #[test]
+    fn v3_to_v4_survives_a_config_with_no_performance_table() {
+        let cfg = json!({ "storage": { "backend": "filesystem", "base_path": "./data" } });
+        let out = MigrationV3ToV4.migrate(cfg.clone()).unwrap();
         assert_eq!(out, cfg);
     }
 }
