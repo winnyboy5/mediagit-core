@@ -69,7 +69,14 @@ $srv = $null
 $restDone = $false
 $pushDone = $false
 try {
-  $srv = Start-QaServer -Backend "minio" -Phase $Phase -EnableAuth
+  # -OpenRegistration explicitly: all three A11 drills provision their user
+  # through POST /auth/register, and AU-3 changed the ServerConfig default to
+  # false. This is the THIRD phase to need it -- 07_users was updated with the
+  # AU-3 commit, 07_cli_auth and this one were not, and each was found by a
+  # campaign rather than by reading. A drill that needs open signup has to ask
+  # for it; inheriting the default is what made the setting inert to begin
+  # with.
+  $srv = Start-QaServer -Backend "minio" -Phase $Phase -EnableAuth -OpenRegistration
   $base = $srv.BaseUrl
 
   # ---- A11-auth-rest ----
