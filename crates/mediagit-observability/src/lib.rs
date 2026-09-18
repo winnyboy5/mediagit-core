@@ -31,10 +31,13 @@
 pub mod config;
 pub mod initialization;
 
-// `macros.rs` was here: `log_info!`, `log_debug!`, `log_warn!`, `log_error!`.
-// Zero callers anywhere in the workspace, and each was an exact alias of the
-// `tracing::` macro of the same name -- including the "structured fields" arm,
-// which expanded to the field syntax `tracing` already provides natively.
+// `macros.rs` was here: SIX macros -- `log_info!`, `log_debug!`, `log_warn!`,
+// `log_error!`, `trace_span!` and `instrument_async!`. Zero callers anywhere in
+// the workspace, and each was an alias of the `tracing::` macro of the same
+// name -- including the "structured fields" arm, which expanded to the field
+// syntax `tracing` already provides natively. The crate's own
+// `examples/async_tracing.rs` reaches past them to `tracing::trace_span!`
+// directly, which is the whole argument in one line.
 // Deleted 2026-09-18 rather than kept as a wrapper nobody used over a macro
 // everybody used directly.
 

@@ -614,7 +614,19 @@ impl StorageBackend for B2SpacesBackend {
         content_length: u64,
         ttl: std::time::Duration,
     ) -> anyhow::Result<Option<crate::PresignedPut>> {
-        self.inner.presign_put(key, content_length, ttl).await
+        // Tagged like every other method on this impl. These two were the only
+        // ones that delegated bare, so a presign failure surfaced with the
+        // driver's own label and no mention of which provider it came from.
+        self.inner
+            .presign_put(key, content_length, ttl)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to presign upload to {}: {}",
+                    self.provider.name(),
+                    e
+                )
+            })
     }
 
     async fn presign_get(
@@ -622,7 +634,13 @@ impl StorageBackend for B2SpacesBackend {
         key: &str,
         ttl: std::time::Duration,
     ) -> anyhow::Result<Option<crate::PresignedDownload>> {
-        self.inner.presign_get(key, ttl).await
+        self.inner.presign_get(key, ttl).await.map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to presign download from {}: {}",
+                self.provider.name(),
+                e
+            )
+        })
     }
 }
 
