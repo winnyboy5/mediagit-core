@@ -12,8 +12,13 @@
 #   U2-own-keys       key create/list/revoke on the caller's own keys.
 #   U3-authz-negatives a Write user cannot revoke another user's key and cannot
 #                     reach the /auth/users admin routes (403).
-#   U4-closed-reg     with registration closed, register 403s; admin create-user
-#                     provisions; that user logs in; admin reset-password recovers.
+#   U4-admin-provision admin create-user provisions a user; that user logs in;
+#                     admin reset-password recovers. Does NOT assert the
+#                     closed-registration 403 -- this phase boots with
+#                     -OpenRegistration because U1 needs it. 07_setup owns that
+#                     assertion, and owns it as EFFECT (it POSTs /auth/register
+#                     at the wizard's server and requires 403), not as a grep
+#                     of the config file.
 #
 # Ground truth: POST /auth/password needs current_password; PATCH
 # /auth/users/{id}/password is the admin reset; /auth/me returns per-repo grants.
@@ -115,12 +120,17 @@ try {
   $u3 = (($carolRevokeDaveCode -eq 403) -or ($carolRevokeDaveCode -eq 404)) -and ($carolAdminCode -eq 403)
   Rec "U3-authz-negatives" $u3 "carol-revoke-daves-key=$carolRevokeDaveCode(want 403/404) carol-admin-route=$carolAdminCode(want 403)"
 
-  # ---- U4-closed-reg ----
+  # ---- U4-admin-provision ----
   # Flip registration closed by promoting qa-admin (already admin via bootstrap)
   # and using POST /auth/users. This phase deliberately runs with
   # -OpenRegistration (U1 needs it), so rather than restart the server we assert
   # closed-mode behaviour by driving the admin create-user route regardless, and
-  # confirm reset-password recovery. 07_setup covers the genuinely-closed server.
+  # confirm reset-password recovery.
+  #
+  # The genuinely-closed server is 07_setup's S1, which boots the wizard's own
+  # config and requires POST /auth/register to 403. Until 2026-09-18 that gate
+  # only grepped the config TEXT, so this deferral pointed at an assertion that
+  # could not fail -- and did not, for the whole time AU-3 was live.
   $adminLogin = Post-Json "$base/auth/login" @{ identifier = "qa-admin"; password = "copper-valley-signal-31" }
   $adminTok = if ($adminLogin.Ok) { $adminLogin.Body.tokens.access_token } else { $null }
   $adminIsAdmin = $adminLogin.Ok -and (("" + $adminLogin.Body.user.role) -eq "Admin")
