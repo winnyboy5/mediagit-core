@@ -783,6 +783,14 @@ async fn main() -> Result<()> {
                 accepted =
                     mediagit_server::CONNS_ACCEPTED.load(std::sync::atomic::Ordering::Relaxed),
                 routed = mediagit_server::REQS_ROUTED.load(std::sync::atomic::Ordering::Relaxed),
+                // Splits the accept->router gap: `read_from` climbing with
+                // `routed` frozen means the bytes arrived and hyper did not
+                // turn them into a request; `read_from` frozen with
+                // `accepted` climbing means the connection task never ran.
+                read_from =
+                    mediagit_server::CONNS_READ_FROM.load(std::sync::atomic::Ordering::Relaxed),
+                bytes_read =
+                    mediagit_server::CONN_BYTES_READ.load(std::sync::atomic::Ordering::Relaxed),
                 idle_s = mediagit_server::secs_since_last_routed_request(),
                 "server runtime heartbeat"
             );
@@ -862,7 +870,7 @@ async fn main() -> Result<()> {
                 // ConnectInfo must be supplied or SmartIpKeyExtractor (rate limiting)
                 // 500s with "Unable to extract key!" on every request.
                 axum::serve(
-                    mediagit_server::counting_listener(http_listener),
+                    mediagit_server::observing_listener(http_listener),
                     app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
                 )
                 .with_graceful_shutdown(shutdown_signal())
@@ -925,7 +933,7 @@ async fn main() -> Result<()> {
         // ConnectInfo must be supplied or SmartIpKeyExtractor (rate limiting)
         // 500s with "Unable to extract key!" on every request.
         axum::serve(
-            mediagit_server::counting_listener(listener),
+            mediagit_server::observing_listener(listener),
             app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
         .with_graceful_shutdown(shutdown_signal())

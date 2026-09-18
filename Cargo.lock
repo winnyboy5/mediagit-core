@@ -3565,6 +3565,7 @@ dependencies = [
  "mediagit-storage",
  "mediagit-test-utils",
  "mediagit-versioning",
+ "pin-project-lite",
  "reqwest",
  "rustls",
  "serde",

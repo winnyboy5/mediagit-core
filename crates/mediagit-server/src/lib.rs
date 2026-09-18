@@ -218,23 +218,6 @@ pub static REQS_ROUTED: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 /// Connections the listener has handed to axum. See `REQS_ROUTED` for why.
 pub static CONNS_ACCEPTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Wrap a listener so every accepted connection is counted.
-///
-/// `tap_io` runs the moment axum accepts, before hyper reads a single byte, so
-/// this counts connections that never produce a request -- which is precisely
-/// the case `REQS_ROUTED` alone cannot tell apart from "never accepted".
-pub fn counting_listener(
-    listener: tokio::net::TcpListener,
-) -> axum::serve::TapIo<
-    tokio::net::TcpListener,
-    impl FnMut(&mut tokio::net::TcpStream) + Send + 'static,
-> {
-    use axum::serve::ListenerExt;
-    listener.tap_io(|_| {
-        CONNS_ACCEPTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    })
-}
-
 /// Millis since process start at which the last request reached the router.
 static LAST_ROUTED_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -256,6 +239,173 @@ fn now_ms() -> u64 {
 /// log lines alone cannot distinguish.
 pub fn secs_since_last_routed_request() -> u64 {
     (now_ms().saturating_sub(LAST_ROUTED_MS.load(std::sync::atomic::Ordering::Relaxed))) / 1000
+}
+
+/// Accepted connections from which at least one byte was ever READ.
+///
+/// THE GAP THIS CLOSES. `CONNS_ACCEPTED` and `REQS_ROUTED` narrowed the
+/// info/refs hang to "the connection arrived but its request never reached the
+/// router" and then ran out of resolution -- their own doc comment says the
+/// stretch between accept and router is uninstrumented, and four reproductions
+/// (ga33, ga36, v040-ga4 on gcs, v040-ga6 on azure) have all died in it.
+///
+/// This splits that stretch in two, which is the whole question:
+///
+///   accepted climbing, READ not climbing  -> the per-connection task is never
+///                                            driven; the bytes are sitting in
+///                                            the socket unread. A server-side
+///                                            scheduling or accept-handoff bug.
+///   accepted and READ climbing, routed not -> the bytes were read and hyper
+///                                            failed to turn them into a routed
+///                                            request. An HTTP-parse or
+///                                            connection-state bug.
+///
+/// In the v040-ga6 capture the client had SENT `GET /info/refs` and timed out
+/// waiting for response headers, six times, on six fresh connections, while the
+/// server sat with 40 idle workers. Those two readings cannot both be explained
+/// by the same cause, and this counter is what tells them apart.
+pub static CONNS_READ_FROM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Bytes read across all accepted connections, so a connection that is being
+/// read slowly is distinguishable from one that is not being read at all.
+pub static CONN_BYTES_READ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pin_project_lite::pin_project! {
+    /// A `TcpStream` that reports reads on it.
+    ///
+    /// COST, stated plainly because it sits on the data plane: two relaxed
+    /// `fetch_add`s on the first successful read of a connection and one on
+    /// every read after it. One relaxed increment is a few nanoseconds beside a
+    /// `recv` syscall that costs microseconds, and reads are per-buffer (64 KiB
+    /// class), not per-byte -- but it is a shared cache line, so it is not
+    /// free and should not be described as if it were.
+    ///
+    /// `CONNS_READ_FROM` is the counter the hang investigation needs and could
+    /// have been a per-connection flag alone. `CONN_BYTES_READ` is kept because
+    /// "read once then stopped" and "reading steadily but slowly" are different
+    /// faults and the flag cannot tell them apart.
+    pub struct ObservedStream<S> {
+        #[pin]
+        inner: S,
+        counted_first_read: bool,
+    }
+}
+
+impl<S> ObservedStream<S> {
+    fn new(inner: S) -> Self {
+        Self {
+            inner,
+            counted_first_read: false,
+        }
+    }
+}
+
+impl<S: tokio::io::AsyncRead> tokio::io::AsyncRead for ObservedStream<S> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.project();
+        let before = buf.filled().len();
+        let res = this.inner.poll_read(cx, buf);
+        if let std::task::Poll::Ready(Ok(())) = &res {
+            let n = buf.filled().len().saturating_sub(before);
+            if n > 0 {
+                CONN_BYTES_READ.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                if !*this.counted_first_read {
+                    *this.counted_first_read = true;
+                    CONNS_READ_FROM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
+        res
+    }
+}
+
+impl<S: tokio::io::AsyncWrite> tokio::io::AsyncWrite for ObservedStream<S> {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        self.project().inner.poll_write(cx, buf)
+    }
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        self.project().inner.poll_flush(cx)
+    }
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        self.project().inner.poll_shutdown(cx)
+    }
+}
+
+/// A listener that counts accepts AND wraps each stream so reads are counted.
+///
+/// Replaces the `tap_io`-based `counting_listener`: `tap_io` can observe the
+/// accept but cannot see whether anything is ever read from the stream, which
+/// is the distinction four hang reproductions have needed.
+pub struct ObservingListener {
+    inner: tokio::net::TcpListener,
+}
+
+impl ObservingListener {
+    pub fn new(inner: tokio::net::TcpListener) -> Self {
+        Self { inner }
+    }
+}
+
+impl axum::serve::Listener for ObservingListener {
+    type Io = ObservedStream<tokio::net::TcpStream>;
+    type Addr = std::net::SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            match self.inner.accept().await {
+                Ok((stream, addr)) => {
+                    CONNS_ACCEPTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return (ObservedStream::new(stream), addr);
+                }
+                Err(e) => {
+                    // Same contract axum documents for its own TcpListener impl:
+                    // log and keep accepting rather than tear the server down on
+                    // a per-connection error.
+                    tracing::debug!(error = %e, "accept failed; retrying");
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.inner.local_addr()
+    }
+}
+
+/// The listener to hand `axum::serve`, with connect-info preserved.
+///
+/// `ObservingListener` cannot carry the `Connected<IncomingStream<..>>` impl
+/// that `into_make_service_with_connect_info::<SocketAddr>()` requires: both
+/// `SocketAddr` and `IncomingStream` are foreign, so the orphan rule refuses
+/// it. axum ships a GENERIC impl for its own `TapIo<L, F>` wrapper, so wrapping
+/// in a no-op `tap_io` supplies connect-info for any inner listener -- which is
+/// exactly what this needs, and why the accept counting stayed in
+/// `ObservingListener::accept` rather than moving into the closure.
+///
+/// Without this every handler would silently lose `ConnectInfo<SocketAddr>`.
+pub fn observing_listener(
+    listener: tokio::net::TcpListener,
+) -> axum::serve::TapIo<
+    ObservingListener,
+    impl FnMut(&mut ObservedStream<tokio::net::TcpStream>) + Send + 'static,
+> {
+    use axum::serve::ListenerExt;
+    ObservingListener::new(listener).tap_io(|_| {})
 }
 
 /// Counts every request that reaches the router, as the OUTERMOST layer.
@@ -592,7 +742,8 @@ mod routed_counter_tests {
         let routed_before = routed();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let mut tapped = counting_listener(listener);
+        let read_before = CONNS_READ_FROM.load(std::sync::atomic::Ordering::Relaxed);
+        let mut tapped = observing_listener(listener);
         let acceptor = tokio::spawn(async move {
             use axum::serve::Listener;
             let _ = tapped.accept().await;
@@ -610,6 +761,15 @@ mod routed_counter_tests {
             routed(),
             routed_before,
             "a connection that sent no request must NOT be counted as routed"
+        );
+        // The counter that splits the accept->router gap. A connection that was
+        // accepted but never written to must leave it alone, or "accepted but
+        // never read from" -- the reading the whole wrapper exists to produce --
+        // would be indistinguishable from noise.
+        assert_eq!(
+            CONNS_READ_FROM.load(std::sync::atomic::Ordering::Relaxed),
+            read_before,
+            "a silent connection must NOT count as read-from"
         );
     }
 }
