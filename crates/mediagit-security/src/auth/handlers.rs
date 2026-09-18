@@ -22,10 +22,15 @@ use super::{
 pub struct AuthService {
     pub jwt_auth: Arc<JwtAuth>,
     pub credentials_store: Arc<CredentialsStore>,
-    /// Whether `POST /auth/register` is open to anonymous callers. Defaults
-    /// to `true` on every constructor below (matches
-    /// `ServerConfig::allow_open_registration`'s serde default) so existing
-    /// behavior is unchanged unless a caller explicitly opts out.
+    /// Whether `POST /auth/register` is open to anonymous callers.
+    ///
+    /// Defaults to `true` on every constructor below, which suits this crate's
+    /// own tests and any embedder building an `AuthService` directly. It does
+    /// **not** match `ServerConfig::allow_open_registration`, which is `false`
+    /// since AU-3 — the server is responsible for stating its own answer, and
+    /// does so via [`AuthService::with_open_registration`] in
+    /// `AppState::new_with_full_auth`. The two were previously described as
+    /// mirroring each other while nothing connected them at all.
     pub allow_open_registration: bool,
     /// AU-16: tokens ended by an explicit logout.
     ///
@@ -77,6 +82,19 @@ impl AuthService {
             allow_open_registration: true,
             revoked_tokens: Arc::new(crate::auth::revocation::RevokedTokens::new()),
         })
+    }
+
+    /// AU-3: set whether `POST /auth/register` accepts anonymous callers.
+    ///
+    /// The constructors above all default this to `true`, and for a long time
+    /// that default was the *only* value this field ever held on the server:
+    /// `mediagit-server` parsed `allow_open_registration` from server.toml,
+    /// validated it, wrote it from the `init` wizard and asserted it in QA —
+    /// and never assigned it here. Closed registration was inert. This setter
+    /// is what `AppState::new_with_full_auth` uses to make the config real.
+    pub fn with_open_registration(mut self, allow: bool) -> Self {
+        self.allow_open_registration = allow;
+        self
     }
 }
 
@@ -717,8 +735,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_registration_open_by_default() {
-        // Default AuthService::new must keep behaving exactly as before —
-        // allow_open_registration defaults to true.
+        // AuthService::new's own default stays true (this crate's
+        // constructors, not the server's config — see the field doc). The
+        // server states its own answer via with_open_registration.
         let auth_service = Arc::new(AuthService::new("test-secret"));
         assert!(auth_service.allow_open_registration);
 

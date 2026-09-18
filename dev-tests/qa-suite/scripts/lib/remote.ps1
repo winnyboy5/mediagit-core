@@ -192,6 +192,11 @@ function Start-QaServer {
     # (users/api_keys/grants.jsonl) lands in <DataDir>\auth - the server's
     # default auth_store_dir is a sibling "auth" dir next to repos_dir.
     [switch]$EnableAuth,
+    # AU-3: allow_open_registration now defaults to FALSE in ServerConfig, so a
+    # drill that exercises anonymous `auth register` must ask for it. This used
+    # to ride the struct default and would have silently started 403ing.
+    # Implies -EnableAuth (the key is only meaningful with auth on).
+    [switch]$OpenRegistration,
     # Optional: bootstrap a first Admin via `mediagit-server admin create` once
     # the server dir/config exist. Implies -EnableAuth. The admin is created
     # BEFORE the server process starts (no --force needed, store not yet held in
@@ -221,6 +226,7 @@ function Start-QaServer {
     [switch]$NoRateLimit
   )
   if ($AdminUser) { $EnableAuth = $true }
+  if ($OpenRegistration) { $EnableAuth = $true }
 
   $bc = _QaBackendConfig $Backend
   $tplPath = Join-Path $QA.Root "config\backends\$($bc.Template)"
@@ -272,6 +278,10 @@ function Start-QaServer {
   $authLines = ""
   if ($EnableAuth) {
     $authLines = "`nenable_auth = true`njwt_secret = `"qa-suite-jwt-secret-0123456789abcdef0123456789abcdef`""
+    # AU-3: written explicitly either way. Asserting the closed default is a
+    # gate in its own right (07_setup), and a drill that needs open signup says
+    # so rather than inheriting whatever the struct default happens to be.
+    if ($OpenRegistration) { $authLines += "`nallow_open_registration = true" }
   }
   $rlLines = ""
   if (-not $NoRateLimit) {

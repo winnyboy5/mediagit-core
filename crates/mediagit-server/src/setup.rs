@@ -103,8 +103,11 @@ pub async fn run_init(args: &InitArgs) -> Result<()> {
     let admin: Option<(String, String, String)> = if enable_auth {
         config.enable_auth = true;
         config.jwt_secret = Some(generate_jwt_secret());
-        // Secure-by-default for new installs; existing configs are
-        // untouched (ServerConfig::allow_open_registration defaults true).
+        // Secure-by-default for new installs. Since AU-3 this matches the
+        // struct default rather than overriding it, and — more to the point —
+        // it now has an effect: the value is threaded to the AuthService that
+        // serves /auth/register, which it never used to be, so this line was
+        // writing a key nothing read.
         config.allow_open_registration = false;
         config.enable_rate_limiting = true;
 

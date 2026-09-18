@@ -99,9 +99,11 @@ pub struct ServerConfig {
     pub jwt_secret: Option<String>,
 
     /// Whether `POST /auth/register` is open to anonymous callers. Defaults
-    /// to `true` so existing configs and drills (which self-register users)
-    /// behave exactly as before; new deployments may opt into closed
-    /// registration explicitly. Only meaningful when `enable_auth = true`.
+    /// to `false` (AU-3): an open endpoint on a server with no grants recorded
+    /// let any caller register and read every repository. Bootstrap the first
+    /// account with `mediagit-server admin create` instead, or set this to
+    /// `true` explicitly to restore open signup. Only meaningful when
+    /// `enable_auth = true`.
     #[serde(default = "default_allow_open_registration")]
     pub allow_open_registration: bool,
 
@@ -215,7 +217,27 @@ pub(crate) fn default_rate_limit_burst() -> u32 {
 }
 
 fn default_allow_open_registration() -> bool {
-    true
+    // AU-3: closed by default.
+    //
+    // This was `true` so that existing configs and drills behaved unchanged.
+    // The cost was a cross-tenant read on any freshly provisioned server:
+    // anonymous caller -> POST /auth/register -> Role::Read -> permissions
+    // ["repo:read"] -> `check_permission` finds no grants on the repo, so
+    // `grants_enforced` is false and `flat_check()` passes. Every repository
+    // was readable by anyone who could reach the port.
+    //
+    // The other two legs of AU-3 were already closed — self-registration
+    // creates Read rather than Write (`auth/handlers.rs`), and grant
+    // enforcement is per-repo rather than global (AU-4) — which is what
+    // bounded this to a read. It is still a full cross-tenant read.
+    //
+    // Nothing else is needed to make this safe: the bootstrap path already
+    // exists and is complete (`mediagit-server admin create`, interactive
+    // `run_init`, and `admin promote`), and the startup warning prints the
+    // exact command. An operator who wants open signup sets the key
+    // explicitly, and an explicit setting is honoured unchanged — serde only
+    // calls this when the key is absent.
+    false
 }
 
 fn default_verify_content_on_complete() -> bool {
