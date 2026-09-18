@@ -747,6 +747,25 @@ pub struct PerformanceConfig {
     /// Never existed on this schema. Same story as `connection_pool`.
     #[serde(default, rename = "timeouts", skip_serializing)]
     pub deprecated_timeouts: Option<serde_json::Value>,
+
+    /// Removed from the schema in v0.4.0, BEFORE this cycle, as dead knobs.
+    ///
+    /// Absorbed for the same reason as the rest: `save()` wrote them, so they
+    /// are in every config old enough to have them, and strict parsing turns
+    /// "silently ignored" into "this repository will not open".
+    ///
+    /// The compat fixture is what surfaced this -- a frozen v0.2.8-beta.1
+    /// repository whose `[performance] max_concurrency = 20` made `fsck` fail
+    /// to open it at all. Absorbing only the keys THIS cycle deleted was not
+    /// enough: `deny_unknown_fields` is retroactive across every key the schema
+    /// has ever shed, and the fixture is the only thing in the tree that still
+    /// remembers the older ones.
+    #[serde(default, rename = "max_concurrency", skip_serializing)]
+    pub deprecated_max_concurrency: Option<serde_json::Value>,
+
+    /// Removed in v0.4.0. `MEDIAGIT_CHUNK_WRITE_CONCURRENCY` is the live knob.
+    #[serde(default, rename = "chunk_write_concurrency", skip_serializing)]
+    pub deprecated_chunk_write_concurrency: Option<serde_json::Value>,
 }
 
 /// Remote repository configuration
@@ -1210,6 +1229,65 @@ base_path = "./data"
         config.save(dir.path()).unwrap();
         let reloaded = Config::load(dir.path()).await.unwrap();
         assert_eq!(reloaded.cdc_seed, SEED);
+    }
+
+    /// The frozen compat fixture is a real v0.2.8-beta.1 repository, and it is
+    /// the only thing in the tree that still remembers keys the schema shed in
+    /// EARLIER cycles. `deny_unknown_fields` is retroactive across all of them,
+    /// so absorbing just the keys this cycle deleted left `max_concurrency`
+    /// rejecting the fixture outright -- `fsck` could not open it at all.
+    ///
+    /// This is the shape to keep in mind: the blast radius of strict parsing is
+    /// every key the schema has EVER had, not the ones you just removed.
+    #[tokio::test]
+    async fn a_pre_v4_config_with_long_removed_keys_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        write_repo(
+            dir.path(),
+            r#"
+config_version = 2
+
+[storage]
+backend = "filesystem"
+base_path = "./data"
+
+[compression]
+enabled = true
+algorithm = "zstd"
+
+[performance]
+max_concurrency = 20
+buffer_size = 65536
+chunk_write_concurrency = 8
+
+[performance.connection_pool]
+max_connections = 10
+
+[performance.timeouts]
+request = 60
+
+[security]
+encryption_at_rest = false
+"#,
+        );
+
+        let config = Config::load(dir.path())
+            .await
+            .expect("a v2 config must migrate, not fail to parse");
+        assert_eq!(config.config_version, crate::migration::CONFIG_VERSION);
+
+        let rewritten = std::fs::read_to_string(dir.path().join(".mediagit/config.toml")).unwrap();
+        for dead in [
+            "max_concurrency",
+            "chunk_write_concurrency",
+            "connection_pool",
+        ] {
+            assert!(
+                !rewritten.contains(dead),
+                "{dead} must be dropped:
+{rewritten}"
+            );
+        }
     }
 
     /// Every config that has ever had a remote carries `default_fetch = true`:
