@@ -1719,7 +1719,23 @@ function Drill-A18-CloneResumeAfterKill {
     $p = Start-Process $QA.MG -ArgumentList @("clone", $srv.Url, $clone) -PassThru -NoNewWindow `
       -RedirectStandardOutput (Join-Path $QA.Logs "a18-clone1.out") `
       -RedirectStandardError  (Join-Path $QA.Logs "a18-clone1.err")
-    Start-Sleep -Milliseconds 2500
+    # Kill as soon as there is something to interrupt, rather than after a fixed
+    # sleep. 2500ms used to be ample margin over a 600MB local clone; it is not
+    # any more -- clone got roughly 4x faster (C1 streaming), so on this host the
+    # clone now finishes INSIDE the sleep, the kill lands after completion, and
+    # the drill reports that it tested nothing. That is the anti-vacuity check
+    # below doing its job, but a drill that cannot arm itself is not a gate.
+    #
+    # Waiting for CLONE_IN_PROGRESS is deterministic where a sleep is a race:
+    # that marker is exactly the state this drill exists to interrupt, so its
+    # appearance is the earliest correct moment to kill. If the clone exits
+    # before the marker ever appears there is genuinely nothing to interrupt,
+    # `killed` stays false, and the drill still refuses to pass.
+    $markerWatch = Join-Path $clone ".mediagit\CLONE_IN_PROGRESS"
+    $deadline = (Get-Date).AddSeconds(30)
+    while ((Get-Date) -lt $deadline -and -not $p.HasExited -and -not (Test-Path $markerWatch)) {
+      Start-Sleep -Milliseconds 25
+    }
     $killed = $false
     if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force; $killed = $true }
     Start-Sleep -Milliseconds 500
