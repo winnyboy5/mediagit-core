@@ -249,6 +249,28 @@ impl S3Stats {
 }
 
 impl B2SpacesDriver {
+    /// Endpoint this driver actually talks to, for error messages.
+    ///
+    /// WHY THIS EXISTS — the same reason as `MinIOBackend::endpoint_label`, and
+    /// the same bug. Every error string in this file used to say `s3:`
+    /// regardless of provider, so a Backblaze B2 or DigitalOcean Spaces presign
+    /// failure was reported as
+    ///
+    ///   presign_put s3: dispatch failure
+    ///
+    /// naming a provider that was never involved. `minio.rs` was fixed for the
+    /// mirror-image case in 20260907-ga42, where a real AWS failure reported
+    /// `minio:` and cost time in the post-mortem. This file kept the defect
+    /// because the file name agreed with the error string, and both were wrong.
+    ///
+    /// Falls back to `"s3"` only when no endpoint is configured, which on this
+    /// driver means plain AWS — reachable in principle through
+    /// `B2SpacesDriver::new`, never through `B2SpacesBackend`, which always
+    /// sets a provider endpoint.
+    pub(crate) fn endpoint_label(&self) -> &str {
+        self.config.endpoint.as_deref().unwrap_or("s3")
+    }
+
     /// Create a new S3 backend with the given bucket name
     ///
     /// Uses automatic AWS credential and region detection from:
@@ -1153,7 +1175,7 @@ impl StorageBackend for B2SpacesDriver {
         let req = builder
             .presigned(presigning)
             .await
-            .map_err(|e| anyhow::anyhow!("presign_put s3: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("presign_put {}: {e}", self.endpoint_label()))?;
         Ok(Some(crate::PresignedPut {
             url: req.uri().to_string(),
             method: "PUT".to_string(),
@@ -1180,7 +1202,7 @@ impl StorageBackend for B2SpacesDriver {
             .key(key)
             .presigned(presigning)
             .await
-            .map_err(|e| anyhow::anyhow!("presign_get s3: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("presign_get {}: {e}", self.endpoint_label()))?;
         Ok(Some(crate::PresignedDownload {
             url: req.uri().to_string(),
             headers: vec![],
@@ -1203,7 +1225,7 @@ impl StorageBackend for B2SpacesDriver {
             .key(key.as_str())
             .send()
             .await
-            .map_err(|e| anyhow!("create_multipart_upload s3: {}", e))?;
+            .map_err(|e| anyhow!("create_multipart_upload {}: {}", self.endpoint_label(), e))?;
         let upload_id = resp
             .upload_id()
             .ok_or_else(|| anyhow!("no upload_id from S3"))?
@@ -1223,7 +1245,14 @@ impl StorageBackend for B2SpacesDriver {
                 .part_number(part_number)
                 .presigned(presigning.clone())
                 .await
-                .map_err(|e| anyhow!("presign upload_part {} s3: {}", part_number, e))?;
+                .map_err(|e| {
+                    anyhow!(
+                        "presign upload_part {} {}: {}",
+                        part_number,
+                        self.endpoint_label(),
+                        e
+                    )
+                })?;
             parts.push(crate::PresignedMpuPart {
                 part_number,
                 url: req.uri().to_string(),
@@ -1272,7 +1301,7 @@ impl StorageBackend for B2SpacesDriver {
             )
             .send()
             .await
-            .map_err(|e| anyhow!("complete_multipart_upload s3: {}", e))?;
+            .map_err(|e| anyhow!("complete_multipart_upload {}: {}", self.endpoint_label(), e))?;
         Ok(())
     }
 
