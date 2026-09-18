@@ -85,7 +85,12 @@ $srv = $null
 $done = @{}
 try {
   # local backend: this phase tests the auth CLI, not object storage.
-  $srv = Start-QaServer -Backend "local" -Phase $Phase -EnableAuth -AdminUser $ADMIN -AdminPass $ADMIN_PW
+  # -OpenRegistration explicitly: C1 drives `auth register`, and AU-3 changed
+  # the ServerConfig default to false. Inheriting the default is what this
+  # suite keeps getting caught by -- 07_users was updated for this in the same
+  # commit and this phase was missed, so C1 403d and C2-C5 cascaded off having
+  # no user. Asking for what the drill needs is the point.
+  $srv = Start-QaServer -Backend "local" -Phase $Phase -EnableAuth -OpenRegistration -AdminUser $ADMIN -AdminPass $ADMIN_PW
   $base = $srv.BaseUrl
   $adminLogin = Test-OracleLogin $base $ADMIN $ADMIN_PW
   $adminTok = $adminLogin.Token
