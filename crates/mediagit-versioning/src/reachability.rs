@@ -269,9 +269,12 @@ mod tests {
         // Pre-walk sanity: verify the tag round-trips through the ODB. If this
         // fails, the walker would silently treat the tag as a blob leaf (the
         // leniency path), masking the real cause.
-        let tag_data = odb.read(&tag_oid).await.expect("tag must be readable from ODB");
-        let tag_rt = crate::Tag::deserialize(&tag_data)
-            .expect("tag bytes must round-trip through postcard");
+        let tag_data = odb
+            .read(&tag_oid)
+            .await
+            .expect("tag must be readable from ODB");
+        let tag_rt =
+            crate::Tag::deserialize(&tag_data).expect("tag bytes must round-trip through postcard");
         assert_eq!(tag_rt.target, c1, "round-tripped tag must point at c1");
 
         let visited = walk_reachable(&odb, [tag_oid], &HashSet::new())
