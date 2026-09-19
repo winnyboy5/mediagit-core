@@ -26,6 +26,43 @@ The removed config keys are `[app]`, `[observability]`,
 nothing. Where the settings that sound load-bearing actually live is documented
 in `CONFIGURATION.md`.
 
+### Fixed — a heap allocation for every log line
+
+Wiring the server to `mediagit-observability` (see "JSON logs reachable from
+both binaries" below) kept the log OUTPUT byte-for-byte identical and quietly
+changed its cost: `get_writer` returned `fn() -> Box<dyn io::Write + Send>`, so
+every event heap-allocated a box and wrote through a vtable. The bare
+`fmt::layer()` it replaced used `io::stdout` directly with neither. The server
+logs at `tower_http=debug` — one span per HTTP request — so a push issuing
+thousands of chunk requests paid thousands of allocations that did not exist
+the day before.
+
+Replaced with a `MakeWriter` over `EitherWriter<Stdout, Stderr>`, which keeps
+the stdout/stderr choice without erasing the type. Output is unchanged; the
+allocation is gone.
+
+Worth stating because the gate could not have caught it: a refactor that
+preserves observable output can still change cost, and a test that diffs log
+lines will pass throughout.
+
+### Added — the accept-to-router gap is now instrumented
+
+The server heartbeat gained `read_from` and `bytes_read` alongside `accepted`
+and `routed`. Between "the kernel accepted a connection" and "a request reached
+the router" there was no instrumentation at all, and five stalls across two
+weeks died in that gap without any of them being able to name a component.
+
+The two counters split it: `accepted` climbing while `read_from` stays frozen
+means no bytes arrived; both climbing while `routed` stays frozen means bytes
+arrived and did not become a request. On its first campaign the split produced a
+decisive reading — `accepted=48 routed=0 read_from=0` over 120 s — and the
+per-attempt rate identified the stalled client as the health poller rather than
+anything in MediaGit.
+
+Diagnostic only; no behaviour change. It does cost two relaxed atomic increments
+on a connection's first read and one on each read after, which is stated in the
+source rather than described as free.
+
 ### Fixed — `remote set-url --push` set a push URL that nothing pushed to
 
 `mediagit remote set-url --push <url>` stored the value, printed "Changed push
