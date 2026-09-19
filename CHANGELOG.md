@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.4.0-rc.1] - 2026-09-19
+
 ### Upgrading — every breaking change in one place
 
 Read this before upgrading a server or a shared repository. Four changes need a
@@ -2056,7 +2058,8 @@ throughput improvements, pack negotiation fixes, and several cloud-backend bug f
 - Dependency security audits in CI
 - Encryption at rest with Argon2 key derivation
 
-[Unreleased]: https://github.com/winnyboy5/mediagit-core/compare/v0.3.0-rc.5...HEAD
+[Unreleased]: https://github.com/winnyboy5/mediagit-core/compare/v0.4.0-rc.1...HEAD
+[v0.4.0-rc.1]: https://github.com/winnyboy5/mediagit-core/compare/v0.3.0-rc.5...v0.4.0-rc.1
 [v0.3.0-rc.5]: https://github.com/winnyboy5/mediagit-core/compare/v0.3.0-rc.4...v0.3.0-rc.5
 [v0.3.0-rc.4]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.8-beta.1...v0.3.0-rc.4
 [v0.2.8-beta.1]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.7-beta.1...v0.2.8-beta.1
