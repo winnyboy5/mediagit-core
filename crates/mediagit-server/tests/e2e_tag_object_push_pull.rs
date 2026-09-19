@@ -262,7 +262,6 @@ bucket = "mediagit-m5a-tag-test"
 access_key_id = "minioadmin"
 secret_access_key = "minioadmin"
 region = "us-east-1"
-force_path_style = true
 "#
     );
     run_tag_object_push_clone(Some(&config_toml)).await;
