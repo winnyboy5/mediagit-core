@@ -9,7 +9,7 @@
 
 ## 🎯 Status
 
-**Version**: v0.3.0-rc.5
+**Version**: v0.4.0-rc.1
 **Status**: 🚧 **RELEASE CANDIDATE**
 **Features**: 100% complete (all P0–P3 items from the rc.3 feature-completeness sprint implemented — a closed batch, distinct from the forward-looking backlog in [FUTURE_TODOS.md](FUTURE_TODOS.md), which reuses the same P0–P3 labels as effort/impact tiers for planned work)
 **Last Validated**: September 19, 2026 — two SCALE QA campaigns (`v040-ga8`, `v040-ga9`), **247 gates each: 246 pass, 0 failures, 1 skip, all 14 phases**, on byte-identical binaries, across MinIO, AWS S3, Azure Blob, GCS and local. The skip is the same gate in both runs — `A8-disk-full`, which needs an elevated shell to attach a size-capped volume. It has since been run under elevation and passes: `add` onto a full volume fails cleanly with `os error 112` and leaves the repository fsck-PERFECT
@@ -798,123 +798,6 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 
 ---
 
-## Roadmap
-
-### v0.1.0 ✅ — February 27, 2026
-*Initial public release — core infrastructure*
-
-- [x] Core CLI: `init`, `add`, `commit`, `status`, `log`, `branch`, `merge`, `push`, `pull`
-- [x] Content-addressed object database (BLAKE3, CDC chunking)
-- [x] Intelligent compression — Zstd, Brotli, per-type strategy (70+ file types)
-- [ ] PSD layer-aware merge intelligence — layer *analysis* works; writing a merged PSD does not (the parser is read-only), so `merge` reports a conflict and checks out one side
-- [x] Multi-cloud storage: AWS S3, Azure Blob, GCS, MinIO, Backblaze B2, DO Spaces
-- [x] Security: backend-provided encryption at rest (S3 SSE); AES-256-GCM + Argon2id implemented in `mediagit-security`, not yet wired into the CLI
-- [x] Observability: structured logging, Prometheus metrics
-- [x] 960 unit tests, 80%+ coverage
-- [x] Multi-platform binaries: Linux (x86_64 + ARM64), macOS (Intel + Apple Silicon), Windows (x86_64)
-
-### v0.2.0 ✅ — March 5, 2026
-*Major features — storage efficiency and security*
-
-- [x] Delta encoding with zstd dictionary compression
-- [x] Delta chain depth cap (MAX_DELTA_DEPTH=10) — prevents read-amplification
-- [x] Adaptive chunk sizes (1–8 MB) — replaces fixed 64 MB chunks
-- [x] Per-type similarity thresholds for delta compression
-- [ ] AES-256-GCM client-side encryption with Argon2id KDF — module implemented and tested, no CLI call sites yet
-- [x] TLS 1.3 on the server's TLS listener (`tls_min_version`, default `"1.3"`; set `"1.2"` as an escape hatch)
-- [x] JWT + API key authentication (server mode)
-- [x] Video timeline and audio track-based merging
-- [x] Automated multi-platform release CI (Linux, macOS, Windows, Docker, crates.io)
-- [x] S3/MinIO bucket auto-create on first use
-- [x] 194 tests passing on release build (0 failures)
-
-### v0.2.1 ✅ — March 2026
-*Stability and distribution*
-
-- [x] Pre-built release binaries on GitHub Releases (5 platforms)
-- [x] Docker multi-arch images on GHCR
-- [x] PowerShell installer (`install.ps1`) with `-UseBasicParsing`
-- [x] Install scripts with pre-release fallback (fetch `/releases` when no stable exists)
-- [x] Automated version bumping (`scripts/bump-version.sh`)
-- [x] Full documentation sync: book, architecture, CLI reference
-- [x] Security audit clean (`cargo audit`)
-- [x] `branch rename` argument order aligned with git semantics (`OLD NEW`)
-- [x] Validated on Linux + Windows; all commands stable across both platforms
-
-### v0.2.3 ✅ — March 2026
-*Progress reporting and chunked staging improvements*
-
-- [x] Fixed `add` ETA/speed reporting for skipped and large files
-- [x] Per-chunk `on_progress` callback for continuous byte-level progress during multi-GB ingestion
-- [x] Security: upgraded `quinn-proto` (RUSTSEC-2026-0037)
-
-### v0.2.7-beta.1 — March–May 2026
-*Delta engine rewrite, CLI refinements, server improvements*
-
-- [x] Delta encoder replaced: suffix-array sliding-window → **zstd dictionary compression** (+1.3–2.1pp savings, 1.4–2.4× faster, 73% less code)
-- [x] Removed `filter`, `install`, `track`, `untrack` commands (git migration deferred)
-- [x] `bisect replay` executes scripted bisect sessions from log files
-- [x] `log <REVISION>` resolves branch names, tags, and abbreviated OIDs
-- [x] `stash push` as git-compatible alias for `stash save`
-- [x] `verify [COMMIT]` optional positional argument for targeted verification
-- [x] Abbreviated OID resolution across `show`, `revert`, `verify`, and all revision-accepting commands
-- [x] HTTP/2 adaptive window tuning (2–4× WAN throughput)
-- [x] Raw file serving endpoints (`GET /{repo}/files/{*path}`, `GET /{repo}/tree`)
-- [x] `/health` route alias alongside `/healthz`
-
-
-### v0.3.0-rc.5 — August–September 2026
-*Relicensed to BSL 1.1, clone streaming, and transfer hardening under WAN failure*
-
-- [x] **Relicensed AGPL-3.0 → BUSL-1.1** — source available, not open source; free for
-      production use at any scale, with hosted/managed third-party offerings reserved.
-      Change Licence AGPL-3.0-or-later after four years. Not retroactive: v0.1.0–v0.2.8-beta.1
-      remain AGPL permanently
-- [x] Clone streams the working tree while chunked media is still downloading
-      (`MEDIAGIT_CLONE_OVERLAP`) — −75.6% peak memory and ~4× faster locally
-- [x] Clone resume after interruption — a killed clone restarts from its marker
-      instead of from zero
-- [x] Large pack uploads to cloud backends hardened: a pack PUT gets a time budget
-      rather than a fixed attempt count, and the TCP connect is bounded on both clients
-- [x] Presign no longer blocks on pack verification — an unverified pack declines the
-      URL and is fetched through the proxy, which verifies every chunk inline
-      (removes a 300 s client-timeout cliff on first clone of a fresh repo)
-- [x] A pack is never re-read over the WAN while it is already being verified
-- [x] Transport failures on a chunk GET get their own retry budget, separate from the
-      one sized for a 503 (`MEDIAGIT_CHUNK_GET_SEND_RETRIES`)
-- [x] A stalled control request gets more fresh-connection attempts before the
-      unbounded fallback (`MEDIAGIT_SHORT_REQUEST_ATTEMPTS`)
-- [x] Client transport errors keep their full `source()` chain, so a failure names the
-      layer that actually broke instead of "error sending request for url"
-- [x] Validated by two SCALE campaigns, 247 gates each, 0 failures and 1 skip
-      (`A8-disk-full`, needs elevation; run separately under an elevated shell, where it passes), on byte-identical binaries
-
-### v0.3.0-rc.4 — July 2026
-*Object-store layout v2, client auth, and reachability tooling, GA hardening: server-enforced locking, durable auth, format freeze*
-
-- [x] Object-store layout v2: per-repo namespace, true two-level hash fanout, `LAYOUT` marker
-- [x] Client authentication: env → config → keychain → none precedence (`MEDIAGIT_TOKEN`, `MEDIAGIT_API_KEY`)
-- [x] `download` command — single-file fetch from a remote without a full clone
-- [x] Parallel checkout across multiple worker threads
-- [x] Roaring-bitmap reachability index for faster `gc`/`fsck` (`MEDIAGIT_BITMAP`)
-- [x] `ObjectType::Tag` with SSH/ed25519 tag signing (`MEDIAGIT_SIGN`, `MEDIAGIT_SIGN_KEY`)
-- [x] Sparse checkout — cone mode and pattern mode (`sparse-checkout set|list|disable`)
-- [x] `media info` — inspect image/video/audio/PSD/3D metadata without touching the ODB
-- [x] `status` ahead/behind tracking-branch counters and `--json` output
-- [x] Server-enforced file locking — `lock create|unlock|list`, push-time enforcement (`MEDIAGIT_LOCKS_ENFORCE`)
-- [x] Auth persistence — `users.jsonl` / `api_keys.jsonl` / `grants.jsonl` survive server restarts (`MEDIAGIT_AUTH_PERSIST`)
-- [x] Per-repo authorization grants (Read < Write < Admin) + admin endpoints (`/auth/users`, `/auth/keys`, grants)
-- [x] OS-keychain credential storage on the client (`MEDIAGIT_NO_KEYRING` to opt out)
-- [x] Path-traversal hardening — object-key validation at the storage boundary + server hex-id guards
-- [x] `push --repair` — pack-aware re-upload of corrupted remote chunks and objects
-- [x] Server-side integrity verification endpoints (chunks + objects, strong BLAKE3 re-hash)
-- [x] `gc --repack` chunk consolidation into cloud packs
-- [x] Format freeze + compatibility promise — persisted/wire formats frozen as of this release (scope and terms in [CHANGELOG.md](CHANGELOG.md), under *Compat*; the `docs/FORMATS.md` §11 spec it cites is a local-only working doc and is not part of the repo)
-
-
-
----
-
 ## Troubleshooting
 
 ### Common Issues
@@ -950,7 +833,7 @@ aws iam get-user-policy --user-name mediagit-user --policy-name MediaGitS3Policy
 ```bash
 # The /releases/latest API returns 404 when only pre-releases exist.
 # Pass the version explicitly:
-VERSION=0.3.0-rc.5 curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
+VERSION=0.4.0-rc.1 curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 
 # Or on Windows PowerShell:
 iwr -UseBasicParsing https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.ps1 | iex
@@ -1025,4 +908,4 @@ Special thanks to:
 
 **Made with 🦀 and ❤️ by Aswin Krishnamoorthy**
 
-**Status**: Release Candidate | **Version**: v0.3.0-rc.5 | **Updated**: September 19, 2026 | **Cloud-Validated**: QA campaigns `v040-ga8` + `v040-ga9`, 247 gates each, 0 failures, 1 skip ✅
+**Status**: Release Candidate | **Version**: v0.4.0-rc.1 | **Updated**: September 19, 2026 | **Cloud-Validated**: QA campaigns `v040-ga8` + `v040-ga9`, 247 gates each, 0 failures, 1 skip ✅
