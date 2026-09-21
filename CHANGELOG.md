@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `fsck` could not detect a missing object
+
+`mediagit fsck` is documented as detecting "corruption or missing objects", and
+every QA campaign uses "fsck reports PERFECT" as its pass criterion. Deleting
+the only blob in a repository produced no issues at all.
+
+Two checks were involved and neither could see it. `check_objects` enumerates
+what is present in storage and verifies each object's BLAKE3 — enumeration is
+structurally unable to notice something that is *gone*. `check_connectivity`
+walked commits to their parents and confirmed that `commit.tree` *existed*, but
+never opened the tree, so no blob and no subtree was checked at all. The walk
+stopped exactly one level above the data.
+
+`traverse_commit` now walks the tree's entries and reports any that are absent.
+Existence is tested with `ObjectDatabase::exists` (loose | manifest | pack) and
+deliberately never with `read`: reading a chunked blob reassembles the whole
+file, which would turn a default-on connectivity check into a full-repo
+download on the multi-GB media repositories this VCS exists for. Whether the
+bytes are *correct* remains `check_objects`' job.
+
+### Fixed — `fsck --full --repair` deleted staged, stashed and mid-rebase work
+
+`gc` roots reachability from eight places: HEAD, branches, tags, the reflog,
+remote-tracking refs, stashes, in-progress operation state and the staging
+index. Each was added in response to a separate data-loss report.
+`check_dangling` rooted from refs alone, and `FsckChecker` held no repository
+root, so it could not read the index or `STASH_LIST` even in principle.
+
+Anything staged but not yet committed was therefore "not referenced by any
+commit" — true, and precisely the wrong conclusion, because dangling objects
+are marked repairable and `--repair` deletes them. A `mediagit add` followed by
+`mediagit fsck --full --repair` destroyed the staged content, and the same
+applied to stashes and to commits held by an interrupted rebase, cherry-pick,
+revert, merge or bisect.
+
+`fsck` now protects the same roots, and is deliberately more conservative than
+`gc` on the reflog: it honours no expiry horizon, because protecting something
+`gc` would collect merely leaves it for the next `gc`, while condemning
+something `gc` protects destroys work the user can still reach. A checker
+constructed without a repository root still reports dangling objects but never
+marks them repairable, so `--repair` cannot act on a root set known to be
+narrower than the collector's.
+
+The hex-OID scanner both walkers use to read operation state now lives in one
+place (`mediagit_versioning::scan_hex_oids`) rather than in a private copy
+each. The two having drifted apart on which objects count as rooted is what
+caused this.
+
 ## [v0.4.0-rc.1] - 2026-09-19
 
 ### Upgrading — every breaking change in one place

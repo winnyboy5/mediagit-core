@@ -37,10 +37,13 @@
 //! ```
 
 use crate::odb::ObjectDatabase;
-use crate::{Commit, ObjectType, Oid, Ref, RefDatabase, RefType, Tag, Tree};
+use crate::{
+    Commit, FileMode, Index, ObjectType, Oid, Ref, RefDatabase, RefType, Reflog, Tag, Tree,
+};
 use mediagit_storage::StorageBackend;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -291,6 +294,43 @@ impl FsckOptions {
     }
 }
 
+/// Every 64-char hex run in `text`, parsed as an OID.
+///
+/// Handles JSON, newline-delimited and bare-OID state files uniformly without
+/// knowing any of their schemas. That is deliberate: a state file whose format
+/// changes must not silently stop protecting the operation it describes.
+///
+/// Shared by `fsck`'s dangling detection and the CLI's `gc`, which must agree
+/// on which objects are rooted — the two having drifted apart on exactly that
+/// question is what let `fsck --repair` delete staged work.
+pub fn scan_hex_oids(text: &str) -> Vec<Oid> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut run = 0usize;
+    for (i, b) in bytes.iter().enumerate() {
+        if b.is_ascii_hexdigit() {
+            if run == 0 {
+                start = i;
+            }
+            run += 1;
+        } else {
+            if run == 64
+                && let Ok(oid) = Oid::from_hex(&text[start..i])
+            {
+                out.push(oid);
+            }
+            run = 0;
+        }
+    }
+    if run == 64
+        && let Ok(oid) = Oid::from_hex(&text[start..])
+    {
+        out.push(oid);
+    }
+    out
+}
+
 /// FSCK integrity checker
 pub struct FsckChecker {
     /// Storage backend for file operations
@@ -299,6 +339,16 @@ pub struct FsckChecker {
     odb: Arc<ObjectDatabase>,
     /// Reference database for listing refs
     refdb: Option<RefDatabase>,
+    /// Repository root: the directory *containing* `.mediagit`.
+    ///
+    /// Needed only by dangling detection, which must protect the roots that
+    /// live outside the ref graph — the staging index, stashes, in-progress
+    /// operation state and the reflog. Optional because `FsckChecker` is also
+    /// built in server-side and test contexts that have a storage backend and
+    /// nothing else; when it is absent, dangling objects are reported but
+    /// never marked repairable, so `--repair` cannot delete them on a root set
+    /// known to be incomplete.
+    repo_root: Option<PathBuf>,
 }
 
 impl FsckChecker {
@@ -310,7 +360,19 @@ impl FsckChecker {
             storage,
             odb: Arc::new(odb),
             refdb,
+            repo_root: None,
         }
+    }
+
+    /// Point the checker at the repository root (the directory containing
+    /// `.mediagit`), enabling dangling detection to protect staged, stashed,
+    /// mid-operation and reflog-referenced objects.
+    ///
+    /// Without this, `check_dangling` sees only the ref graph and would report
+    /// every such object as unreferenced.
+    pub fn with_repo_root(mut self, repo_root: impl Into<PathBuf>) -> Self {
+        self.repo_root = Some(repo_root.into());
+        self
     }
 
     /// Create a new FSCK checker (backward compat, no refdb)
@@ -710,7 +772,12 @@ impl FsckChecker {
                 }
             };
 
-            // Check tree exists
+            // Check tree exists, then walk INTO it. Stopping at the tree's own
+            // existence was the whole gap: `check_objects` enumerates what is
+            // in storage and verifies that, so it is structurally unable to
+            // notice an object that is *gone*. Only a walk down from the refs
+            // can, and this one stopped one level short — so deleting every
+            // blob in the repo left `fsck` reporting a clean bill of health.
             referenced_objects.insert(commit.tree);
             if !self.object_exists(&commit.tree).await? {
                 report.add_issue(
@@ -721,6 +788,9 @@ impl FsckChecker {
                     )
                     .with_oid(*oid),
                 );
+            } else {
+                self.check_tree_entries(&commit.tree, visited, referenced_objects, report)
+                    .await?;
             }
 
             // Traverse parent commits
@@ -728,6 +798,72 @@ impl FsckChecker {
                 referenced_objects.insert(*parent);
                 self.traverse_commit(parent, visited, referenced_objects, report)
                     .await?;
+            }
+
+            Ok(())
+        })
+    }
+
+    /// Verify every object a reachable tree points at is actually present.
+    ///
+    /// Existence is tested with [`ObjectDatabase::exists`] (loose | manifest |
+    /// pack), deliberately NOT `read`: a chunked blob's `read` reassembles the
+    /// entire file, which would turn a default-on connectivity check into a
+    /// full-repo download on exactly the multi-GB media repos this VCS exists
+    /// for. Whether the bytes are *correct* stays `check_objects`' job — it
+    /// already reads and BLAKE3-verifies every object it enumerates, including
+    /// per-chunk verification for manifests. This walk answers only the
+    /// question enumeration cannot: is anything referenced but absent.
+    ///
+    /// Shares `visited` with [`Self::traverse_commit`] so trees reused across
+    /// commits are walked once; OIDs are content hashes, so a tree OID can
+    /// never collide with a commit OID in that set.
+    fn check_tree_entries<'a>(
+        &'a self,
+        tree_oid: &'a Oid,
+        visited: &'a mut HashSet<Oid>,
+        referenced_objects: &'a mut HashSet<Oid>,
+        report: &'a mut FsckReport,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + 'a>> {
+        Box::pin(async move {
+            if !visited.insert(*tree_oid) {
+                return Ok(());
+            }
+
+            // The caller already established this tree exists; an unreadable
+            // or unparseable one is corruption, which `check_objects` reports
+            // against the object itself. Nothing to add here.
+            let Ok(data) = self.odb.read(tree_oid).await else {
+                return Ok(());
+            };
+            let Ok(tree) = crate::format::deserialize::<Tree>(&data) else {
+                return Ok(());
+            };
+
+            for entry in tree.entries.values() {
+                referenced_objects.insert(entry.oid);
+
+                if !self.odb.exists(&entry.oid).await? {
+                    report.add_issue(
+                        FsckIssue::new(
+                            IssueSeverity::Error,
+                            IssueCategory::MissingObject,
+                            format!("Tree {} references missing object {}", tree_oid, entry.oid),
+                        )
+                        .with_oid(entry.oid),
+                    );
+                    continue;
+                }
+
+                // Trees in this VCS are normally single-level (entries keyed
+                // by full relative path), but `FileMode::Directory` entries
+                // are produced on some paths (see the server's tree builder),
+                // and `gc`'s walker recurses through them — so this one must
+                // too, or fsck and gc would disagree about what is reachable.
+                if entry.mode == FileMode::Directory {
+                    self.check_tree_entries(&entry.oid, visited, referenced_objects, report)
+                        .await?;
+                }
             }
 
             Ok(())
@@ -984,22 +1120,137 @@ impl FsckChecker {
             }
         }
 
+        // Roots that live outside the ref graph. Without these, an object
+        // that is staged, stashed or held by an in-progress rebase is
+        // "unreferenced by any commit" — true, and exactly the wrong
+        // conclusion, because `--repair` then deletes the user's live work.
+        self.protect_working_roots(&mut referenced, report).await?;
+
+        // Only a checker that can see those roots may condemn anything. With
+        // no repo root the ref graph is all we have, which is a strictly
+        // narrower set than `gc` protects, so findings stay informational.
+        let can_condemn = self.repo_root.is_some();
+        if !can_condemn {
+            warn!(
+                "Dangling detection ran without a repository root: staged, stashed and \
+                 in-progress objects cannot be distinguished from garbage, so findings \
+                 are reported but not marked repairable"
+            );
+        }
+
         // Find dangling objects
         for oid in all_objects {
             if !referenced.contains(&oid) {
-                report.add_issue(
-                    FsckIssue::new(
-                        IssueSeverity::Info,
-                        IssueCategory::DanglingObject,
-                        format!("Object {} is not referenced by any commit", oid),
-                    )
-                    .with_oid(oid)
-                    .repairable(),
-                );
+                let issue = FsckIssue::new(
+                    IssueSeverity::Info,
+                    IssueCategory::DanglingObject,
+                    format!("Object {} is not referenced by any commit", oid),
+                )
+                .with_oid(oid);
+                report.add_issue(if can_condemn {
+                    issue.repairable()
+                } else {
+                    issue
+                });
             }
         }
 
         Ok(())
+    }
+
+    /// Protect objects rooted outside the ref graph: the staging index,
+    /// stashes, in-progress operation state and the reflog.
+    ///
+    /// `gc` roots reachability from all of these (see `build_reachability_set`
+    /// in the CLI's `gc` command, which added each one in response to a
+    /// separate data-loss report). `check_dangling` rooted from refs alone, so
+    /// every staged, stashed or mid-rebase object was reported dangling and
+    /// `fsck --full --repair` deleted it.
+    ///
+    /// fsck is deliberately *more* conservative than gc here: it protects the
+    /// entire reflog rather than gc's `gc.reflogExpire` horizon. The two
+    /// errors are not symmetric — protecting something gc would collect just
+    /// leaves an object for the next gc to remove, while condemning something
+    /// gc protects destroys work the user can still reach.
+    async fn protect_working_roots(
+        &self,
+        referenced: &mut HashSet<Oid>,
+        report: &mut FsckReport,
+    ) -> anyhow::Result<()> {
+        let Some(repo_root) = self.repo_root.clone() else {
+            return Ok(());
+        };
+
+        // Staged blobs. Inserted directly rather than routed through
+        // `collect_referenced_objects`, which would `odb.read` each one —
+        // and reading a chunked blob reassembles the whole file to learn
+        // nothing that the manifest lookup below does not already say.
+        if let Ok(index) = Index::load(&repo_root) {
+            for entry in index.entries() {
+                if referenced.insert(entry.oid)
+                    && let Ok(Some(manifest)) = self.odb.get_chunk_manifest(&entry.oid).await
+                {
+                    for chunk in &manifest.chunks {
+                        referenced.insert(chunk.id);
+                    }
+                }
+            }
+        }
+
+        // Commit-shaped roots get their full closure walked.
+        for oid in Self::working_root_commits(&repo_root).await {
+            let mut visited = HashSet::new();
+            self.collect_referenced_objects(&oid, &mut visited, referenced, report)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Commit OIDs held by stashes, in-progress operation state and the
+    /// reflog.
+    ///
+    /// State files are scanned for 64-char hex runs rather than parsed:
+    /// deliberately format-agnostic, so a state file whose schema changes
+    /// cannot silently stop protecting the operation it describes. Mirrors
+    /// the same choice in the CLI's `gc`.
+    async fn working_root_commits(repo_root: &Path) -> Vec<Oid> {
+        let mediagit = repo_root.join(".mediagit");
+        let mut roots = Vec::new();
+
+        for name in [
+            "STASH_LIST",
+            "rebase-apply/state.json",
+            "CHERRY_PICK_STATE",
+            "REVERT_STATE",
+            "BISECT_STATE",
+            "MERGE_HEAD",
+            "ORIG_HEAD",
+        ] {
+            if let Ok(text) = std::fs::read_to_string(mediagit.join(name)) {
+                roots.extend(scan_hex_oids(&text));
+            }
+        }
+
+        let reflog = Reflog::new(&mediagit);
+        let zero_oid = Oid::from_bytes([0u8; 32]);
+        if let Ok(ref_names) = reflog.list_refs().await {
+            for ref_name in ref_names {
+                if let Ok(entries) = reflog.read(&ref_name, None).await {
+                    for entry in entries {
+                        roots.extend(
+                            [entry.old_oid, entry.new_oid]
+                                .into_iter()
+                                .filter(|o| *o != zero_oid),
+                        );
+                    }
+                }
+            }
+        }
+
+        roots.sort_by_key(|o| o.to_hex());
+        roots.dedup();
+        roots
     }
 
     /// Collect all objects referenced from a commit
@@ -2124,7 +2375,13 @@ mod tests {
             .await
             .unwrap();
 
-        let checker = FsckChecker::new(storage.clone());
+        // A repair-capable checker is one that knows its repo root: only then
+        // can it tell a genuine orphan from a staged/stashed/mid-rebase object
+        // and mark findings repairable. The directory is empty of repo state,
+        // so every working root resolves to nothing and this test's orphan is
+        // judged exactly as before.
+        let repo = tempfile::TempDir::new().unwrap();
+        let checker = FsckChecker::new(storage.clone()).with_repo_root(repo.path());
         let report = checker.check(FsckOptions::full()).await.unwrap();
 
         assert!(
@@ -2323,6 +2580,227 @@ mod tests {
             !storage.exists(&chunk_key).await.unwrap(),
             "the corrupt chunk must be gone so a later fetch can supply a good \
              copy; leaving it means every future read fails identically"
+        );
+    }
+
+    /// Build a one-commit repo on a LocalBackend and return
+    /// (checker, blob_oid, tree_oid, commit_oid, storage).
+    async fn repo_with_one_commit(
+        tmp: &tempfile::TempDir,
+    ) -> (FsckChecker, Oid, Oid, Oid, Arc<dyn StorageBackend>) {
+        use crate::{Commit, FileMode, ObjectType, Signature, Tree, TreeEntry};
+        use mediagit_storage::LocalBackend;
+
+        let storage: Arc<dyn StorageBackend> =
+            Arc::new(LocalBackend::new(tmp.path()).await.unwrap());
+        let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
+
+        let blob = odb.write(ObjectType::Blob, b"payload bytes").await.unwrap();
+        let mut tree = Tree::new();
+        tree.add_entry(TreeEntry::new("a.txt".to_string(), FileMode::Regular, blob));
+        let tree_oid = tree.write(&odb).await.unwrap();
+        let sig = Signature::now("t".to_string(), "t@e".to_string());
+        let commit = Commit::new(tree_oid, sig.clone(), sig, "msg".to_string());
+        let commit_oid = commit.write(&odb).await.unwrap();
+
+        let refdb = RefDatabase::new(tmp.path());
+        refdb
+            .write(&Ref::new_direct("refs/heads/main".to_string(), commit_oid))
+            .await
+            .unwrap();
+
+        let checker =
+            FsckChecker::new_with_refdb(storage.clone(), Some(refdb)).with_repo_root(tmp.path());
+        (checker, blob, tree_oid, commit_oid, storage)
+    }
+
+    /// A blob deleted from storage must be reported as missing.
+    ///
+    /// `check_connectivity` walked commits -> parents and checked only that
+    /// `commit.tree` existed; it never walked the tree's entries. And
+    /// `check_objects` enumerates what IS in storage, so it can never see an
+    /// absence. Net effect: deleting every blob in the repo left `fsck`
+    /// reporting a clean bill of health.
+    #[tokio::test]
+    async fn test_fsck_detects_missing_blob_referenced_by_tree() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (checker, blob, _tree, _commit, storage) = repo_with_one_commit(&tmp).await;
+
+        storage.delete(&blob.to_hex()).await.unwrap();
+        assert!(
+            !storage.exists(&blob.to_hex()).await.unwrap(),
+            "precondition: the blob must actually be gone from storage"
+        );
+
+        // Default options — NOT `full()`. The hole was reachable on the path
+        // `mediagit fsck` takes with no flags.
+        let report = checker.check(FsckOptions::default()).await.unwrap();
+
+        let missing: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| i.category == IssueCategory::MissingObject)
+            .collect();
+        assert!(
+            !missing.is_empty(),
+            "a blob referenced by a reachable tree but absent from storage must \
+             be reported, got issues: {:?}",
+            report.issues
+        );
+        assert!(
+            missing.iter().any(|i| i.oid == Some(blob)),
+            "the report must name the missing blob {}, got: {:?}",
+            blob,
+            missing
+        );
+        assert!(report.has_errors());
+    }
+
+    /// The healthy-repo half of the guard above: an intact repo must stay
+    /// clean. Without this, "report a missing object" could be satisfied by
+    /// reporting one unconditionally.
+    #[tokio::test]
+    async fn test_fsck_intact_repo_reports_no_missing_objects() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (checker, _blob, _tree, _commit, _storage) = repo_with_one_commit(&tmp).await;
+
+        let report = checker.check(FsckOptions::default()).await.unwrap();
+
+        let missing: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| i.category == IssueCategory::MissingObject)
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "an intact repo must report no missing objects, got: {:?}",
+            missing
+        );
+    }
+
+    /// `gc` protects staged (index) objects from collection; `fsck --full`
+    /// classifies them as dangling and marks them repairable, so
+    /// `fsck --full --repair` deletes the user's staged work.
+    ///
+    /// This is the QA-007 data-loss shape with a different root set: `gc`
+    /// roots from HEAD + branches + tags + reflog + remotes + stash +
+    /// in-progress state + the index, while `fsck` roots from refs alone.
+    #[tokio::test]
+    async fn test_fsck_dangling_does_not_condemn_staged_objects() {
+        use crate::ObjectType;
+        use crate::index::{Index, IndexEntry};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (checker, _blob, _tree, _commit, storage) = repo_with_one_commit(&tmp).await;
+
+        // Stage a NEW file: `mediagit add` writes the blob and records it in
+        // the index, but no commit references it yet.
+        let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
+        let staged = odb
+            .write(ObjectType::Blob, b"staged but uncommitted")
+            .await
+            .unwrap();
+        let mut index = Index::load(tmp.path()).unwrap_or_default();
+        index.add_entry(IndexEntry::new(
+            std::path::PathBuf::from("staged.txt"),
+            staged,
+            0o100644,
+            22,
+            None,
+        ));
+        index.save(tmp.path()).unwrap();
+
+        let report = checker.check(FsckOptions::full()).await.unwrap();
+
+        let condemned: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| i.category == IssueCategory::DanglingObject && i.repairable)
+            .filter(|i| i.oid == Some(staged))
+            .collect();
+        assert!(
+            condemned.is_empty(),
+            "a staged-but-uncommitted object must not be marked repairable-dangling: \
+             `fsck --repair` deletes those, destroying the user's staged work that \
+             `gc` deliberately protects. Got: {:?}",
+            condemned
+        );
+    }
+
+    /// The other half of the guard above. Protecting the working roots must
+    /// not degenerate into protecting everything — a genuinely orphaned
+    /// object still has to be found and still has to be repairable, or
+    /// `fsck --full --repair` becomes a no-op and the previous test passes
+    /// vacuously.
+    #[tokio::test]
+    async fn test_fsck_still_condemns_genuinely_orphaned_objects() {
+        use crate::ObjectType;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (checker, _blob, _tree, _commit, storage) = repo_with_one_commit(&tmp).await;
+
+        // Written straight to the ODB: no ref, no tree, no index entry, no
+        // stash, no reflog — garbage by every root set.
+        let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
+        let orphan = odb
+            .write(ObjectType::Blob, b"referenced by absolutely nothing")
+            .await
+            .unwrap();
+
+        let report = checker.check(FsckOptions::full()).await.unwrap();
+
+        let condemned: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| i.category == IssueCategory::DanglingObject && i.oid == Some(orphan))
+            .collect();
+        assert!(
+            !condemned.is_empty(),
+            "a truly unreferenced object must still be reported dangling, else \
+             the working-root protection has swallowed the whole check"
+        );
+        assert!(
+            condemned.iter().all(|i| i.repairable),
+            "with a repo root present, dangling findings must stay repairable so \
+             `--repair` can still reclaim real garbage, got: {:?}",
+            condemned
+        );
+    }
+
+    /// A checker built without a repo root cannot tell staged work from
+    /// garbage, so it must report dangling objects without marking them
+    /// repairable — `--repair` must not be able to act on a root set known
+    /// to be narrower than gc's.
+    #[tokio::test]
+    async fn test_fsck_without_repo_root_reports_but_never_condemns() {
+        use crate::ObjectType;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (_checker, _blob, _tree, _commit, storage) = repo_with_one_commit(&tmp).await;
+
+        let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
+        let orphan = odb.write(ObjectType::Blob, b"orphan").await.unwrap();
+
+        // Same repo, but the checker is given no repo root.
+        let refdb = RefDatabase::new(tmp.path());
+        let blind = FsckChecker::new_with_refdb(storage.clone(), Some(refdb));
+        let report = blind.check(FsckOptions::full()).await.unwrap();
+
+        let found: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| i.category == IssueCategory::DanglingObject && i.oid == Some(orphan))
+            .collect();
+        assert!(
+            !found.is_empty(),
+            "the finding must still be reported — it is the deletion that is unsafe, \
+             not the observation"
+        );
+        assert!(
+            found.iter().all(|i| !i.repairable),
+            "without a repo root, staged/stashed objects are indistinguishable from \
+             garbage, so nothing may be marked repairable, got: {:?}",
+            found
         );
     }
 }

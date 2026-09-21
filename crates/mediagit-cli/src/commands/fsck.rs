@@ -115,8 +115,12 @@ impl FsckCmd {
         // Create RefDatabase for accurate ref listing
         let refdb = RefDatabase::new(&mediagit_dir);
 
-        // Create FSCK checker with RefDatabase
-        let checker = FsckChecker::new_with_refdb(storage.clone(), Some(refdb));
+        // Create FSCK checker with RefDatabase. The repo root (not
+        // `.mediagit`) is what dangling detection needs: it protects staged,
+        // stashed, mid-operation and reflog-referenced objects, which `gc`
+        // protects too and `--repair` would otherwise delete.
+        let checker =
+            FsckChecker::new_with_refdb(storage.clone(), Some(refdb)).with_repo_root(&repo_path);
 
         // Configure options
         let options = self.build_options();
