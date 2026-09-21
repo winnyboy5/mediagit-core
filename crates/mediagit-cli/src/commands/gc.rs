@@ -572,41 +572,11 @@ impl GarbageCollector {
             let Ok(text) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            oids.extend(Self::scan_hex_oids(&text));
+            oids.extend(mediagit_versioning::scan_hex_oids(&text));
         }
         oids.sort_by_key(|o| o.to_hex());
         oids.dedup();
         oids
-    }
-
-    /// Every 64-char hex run in `text`, parsed as an OID. Handles JSON, the
-    /// newline-delimited REVERT_STATE format, and bare-OID files uniformly.
-    fn scan_hex_oids(text: &str) -> Vec<Oid> {
-        let bytes = text.as_bytes();
-        let mut out = Vec::new();
-        let mut start = 0usize;
-        let mut run = 0usize;
-        for (i, b) in bytes.iter().enumerate() {
-            if b.is_ascii_hexdigit() {
-                if run == 0 {
-                    start = i;
-                }
-                run += 1;
-            } else {
-                if run == 64
-                    && let Ok(oid) = Oid::from_hex(&text[start..i])
-                {
-                    out.push(oid);
-                }
-                run = 0;
-            }
-        }
-        if run == 64
-            && let Ok(oid) = Oid::from_hex(&text[start..])
-        {
-            out.push(oid);
-        }
-        out
     }
 
     /// Traverse commit → tree → blob chains
