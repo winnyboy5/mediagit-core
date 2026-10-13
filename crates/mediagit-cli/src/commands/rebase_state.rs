@@ -90,6 +90,7 @@ impl RebaseState {
         }
 
         let content =
+            // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- repo-internal constant path
             std::fs::read_to_string(&state_file).context("Failed to read rebase state file")?;
 
         let state: RebaseState =

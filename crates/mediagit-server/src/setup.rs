@@ -57,6 +57,7 @@ pub struct InitArgs {
 }
 
 pub async fn run_init(args: &InitArgs) -> Result<()> {
+    // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- operator CLI arg
     let config_path = Path::new(&args.config);
     if config_path.exists() && !args.force {
         anyhow::bail!(
@@ -200,6 +201,7 @@ fn prompt_basics(args: &InitArgs) -> Result<(String, u16, PathBuf, bool)> {
         .default(args.enable_auth)
         .interact()?;
 
+    // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- operator CLI arg
     Ok((host, port, PathBuf::from(data_dir), enable_auth))
 }
 

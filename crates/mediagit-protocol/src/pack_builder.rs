@@ -390,6 +390,7 @@ pub async fn upload_and_register(
         // Fallback path only: MPU declined (501/404/part failure) or the pack is
         // under the MPU threshold. `Bytes` so the retry closures below clone a
         // refcount bump, not the whole pack (B5).
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- local temp file
         let pack_data: bytes::Bytes = tokio::fs::read(&result.temp_path)
             .await
             .context("read pack temp file")?
@@ -634,6 +635,7 @@ pub async fn upload_and_register(
         // the same reason: this path has no part granularity, so the body must
         // be whole and re-clonable across retries. Only reached when MPU
         // declined AND no presigned URL was issued.
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- local temp file
         let pack_data: bytes::Bytes = tokio::fs::read(&result.temp_path)
             .await
             .context("read pack temp file")?

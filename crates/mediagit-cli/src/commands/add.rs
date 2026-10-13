@@ -66,6 +66,7 @@ pub async fn stage_files_for_commit(paths: &[String], repo_root: &std::path::Pat
     // Stage each path sequentially
     let mut added_count = 0u64;
     for path_str in paths {
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- local CLI arg
         let path = std::path::Path::new(path_str);
         if path.is_file()
             && let Ok(abs_path) = dunce::canonicalize(path)
@@ -837,6 +838,7 @@ impl AddCmd {
             (content_oid, oid)
         } else {
             // IN-MEMORY PATH: Files < 5MB — read fully into memory, then hash/delta/write
+            // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- local CLI arg (add walk)
             let content = tokio::fs::read(file_path)
                 .await
                 .context(format!("Failed to read file: {}", file_path.display()))?;
@@ -1113,6 +1115,7 @@ impl AddCmd {
             return Ok(());
         }
 
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- local CLI arg (add walk)
         let entries = std::fs::read_dir(dir)
             .context(format!("Failed to read directory: {}", dir.display()))?;
 

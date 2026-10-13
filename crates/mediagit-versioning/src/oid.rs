@@ -120,6 +120,7 @@ impl Oid {
     pub fn from_file<P: AsRef<std::path::Path>>(path: P) -> anyhow::Result<Self> {
         use std::io::Read;
 
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- local CLI arg (file being hashed)
         let mut file = std::fs::File::open(path.as_ref())?;
         let mut hasher = Hasher::new();
         let mut buffer = [0u8; 64 * 1024]; // 64KB buffer - stack allocated
@@ -159,6 +160,7 @@ impl Oid {
     pub async fn from_file_async<P: AsRef<std::path::Path>>(path: P) -> anyhow::Result<Self> {
         use tokio::io::AsyncReadExt;
 
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- local CLI arg (file being hashed)
         let mut file = tokio::fs::File::open(path.as_ref()).await?;
         let mut hasher = Hasher::new();
         let mut buffer = vec![0u8; 64 * 1024]; // 64KB buffer - heap for async
@@ -184,6 +186,7 @@ impl Oid {
     /// Gated by `MEDIAGIT_HASH_PARALLEL=1` at the call site.
     #[allow(unsafe_code)] // audited: read-only mmap, file not modified while mapped
     pub fn from_file_mmap_parallel<P: AsRef<std::path::Path>>(path: P) -> anyhow::Result<Self> {
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- local CLI arg (file being hashed)
         let file = std::fs::File::open(path.as_ref())?;
         // Safety: file opened read-only; mapping is read-only.
         let mmap = unsafe { memmap2::Mmap::map(&file)? };

@@ -348,6 +348,7 @@ impl CherryPickCmd {
         }
 
         // Load state
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- repo-internal constant path
         let state_json = std::fs::read_to_string(&state_path)?;
         let state: CherryPickState = serde_json::from_str(&state_json)?;
 
@@ -402,6 +403,7 @@ impl CherryPickCmd {
         }
 
         // Load state
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- repo-internal constant path
         let state_json = std::fs::read_to_string(&state_path)?;
         let state: CherryPickState = serde_json::from_str(&state_json)?;
 
@@ -447,6 +449,7 @@ impl CherryPickCmd {
         }
 
         // Load state to get original HEAD
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- repo-internal constant path
         let state_json = std::fs::read_to_string(&state_path)?;
         let state: CherryPickState = serde_json::from_str(&state_json)?;
 

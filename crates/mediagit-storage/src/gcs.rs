@@ -300,6 +300,7 @@ impl GcsBackend {
             ));
         }
 
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- operator config path
         let sa_json_str = std::fs::read_to_string(path).map_err(|e| {
             anyhow::anyhow!(
                 "failed to read service account file '{}': {}",
@@ -362,6 +363,7 @@ impl GcsBackend {
             ));
         }
 
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- operator config path
         let sa_json_str = std::fs::read_to_string(path).map_err(|e| {
             anyhow::anyhow!(
                 "failed to read service account file '{}': {}",

@@ -289,6 +289,7 @@ impl OperationStats {
             return Ok(Vec::new());
         }
 
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- repo-internal path (storage stats dir)
         let mut entries: Vec<_> = std::fs::read_dir(&stats_dir)?
             .filter_map(|e| e.ok())
             .filter(|e| {
@@ -304,6 +305,7 @@ impl OperationStats {
 
         let mut stats = Vec::new();
         for entry in entries.into_iter().take(limit) {
+            // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- repo-internal path (storage stats dir)
             if let Ok(content) = std::fs::read_to_string(entry.path())
                 && let Ok(stat) = serde_json::from_str::<OperationStats>(&content)
             {
@@ -327,6 +329,7 @@ impl OperationStats {
 
     /// Cleanup old stats files, keeping only the most recent `keep_count`
     fn cleanup_old_stats(stats_dir: &Path, keep_count: usize) -> anyhow::Result<()> {
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- repo-internal path (storage stats dir)
         let mut entries: Vec<_> = std::fs::read_dir(stats_dir)?
             .filter_map(|e| e.ok())
             .filter(|e| {

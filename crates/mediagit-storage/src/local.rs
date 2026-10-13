@@ -379,6 +379,7 @@ impl LocalBackend {
         }
 
         let path = self.object_path_checked(key)?;
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- key validated by object_path_checked
         let file = std::fs::File::open(&path)?;
 
         // SAFETY: The file is opened read-only and we assume it won't be modified
@@ -433,6 +434,7 @@ impl LocalBackend {
             Ok(MmapOrVec::Mmap(self.get_mmap(key)?))
         } else {
             Ok(MmapOrVec::Vec(
+                // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- key validated by object_path_checked
                 fs::read(self.object_path_checked(key)?).await?,
             ))
         }
@@ -468,6 +470,7 @@ impl StorageBackend for LocalBackend {
 
         let path = self.object_path_checked(key)?;
 
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- key validated by object_path_checked
         match fs::read(&path).await {
             Ok(data) => Ok(data),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -488,6 +491,7 @@ impl StorageBackend for LocalBackend {
     > {
         use tokio::io::{AsyncReadExt, AsyncSeekExt};
         let path = self.object_path_checked(key)?;
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- key validated by object_path_checked
         let mut file = tokio::fs::File::open(&path).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 anyhow::anyhow!("object not found: {}", key)
@@ -579,6 +583,7 @@ impl StorageBackend for LocalBackend {
             let _ = fs::remove_file(&temp_path).await;
 
             // Create and write temp file
+            // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- key validated by object_path_checked
             let file_result = fs::File::create(&temp_path).await;
             let mut file = match file_result {
                 Ok(f) => f,
@@ -657,6 +662,7 @@ impl StorageBackend for LocalBackend {
             Ok(()) => Ok(()),
             Err(_) => {
                 // Cross-device rename (different filesystem / drive): copy then delete.
+                // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- key validated by object_path_checked
                 fs::copy(src, &dest)
                     .await
                     .map_err(|e| anyhow::anyhow!("put_file copy: {}", e))?;

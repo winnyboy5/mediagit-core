@@ -750,6 +750,7 @@ fn decode_recovery_code(code: &str) -> Result<EncryptionKey> {
 fn read_stored(repo_root: &Path) -> Result<StoredKey> {
     let path = key_file_path(repo_root);
     let text =
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- repo-internal constant path
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let stored: StoredKey =
         toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
@@ -830,6 +831,7 @@ fn keyfile_master_at(path: &Path) -> Result<EncryptionKey> {
     // the master key spelled out in ASCII (equally sensitive to the raw-bytes
     // form), and the raw-bytes arm's `raw` *is* the key.
     let raw = Zeroizing::new(
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- local CLI arg (key file)
         std::fs::read(path).with_context(|| format!("reading key file at {}", path.display()))?,
     );
 

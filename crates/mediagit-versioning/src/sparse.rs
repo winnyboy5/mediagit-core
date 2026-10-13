@@ -73,6 +73,7 @@ impl SparseFilter {
         if !path.exists() {
             return Ok(Self::disabled());
         }
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- repo-internal constant path
         let content = fs::read_to_string(&path)?;
         Self::parse(repo_root, &content)
     }

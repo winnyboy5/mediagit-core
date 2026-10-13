@@ -331,6 +331,7 @@ impl RemoteCmd {
                 let remotes_dir = storage_path.join("refs").join("remotes").join(name);
                 if remotes_dir.exists() {
                     println!("  Locally tracked branches:");
+                    // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- local CLI arg (remote name)
                     if let Ok(entries) = std::fs::read_dir(&remotes_dir) {
                         for entry in entries.flatten() {
                             if let Some(name) = entry.file_name().to_str() {

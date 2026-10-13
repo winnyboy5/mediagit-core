@@ -587,6 +587,7 @@ pub async fn apply_merge_to_workdir(
         let is_binary = ours_bytes.as_deref().is_some_and(contains_nul_byte)
             || theirs_bytes.as_deref().is_some_and(contains_nul_byte);
 
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- validated by worktree_path
         let dest = crate::checkout::worktree_path(workdir, Path::new(path_str))?;
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)
@@ -639,6 +640,7 @@ pub async fn apply_merge_to_workdir(
 
         // Stage the workdir content at stage 0
         let index_entry = IndexEntry::new(
+            // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- index entry only, no fs access; writes go through worktree_path
             std::path::PathBuf::from(path_str),
             stage0_oid,
             0o100644,
@@ -656,6 +658,7 @@ pub async fn apply_merge_to_workdir(
         // never receive `<<<<<<<` markers (inlining would corrupt them), so
         // any caller inspecting file *content* sees a clean tree and wrongly
         // concludes the conflict was resolved.
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- index entry only, no fs access; writes go through worktree_path
         index.mark_unresolved(std::path::PathBuf::from(path_str));
     }
 

@@ -333,6 +333,7 @@ impl Config {
                 .ok_or_else(|| anyhow::anyhow!("Invalid config path: {}", config_path.display()))?
                 .to_string_lossy()
         ));
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- operator config path
         std::fs::copy(&config_path, &backup_path).map_err(|e| {
             anyhow::anyhow!(
                 "Failed to back up config.toml to {} before migration: {}",
@@ -441,6 +442,7 @@ impl Config {
 
         {
             use std::io::Write;
+            // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- operator config path
             let mut f = std::fs::File::create(&tmp_path)?;
             f.write_all(toml_str.as_bytes())?;
             f.sync_all()?;

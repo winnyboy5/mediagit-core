@@ -187,6 +187,7 @@ fn working_oid(full_path: &Path) -> Option<Oid> {
     if metadata.len() >= crate::commands::utils::STREAMING_THRESHOLD {
         Oid::from_file(full_path).ok()
     } else {
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- read-only probe of local worktree
         std::fs::read(full_path).ok().map(|c| Oid::hash(&c))
     }
 }

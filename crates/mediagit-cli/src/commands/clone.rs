@@ -792,6 +792,7 @@ url = "{}"
 /// index from a local clone's copied `.mediagit`).
 fn copy_dir_skip(src: &Path, dst: &Path, skip_relative: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
+    // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- local CLI arg (local clone source dir)
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         if Path::new(&entry.file_name()) == skip_relative {

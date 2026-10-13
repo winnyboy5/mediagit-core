@@ -379,6 +379,7 @@ impl RevertCmd {
         for entry in tree.iter() {
             if !entry.is_tree() {
                 let idx_entry = IndexEntry::new(
+                    // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- no fs access (index entry)
                     PathBuf::from(&entry.name),
                     entry.oid,
                     entry.mode.as_u32(),
@@ -398,6 +399,7 @@ impl RevertCmd {
             anyhow::bail!("No revert in progress");
         }
 
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- repo-internal constant path
         let state_content = fs::read_to_string(&state_file).await?;
         let state = RevertState::from_string(&state_content)?;
 
@@ -485,6 +487,7 @@ impl RevertCmd {
             anyhow::bail!("No revert in progress");
         }
 
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- repo-internal constant path
         let state_content = fs::read_to_string(&state_file).await?;
         let state = RevertState::from_string(&state_content)?;
 
@@ -535,6 +538,7 @@ impl RevertCmd {
             anyhow::bail!("No revert in progress");
         }
 
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- repo-internal constant path
         let state_content = fs::read_to_string(&state_file).await?;
         let mut state = RevertState::from_string(&state_content)?;
 
@@ -577,6 +581,7 @@ impl RevertCmd {
             return Ok(None);
         }
 
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- repo-internal constant path
         let content = fs::read_to_string(&head_path).await?;
         let content = content.trim();
 

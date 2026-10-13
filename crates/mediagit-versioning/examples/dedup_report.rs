@@ -219,6 +219,7 @@ fn repo_root() -> Result<PathBuf> {
 /// written so processing (and therefore first-seen chunk attribution) is
 /// deterministic across runs.
 fn parse_manifest(path: &Path) -> Result<(Vec<String>, Vec<String>)> {
+    // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- dev example tool, local CLI args
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("reading manifest {}", path.display()))?;
 
@@ -249,6 +250,7 @@ fn parse_manifest(path: &Path) -> Result<(Vec<String>, Vec<String>)> {
 }
 
 fn extension_of(rel: &str) -> String {
+    // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- dev example tool, local CLI args
     Path::new(rel)
         .extension()
         .and_then(|e| e.to_str())
@@ -267,12 +269,14 @@ async fn process_file(
     per_ext: &mut BTreeMap<String, ExtAccum>,
 ) -> Result<()> {
     let ext = extension_of(rel);
+    // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- dev example tool, local CLI args
     let filename = Path::new(rel)
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or(rel);
     let obj_type = CompObjectType::from_path(rel);
 
+    // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- dev example tool, local CLI args
     let data = tokio::fs::read(path)
         .await
         .with_context(|| format!("reading {}", path.display()))?;
@@ -315,6 +319,7 @@ fn compute_deltas(
     let mut groups: BTreeMap<(String, String), (Option<String>, Option<String>)> = BTreeMap::new();
 
     for rel in pair_files {
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- dev example tool, local CLI args
         let p = Path::new(rel);
         let ext = extension_of(rel);
         let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
@@ -330,8 +335,10 @@ fn compute_deltas(
             continue; // incomplete pair, skip
         };
 
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- dev example tool, local CLI args
         let v1_data = std::fs::read(pairs_root.join(&v1_rel))
             .with_context(|| format!("reading pair base {}", v1_rel))?;
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- dev example tool, local CLI args
         let v2_data = std::fs::read(pairs_root.join(&v2_rel))
             .with_context(|| format!("reading pair target {}", v2_rel))?;
 

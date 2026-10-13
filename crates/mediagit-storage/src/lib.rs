@@ -394,6 +394,7 @@ pub trait StorageBackend: Send + Sync + Debug {
     /// overrides with an atomic rename so the data is never re-buffered in RAM.
     /// Gated by `MEDIAGIT_STREAM_CHUNK_TO_DISK=1` in the protocol client.
     async fn put_file(&self, key: &str, src: &std::path::Path) -> anyhow::Result<()> {
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- local temp file (key validated in put)
         let data = tokio::fs::read(src).await?;
         self.put(key, &data).await
     }
@@ -790,6 +791,7 @@ pub fn validate_object_key(key: &str) -> anyhow::Result<()> {
         }
     }
 
+    // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- inside validate_object_key itself
     let path = std::path::Path::new(&normalized);
 
     if path.is_absolute() {

@@ -174,6 +174,7 @@ fn should_scan_with_interval(repo_root: &Path, interval: u64) -> bool {
     }
 
     let path = repo_root.join(COUNTER_FILE);
+    // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- repo-internal constant path
     let count = std::fs::read_to_string(&path)
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())

@@ -55,6 +55,7 @@ impl UploadJournal {
     /// Load from disk, creating a new empty journal if the file does not exist.
     pub fn load_or_new(path: &Path, push_id: &str) -> anyhow::Result<Self> {
         if path.exists() {
+            // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- repo-internal path (client-generated push id)
             let data = std::fs::read_to_string(path)?;
             let j: Self = serde_json::from_str(&data)?;
             return Ok(j);

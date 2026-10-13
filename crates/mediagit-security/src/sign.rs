@@ -58,6 +58,7 @@ fn dirs_home() -> Option<PathBuf> {
 /// group/world-readable keys; MediaGit does not yet) — protect the key with
 /// filesystem permissions.
 pub fn sign(payload: &[u8], key_path: &Path) -> Result<Vec<u8>> {
+    // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- local signing key path (MEDIAGIT_SIGN_KEY or ~/.ssh)
     let pem = std::fs::read_to_string(key_path)
         .with_context(|| format!("Failed to read SSH key at {}", key_path.display()))?;
     let key = PrivateKey::from_openssh(&pem)
@@ -84,6 +85,7 @@ pub fn sign(payload: &[u8], key_path: &Path) -> Result<Vec<u8>> {
 /// Load the public key matching `key_path` (i.e. the public half of the key
 /// [`sign`] would use). Used to self-verify a tag signed with the same key.
 pub fn public_key_for(key_path: &Path) -> Result<PublicKey> {
+    // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- local signing key path (MEDIAGIT_SIGN_KEY or ~/.ssh)
     let pem = std::fs::read_to_string(key_path)
         .with_context(|| format!("Failed to read SSH key at {}", key_path.display()))?;
     let key = PrivateKey::from_openssh(&pem)

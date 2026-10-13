@@ -307,6 +307,7 @@ async fn stream_chunk_body_to_file_with_retry(
     let mut response = first;
     let mut attempt = 0u32;
     loop {
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- OID/hex-derived temp path
         let mut f = tokio::fs::File::create(temp_path)
             .await
             .map_err(|e| anyhow::anyhow!("B4 temp create: {}", e))?;
