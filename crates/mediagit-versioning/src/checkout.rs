@@ -180,7 +180,13 @@ pub(crate) fn worktree_path(root: &Path, rel: &Path) -> Result<PathBuf> {
     let s = rel
         .to_str()
         .with_context(|| format!("non-UTF-8 tree path: {}", rel.display()))?;
-    mediagit_storage::validate_object_key(s)
+    // `X:` is a drive prefix only on Windows; elsewhere `a:b.txt` is an
+    // ordinary name, so mask the letter before the drive-letter check.
+    let probe = match s.as_bytes() {
+        [c, b':', ..] if !cfg!(windows) && c.is_ascii_alphabetic() => format!("_{}", &s[1..]),
+        _ => s.to_owned(),
+    };
+    mediagit_storage::validate_object_key(&probe)
         .with_context(|| format!("unsafe tree path: {}", rel.display()))?;
     Ok(root.join(rel))
 }
@@ -364,7 +370,13 @@ impl<'a> CheckoutManager<'a> {
                     // presence is simply untouched — never deleted by checkout.
                     continue;
                 }
-                let file_path = worktree_path(&self.repo_root, &file)?;
+                let file_path = match worktree_path(&self.repo_root, &file) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn!("Not removing {}: {e:#}", file.display());
+                        continue;
+                    }
+                };
                 debug!("Removing file not in target: {}", file.display());
 
                 if file_path.exists() {
@@ -569,13 +581,19 @@ impl<'a> CheckoutManager<'a> {
         // through here, so this is the one place that has to know.
         detect_case_collisions(&self.repo_root, entries.iter().map(|(p, _, _)| p))?;
 
+        // Validate every path before the first write, so an unsafe entry
+        // fails the checkout without leaving it half-applied.
+        let entries = entries
+            .into_iter()
+            .map(|(path, oid, mode)| Ok((worktree_path(&self.repo_root, &path)?, oid, mode)))
+            .collect::<Result<Vec<_>>>()?;
+
         let semaphore = Arc::new(Semaphore::new(checkout_parallelism()));
         let mut tasks: JoinSet<Result<bool>> = JoinSet::new();
 
-        for (path, oid, mode) in entries {
+        for (full_path, oid, mode) in entries {
             let sem = semaphore.clone();
             let odb = self.odb.clone();
-            let full_path = worktree_path(&self.repo_root, &path)?;
             tasks.spawn(async move {
                 let _permit = sem
                     .acquire_owned()
@@ -881,7 +899,12 @@ impl<'a> CheckoutManager<'a> {
         let mut to_delete = Vec::new();
         for path in from_files.keys() {
             if !to_files.contains_key(path) {
-                let full_path = worktree_path(&self.repo_root, path)?;
+                // An unsafe path in the tree we are leaving was never written,
+                // so there is nothing to delete; don't block moving away.
+                let Ok(full_path) = worktree_path(&self.repo_root, path) else {
+                    warn!("Skipping unsafe path in source tree: {}", path.display());
+                    continue;
+                };
                 if full_path.exists() {
                     to_delete.push(full_path);
                 }
@@ -2200,6 +2223,10 @@ mod tests {
         let blob = odb.write(ObjectType::Blob, b"pwned").await?;
         let mut tree = Tree::new();
         tree.add_entry(TreeEntry::new(name.to_string(), FileMode::Regular, blob));
+        // Safe siblings: the unsafe entry must fail the checkout before any write.
+        for good in ["a_good.txt", "z_good.txt"] {
+            tree.add_entry(TreeEntry::new(good.to_string(), FileMode::Regular, blob));
+        }
         let tree_oid = tree.write(&odb).await?;
         let commit = Commit::new(
             tree_oid,
@@ -2219,6 +2246,12 @@ mod tests {
     async fn test_checkout_rejects_parent_traversal_tree_entry() -> Result<()> {
         let (err, outer) = checkout_poisoned_name("../evil.txt").await?;
         assert!(!outer.path().join("evil.txt").exists(), "escaped worktree");
+        for good in ["a_good.txt", "z_good.txt"] {
+            assert!(
+                !outer.path().join("repo").join(good).exists(),
+                "partial checkout wrote {good}"
+            );
+        }
         assert!(
             err.is_some_and(|e| e.contains("invalid storage key")),
             "checkout of a `..` tree entry must be rejected by validation"
@@ -2244,8 +2277,17 @@ mod tests {
             worktree_path(root, Path::new("a/b.txt")).unwrap(),
             root.join("a/b.txt")
         );
-        for bad in ["../x", "..\\x", "a/../../x", "/x", "C:/x"] {
+        for bad in ["../x", "..\\x", "a/../../x", "/x", "a:/../../x"] {
             assert!(worktree_path(root, Path::new(bad)).is_err(), "{bad}");
+        }
+        // `X:` is a drive only on Windows; elsewhere it is a legal name.
+        assert_eq!(
+            worktree_path(root, Path::new("C:/x")).is_err(),
+            cfg!(windows),
+            "C:/x"
+        );
+        if !cfg!(windows) {
+            assert!(worktree_path(root, Path::new("a:b.txt")).is_ok());
         }
     }
 }
