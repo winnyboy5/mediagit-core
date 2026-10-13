@@ -2144,6 +2144,7 @@ impl ObjectDatabase {
             // verified and written. A crash or error mid-stream leaves at
             // worst a stale `.mgtmp`, never a truncated file at `path`.
             let tmp_path = atomic_tmp_path(path)?;
+            // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- destination validated by caller (checkout worktree_path, A1)
             let mut file = tokio::fs::File::create(&tmp_path).await?;
             let mut bytes_written = 0u64;
 
@@ -3038,6 +3039,7 @@ impl ObjectDatabase {
             // no streaming decoder. `clone` always builds its ODB with smart
             // compression (`clone.rs` -> `core.rs`), so this arm is not the
             // clone path and does not carry its memory constraint.
+            // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- repo-internal staged chunk path, hash-verified
             let data = tokio::fs::read(path).await.map_err(|e| {
                 anyhow::anyhow!("Failed to read staged chunk {}: {}", path.display(), e)
             })?;
@@ -3066,6 +3068,7 @@ impl ObjectDatabase {
 
         let chunk_key = format!("chunks/{}", chunk_id.to_hex());
         if mediagit_compression::process_key().is_some() {
+            // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- repo-internal staged chunk path, hash-verified
             let data = tokio::fs::read(path).await.map_err(|e| {
                 anyhow::anyhow!("Failed to read staged chunk {}: {}", path.display(), e)
             })?;

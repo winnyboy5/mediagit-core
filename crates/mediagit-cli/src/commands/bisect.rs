@@ -342,6 +342,7 @@ impl BisectCmd {
 
     async fn replay(&self, opts: &ReplayOpts) -> Result<()> {
         let logfile_content =
+            // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- local CLI arg (--logfile)
             std::fs::read_to_string(&opts.logfile).context("Failed to read log file")?;
 
         println!("{} Replaying bisect log...", style("→").cyan());
@@ -585,6 +586,7 @@ impl BisectCmd {
             anyhow::bail!("No bisect session in progress. Use 'mediagit bisect start' to begin.");
         }
 
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- repo-internal constant path
         let state_json = std::fs::read_to_string(&state_path)?;
         let state: BisectState = serde_json::from_str(&state_json)?;
 

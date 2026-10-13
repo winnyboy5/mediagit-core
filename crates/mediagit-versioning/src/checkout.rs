@@ -88,6 +88,7 @@ async fn write_entry_to_disk(
             {
                 use std::os::unix::fs::symlink;
                 let _ = fs::remove_file(full_path);
+                // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- link path validated by worktree_path; target is symlink content
                 symlink(&target, full_path).with_context(|| {
                     format!("Failed to create symlink: {}", full_path.display())
                 })?;
@@ -393,6 +394,7 @@ impl<'a> CheckoutManager<'a> {
             return Ok(());
         }
 
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- local worktree walk
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
@@ -445,6 +447,7 @@ impl<'a> CheckoutManager<'a> {
         // Don't try to remove the repo root
         if dir == self.repo_root {
             // But still process its contents
+            // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- local worktree walk
             for entry in fs::read_dir(dir)? {
                 let entry = entry?;
                 let path = entry.path();
@@ -464,6 +467,7 @@ impl<'a> CheckoutManager<'a> {
         let mut has_contents = false;
 
         // First pass: recursively process subdirectories
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- local worktree walk
         let entries: Vec<_> = fs::read_dir(dir)?.filter_map(|e| e.ok()).collect();
 
         for entry in &entries {
@@ -1726,6 +1730,7 @@ mod tests {
         // Worktrees must be byte-identical: same file set, same content.
         fn list_files(root: &Path) -> Result<std::collections::BTreeMap<String, Vec<u8>>> {
             let mut out = std::collections::BTreeMap::new();
+            // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- test code
             for entry in fs::read_dir(root)? {
                 let entry = entry?;
                 let name = entry.file_name().to_string_lossy().to_string();
@@ -2070,6 +2075,7 @@ mod tests {
                 root: &Path,
                 out: &mut std::collections::BTreeMap<String, Vec<u8>>,
             ) -> Result<()> {
+                // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- test code
                 for entry in fs::read_dir(dir)? {
                     let entry = entry?;
                     let path = entry.path();
@@ -2308,6 +2314,7 @@ mod overlap_split_parity_tests {
 
     fn read_tree_on_disk(root: &Path) -> Vec<(String, String)> {
         fn walk(dir: &Path, base: &Path, out: &mut Vec<(String, String)>) {
+            // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- test code
             for entry in fs::read_dir(dir).unwrap().flatten() {
                 let p = entry.path();
                 if p.is_dir() {
@@ -2318,6 +2325,7 @@ mod overlap_split_parity_tests {
                         .unwrap()
                         .to_string_lossy()
                         .replace('\\', "/");
+                    // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- test code
                     out.push((rel, fs::read_to_string(&p).unwrap()));
                 }
             }

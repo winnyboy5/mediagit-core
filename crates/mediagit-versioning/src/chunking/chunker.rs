@@ -447,6 +447,7 @@ impl ContentChunker {
         filename: &str,
     ) -> Result<Vec<ContentChunk>> {
         // Detect file type from extension
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- no fs access (extension only)
         let extension = std::path::Path::new(filename)
             .extension()
             .and_then(|e| e.to_str())

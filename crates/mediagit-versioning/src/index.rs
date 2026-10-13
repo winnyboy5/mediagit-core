@@ -104,6 +104,7 @@ impl Index {
             return Ok(Self::new());
         }
 
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- repo-internal constant path
         let contents = fs::read_to_string(&index_path)
             .with_context(|| format!("Failed to read index file: {}", index_path.display()))?;
 

@@ -335,10 +335,12 @@ impl ServerConfig {
     /// than duplicating the "does the default path exist" condition and letting
     /// the two drift.
     pub fn load_reporting(config_path: &str) -> Result<(Self, Option<String>)> {
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- operator config path
         let path = PathBuf::from(config_path);
         let is_default = config_path == "mediagit-server.toml";
 
         if path.exists() {
+            // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- operator config path
             let content = std::fs::read_to_string(&path).context("Failed to read config file")?;
 
             let config: Self = toml::from_str(&content).with_context(|| {

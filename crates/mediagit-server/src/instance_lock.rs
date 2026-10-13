@@ -114,6 +114,7 @@ impl InstanceLock {
             .read(true)
             .write(true)
             .truncate(false)
+            // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- operator data dir
             .open(&path)
             .with_context(|| format!("opening instance lock: {}", path.display()))?;
 
@@ -152,6 +153,7 @@ impl InstanceLock {
 
         // Lock held by a live sibling. The owner file names it; it is untrusted
         // text and only ever reaches an error message.
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- operator data dir
         let holder = std::fs::read_to_string(&owner_path).unwrap_or_default();
         let holder = holder.trim();
         let holder = if holder.is_empty() {

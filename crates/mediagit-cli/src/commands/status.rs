@@ -819,6 +819,7 @@ impl StatusCmd {
         ignored_files: &mut HashSet<PathBuf>,
         files: &mut HashSet<PathBuf>,
     ) -> Result<()> {
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- local worktree walk
         for entry in std::fs::read_dir(current_dir)? {
             let entry = entry?;
             let path = entry.path();

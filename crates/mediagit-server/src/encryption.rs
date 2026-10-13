@@ -144,6 +144,7 @@ fn read_key_file(path: &Path) -> Result<EncryptionKey> {
     // master key spelled out in ASCII, which is exactly as sensitive as the
     // raw form.
     let raw = Zeroizing::new(
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- operator config path
         std::fs::read(path).with_context(|| format!("reading master key at {}", path.display()))?,
     );
 
@@ -284,6 +285,7 @@ pub fn load_repo_key_bytes(
 
 fn read_stored(path: &Path) -> Result<StoredRepoKey> {
     let text =
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- repo validated by validate_repo_name middleware
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let stored: StoredRepoKey =
         serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;

@@ -72,6 +72,7 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
     let tmp = tmp_path_for(path)?;
 
     let write_result = (|| -> io::Result<()> {
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- temp sibling of caller-validated path
         let mut file = std::fs::File::create(&tmp)?;
         file.write_all(data)?;
         file.sync_all()?;

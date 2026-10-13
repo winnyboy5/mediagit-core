@@ -294,6 +294,7 @@ async fn collect_refs_recursive(
 ) -> anyhow::Result<()> {
     use tokio::fs;
 
+    // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- repo-internal refs dir walk
     let mut entries = fs::read_dir(dir_path).await?;
 
     while let Some(entry) = entries.next_entry().await? {
@@ -412,6 +413,7 @@ impl RefDatabase {
         // in-flight temp file, and whichever `rename` landed last won,
         // silently discarding the other update.
         let temp_path = crate::atomic_write::tmp_path_for(&path)?;
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- ref name validated by ref_path (A2)
         let mut file = fs::File::create(&temp_path).await?;
         file.write_all(&data).await?;
         file.sync_all().await?;
@@ -440,6 +442,7 @@ impl RefDatabase {
 
         let path = self.ref_path(ref_name)?;
 
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- ref name validated by ref_path (A2)
         match fs::read(&path).await {
             Ok(data) => {
                 debug!(ref_name = %ref_name, "Read reference");

@@ -624,6 +624,7 @@ impl StatsCmd {
 
                 if is_media {
                     stats.media_files += 1;
+                    // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- no fs access (extension only)
                     if let Some(ext) = Path::new(&name).extension().and_then(|e| e.to_str()) {
                         let category = categorize_extension(ext);
                         if category != "other" {

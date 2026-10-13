@@ -297,6 +297,7 @@ impl ImageMetadataParser {
     /// Detect image format from data
     fn detect_format(data: &[u8], filename: &str) -> Result<SupportedImageFormat> {
         // Try extension first
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- no fs access (extension only)
         if let Some(ext) = Path::new(filename).extension()
             && let Some(format) = SupportedImageFormat::from_extension(ext.to_str().unwrap_or(""))
         {

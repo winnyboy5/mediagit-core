@@ -63,6 +63,7 @@ impl PackTransaction {
         fs::write(&temp_path, data).await?;
 
         // Verify written data
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- OID/hex-derived path
         let written_data = fs::read(&temp_path).await?;
         if written_data != data {
             return Err(anyhow::anyhow!("Data verification failed for {}", oid));

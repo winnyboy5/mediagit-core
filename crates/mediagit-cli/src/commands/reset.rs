@@ -403,6 +403,7 @@ impl ResetCmd {
             return Ok(None);
         }
 
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- repo-internal constant path
         let content = fs::read_to_string(&head_path).await?;
         let content = content.trim();
 

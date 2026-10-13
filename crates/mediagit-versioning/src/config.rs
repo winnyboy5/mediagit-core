@@ -149,6 +149,7 @@ impl StorageConfig {
 
     /// Load configuration from TOML file
     pub fn from_toml(path: &std::path::Path) -> anyhow::Result<Self> {
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- local config path
         let content = std::fs::read_to_string(path)?;
         let config: Self = toml::from_str(&content)?;
         Ok(config)
