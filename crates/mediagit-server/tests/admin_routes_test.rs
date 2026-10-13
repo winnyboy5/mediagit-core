@@ -1256,3 +1256,22 @@ async fn logout_does_not_affect_other_sessions() {
          the user out of the rest"
     );
 }
+
+#[tokio::test]
+async fn grant_rejects_traversal_repo_name() {
+    let (state, admin, _write) = test_state_with_tokens().await;
+    let app = create_router(Arc::clone(&state));
+
+    // `..` joins to an existing directory, so without validation this would
+    // be accepted and recorded as a grant.
+    let resp = app
+        .oneshot(post_json(
+            "/auth/users/target-user/grants",
+            Some(&admin),
+            r#"{"repo":"..","level":"write"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(state.grants.get("target-user", ".."), None);
+}
