@@ -555,7 +555,7 @@ pub async fn apply_merge_to_workdir(
             .with_context(|| format!("Failed to read blob for {}", path_str))?;
 
         // Write to workdir
-        let dest = workdir.join(path_str);
+        let dest = crate::checkout::worktree_path(workdir, Path::new(path_str))?;
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create dirs for {}", path_str))?;
@@ -587,7 +587,7 @@ pub async fn apply_merge_to_workdir(
         let is_binary = ours_bytes.as_deref().is_some_and(contains_nul_byte)
             || theirs_bytes.as_deref().is_some_and(contains_nul_byte);
 
-        let dest = workdir.join(path_str);
+        let dest = crate::checkout::worktree_path(workdir, Path::new(path_str))?;
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create dirs for {}", path_str))?;

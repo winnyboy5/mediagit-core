@@ -170,6 +170,20 @@ async fn checkout_entry_differential(
     Ok(true)
 }
 
+/// Join a tree/index-derived relative path onto the worktree root.
+///
+/// Tree entry names come from remotes and are untrusted: a name like
+/// `../evil.txt` or `C:/x` would otherwise make checkout write or delete
+/// outside the repository.
+pub(crate) fn worktree_path(root: &Path, rel: &Path) -> Result<PathBuf> {
+    let s = rel
+        .to_str()
+        .with_context(|| format!("non-UTF-8 tree path: {}", rel.display()))?;
+    mediagit_storage::validate_object_key(s)
+        .with_context(|| format!("unsafe tree path: {}", rel.display()))?;
+    Ok(root.join(rel))
+}
+
 /// Checkout manager for working directory operations
 pub struct CheckoutManager<'a> {
     odb: &'a ObjectDatabase,
@@ -247,7 +261,7 @@ impl<'a> CheckoutManager<'a> {
     /// filter — used by the `sparse-checkout set`/`disable` commands to
     /// explicitly materialize a newly-included file.
     pub async fn materialize_file(&self, rel_path: &Path, oid: &Oid, mode: FileMode) -> Result<()> {
-        let full_path = self.repo_root.join(rel_path);
+        let full_path = worktree_path(&self.repo_root, rel_path)?;
         write_entry_to_disk(self.odb, &full_path, oid, mode).await
     }
 
@@ -349,7 +363,7 @@ impl<'a> CheckoutManager<'a> {
                     // presence is simply untouched — never deleted by checkout.
                     continue;
                 }
-                let file_path = self.repo_root.join(&file);
+                let file_path = worktree_path(&self.repo_root, &file)?;
                 debug!("Removing file not in target: {}", file.display());
 
                 if file_path.exists() {
@@ -557,7 +571,7 @@ impl<'a> CheckoutManager<'a> {
         for (path, oid, mode) in entries {
             let sem = semaphore.clone();
             let odb = self.odb.clone();
-            let full_path = self.repo_root.join(&path);
+            let full_path = worktree_path(&self.repo_root, &path)?;
             tasks.spawn(async move {
                 let _permit = sem
                     .acquire_owned()
@@ -794,7 +808,7 @@ impl<'a> CheckoutManager<'a> {
             let mut to_restore = Vec::new();
             let mut files_unchanged = 0usize;
             for (path, (oid, mode)) in &to_files {
-                let full_path = self.repo_root.join(path);
+                let full_path = worktree_path(&self.repo_root, path)?;
                 if full_path.exists() {
                     files_unchanged += 1;
                 } else {
@@ -836,7 +850,7 @@ impl<'a> CheckoutManager<'a> {
         let mut files_unchanged = 0usize;
 
         for (path, (to_oid, mode)) in &to_files {
-            let full_path = self.repo_root.join(path);
+            let full_path = worktree_path(&self.repo_root, path)?;
 
             match from_files.get(path) {
                 Some((from_oid, _)) if from_oid == to_oid => {
@@ -863,7 +877,7 @@ impl<'a> CheckoutManager<'a> {
         let mut to_delete = Vec::new();
         for path in from_files.keys() {
             if !to_files.contains_key(path) {
-                let full_path = self.repo_root.join(path);
+                let full_path = worktree_path(&self.repo_root, path)?;
                 if full_path.exists() {
                     to_delete.push(full_path);
                 }
@@ -2164,6 +2178,69 @@ mod tests {
         assert!(!repo_root.join("x.bin::stage1").exists());
 
         Ok(())
+    }
+
+    /// A remote-supplied tree entry name must never resolve outside the
+    /// worktree: checkout fails hard and nothing is written.
+    async fn checkout_poisoned_name(name: &str) -> Result<(Option<String>, TempDir)> {
+        let outer = TempDir::new()?;
+        let repo_root = outer.path().join("repo");
+        let storage_path = repo_root.join(".mediagit");
+        fs::create_dir_all(&storage_path)?;
+
+        let storage = Arc::new(LocalBackend::new(&storage_path).await?);
+        let odb = ObjectDatabase::new(storage, 100);
+
+        let blob = odb.write(ObjectType::Blob, b"pwned").await?;
+        let mut tree = Tree::new();
+        tree.add_entry(TreeEntry::new(name.to_string(), FileMode::Regular, blob));
+        let tree_oid = tree.write(&odb).await?;
+        let commit = Commit::new(
+            tree_oid,
+            Signature::now("Test".to_string(), "test@example.com".to_string()),
+            Signature::now("Test".to_string(), "test@example.com".to_string()),
+            "poisoned".to_string(),
+        );
+        let commit_oid = commit.write(&odb).await?;
+
+        let res = CheckoutManager::new(&odb, &repo_root)
+            .checkout_commit(&commit_oid)
+            .await;
+        Ok((res.err().map(|e| format!("{e:#}")), outer))
+    }
+
+    #[tokio::test]
+    async fn test_checkout_rejects_parent_traversal_tree_entry() -> Result<()> {
+        let (err, outer) = checkout_poisoned_name("../evil.txt").await?;
+        assert!(!outer.path().join("evil.txt").exists(), "escaped worktree");
+        assert!(
+            err.is_some_and(|e| e.contains("invalid storage key")),
+            "checkout of a `..` tree entry must be rejected by validation"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_checkout_rejects_absolute_tree_entry() -> Result<()> {
+        let (err, _outer) = checkout_poisoned_name("/mg_abs_test_x.txt").await?;
+        assert!(
+            err.is_some_and(|e| e.contains("invalid storage key")),
+            "checkout of an absolute tree entry must be rejected by validation"
+        );
+        assert!(!std::path::Path::new("/mg_abs_test_x.txt").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn test_worktree_path_validation() {
+        let root = Path::new("root");
+        assert_eq!(
+            worktree_path(root, Path::new("a/b.txt")).unwrap(),
+            root.join("a/b.txt")
+        );
+        for bad in ["../x", "..\\x", "a/../../x", "/x", "C:/x"] {
+            assert!(worktree_path(root, Path::new(bad)).is_err(), "{bad}");
+        }
     }
 }
 
