@@ -177,6 +177,10 @@ pub async fn upsert_grant(
         return Err(StatusCode::NOT_FOUND);
     }
 
+    crate::security::validate_repo_name(&req.repo).map_err(|e| {
+        tracing::warn!(repo = %req.repo, "grant refused: invalid repository name: {}", e);
+        StatusCode::BAD_REQUEST
+    })?;
     let repo_path = state.repos_dir.join(&req.repo);
     if !repo_path.is_dir() {
         tracing::warn!(repo = %req.repo, "grant refused: no such repository");
