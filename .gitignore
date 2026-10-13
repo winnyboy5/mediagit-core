@@ -244,3 +244,5 @@ graphify-out/
 # docs/agents/ (skill setup config) stays local-only, intentionally.
 !docs/adr/
 !docs/adr/**
+
+deck/
