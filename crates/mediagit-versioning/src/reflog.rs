@@ -185,18 +185,19 @@ impl Reflog {
     }
 
     /// Get the path to a reflog file
-    fn reflog_path(&self, ref_name: &str) -> PathBuf {
+    fn reflog_path(&self, ref_name: &str) -> Result<PathBuf> {
+        mediagit_storage::validate_object_key(ref_name)?;
         let logs_dir = self.root.join("logs");
 
         // Normalize ref name
-        if ref_name == "HEAD" {
+        Ok(if ref_name == "HEAD" {
             logs_dir.join("HEAD")
         } else if ref_name.starts_with("refs/") {
             logs_dir.join(ref_name)
         } else {
             // Assume it's a branch name
             logs_dir.join("refs").join("heads").join(ref_name)
-        }
+        })
     }
 
     /// Append an entry to the reflog
@@ -207,7 +208,7 @@ impl Reflog {
     /// * `ref_name` - Name of the ref (e.g., "HEAD", "refs/heads/main", or "main")
     /// * `entry` - The reflog entry to append
     pub async fn append(&self, ref_name: &str, entry: &ReflogEntry) -> Result<()> {
-        let path = self.reflog_path(ref_name);
+        let path = self.reflog_path(ref_name)?;
 
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
@@ -274,7 +275,7 @@ impl Reflog {
     /// * `ref_name` - Name of the ref
     /// * `limit` - Maximum number of entries to return (None for all)
     pub async fn read(&self, ref_name: &str, limit: Option<usize>) -> Result<Vec<ReflogEntry>> {
-        let path = self.reflog_path(ref_name);
+        let path = self.reflog_path(ref_name)?;
 
         if !path.exists() {
             return Ok(Vec::new());
@@ -319,7 +320,7 @@ impl Reflog {
     /// # Returns
     /// Number of entries that were expired (removed)
     pub async fn expire(&self, ref_name: &str, keep: usize) -> Result<usize> {
-        let path = self.reflog_path(ref_name);
+        let path = self.reflog_path(ref_name)?;
 
         if !path.exists() {
             return Ok(0);
@@ -358,7 +359,7 @@ impl Reflog {
     /// # Arguments
     /// * `ref_name` - Name of the ref
     pub async fn delete(&self, ref_name: &str) -> Result<bool> {
-        let path = self.reflog_path(ref_name);
+        let path = self.reflog_path(ref_name)?;
 
         if path.exists() {
             fs::remove_file(&path)
@@ -372,7 +373,7 @@ impl Reflog {
 
     /// Check if a reflog exists for a ref
     pub async fn exists(&self, ref_name: &str) -> bool {
-        self.reflog_path(ref_name).exists()
+        self.reflog_path(ref_name).is_ok_and(|p| p.exists())
     }
 
     /// List all refs that have reflogs
@@ -567,5 +568,30 @@ mod tests {
         // Read with shorthand
         let entries = reflog.read("feature", None).await.unwrap();
         assert_eq!(entries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_reflog_rejects_traversal_names() {
+        let outer = TempDir::new().unwrap();
+        let root = outer.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let reflog = Reflog::new(&root);
+        let entry = ReflogEntry::now(
+            Oid::from_bytes([0u8; 32]),
+            Oid::hash(b"c"),
+            "User",
+            "user@test.com",
+            "commit: x",
+        );
+
+        for bad in ["refs/../../../escape", "../../escape", "/abs", "C:/abs"] {
+            assert!(reflog.append(bad, &entry).await.is_err(), "append {bad}");
+            assert!(reflog.read(bad, None).await.is_err(), "read {bad}");
+            assert!(reflog.expire(bad, 0).await.is_err(), "expire {bad}");
+            assert!(reflog.delete(bad).await.is_err(), "delete {bad}");
+            assert!(!reflog.exists(bad).await, "exists {bad}");
+        }
+        let entries: Vec<_> = std::fs::read_dir(outer.path()).unwrap().collect();
+        assert_eq!(entries.len(), 1, "nothing may be created outside the root");
     }
 }

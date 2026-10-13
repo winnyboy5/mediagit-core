@@ -372,9 +372,12 @@ impl RefDatabase {
     }
 
     /// Get the absolute file path for a reference name
-    fn ref_path(&self, ref_name: &str) -> PathBuf {
+    fn ref_path(&self, ref_name: &str) -> anyhow::Result<PathBuf> {
+        // Ref names arrive from remotes (e.g. the server's refs/update), so
+        // they must not be able to escape the refs root.
+        mediagit_storage::validate_object_key(ref_name)?;
         // Refs are stored at: .mediagit/HEAD or .mediagit/refs/heads/main
-        self.root.join(ref_name)
+        Ok(self.root.join(ref_name))
     }
 
     /// Write a reference to the database
@@ -394,7 +397,7 @@ impl RefDatabase {
         );
 
         let data = r.serialize()?;
-        let path = self.ref_path(&r.name);
+        let path = self.ref_path(&r.name)?;
 
         // Create parent directory if needed
         if let Some(parent) = path.parent() {
@@ -435,7 +438,7 @@ impl RefDatabase {
     pub async fn read(&self, ref_name: &str) -> anyhow::Result<Ref> {
         use tokio::fs;
 
-        let path = self.ref_path(ref_name);
+        let path = self.ref_path(ref_name)?;
 
         match fs::read(&path).await {
             Ok(data) => {
@@ -454,7 +457,7 @@ impl RefDatabase {
     pub async fn exists(&self, ref_name: &str) -> anyhow::Result<bool> {
         use tokio::fs;
 
-        let path = self.ref_path(ref_name);
+        let path = self.ref_path(ref_name)?;
         Ok(fs::metadata(&path).await.is_ok())
     }
 
@@ -468,7 +471,7 @@ impl RefDatabase {
 
         debug!(ref_name = %ref_name, "Deleting reference");
 
-        let path = self.ref_path(ref_name);
+        let path = self.ref_path(ref_name)?;
         fs::remove_file(&path).await?;
 
         debug!(ref_name = %ref_name, "Reference deleted");
@@ -972,5 +975,54 @@ mod tests {
 
         // Resolution should fail
         assert!(refdb.resolve("HEAD").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_refdb_rejects_traversal_names() {
+        let outer = tempfile::tempdir().unwrap();
+        let root = outer.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let refdb = RefDatabase::new(&root);
+        let oid = Oid::hash(b"x");
+
+        for bad in [
+            "../../escape",
+            "../escape",
+            "refs/../../x",
+            "/abs",
+            "C:/abs",
+        ] {
+            let r = Ref::new_direct(bad.to_string(), oid);
+            assert!(refdb.write(&r).await.is_err(), "write {bad}");
+            assert!(refdb.read(bad).await.is_err(), "read {bad}");
+            assert!(refdb.exists(bad).await.is_err(), "exists {bad}");
+            assert!(refdb.delete(bad).await.is_err(), "delete {bad}");
+        }
+        let entries: Vec<_> = std::fs::read_dir(outer.path()).unwrap().collect();
+        assert_eq!(entries.len(), 1, "nothing may be created outside the root");
+    }
+
+    #[tokio::test]
+    async fn test_refdb_accepts_normal_names() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let refdb = RefDatabase::new(temp_dir.path());
+        let oid = Oid::hash(b"x");
+        for ok in [
+            "refs/heads/main",
+            "refs/heads/feat/x",
+            "refs/remotes/origin/main",
+            "refs/tags/v1.0",
+        ] {
+            refdb
+                .write(&Ref::new_direct(ok.to_string(), oid))
+                .await
+                .unwrap();
+            assert!(refdb.exists(ok).await.unwrap());
+            assert_eq!(refdb.read(ok).await.unwrap().oid, Some(oid));
+        }
+        let head = Ref::new_symbolic("HEAD".to_string(), "refs/heads/main".to_string());
+        refdb.write(&head).await.unwrap();
+        assert!(refdb.exists("HEAD").await.unwrap());
+        assert!(!refdb.exists("refs/heads/missing").await.unwrap());
     }
 }
