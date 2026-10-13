@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Licence
+
+- **Free production use is now limited to Small Organisations**: fewer than 250
+  people (employees plus full-time contractors) and less than USD 10M annual
+  revenue, counted together with affiliates. Larger organisations need an
+  Enterprise licence for production use. Non-production use (evaluation,
+  pilots, testing) stays free for everyone. See [LICENSE](LICENSE) and
+  [LICENSE-COMMERCIAL.md](LICENSE-COMMERCIAL.md).
+- Applies to releases published after `v0.4.0-rc.1`. Earlier releases keep the
+  grant they were published under.
+
 ## [v0.4.0-rc.1] - 2026-09-19
 
 ### Upgrading — every breaking change in one place

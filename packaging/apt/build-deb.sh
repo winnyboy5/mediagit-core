@@ -87,10 +87,12 @@ License: BUSL-1.1
  OSI-approved open source licence, and this package is therefore non-free by
  Debian's definition.
  .
- Production use is permitted at any scale and by any organisation, provided
- that use does not include offering the Licensed Work, or a service whose
- primary value derives from it, to third parties as a hosted, managed, or
- software-as-a-service offering.
+ Production use is permitted to Small Organisations (fewer than 250 people
+ and less than USD 10,000,000 annual revenue, counted with affiliates),
+ provided that use does not include offering the Licensed Work, or a service
+ whose primary value derives from it, to third parties as a hosted, managed,
+ or software-as-a-service offering. Larger organisations need a commercial
+ licence for production use. Non-production use is permitted to everyone.
  .
  Four years after a given version is published, that version becomes available
  under the Change Licence, the GNU Affero General Public License version 3 or
