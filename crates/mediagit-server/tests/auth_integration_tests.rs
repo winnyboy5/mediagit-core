@@ -519,3 +519,36 @@ async fn grant_on_one_repo_does_not_lock_users_out_of_others() {
         "a repo with grants recorded must enforce them"
     );
 }
+
+/// A pushed ref name is attacker-controlled JSON: `refs/update` must reject
+/// traversal names without creating any file outside `.mediagit`.
+#[tokio::test]
+async fn test_refs_update_rejects_traversal_ref_name() {
+    let outer = TempDir::new().unwrap();
+    let repos_dir = outer.path().join("repos");
+    std::fs::create_dir_all(repos_dir.join("test-repo")).unwrap();
+    let app = create_router(Arc::new(AppState::new(repos_dir.clone())));
+
+    let oid = "a".repeat(64);
+    for (name, escaped) in [
+        ("../evil", repos_dir.join("test-repo").join("evil")),
+        ("../../evil", repos_dir.join("evil")),
+    ] {
+        let body = format!(
+            r#"{{"updates":[{{"name":"{name}","old_oid":null,"new_oid":"{oid}"}}],"force":false}}"#
+        );
+        let request = Request::builder()
+            .uri("/test-repo/refs/update")
+            .method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(!escaped.exists(), "{name}: ref file escaped .mediagit");
+        assert_eq!(json["results"][0]["success"], false, "{name}: {json}");
+    }
+}
