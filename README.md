@@ -848,8 +848,10 @@ iwr -UseBasicParsing https://raw.githubusercontent.com/winnyboy5/mediagit-core/m
 MediaGit is **source available** under the
 **[Business Source License 1.1](LICENSE)**.
 
-- ✅ **Free for production use at any scale**, by any organisation, with no seat
-  cap and no company-size cap
+- ✅ **Free for production use by small organisations**: fewer than 250 people
+  and under USD 10M annual revenue (larger organisations need an
+  [Enterprise licence](LICENSE-COMMERCIAL.md))
+- ✅ Evaluation, pilots, testing and other non-production use are free for everyone
 - ✅ Read, modify, fork and self-host freely
 - ✅ Each release converts to **AGPL-3.0-or-later four years after publication**
 - ⚠️ Offering MediaGit *to third parties* as a hosted, managed or
