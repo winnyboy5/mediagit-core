@@ -7,8 +7,10 @@ services:
   # ============================================================================
   # LocalStack - AWS S3 Emulator
   # ============================================================================
-  localstack:
+  localstack:  # nosemgrep: yaml.docker-compose.security.writable-filesystem-service.writable-filesystem-service -- test emulator, writes its data dir
     image: localstack/localstack:latest
+    security_opt:
+      - "no-new-privileges:true"
     container_name: mediagit-localstack
     ports:
       - "4566:4566"  # LocalStack edge port (all services)
@@ -19,8 +21,6 @@ services:
       - AWS_DEFAULT_REGION=us-east-1
       - AWS_ACCESS_KEY_ID=test
       - AWS_SECRET_ACCESS_KEY=test
-    volumes:
-      - "/var/run/docker.sock:/var/run/docker.sock"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
       interval: 10s
@@ -32,8 +32,10 @@ services:
   # ============================================================================
   # Azurite - Azure Blob Storage Emulator
   # ============================================================================
-  azurite:
+  azurite:  # nosemgrep: yaml.docker-compose.security.writable-filesystem-service.writable-filesystem-service -- test emulator, writes its data dir
     image: mcr.microsoft.com/azure-storage/azurite:latest
+    security_opt:
+      - "no-new-privileges:true"
     container_name: mediagit-azurite
     ports:
       - "10000:10000"  # Blob service
@@ -55,8 +57,10 @@ services:
   # ============================================================================
   # Azurite Init - Container initialization
   # ============================================================================
-  azurite-init:
+  azurite-init:  # nosemgrep: yaml.docker-compose.security.writable-filesystem-service.writable-filesystem-service -- test emulator, writes its data dir
     image: mcr.microsoft.com/azure-cli:latest
+    security_opt:
+      - "no-new-privileges:true"
     container_name: mediagit-azurite-init
     depends_on:
       azurite:
@@ -73,8 +77,10 @@ services:
   # ============================================================================
   # GCS Emulator - Google Cloud Storage Emulator
   # ============================================================================
-  gcs-emulator:
+  gcs-emulator:  # nosemgrep: yaml.docker-compose.security.writable-filesystem-service.writable-filesystem-service -- test emulator, writes its data dir
     image: fsouza/fake-gcs-server:latest
+    security_opt:
+      - "no-new-privileges:true"
     container_name: mediagit-gcs-emulator
     ports:
       - "4443:4443"
@@ -100,8 +106,10 @@ services:
   # ============================================================================
   # MinIO - S3-Compatible Object Storage
   # ============================================================================
-  minio:
+  minio:  # nosemgrep: yaml.docker-compose.security.writable-filesystem-service.writable-filesystem-service -- test emulator, writes its data dir
     image: pgsty/silo:RELEASE.2026-08-06T00-00-00Z
+    security_opt:
+      - "no-new-privileges:true"
     container_name: mediagit-minio
     ports:
       - "9000:9000"  # API port
@@ -125,8 +133,10 @@ services:
   # ============================================================================
   # MinIO Client - For bucket initialization
   # ============================================================================
-  minio-init:
+  minio-init:  # nosemgrep: yaml.docker-compose.security.writable-filesystem-service.writable-filesystem-service -- test emulator, writes its data dir
     image: pgsty/mc:RELEASE.2026-08-06T00-00-00Z
+    security_opt:
+      - "no-new-privileges:true"
     container_name: mediagit-minio-init
     depends_on:
       minio:
