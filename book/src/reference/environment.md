@@ -110,7 +110,8 @@ MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurre
 | `MEDIAGIT_CHUNK_FBX` | Opt-in structure-aware FBX chunking walker (measured net-negative vs. generic CDC; off by design). | unset/`0` (OFF) |
 | `MEDIAGIT_CHUNK_BLEND` / `MEDIAGIT_CHUNK_STL` / `MEDIAGIT_CHUNK_PLY` | Structure-aware chunking walkers for `.blend`/STL/PLY. `0` disables each. | `1` (ON) |
 | `MEDIAGIT_AUDIO_TIER` | Audio-format chunk tier. `0` disables. | `1` (ON) |
-| `MEDIAGIT_CONTAINER_CHUNK_CAP_MB` | Ceiling (MiB) above which container-format chunking is skipped for plain `StreamCDC`. `0` disables the cap. | `100` |
+| `MEDIAGIT_CONTAINER_CHUNK_CAP_MB` | Ceiling (MiB) above which container-format chunking is skipped for plain `StreamCDC`. `0` disables the cap. Does not apply to MP4/MOV/M4V/M4A/3GP. | `100` |
+| `MEDIAGIT_VIDEO_CHUNKER` | Frame-aligned chunker for MP4/MOV/M4V/M4A/3GP. `cdc` (or `0`) restores plain content-defined chunking. | frame-aligned (ON) |
 | `MEDIAGIT_PHASH` | Perceptual image hashing for delta candidacy. `0` disables hashing and image delta. | `1` (ON) |
 | `MEDIAGIT_PHASH_MAX_MB` | Max image size (MiB) perceptual-hashed for delta candidacy. | `64` |
 | `MEDIAGIT_SIMILARITY_SEED_MAX_CHUNKS` | Max chunks scanned when seeding delta-candidate similarity search. | `256` |

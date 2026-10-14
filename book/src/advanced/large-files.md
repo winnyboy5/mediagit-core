@@ -20,14 +20,17 @@ boundaries instead of the generic size tiers above:
 
 | Format | Chunker |
 |--------|---------|
-| MP4 / MOV / M4V | Atom/box-aware (splits around `moov`/`mdat`) |
+| MP4 / MOV / M4V / M4A / 3GP | Streaming, frame-aligned at any file size (video samples of 256 KiB or more become their own chunk) |
 | MKV / WebM | Matroska EBML-aware |
 | AVI | RIFF-aware |
 | GLB / glTF / OBJ / STL / PLY / FBX | 3D-model structure-aware |
 | Blender (`.blend`) | BHEAD block walker |
 | PSD / AI / PDF / EPS / INDD | Generic FastCDC, but with small creative-container params (1 MB avg / 512 KB–4 MB) so re-sync after an embedded-stream shift stays quick |
 
-Structure-aware parsers fall back to plain FastCDC above
+The MP4/MOV family is not subject to the size cap; malformed or fragmented
+(`moof`) files fall back to the previous path, and
+`MEDIAGIT_VIDEO_CHUNKER=cdc` restores plain content-defined chunking. The other
+structure-aware parsers fall back to plain FastCDC above
 `MEDIAGIT_CONTAINER_CHUNK_CAP_MB` (default 100 MB) or if parsing fails.
 
 No configuration is required. MediaGit detects file size and type automatically.

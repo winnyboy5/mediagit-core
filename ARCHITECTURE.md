@@ -242,7 +242,7 @@ graph TD
 | Constant | Value | Purpose |
 |----------|-------|---------|
 | `MAX_DELTA_DEPTH` | 10 | Max delta chain before re-storing as full object |
-| `MAX_OBJECT_SIZE` | 16 GB | Prevents allocation failures from corrupt manifests |
+| `MAX_OBJECT_SIZE` | 16 GB | Prevents allocation failures from corrupt manifests when a whole object is loaded; add, commit, status, fsck, show, diff, merge, download and checkout stream and work on files over 16 GiB |
 | `LARGE_TEXT_THRESHOLD` | 500 MB | Switch from Brotli to Zstd for text files |
 
 ---
@@ -473,7 +473,9 @@ The `chunk_media_aware()` method dispatches to FastCDC (`chunk_fastcdc()`) for t
 
 The `collect_file_chunks_blocking()` method (ODB streaming path) memory-maps the file and routes it through `chunk_media_aware()`, giving all files — including those >100 MB — full format-aware parsing. `StreamCDC` is used only as a fallback when mmap fails.
 
-> **Note on structural parsers**: MP4 (`chunk_mp4`) and Matroska (`chunk_matroska`) use FastCDC internally for CDC-subdivision fallbacks with **video-optimized parameters** `(avg=2MB, min=1MB, max=8MB)` — larger than the generic 1 MB tier — to improve delta dictionary matching for video content.
+> **Note on MP4/MOV**: the MP4 family (MOV/MP4/M4V/M4A/3GP) uses a streaming, frame-aligned chunker (`chunking/mp4_stream.rs`) at any file size instead of the in-memory `chunk_mp4` path, which remains the fallback for malformed or fragmented (`moof`) files. `MEDIAGIT_VIDEO_CHUNKER=cdc` (or `0`) restores the old behaviour.
+
+> **Note on structural parsers**: MP4 (`chunk_mp4`, fallback path) and Matroska (`chunk_matroska`) use FastCDC internally for CDC-subdivision fallbacks with **video-optimized parameters** `(avg=2MB, min=1MB, max=8MB)` — larger than the generic 1 MB tier — to improve delta dictionary matching for video content.
 
 ### Chunk Sizing (Adaptive)
 
@@ -571,6 +573,8 @@ graph TD
 | Default | 0.80 | 20% |
 
 ### Delta Eligibility (`should_use_delta`)
+
+`should_use_delta` (`add.rs`) is consulted only on the in-memory `add` path, for files under `STREAMING_THRESHOLD` (5 MiB). Files of 5 MiB or more always go through `write_chunked_from_file`, where the delta decision is the per-chunk codec policy (lossy-codec chunks skip delta; the extension rules below do not apply). The size conditions below are therefore checked against files under 5 MiB only.
 
 | Category | Eligible? | Condition |
 |----------|-----------|-----------|

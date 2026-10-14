@@ -69,6 +69,34 @@ is the 400 small files' write cost.
 that is almost all chunked media has little in the `ready` batch and gains
 little.
 
+## Video revisions (frame-aligned chunking, measured 2026-10-14/15)
+
+**Build:** release, Windows, branch `spike/video-frame-chunking` | MP4/MOV/M4V/M4A/3GP now use a streaming, frame-aligned chunker at any file size. Video samples of 256 KiB or more become their own chunk (split at 4 MiB); audio, small frames and headers are content-defined chunked between frames. `MEDIAGIT_VIDEO_CHUNKER=cdc` restores the previous frame-blind chunking.
+
+**New bytes stored per revision** (real NLE ProRes 422 HQ exports and an H.264 export):
+
+| Edit | Before | After |
+|---|---:|---:|
+| ProRes 422 HQ, insert (CLI) | 53.9 MB | 1.4 MB |
+| ProRes 422 HQ, trim (CLI) | 4.4 MB | 0 MB |
+| ProRes 422 HQ, insert (probe) | 56.5 MB | 1.6 MB |
+| ProRes 422 HQ, trim (probe) | 7.0 MB | 0.15 MB |
+| H.264, trim (probe) | 39.8 MB | 9.0 MB |
+
+**Throughput and memory** (5.35 GB synthetic unique-frame ProRes, medians of 3, frame-aligned vs the previous content-defined chunking):
+
+| Operation | Frame-aligned | Previous CDC |
+|---|---:|---:|
+| `add` | 13.8 s | 21.4 s |
+| Restore, loose | 14.3 s | 17.4 s |
+| Restore, packed (after `gc --repack`) | 19.4 s | 31.0 s |
+
+Private memory: about 365 MB for `add`, 44-46 MB for a packed restore. `add` on a 19 GB file went from a 7.8 GB to a 361 MB working set (windowed hashing). Packed chunk reads were quadratic (a 481 MB file: 0.7 s loose vs 21.6 s packed); they are now one ranged read per chunk through a pack locator (48 bytes per entry). Files over 16 GiB now work through add, commit, status, fsck, show, diff, merge/cherry-pick/rebase/revert, download and checkout (tested at 17.93 and 19.25 GiB).
+
+**Limits:** ProRes, DNxHR and JPEG 2000 chunks are stored raw (zstd ratio measured 1.0000 on Resolve 422 HQ and ARRI 4444 XQ). A colour-graded or fully re-encoded render still stores about 100% new bytes: no byte-level reuse exists between such revisions. The gains apply to edits that keep frames intact (trim, insert).
+
+---
+
 ## At-rest encryption cost (DC-7, measured 2026-08-12)
 
 **Build:** `0.3.0-rc.3` release | **Corpus:** 824,415,190 B synthetic VFX, 681 chunks |

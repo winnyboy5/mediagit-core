@@ -31,10 +31,11 @@ manageable for very large files:
 - 10 GB – 100 GB: ~4 MB average chunk (1–16 MB range)
 - Over 100 GB: ~8 MB average chunk (1–32 MB range)
 
-Format-aware chunkers (MP4, MKV, GLB, STL, PLY, FBX, Blender, ...) use their
+Format-aware chunkers (MP4/MOV, MKV, GLB, STL, PLY, FBX, Blender, ...) use their
 own structure-based split instead of these generic tiers, up to a size cap
 (`MEDIAGIT_CONTAINER_CHUNK_CAP_MB`, default 100 MB) above which they fall
-back to plain content-defined chunking.
+back to plain content-defined chunking. The MP4/MOV family is exempt: it uses
+frame-aligned chunking at any file size.
 
 Performance for large files benefits from the `--jobs` flag:
 

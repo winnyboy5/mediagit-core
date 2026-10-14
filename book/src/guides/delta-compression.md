@@ -27,8 +27,11 @@ Delta Compression:
 Delta is automatic. There is no flag that turns it on, and the decision runs
 in three stages — a candidate has to clear all three:
 
-1. **Is this file type worth trying?** (`should_use_delta`) Decided by
-   extension, not by a global size floor. Uncompressed raster and audio
+1. **Is this file type worth trying?** (`should_use_delta`) For files under
+   5 MiB, decided by extension, not by a global size floor. Files of 5 MiB or
+   more skip this table: they are chunked from disk, and delta is decided per
+   chunk by codec (chunks of lossy codecs such as H.264, H.265, VP9, AV1, AAC,
+   Opus, Vorbis and MP3 skip delta). Uncompressed raster and audio
    (`psd`, `tif`, `bmp`, `wav`, `aiff`), text and code, and text-based 3D
    formats (`obj`, `gltf`, `stl`, `step`) are always attempted. Already-
    compressed formats — `jpg`, `png`, `webp`, `gif`, `zip`, `gz`, `7z` — are
@@ -178,7 +181,7 @@ Work the three stages in order — the first one that rejects is the answer.
 failure: those bytes are already compressed, and a delta of compressed data
 finds nothing.
 
-**Is it under a size gate?** `mp4`/`mkv`/`flv`/`wmv` are only attempted above
+**Is it under a size gate?** (Extension table, files under 5 MiB only.) `mp4`/`mkv`/`flv`/`wmv` are only attempted above
 100 MB; `ai`/`indd`/`idml`/`pdf` only above 50 MB.
 
 **Did it clear similarity and benefit?** Run the add with logging on:

@@ -60,7 +60,7 @@ graph TD
 ```mermaid
 graph TD
     A["File qualified for chunking"] --> B{"Select strategy<br/>by extension"}
-    B -->|"MP4/MOV/M4V/M4A/3GP"| C["🎬 MP4 Atom Parsing<br/>(ftyp/moov/mdat)"]
+    B -->|"MP4/MOV/M4V/M4A/3GP"| C["🎬 Frame-aligned MP4 Chunking<br/>(any file size)"]
     B -->|"AVI/RIFF/WAV"| D["🎬 RIFF Parsing<br/>(LIST/hdrl/movi)"]
     B -->|"MKV/WebM/MKA"| E["🎬 EBML Parsing<br/>(Segment/Cluster)"]
     B -->|"GLB/glTF"| F["🎬 GLB Parsing<br/>(header/JSON/bin)"]
@@ -195,14 +195,16 @@ unchanged portions.
 
 | Format | Extensions | Compression | Chunking | Delta | Merge |
 |--------|-----------|-------------|----------|-------|-------|
-| MP4 | `.mp4`, `.m4v` | 💾 Store | 🎬 Atom parsing (≥5MB) | 🔀 >100MB | 🧩 Video |
-| QuickTime | `.mov`, `.qt` | 💾 Store | 🎬 Atom parsing (≥5MB) | ✅ Always | 🧩 Video |
+| MP4 | `.mp4`, `.m4v` | 💾 Store | 🎬 Frame-aligned (any size) | 🔀 Per chunk | 🧩 Video |
+| QuickTime | `.mov`, `.qt` | 💾 Store | 🎬 Frame-aligned (any size) | 🔀 Per chunk | 🧩 Video |
 | AVI | `.avi` | 💾 Store | 🎬 RIFF parsing (≥5MB) | ✅ Always | 🧩 Video |
 | Matroska | `.mkv` | 💾 Store | 🎬 EBML parsing (≥5MB) | 🔀 >100MB | 🧩 Video |
 | WebM | `.webm` | 💾 Store | 🎬 EBML parsing (≥5MB) | ❌ | 🧩 Video |
 | FLV | `.flv`, `.f4v` | 💾 Store | ✂️ FastCDC (≥5MB) | 🔀 >100MB | 🧩 Video |
 | WMV | `.wmv`, `.asf` | 💾 Store | ✂️ FastCDC (≥5MB) | 🔀 >100MB | 🧩 Video |
 | MPEG | `.mpg`, `.mpeg`, `.m2v` | 💾 Store | ✂️ FastCDC (≥5MB) | ❌ | 🧩 Video |
+
+> **MP4/MOV delta policy**: delta is decided per chunk. Chunks of lossy codecs (H.264, H.265, VP9, AV1, AAC, Opus, Vorbis, MP3) skip delta, as do video-stream chunks whose codec is unknown. Intra-only video (ProRes, DNxHR, JPEG 2000) is stored raw (no compression) but can still be delta-encoded, with a tighter acceptance threshold of 0.60. Colour-graded or fully re-encoded renders share no bytes with the previous revision, so they store as new data.
 
 ### Professional Video
 
@@ -480,9 +482,8 @@ For files that qualify for **MediaAware** chunking, the system parses internal f
 ```mermaid
 graph LR
     subgraph MP4["MP4/MOV Parser"]
-        A1["Walk ISO BMFF<br/>atom tree"] --> B1["ftyp → chunk"]
-        B1 --> C1["moov → chunk"]
-        C1 --> D1["mdat → split at<br/>max_chunk_size"]
+        A1["Stream ISO BMFF<br/>sample tables"] --> B1["Video sample 256 KiB+<br/>→ own chunk (split at 4 MiB)"]
+        B1 --> C1["Audio, small frames,<br/>headers → CDC between frames"]
     end
 
     subgraph RIFF["AVI/RIFF Parser"]
@@ -519,7 +520,7 @@ graph LR
 
 | Parser | Formats | How It Works |
 |--------|---------|--------------|
-| **MP4/MOV** | `.mp4`, `.mov`, `.m4v`, `.m4a`, `.3gp` | Walks ISO base media file atom tree (`ftyp`, `moov`, `mdat`) |
+| **MP4/MOV** | `.mp4`, `.mov`, `.m4v`, `.m4a`, `.3gp` | Streaming, frame-aligned at any file size: video samples of 256 KiB or more become their own chunk (split at 4 MiB); audio, small frames and headers are content-defined chunked (256 KiB / 1 MiB / 4 MiB) between frames. Malformed or fragmented (`moof`) files fall back to the previous path; `MEDIAGIT_VIDEO_CHUNKER=cdc` restores the old behaviour |
 | **AVI/RIFF** | `.avi`, `.riff` | Parses RIFF container chunks (`LIST`, `hdrl`, `movi`, `idx1`) |
 | **MKV/WebM** | `.mkv`, `.webm`, `.mka`, `.mk3d` | Parses EBML element tree (Segment, Cluster, Tracks) |
 | **GLB** | `.glb`, `.gltf` | Header + JSON chunk + BIN chunk; BIN >4MB CDC-subdivided (1MB avg) |

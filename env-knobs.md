@@ -53,7 +53,8 @@ Lifecycle: **experimental** → **stable** (2 clean deep-test releases) → **de
 | `MEDIAGIT_CHUNK_STL` | `1` (ON) | 0.3.0-rc.4 | add/chunking | stable | Structure-aware STL chunking walker. `0` disables. |
 | `MEDIAGIT_CHUNK_PLY` | `1` (ON) | 0.3.0-rc.4 | add/chunking | stable | Structure-aware PLY chunking walker. `0` disables. |
 | `MEDIAGIT_AUDIO_TIER` | `1` (ON) | 0.3.0-rc.4 | add/chunking | stable | Audio-format chunk tier. `0` disables (falls back to generic CDC). |
-| `MEDIAGIT_CONTAINER_CHUNK_CAP_MB` | `100` | 0.3.0-rc.4 | add/chunking | stable | Byte-size ceiling (MiB) above which container-format chunking (mmap walker) is skipped in favor of plain `StreamCDC`, to bound peak heap use. `0` disables the cap. |
+| `MEDIAGIT_CONTAINER_CHUNK_CAP_MB` | `100` | 0.3.0-rc.4 | add/chunking | stable | Byte-size ceiling (MiB) above which container-format chunking (mmap walker) is skipped in favor of plain `StreamCDC`, to bound peak heap use. `0` disables the cap. Does not apply to MP4/MOV/M4V/M4A/3GP. |
+| `MEDIAGIT_VIDEO_CHUNKER` | frame-aligned | 0.4.0-rc.1 | add/chunking | stable | Chunker for MP4/MOV/M4V/M4A/3GP. Default is the streaming frame-aligned chunker at any file size; `cdc` (or `0`) restores plain content-defined chunking. |
 | `MEDIAGIT_SIMILARITY_SEED_MAX_CHUNKS` | `256` | 0.3.0-rc.4 | add/delta | stable | Max chunks scanned when seeding delta-candidate similarity search. |
 | `MEDIAGIT_PHASH_MAX_MB` | `64` | 0.3.0-rc.4 | add | stable | Max image size (MiB) perceptual-hashed for delta candidacy; larger images skip pHash. |
 | `MEDIAGIT_MEDIA_META` | `1` (ON) | 0.3.0-rc.4 | status | stable | Show `media: ...` summary lines in `status` for recognized media files. `0` disables. |
