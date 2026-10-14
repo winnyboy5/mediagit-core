@@ -223,7 +223,15 @@ impl DiffCmd {
             } else {
                 // Hash working tree file and compare
                 // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- read-only probe of local worktree
-                let working_oid = if let Ok(content) = std::fs::read(&full_path) {
+                // Large files hash in constant memory (same threshold as status/add).
+                let large = std::fs::metadata(&full_path)
+                    .is_ok_and(|m| m.len() >= super::utils::STREAMING_THRESHOLD);
+                let working_oid = if large {
+                    match Oid::from_file(&full_path) {
+                        Ok(oid) => oid,
+                        Err(_) => continue,
+                    }
+                } else if let Ok(content) = std::fs::read(&full_path) {
                     Oid::hash(&content)
                 } else {
                     continue;

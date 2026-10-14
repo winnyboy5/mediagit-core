@@ -464,8 +464,12 @@ impl FsckChecker {
         // - Decompression (smart, zlib, or uncompressed)
         // - Checksum verification (returns error if checksum doesn't match)
         // - Chunk reconstruction if needed
-        match self.odb.read(oid).await {
-            Ok(_data) => {
+        //
+        // Streamed into a sink, not `read()`: a chunked blob can be 100+ GB
+        // and `read()` would reassemble it in RAM (and refuse above
+        // MAX_OBJECT_SIZE). Same per-chunk and whole-object verification.
+        match self.odb.stream_object_to(oid, &mut tokio::io::sink()).await {
+            Ok(_len) => {
                 // Object read successfully, checksum verified by ODB
                 debug!(oid = %oid, "Object verified successfully");
                 Ok(())
@@ -1228,6 +1232,13 @@ impl FsckChecker {
     /// `read_from_packs`) rather than raw loose storage, so packed objects
     /// aren't reported missing after `gc --repack`.
     async fn object_exists(&self, oid: &Oid) -> anyhow::Result<bool> {
+        // Presence check, not a verified read: `read()` of a chunked blob
+        // reassembles it in RAM. Integrity of present objects is judged by
+        // `verify_object`. `exists()` does not know legacy `deltas/<oid>.meta`
+        // objects, so a miss still falls back to a read.
+        if self.odb.exists(oid).await? {
+            return Ok(true);
+        }
         Ok(self.odb.read(oid).await.is_ok())
     }
 
@@ -2324,5 +2335,68 @@ mod tests {
             "the corrupt chunk must be gone so a later fetch can supply a good \
              copy; leaving it means every future read fails identically"
         );
+    }
+
+    /// Builds a 2 MB chunked blob, then lets the caller damage one chunk
+    /// before running `check_objects`. Guards the streaming `verify_object`
+    /// against the "fsck is blind to a damaged blob" failure mode.
+    async fn fsck_report_after_damaging_chunk(
+        damage: impl FnOnce(Arc<MockBackend>, String) -> futures::future::BoxFuture<'static, ()>,
+    ) -> FsckReport {
+        use crate::chunking::ChunkStrategy;
+
+        let storage = Arc::new(MockBackend::new());
+        let writer = ObjectDatabase::with_optimizations(
+            storage.clone(),
+            100,
+            Some(ChunkStrategy::Fixed { size: 256 * 1024 }),
+            false,
+            0,
+        );
+        let data: Vec<u8> = (0..2 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        let blob_oid = writer
+            .write_chunked(ObjectType::Blob, &data, "big.bin")
+            .await
+            .expect("write_chunked should succeed");
+        let manifest_bytes = storage
+            .get(&format!("manifests/{}", blob_oid.to_hex()))
+            .await
+            .unwrap();
+        let manifest = crate::chunking::ChunkManifest::from_bytes(&manifest_bytes).unwrap();
+        let chunk_key = format!("chunks/{}", manifest.chunks[0].id.to_hex());
+        damage(storage.clone(), chunk_key).await;
+
+        let checker = FsckChecker::new(storage);
+        let mut report = FsckReport::new();
+        checker
+            .check_objects(&mut report, &FsckOptions::default())
+            .await
+            .unwrap();
+        report
+    }
+
+    #[tokio::test]
+    async fn fsck_reports_corrupt_chunk_of_chunked_blob() {
+        let report = fsck_report_after_damaging_chunk(|storage, key| {
+            Box::pin(async move {
+                let mut bytes = storage.get(&key).await.unwrap();
+                let mid = bytes.len() / 2;
+                bytes[mid] ^= 0xFF;
+                storage.put(&key, &bytes).await.unwrap();
+            })
+        })
+        .await;
+        assert!(report.has_errors(), "corrupt chunk went unreported");
+    }
+
+    #[tokio::test]
+    async fn fsck_reports_missing_chunk_of_chunked_blob() {
+        let report = fsck_report_after_damaging_chunk(|storage, key| {
+            Box::pin(async move {
+                storage.delete(&key).await.unwrap();
+            })
+        })
+        .await;
+        assert!(report.has_errors(), "missing chunk went unreported");
     }
 }

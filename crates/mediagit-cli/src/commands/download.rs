@@ -80,27 +80,19 @@ impl DownloadCmd {
             self.remote_path.starts_with("http://") || self.remote_path.starts_with("https://");
         if !is_url {
             validate_no_path_traversal(&self.remote_path)?;
-            if let Ok(repo_root) = crate::repo::find_repo_root()
-                && let Some(bytes) = self.try_local_extract(&repo_root).await
-            {
+            if let Ok(repo_root) = crate::repo::find_repo_root() {
                 let out_path = self.output_path(&self.remote_path);
-                if let Some(parent) = out_path.parent()
-                    && !parent.as_os_str().is_empty()
-                {
-                    std::fs::create_dir_all(parent).context("Failed to create output directory")?;
+                if let Some(len) = self.try_local_extract(&repo_root, &out_path).await {
+                    if !self.quiet {
+                        output::success(&format!(
+                            "Downloaded '{}' ({} bytes) to {}",
+                            self.remote_path,
+                            len,
+                            out_path.display()
+                        ));
+                    }
+                    return Ok(());
                 }
-                std::fs::write(&out_path, &bytes).with_context(|| {
-                    format!("Failed to write output file '{}'", out_path.display())
-                })?;
-                if !self.quiet {
-                    output::success(&format!(
-                        "Downloaded '{}' ({} bytes) to {}",
-                        self.remote_path,
-                        bytes.len(),
-                        out_path.display()
-                    ));
-                }
-                return Ok(());
             }
         }
 
@@ -302,7 +294,7 @@ impl DownloadCmd {
     /// `show <rev>:<path>`). Returns `None` on any local miss (unresolvable
     /// ref, path not found in the tree, storage error, ...) so `execute`
     /// falls back to the existing remote-download path unchanged.
-    async fn try_local_extract(&self, repo_root: &Path) -> Option<Vec<u8>> {
+    async fn try_local_extract(&self, repo_root: &Path, out_path: &Path) -> Option<u64> {
         let storage = crate::repo::create_storage_backend(repo_root).await.ok()?;
         let refdb = RefDatabase::new(repo_root.join(".mediagit"));
         let odb = ObjectDatabase::with_smart_compression(storage, 1000);
@@ -318,7 +310,9 @@ impl DownloadCmd {
             super::show::ShowCmd::find_path_in_tree(&odb, &commit.tree, &self.remote_path)
                 .await
                 .ok()?;
-        odb.read(&file_oid).await.ok()
+        // Streamed to disk: the blob may be far larger than RAM. A failure
+        // leaves no partial file and falls through to the remote path.
+        odb.read_to_file(&file_oid, out_path).await.ok()
     }
 
     fn output_path(&self, file_path: &str) -> PathBuf {

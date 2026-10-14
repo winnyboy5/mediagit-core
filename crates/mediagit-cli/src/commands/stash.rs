@@ -146,6 +146,17 @@ pub struct ClearOpts {
     pub force: bool,
 }
 
+/// Content hash of a worktree file; files at or above the streaming threshold
+/// are hashed in constant memory (same split as `add`/`status`).
+fn hash_worktree_file(path: &Path) -> Option<Oid> {
+    let large = std::fs::metadata(path).is_ok_and(|m| m.len() >= super::utils::STREAMING_THRESHOLD);
+    if large {
+        Oid::from_file(path).ok()
+    } else {
+        std::fs::read(path).ok().map(|b| Oid::hash(&b))
+    }
+}
+
 impl StashCmd {
     pub async fn execute(&self) -> Result<()> {
         match &self.command {
@@ -204,9 +215,7 @@ impl StashCmd {
                 continue; // Deleted file — tracked by absence
             }
             let full_path = repo_root.join(path);
-            let working_oid = if let Ok(content) = std::fs::read(&full_path) {
-                Oid::hash(&content)
-            } else {
+            let Some(working_oid) = hash_worktree_file(&full_path) else {
                 continue;
             };
             if working_oid != *head_oid {
@@ -225,8 +234,8 @@ impl StashCmd {
                 continue;
             }
             let full_path = repo_root.join(path);
-            if let Ok(content) = std::fs::read(&full_path) {
-                untracked_changes.push((path.clone(), Oid::hash(&content)));
+            if let Some(oid) = hash_worktree_file(&full_path) {
+                untracked_changes.push((path.clone(), oid));
             }
         }
 
@@ -252,9 +261,23 @@ impl StashCmd {
 
         // 2. Override with working-tree modifications and untracked files
         //    (write blobs to ODB)
-        for (path, _oid) in working_tree_changes.iter().chain(untracked_changes.iter()) {
+        for (path, content_oid) in working_tree_changes.iter().chain(untracked_changes.iter()) {
             let full_path = repo_root.join(path);
-            if let Ok(content) = std::fs::read(&full_path) {
+            // Large files are chunked straight from disk (same threshold as `add`).
+            let large = std::fs::metadata(&full_path)
+                .is_ok_and(|m| m.len() >= super::utils::STREAMING_THRESHOLD);
+            if large {
+                let filename = full_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                let blob_oid = odb
+                    .write_chunked_from_file(&full_path, filename, None, Some(*content_oid))
+                    .await
+                    .context(format!("Failed to write blob for {}", path.display()))?;
+                tree.add_entry(mediagit_versioning::TreeEntry::new(
+                    path.to_string_lossy().to_string(),
+                    mediagit_versioning::FileMode::Regular,
+                    blob_oid,
+                ));
+            } else if let Ok(content) = std::fs::read(&full_path) {
                 let blob_oid = odb
                     .write(ObjectType::Blob, &content)
                     .await
@@ -423,10 +446,9 @@ impl StashCmd {
         for (path, (stash_entry_oid, _)) in &stash_files {
             let full = repo_root.join(path);
             // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- read-only probe of local worktree
-            let Ok(bytes) = std::fs::read(&full) else {
+            let Some(working) = hash_worktree_file(&full) else {
                 continue; // absent: the overlay creates it, nothing to lose
             };
-            let working = Oid::hash(&bytes);
             if working == *stash_entry_oid {
                 continue; // already matches the stash
             }
@@ -839,5 +861,32 @@ mod tests {
         let cmd = parse(&["show", "0"]).unwrap();
         let err = execute_in(temp.path(), &cmd).await.unwrap_err();
         assert!(err.to_string().contains("Stash entry 0 not found"));
+    }
+
+    /// A worktree file at or above the streaming threshold must be chunked
+    /// straight from disk. The old path read it whole and stored it with
+    /// `odb.write`, which never produces a manifest, so `is_chunked` is the
+    /// observable difference.
+    #[tokio::test]
+    async fn save_stores_large_file_chunked() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let data: Vec<u8> = (0..6 * 1024 * 1024)
+            .map(|i| ((i * 7) % 251) as u8)
+            .collect();
+        std::fs::write(temp.path().join("big.bin"), &data).unwrap();
+        let expected = Oid::hash(&data);
+
+        execute_in(temp.path(), &parse(&["save", "-m", "big"]).unwrap())
+            .await
+            .unwrap();
+
+        let storage = create_storage_backend(temp.path()).await.unwrap();
+        let odb = ObjectDatabase::with_smart_compression(storage, 100);
+        assert!(
+            odb.is_chunked(&expected).await.unwrap(),
+            "large stashed file must be stored chunked"
+        );
     }
 }

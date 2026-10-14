@@ -72,6 +72,20 @@ impl ShowCmd {
             .await
             .context(format!("Cannot resolve object: {}", object_str))?;
 
+        // A chunked object is a large blob (never a commit or tag): describe it
+        // from its manifest instead of reassembling it in RAM.
+        if let Some(manifest) = odb.get_chunk_manifest(&oid).await? {
+            let mut head = Vec::new();
+            for chunk in &manifest.chunks {
+                if head.len() >= 256 {
+                    break;
+                }
+                head.extend_from_slice(&odb.get_chunk(&chunk.id).await?);
+            }
+            Self::print_raw_object_info(&oid, manifest.total_size as usize, &head, self.verbose);
+            return Ok(());
+        }
+
         // Read object
         let data = odb
             .read(&oid)
@@ -210,28 +224,34 @@ impl ShowCmd {
             }
             Err(_) => {
                 // Not a commit or tag, show raw object info
-                println!("{} {}", style("object").cyan().bold(), style(&oid).yellow());
-                println!("Size: {} bytes", data.len());
-
-                if self.verbose {
-                    // Show hex dump of first 256 bytes
-                    let display_len = data.len().min(256);
-                    println!("\nFirst {} bytes (hex):", display_len);
-                    for (i, chunk) in data[..display_len].chunks(16).enumerate() {
-                        print!("{:08x}  ", i * 16);
-                        for byte in chunk {
-                            print!("{:02x} ", byte);
-                        }
-                        println!();
-                    }
-                    if data.len() > 256 {
-                        println!("... ({} more bytes)", data.len() - 256);
-                    }
-                }
+                Self::print_raw_object_info(&oid, data.len(), &data, self.verbose);
             }
         }
 
         Ok(())
+    }
+
+    /// Raw-object summary. `head` must hold at least the first
+    /// `min(size, 256)` bytes of the object.
+    fn print_raw_object_info(oid: &Oid, size: usize, head: &[u8], verbose: bool) {
+        println!("{} {}", style("object").cyan().bold(), style(oid).yellow());
+        println!("Size: {} bytes", size);
+
+        if verbose {
+            // Show hex dump of first 256 bytes
+            let display_len = size.min(256);
+            println!("\nFirst {} bytes (hex):", display_len);
+            for (i, chunk) in head[..display_len].chunks(16).enumerate() {
+                print!("{:08x}  ", i * 16);
+                for byte in chunk {
+                    print!("{:02x} ", byte);
+                }
+                println!();
+            }
+            if size > 256 {
+                println!("... ({} more bytes)", size - 256);
+            }
+        }
     }
 
     /// Print the raw bytes of `path` as it existed in `rev` (historical file
@@ -242,6 +262,16 @@ impl ShowCmd {
         path: &str,
         refdb: &RefDatabase,
         odb: &ObjectDatabase,
+    ) -> Result<()> {
+        Self::write_path_at_revision(rev, path, refdb, odb, &mut tokio::io::stdout()).await
+    }
+
+    async fn write_path_at_revision<W: tokio::io::AsyncWrite + Unpin + Send>(
+        rev: &str,
+        path: &str,
+        refdb: &RefDatabase,
+        odb: &ObjectDatabase,
+        out: &mut W,
     ) -> Result<()> {
         let oid = resolve_revision(rev, refdb, odb)
             .await
@@ -254,13 +284,12 @@ impl ShowCmd {
         let file_oid = Self::find_path_in_tree(odb, &commit.tree, path)
             .await
             .context(format!("Path '{}' not found in revision '{}'", path, rev))?;
-        let blob = odb
-            .read(&file_oid)
+        // Streamed: the blob may be far larger than RAM.
+        use tokio::io::AsyncWriteExt;
+        odb.stream_object_to(&file_oid, out)
             .await
             .context(format!("Failed to read blob for '{}'", path))?;
-
-        use std::io::Write;
-        std::io::stdout().write_all(&blob)?;
+        out.flush().await?;
         Ok(())
     }
 
@@ -327,6 +356,12 @@ impl ShowCmd {
         let Some(oid) = current_tree_files.get(path) else {
             return;
         };
+        // Size first (manifest only for chunked blobs): never load a blob the
+        // summary would reject anyway.
+        match odb.get_object_size(oid).await {
+            Ok(size) if size as u64 <= super::super::media_meta::MAX_MEDIA_META_BYTES => {}
+            _ => return,
+        }
         let Ok(data) = odb.read(oid).await else {
             return;
         };
@@ -371,5 +406,54 @@ impl ShowCmd {
             }
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mediagit_storage::mock::MockBackend;
+    use mediagit_versioning::{ChunkStrategy, FileMode, ObjectType, Signature, TreeEntry};
+    use std::sync::Arc;
+
+    /// `show <rev>:<path>` of a chunked blob must stream it, never `read()`
+    /// it whole. `read()` bumps a cache hit/miss counter on every call; the
+    /// lookup itself reads exactly three objects (peel, commit, tree).
+    #[tokio::test]
+    async fn show_path_streams_chunked_blob_without_whole_read() {
+        let odb = ObjectDatabase::with_optimizations(
+            Arc::new(MockBackend::new()),
+            100,
+            Some(ChunkStrategy::Fixed { size: 256 * 1024 }),
+            false,
+            0,
+        );
+        let data: Vec<u8> = (0..2 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        let blob = odb
+            .write_chunked(ObjectType::Blob, &data, "big.bin")
+            .await
+            .unwrap();
+        assert!(odb.is_chunked(&blob).await.unwrap());
+
+        let mut tree = Tree::new();
+        tree.add_entry(TreeEntry::new("big.bin".into(), FileMode::Regular, blob));
+        let tree_oid = tree.write(&odb).await.unwrap();
+        let sig = Signature::now("T".into(), "t@example.com".into());
+        let commit = Commit::new(tree_oid, sig.clone(), sig, "m".into());
+        let commit_oid = commit.write(&odb).await.unwrap();
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let refdb = RefDatabase::new(dir.path());
+        let before = odb.metrics().await;
+        let mut out = Vec::new();
+        ShowCmd::write_path_at_revision(&commit_oid.to_hex(), "big.bin", &refdb, &odb, &mut out)
+            .await
+            .unwrap();
+        let after = odb.metrics().await;
+
+        assert_eq!(out, data);
+        let reads =
+            (after.cache_hits - before.cache_hits) + (after.cache_misses - before.cache_misses);
+        assert_eq!(reads, 3, "blob must not go through odb.read()");
     }
 }
