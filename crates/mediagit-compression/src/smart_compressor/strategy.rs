@@ -214,10 +214,10 @@ impl CompressionStrategy {
             ChunkCodecHint::HighEntropyVideo | ChunkCodecHint::CompressedAudio => {
                 Some(CompressionStrategy::Store)
             }
-            // Intra-only video (ProRes/DNxHR) — light Zstd for ~10-20% savings
-            ChunkCodecHint::IntraOnlyVideo => {
-                Some(CompressionStrategy::Zstd(CompressionLevel::Fast))
-            }
+            // Intra-only video (ProRes/DNxHR/JPEG2000) — store as-is. Measured: Zstd Fast
+            // ratio 1.0000 on Resolve ProRes 422 HQ and on ARRI ProRes 4444 XQ frames, so it
+            // only burned ~3 s/GB of compress time before the expansion fallback stored raw.
+            ChunkCodecHint::IntraOnlyVideo => Some(CompressionStrategy::Store),
             // Raw video — excellent Zstd compression
             ChunkCodecHint::RawVideo => Some(CompressionStrategy::Zstd(CompressionLevel::Default)),
             // PCM/FLAC/ALAC — Zstd default for ~40-65% savings
@@ -237,5 +237,18 @@ impl CompressionStrategy {
             // Unknown — let caller use file-level strategy
             ChunkCodecHint::Unknown => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod codec_hint_tests {
+    use super::*;
+
+    #[test]
+    fn intra_only_video_is_stored_raw() {
+        assert_eq!(
+            CompressionStrategy::for_codec_hint(ChunkCodecHint::IntraOnlyVideo),
+            Some(CompressionStrategy::Store)
+        );
     }
 }

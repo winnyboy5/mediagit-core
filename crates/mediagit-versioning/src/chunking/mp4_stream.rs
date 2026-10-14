@@ -969,4 +969,66 @@ mod tests {
             );
         }
     }
+    #[test]
+    #[ignore] // measurement: zstd-fast cost on ProRes frame chunks (use test profile numbers with care)
+    fn fixture_prores_zstd_cost() {
+        use mediagit_compression::{ChunkCodecHint, SmartCompressor, TypeAwareCompressor};
+        use std::time::Instant;
+        // ZSTDCOST_FILE: path relative to test-files/ (default: Resolve ProRes HQ).
+        let rel = std::env::var("ZSTDCOST_FILE")
+            .unwrap_or_else(|_| "video-implementation/NLE-pairs/U0_v1.mov".into());
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../test-files")
+            .join(rel);
+        let Ok(mut f) = std::fs::File::open(p) else {
+            return;
+        };
+        let plan = Mp4Plan::build(&mut f).unwrap();
+        let mut frames: Vec<Vec<u8>> = Vec::new();
+        plan.run(&mut f, 20260716, &mut |c| {
+            if c.chunk_type == ChunkType::VideoStream
+                && c.codec_hint == CodecHint::ProRes
+                && frames.len() < 200
+            {
+                frames.push(c.data);
+            }
+            Ok(())
+        })
+        .unwrap();
+        let raw: usize = frames.iter().map(Vec::len).sum();
+        let sc = SmartCompressor::new();
+        let t = Instant::now();
+        let comp: Vec<Vec<u8>> = frames
+            .iter()
+            .map(|d| {
+                sc.compress_by_codec(d, ChunkCodecHint::IntraOnlyVideo)
+                    .unwrap()
+                    .unwrap()
+            })
+            .collect();
+        let ct = t.elapsed().as_secs_f64();
+        let csize: usize = comp.iter().map(Vec::len).sum();
+        let t = Instant::now();
+        let mut out = 0usize;
+        for c in &comp {
+            out += sc.decompress_typed(c).unwrap().len();
+        }
+        let dt = t.elapsed().as_secs_f64();
+        assert_eq!(out, raw);
+        let t = Instant::now();
+        let copied: usize = frames.iter().map(|d| d.to_vec().len()).sum();
+        let mt = t.elapsed().as_secs_f64();
+        let mb = raw as f64 / 1e6;
+        eprintln!(
+            "ZSTDCOST frames={} raw={:.1}MB comp={:.1}MB ratio={:.4} compress={:.0}MB/s decompress={:.0}MB/s copy={:.0}MB/s ({})",
+            frames.len(),
+            mb,
+            csize as f64 / 1e6,
+            csize as f64 / raw as f64,
+            mb / ct,
+            mb / dt,
+            mb / mt.max(1e-9),
+            copied
+        );
+    }
 }

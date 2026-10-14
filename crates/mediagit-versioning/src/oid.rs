@@ -76,6 +76,9 @@ const _: () = assert!(
     "RAYON_HASH_THRESHOLD_BYTES is below the measured break-even; small hashes      would get slower, not faster"
 );
 
+/// Window size for `Oid::from_file_mmap_parallel` (multiple of any OS allocation granularity).
+const MMAP_HASH_WINDOW: u64 = 256 * 1024 * 1024;
+
 impl Oid {
     /// Create an OID by hashing the given data
     ///
@@ -182,16 +185,36 @@ impl Oid {
     /// tree-hash spec guarantees sequential and parallel modes agree. On multi-core hardware
     /// this is typically 2–4× faster than the sequential path for files ≥ 1 MiB.
     ///
+    /// The file is mapped in `MMAP_HASH_WINDOW`-sized windows, each dropped before the next
+    /// is mapped, so the mapped working set is bounded by one window rather than the file
+    /// size (mapping a 19 GB file whole pinned several GB of file-backed pages).
+    ///
     /// This is a blocking function; call it inside `tokio::task::spawn_blocking`.
     /// Gated by `MEDIAGIT_HASH_PARALLEL=1` at the call site.
-    #[allow(unsafe_code)] // audited: read-only mmap, file not modified while mapped
     pub fn from_file_mmap_parallel<P: AsRef<std::path::Path>>(path: P) -> anyhow::Result<Self> {
+        Self::from_file_mmap_windowed(path.as_ref(), MMAP_HASH_WINDOW)
+    }
+
+    /// `window_len` must be a multiple of the OS allocation granularity (64 KiB on Windows).
+    #[allow(unsafe_code)] // audited: read-only mmap, file not modified while mapped
+    fn from_file_mmap_windowed(path: &std::path::Path, window_len: u64) -> anyhow::Result<Self> {
         // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- local CLI arg (file being hashed)
-        let file = std::fs::File::open(path.as_ref())?;
-        // Safety: file opened read-only; mapping is read-only.
-        let mmap = unsafe { memmap2::Mmap::map(&file)? };
+        let file = std::fs::File::open(path)?;
+        let file_len = file.metadata()?.len();
         let mut hasher = Hasher::new();
-        hasher.update_rayon(&mmap[..]);
+        let mut offset = 0u64;
+        while offset < file_len {
+            let len = window_len.min(file_len - offset) as usize;
+            // Safety: file opened read-only; mapping is read-only.
+            let window = unsafe {
+                memmap2::MmapOptions::new()
+                    .offset(offset)
+                    .len(len)
+                    .map(&file)?
+            };
+            hasher.update_rayon(&window[..]);
+            offset += len as u64;
+        }
         Ok(Oid(hasher.finalize()))
     }
 
@@ -478,6 +501,56 @@ mod tests {
             memory_oid, file_oid,
             "Large file streaming hash should match in-memory hash"
         );
+    }
+
+    /// Windowed mmap hashing must equal whole-buffer and sequential-stream hashing
+    /// for every size relative to the window: empty, below, at, across, and a
+    /// non-multiple of it.
+    #[test]
+    fn windowed_mmap_hash_matches_whole_and_sequential() {
+        const WINDOW: u64 = 64 * 1024; // multiple of the 64 KiB allocation granularity
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let sizes = [
+            0usize,
+            1,
+            1000,
+            WINDOW as usize - 1,
+            WINDOW as usize,
+            WINDOW as usize + 1,
+            3 * WINDOW as usize,
+            3 * WINDOW as usize + 12_345,
+            7 * WINDOW as usize + 1,
+        ];
+        for (i, &size) in sizes.iter().enumerate() {
+            let data: Vec<u8> = (0..size)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    state as u8
+                })
+                .collect();
+            let path = dir.path().join(format!("f{i}.bin"));
+            std::fs::write(&path, &data).unwrap();
+
+            let whole = Oid::hash(&data);
+            assert_eq!(
+                Oid::from_file(&path).unwrap(),
+                whole,
+                "sequential, size {size}"
+            );
+            assert_eq!(
+                Oid::from_file_mmap_windowed(&path, WINDOW).unwrap(),
+                whole,
+                "windowed, size {size}"
+            );
+            assert_eq!(
+                Oid::from_file_mmap_parallel(&path).unwrap(),
+                whole,
+                "public entry point, size {size}"
+            );
+        }
     }
 }
 
