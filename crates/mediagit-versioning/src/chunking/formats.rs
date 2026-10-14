@@ -257,6 +257,40 @@ impl ContentChunker {
     /// Parses MP4 atoms (ftyp, moov, mdat, etc.) and creates chunks at atom boundaries.
     /// For large mdat atoms, uses CDC sub-chunking. For moov, parses nested atoms.
     pub(super) async fn chunk_mp4(&self, data: &[u8]) -> Result<Vec<ContentChunk>> {
+        // Frame-aligned walker first; any parse/validation error falls through
+        // to the legacy atom/CDC path.
+        if super::mp4_stream::frame_chunker_enabled() {
+            match super::mp4_stream::chunk_slice(data, self.seed) {
+                Ok(chunks) => return Ok(chunks),
+                Err(e) => {
+                    debug!(error = %e, "frame-aligned MP4 walker declined, using atom/CDC path")
+                }
+            }
+        }
+        self.chunk_mp4_legacy(data).await
+    }
+
+    /// Pre-walker MP4 chunking (atom boundaries + CDC inside mdat). Called
+    /// directly by the streaming entry point once the walker has declined, so
+    /// `moov` is not parsed twice.
+    pub(super) async fn chunk_mp4_legacy(&self, data: &[u8]) -> Result<Vec<ContentChunk>> {
+        let chunks = self.chunk_mp4_atoms(data).await?;
+        // The atom walker can leave gaps when a nested atom is malformed; never
+        // hand back a manifest that does not reproduce the file.
+        let mut at = 0u64;
+        let exact = chunks.iter().all(|c| {
+            let ok = c.offset == at;
+            at += c.size as u64;
+            ok
+        }) && at == data.len() as u64;
+        if exact {
+            return Ok(chunks);
+        }
+        warn!("MP4 atom chunking did not cover the file exactly, using fixed chunking");
+        self.chunk_fixed(data, 4 * 1024 * 1024).await
+    }
+
+    async fn chunk_mp4_atoms(&self, data: &[u8]) -> Result<Vec<ContentChunk>> {
         // Validate MP4 signature (ftyp should be first atom)
         if data.len() < 8 || &data[4..8] != b"ftyp" {
             debug!("Not a valid MP4 file (no ftyp), using fixed chunking");
@@ -298,7 +332,7 @@ impl ContentChunker {
 
         for atom in atoms {
             let atom_start = atom.offset as usize;
-            let atom_end = (atom.offset + atom.size) as usize;
+            let atom_end = atom.offset.saturating_add(atom.size) as usize;
 
             if atom_end > data.len() {
                 // Atom size extends past EOF (common for MOV mdat with size=0 or
@@ -376,8 +410,9 @@ impl ContentChunker {
                             // still gets emitted rather than being silently dropped.
                             for nested_atom in &nested {
                                 let nested_start = 8 + nested_atom.offset as usize;
-                                let nested_end =
-                                    (nested_start + nested_atom.size as usize).min(atom_data.len());
+                                let nested_end = nested_start
+                                    .saturating_add(nested_atom.size as usize)
+                                    .min(atom_data.len());
                                 if nested_start < atom_data.len() {
                                     let nested_data = &atom_data[nested_start..nested_end];
                                     if !nested_data.is_empty() {
@@ -1739,9 +1774,14 @@ pub(super) fn parse_mp4_atoms(data: &[u8]) -> Vec<Mp4Atom> {
             _ => (size, 8),
         };
 
-        // Sanity check: atom shouldn't extend beyond data
-        if pos + actual_size > data_len {
-            // Truncated atom - include what we have
+        // Sanity check: atom shouldn't extend beyond data, overflow u64, or be
+        // smaller than its own header (which would stall `pos`).
+        let fits = pos
+            .checked_add(actual_size)
+            .is_some_and(|end| end <= data_len)
+            && actual_size >= header_size as u64;
+        if !fits {
+            // Truncated/invalid atom - include what we have
             atoms.push(Mp4Atom {
                 atom_type,
                 offset: pos,
@@ -1836,7 +1876,7 @@ fn parse_stsd_sample_entries(stsd_body: &[u8]) -> Vec<[u8; 4]> {
 }
 
 /// Map an MP4/MOV sample-entry FourCC (from `stsd`) to a `CodecHint`.
-fn mp4_fourcc_to_codec_hint(fourcc: &[u8; 4]) -> CodecHint {
+pub(super) fn mp4_fourcc_to_codec_hint(fourcc: &[u8; 4]) -> CodecHint {
     match fourcc {
         b"avc1" | b"avc3" => CodecHint::H264,
         b"hvc1" | b"hev1" | b"dvh1" | b"dvhe" => CodecHint::H265,

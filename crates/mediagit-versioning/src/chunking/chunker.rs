@@ -223,17 +223,18 @@ impl ContentChunker {
 
         let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
+        let ext = std::path::Path::new(filename)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
         // Only use mmap + format-aware chunking for extensions that have a dedicated
         // structure-aware parser (container formats where splitting at structural
         // boundaries genuinely improves deduplication).  All other files go straight
         // to StreamCDC so that chunk boundaries stay content-defined and
         // delta-compressible — matching the behaviour of v0.2.5-beta.1.
         let has_structure_parser = {
-            let ext = std::path::Path::new(filename)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_lowercase();
             matches!(
                 ext.as_str(),
                 // Video containers with dedicated parsers
@@ -243,6 +244,35 @@ impl ContentChunker {
                     | "glb" | "gltf" | "obj" | "stl" | "ply" | "fbx" | "blend"
             )
         };
+
+        // Frame-aligned streaming walker for the MP4 family, at any size. A
+        // parse or validation error (nothing emitted yet) falls through to the
+        // paths below. A run-time error fails the add: no partial manifest is
+        // written (orphan chunks remain until gc).
+        let mut walker_declined = false;
+        if matches!(ext.as_str(), "mp4" | "mov" | "m4v" | "m4a" | "3gp")
+            && super::mp4_stream::frame_chunker_enabled()
+        {
+            let mut file = std::fs::File::open(path)
+                .map_err(|e| anyhow::anyhow!("Failed to open file '{}': {}", path.display(), e))?;
+            match super::mp4_stream::Mp4Plan::build(&mut file) {
+                Ok(plan) => {
+                    return plan.run(&mut file, self.seed, &mut |chunk| {
+                        sender.blocking_send(chunk).map_err(|_| {
+                            anyhow::anyhow!("Chunk worker channel closed unexpectedly")
+                        })
+                    });
+                }
+                Err(e) => {
+                    walker_declined = true;
+                    debug!(
+                        path = %path.display(),
+                        error = %e,
+                        "frame-aligned MP4 walker declined, using existing path"
+                    );
+                }
+            }
+        }
 
         let cap_bytes = container_chunk_cap_bytes();
         if has_structure_parser && file_size > cap_bytes {
@@ -277,7 +307,14 @@ impl ContentChunker {
                     .enable_all()
                     .build()
                 {
-                    Ok(rt) => match rt.block_on(self.chunk(&mmap[..], filename)) {
+                    Ok(rt) => match rt.block_on(async {
+                        if walker_declined {
+                            // Walker already parsed (and rejected) this file.
+                            self.chunk_mp4_legacy(&mmap[..]).await
+                        } else {
+                            self.chunk(&mmap[..], filename).await
+                        }
+                    }) {
                         Ok(chunks) => {
                             debug!(
                                 path = %path.display(),
