@@ -6,7 +6,7 @@ Welcome to MediaGit-Core, a next-generation media versioning system built with R
 
 MediaGit-Core is a source-available version control system designed specifically for managing large binary files (media assets) with the same efficiency and flexibility that Git provides for source code. It solves the fundamental limitations of Git-LFS while providing a familiar Git-like interface.
 
-It is licensed under BUSL-1.1 — free to read, modify, fork and self-host, and free to run in production for organisations with fewer than 250 people and under USD 10M revenue, but **not open source in the OSI sense**, because offering MediaGit to third parties as a hosted or managed service is reserved. See [License](#license) below.
+It is licensed under BUSL-1.1 — free to read, modify, fork and self-host, and free to run in production for small organisations (fewer than 10 people, under USD 250,000 revenue and under USD 1M equity funding, plus educational institutions, non-profits and open-source projects), but **not open source in the OSI sense**, because offering MediaGit to third parties as a hosted or managed service is reserved. See [License](#license) below.
 
 ## Key Features
 
@@ -101,9 +101,10 @@ Ready to get started? Head to the [Installation](./installation/README.md) guide
 MediaGit-Core is **source available** under the **Business Source License 1.1
 (BUSL-1.1)**.
 
-- ✅ **Free for production use by small organisations**: fewer than 250 people
-  and under USD 10M annual revenue (larger organisations need an Enterprise
-  licence)
+- ✅ **Free for production use by small organisations**: fewer than 10 people,
+  under USD 250,000 annual revenue and under USD 1M of equity funding;
+  educational institutions, non-profits and open-source projects always
+  qualify (larger organisations need a Team or Enterprise licence)
 - ✅ Evaluation, pilots, testing and other non-production use are free for everyone
 - ✅ Read, modify, fork and self-host freely
 - ✅ Each release converts to **AGPL-3.0-or-later four years after publication**

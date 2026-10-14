@@ -7,9 +7,21 @@ in a minute whether you need to talk to us.
 ## Free for small organisations
 
 The Additional Use Grant in `LICENSE` permits **production use by Small
-Organisations**: organisations that, together with their affiliates, have
-**fewer than 250 people** (employees plus full-time contractors) **and less than
-USD 10 million** in annual revenue. If that is you, all of the following are free:
+Organisations**: organisations that, together with their affiliates, meet all
+three of these limits:
+
+- **fewer than 10 people** (employees plus full-time contractors);
+- **less than USD 250,000** in annual revenue; and
+- **less than USD 1 million** in total equity funding raised (equity, SAFEs and
+  convertible notes; grants, loans and revenue do not count).
+
+Regardless of size, **educational institutions** (and their students and staff,
+for teaching, study and non-commercial research), **registered non-profits**,
+and **open-source projects** whose code and assets are publicly released under an
+OSI-approved or Creative Commons licence are also treated as Small
+Organisations.
+
+If that is you, all of the following are free:
 
 - Running MediaGit to version **your own** media: films, games, campaigns,
   archives, whatever you make.
@@ -27,17 +39,18 @@ USD 10 million** in annual revenue. If that is you, all of the following are fre
   the client runs their own instance. The client needs its own licence if it is
   not a Small Organisation.
 
-If you are an indie or mid-size studio, a startup or a freelancer using MediaGit
-for your own work, you are covered. You owe nothing and need to ask no one.
+If you are a freelancer, a small indie team or an early-stage startup inside
+those limits, you are covered. You owe nothing and need to ask no one.
 
 ## When you need a commercial licence
 
 You need a commercial licence in two cases.
 
-**1. Your organisation is not a Small Organisation.** That means 250 or more
-people, or USD 10 million or more in annual revenue, counted together with
-your affiliates. Production use then needs an **Enterprise licence**: an
-annual contract that includes the enterprise add-on module and an SLA.
+**1. Your organisation is not a Small Organisation.** That means 10 or more
+people, or USD 250,000 or more in annual revenue, or USD 1 million or more in
+equity funding raised, counted together with your affiliates. Production use
+then needs a **Team licence** or, for larger organisations, an **Enterprise
+licence**.
 
 **2. You offer MediaGit as a service to others,** whatever your size:
 
@@ -60,8 +73,11 @@ check.
 
 - **Studio support:** priority help, onboarding and an SLA, for teams of any
   size.
-- **Enterprise licence:** for organisations above the Small Organisation
-  threshold. It includes the enterprise add-on module (SSO/SAML, fine-grained
+- **Team licence:** for studios above the Small Organisation threshold that
+  self-host MediaGit on their own storage. Priced per seat.
+- **Pilot licence:** a written, free, time-limited licence for studios trialling
+  MediaGit in production before buying a Team licence.
+- **Enterprise licence:** for larger organisations. It includes the enterprise add-on module (SSO/SAML, fine-grained
   RBAC, audit logging and compliance reporting) and an SLA.
 - **MediaGit Cloud:** hosted, managed and backed up, with no infrastructure to
   run.
