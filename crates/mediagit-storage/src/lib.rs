@@ -332,9 +332,30 @@ pub trait StorageBackend: Send + Sync + Debug {
 
     /// Retrieve a byte range from an object (`offset` inclusive, `len` bytes).
     ///
-    /// Default implementation fetches the whole object and slices it.
-    /// Backends may override for efficient HTTP Range-GET.
+    /// Default implementation tries the backend's native `get_streaming_range`
+    /// (a real ranged GET on S3/MinIO/B2) and falls back to fetching the whole
+    /// object and slicing it. Backends may override for efficient Range-GET.
     async fn get_range(&self, key: &str, offset: u64, len: u64) -> anyhow::Result<Vec<u8>> {
+        if len > 0
+            && let Some(end) = offset.checked_add(len)
+            && let Ok(mut stream) = self.get_streaming_range(key, offset..end).await
+        {
+            use futures::StreamExt;
+            let mut out = Vec::with_capacity(len as usize);
+            let mut complete = true;
+            while let Some(part) = stream.next().await {
+                match part {
+                    Ok(bytes) => out.extend_from_slice(&bytes),
+                    Err(_) => {
+                        complete = false;
+                        break;
+                    }
+                }
+            }
+            if complete && out.len() as u64 == len {
+                return Ok(out);
+            }
+        }
         let data = self.get(key).await?;
         let start = offset as usize;
         let end = start + len as usize;
@@ -933,6 +954,55 @@ pub async fn check_or_write_layout_marker(
 mod tests {
     use super::*;
     use crate::mock::MockBackend;
+
+    /// Backend whose whole-object `get` fails, so a passing `get_range` proves the
+    /// trait default used the native `get_streaming_range` rather than slicing a `get`.
+    #[derive(Debug)]
+    struct RangeOnly(Vec<u8>);
+
+    #[async_trait::async_trait]
+    impl StorageBackend for RangeOnly {
+        async fn get(&self, _key: &str) -> anyhow::Result<Vec<u8>> {
+            anyhow::bail!("whole-object get must not be used")
+        }
+        async fn put(&self, _key: &str, _data: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn exists(&self, _key: &str) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+        async fn delete(&self, _key: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn list_objects(&self, _prefix: &str) -> anyhow::Result<Vec<String>> {
+            Ok(vec![])
+        }
+        async fn head(&self, _key: &str) -> anyhow::Result<Option<u64>> {
+            Ok(Some(self.0.len() as u64))
+        }
+        async fn get_streaming_range(
+            &self,
+            _key: &str,
+            range: std::ops::Range<u64>,
+        ) -> anyhow::Result<
+            std::pin::Pin<
+                Box<dyn futures::Stream<Item = anyhow::Result<bytes::Bytes>> + Send + 'static>,
+            >,
+        > {
+            let slice =
+                bytes::Bytes::copy_from_slice(&self.0[range.start as usize..range.end as usize]);
+            Ok(Box::pin(futures::stream::once(async move { Ok(slice) })))
+        }
+    }
+
+    #[tokio::test]
+    async fn default_get_range_uses_native_ranged_stream() {
+        let backend = RangeOnly((0..100u8).collect());
+        assert_eq!(
+            backend.get_range("k", 10, 5).await.unwrap(),
+            vec![10, 11, 12, 13, 14]
+        );
+    }
 
     #[tokio::test]
     async fn layout_marker_written_on_fresh_empty_store() {

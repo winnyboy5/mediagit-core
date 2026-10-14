@@ -1804,139 +1804,263 @@ impl ObjectDatabase {
 
     /// Read an object from pack files
     ///
-    /// Searches through all pack files to find the requested object.
-    /// This is used as a fallback when loose object is not found.
+    /// Looks the object up in the cached pack locator (built once from each
+    /// pack's index via ranged reads) and fetches just that entry with a
+    /// ranged read. Used as a fallback when the loose object is not found.
+    ///
+    /// The per-object hash check below is the integrity gate for these bytes;
+    /// the whole-pack checksum is not re-verified per read (it is still checked
+    /// by fsck and on pack import). If the same oid is packed more than once, a
+    /// copy that fails its hash falls through to the next one.
     pub(super) async fn read_from_packs(&self, oid: &Oid) -> anyhow::Result<Vec<u8>> {
-        use crate::pack::PackReader;
-
         debug!(oid = %oid, "Searching for object in pack files");
 
-        // List all pack files
-        let pack_files = self.list_pack_files().await?;
+        // Attempt 0 uses the cache; attempt 1 follows a locator reset after a
+        // stale entry (pack deleted/rewritten by another process).
+        for attempt in 0..2 {
+            self.ensure_pack_membership_loaded().await?;
+            let mut locs = self.pack_locations(oid).await;
+            if locs.is_empty() {
+                // Packs may have been added by another process since the
+                // locator was built: index any new ones, then look once more.
+                self.refresh_pack_locator().await?;
+                locs = self.pack_locations(oid).await;
+            }
+            if locs.is_empty() {
+                let pack_count = self
+                    .pack_membership
+                    .read()
+                    .await
+                    .as_ref()
+                    .map_or(0, |l| l.pack_count());
+                if pack_count == 0 {
+                    anyhow::bail!(
+                        "Object {} not found: no loose object and no pack files",
+                        oid
+                    );
+                }
+                anyhow::bail!(
+                    "Object {} not found: no loose object and not found in {} pack files",
+                    oid,
+                    pack_count
+                );
+            }
 
-        if pack_files.is_empty() {
+            let mut last_err = None;
+            let mut all_integrity = true;
+            for loc in &locs {
+                let compressed_data = match self.read_packed_payload(loc, oid).await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        warn!(pack = %loc.pack_key, error = %e, "Packed entry read failed");
+                        all_integrity = false;
+                        last_err = Some(e);
+                        continue;
+                    }
+                };
+                match self.decode_packed(compressed_data, loc, oid).await {
+                    Ok(data) => return Ok(data),
+                    Err(e) => last_err = Some(e),
+                }
+            }
+            if all_integrity || attempt == 1 {
+                return Err(last_err.expect("at least one location was tried"));
+            }
+            // A read (not hash) failure: the locator may be stale. Re-index once.
+            *self.pack_membership.write().await = None;
+        }
+        unreachable!("loop returns on its second attempt")
+    }
+
+    /// Decompress a packed payload and verify it hashes to `oid`.
+    async fn decode_packed(
+        &self,
+        compressed_data: Vec<u8>,
+        loc: &crate::odb::PackLocation,
+        oid: &Oid,
+    ) -> anyhow::Result<Vec<u8>> {
+        // Decompress the object data (pack stores compressed data)
+        let data = if let Some(smart_comp) = &self.smart_compressor {
+            match decompress_typed_blocking(smart_comp.clone(), compressed_data.clone()).await {
+                Ok(d) => d,
+                Err(_) => {
+                    // Fallback to standard decompression
+                    match decompress_blocking(self.compressor.clone(), compressed_data.clone())
+                        .await
+                    {
+                        Ok(d) => d,
+                        Err(_) => compressed_data, // Use raw data as last resort
+                    }
+                }
+            }
+        } else if self.compression_enabled
+            || (compressed_data.len() >= 2 && compressed_data[0] == 0x78)
+        {
+            match decompress_blocking(self.compressor.clone(), compressed_data.clone()).await {
+                Ok(d) => d,
+                Err(_) => compressed_data,
+            }
+        } else {
+            compressed_data
+        };
+
+        // Verify integrity
+        let computed_oid = Oid::hash(&data);
+        if computed_oid != *oid {
+            warn!(
+                expected = %oid,
+                computed = %computed_oid,
+                pack = %loc.pack_key,
+                "Pack object integrity check failed"
+            );
             anyhow::bail!(
-                "Object {} not found: no loose object and no pack files",
-                oid
+                "Pack object integrity check failed for {} in {}: computed {}",
+                oid,
+                loc.pack_key,
+                computed_oid
             );
         }
 
-        // Search through each pack file
-        for pack_key in &pack_files {
-            // Read pack file data
-            match self.storage.get(pack_key).await {
-                Ok(pack_data) => {
-                    // Parse pack file
-                    match PackReader::new(pack_data) {
-                        Ok(pack_reader) => {
-                            // Try to get object from this pack
-                            match pack_reader.get_object(oid) {
-                                Ok(compressed_data) => {
-                                    debug!(
-                                        oid = %oid,
-                                        pack = pack_key,
-                                        "Found object in pack file"
-                                    );
-
-                                    // Decompress the object data (pack stores compressed data)
-                                    let data = if let Some(smart_comp) = &self.smart_compressor {
-                                        match decompress_typed_blocking(
-                                            smart_comp.clone(),
-                                            compressed_data.clone(),
-                                        )
-                                        .await
-                                        {
-                                            Ok(d) => d,
-                                            Err(_) => {
-                                                // Fallback to standard decompression
-                                                match decompress_blocking(
-                                                    self.compressor.clone(),
-                                                    compressed_data.clone(),
-                                                )
-                                                .await
-                                                {
-                                                    Ok(d) => d,
-                                                    Err(_) => compressed_data, // Use raw data as last resort
-                                                }
-                                            }
-                                        }
-                                    } else if self.compression_enabled
-                                        || (compressed_data.len() >= 2
-                                            && compressed_data[0] == 0x78)
-                                    {
-                                        match decompress_blocking(
-                                            self.compressor.clone(),
-                                            compressed_data.clone(),
-                                        )
-                                        .await
-                                        {
-                                            Ok(d) => d,
-                                            Err(_) => compressed_data,
-                                        }
-                                    } else {
-                                        compressed_data
-                                    };
-
-                                    // Verify integrity
-                                    let computed_oid = Oid::hash(&data);
-                                    if computed_oid != *oid {
-                                        warn!(
-                                            expected = %oid,
-                                            computed = %computed_oid,
-                                            pack = pack_key,
-                                            "Pack object integrity check failed"
-                                        );
-                                        continue; // Try next pack
-                                    }
-
-                                    // Cache the decompressed data (skip large objects)
-                                    if data.len() <= MAX_CACHEABLE_OBJECT_SIZE {
-                                        let arc_data = Arc::new(data.clone());
-                                        self.cache.insert(*oid, arc_data).await;
-                                    }
-
-                                    info!(
-                                        oid = %oid,
-                                        pack = pack_key,
-                                        size = data.len(),
-                                        "Successfully read object from pack file"
-                                    );
-
-                                    return Ok(data);
-                                }
-                                Err(_) => {
-                                    // Object not in this pack, try next one
-                                    continue;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            warn!(
-                                pack = pack_key,
-                                error = %e,
-                                "Failed to parse pack file"
-                            );
-                            continue;
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        pack = pack_key,
-                        error = %e,
-                        "Failed to read pack file"
-                    );
-                    continue;
-                }
-            }
+        // Cache the decompressed data (skip large objects)
+        if data.len() <= MAX_CACHEABLE_OBJECT_SIZE {
+            let arc_data = Arc::new(data.clone());
+            self.cache.insert(*oid, arc_data).await;
         }
 
-        // Object not found in any pack
-        anyhow::bail!(
-            "Object {} not found: no loose object and not found in {} pack files",
-            oid,
-            pack_files.len()
-        )
+        info!(
+            oid = %oid,
+            pack = %loc.pack_key,
+            size = data.len(),
+            "Successfully read object from pack file"
+        );
+
+        Ok(data)
+    }
+
+    /// Fetch one packed entry's (still compressed) payload with ranged reads.
+    ///
+    /// A delta entry (`DELTA` + base oid + sealed delta) is resolved through the
+    /// locator: its base is a ranged read of another entry in the SAME pack, so
+    /// no pack is ever fetched whole. Chain depth is capped like `PackReader`.
+    async fn read_packed_payload(
+        &self,
+        loc: &crate::odb::PackLocation,
+        oid: &Oid,
+    ) -> anyhow::Result<Vec<u8>> {
+        const ENTRY_HEADER: usize = 5; // 1 type byte + 4 size bytes
+        const DELTA_HEADER: usize = 5 + 32; // "DELTA" + base oid
+        const MAX_DELTA_CHAIN_DEPTH: usize = 10;
+
+        let mut deltas: Vec<Vec<u8>> = Vec::new();
+        let mut cur = loc.clone();
+        loop {
+            let entry = self
+                .storage
+                .get_range(&cur.pack_key, cur.offset, cur.len as u64)
+                .await?;
+            if entry.len() >= 5 && &entry[..5] == b"DELTA" {
+                if deltas.len() >= MAX_DELTA_CHAIN_DEPTH {
+                    anyhow::bail!("Delta chain too deep for {} in {}", oid, loc.pack_key);
+                }
+                if entry.len() < DELTA_HEADER {
+                    anyhow::bail!("Delta entry too small for {} in {}", oid, loc.pack_key);
+                }
+                let base_oid = Oid::from_bytes(entry[5..DELTA_HEADER].try_into()?);
+                deltas.push(entry[DELTA_HEADER..].to_vec());
+                cur = self
+                    .pack_location_in(&base_oid, &loc.pack_key)
+                    .await
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Delta base {} not found in {}", base_oid, loc.pack_key)
+                    })?;
+                continue;
+            }
+            if entry.len() < ENTRY_HEADER || ObjectType::from_u8(entry[0]).is_none() {
+                anyhow::bail!("Invalid packed entry for {} in {}", oid, loc.pack_key);
+            }
+            let mut data = entry[ENTRY_HEADER..].to_vec();
+            // Apply deltas base-first. The delta bytes may be sealed at rest.
+            for sealed in deltas.iter().rev() {
+                let raw = mediagit_compression::open_at_rest(sealed)?;
+                let delta = crate::delta::Delta::from_bytes(&raw)?;
+                data = crate::delta::DeltaDecoder::apply(&data, &delta)?;
+            }
+            return Ok(data);
+        }
+    }
+
+    async fn pack_locations(&self, oid: &Oid) -> Vec<crate::odb::PackLocation> {
+        let guard = self.pack_membership.read().await;
+        guard.as_ref().map(|l| l.locations(oid)).unwrap_or_default()
+    }
+
+    async fn pack_location_in(
+        &self,
+        oid: &Oid,
+        pack_key: &str,
+    ) -> Option<crate::odb::PackLocation> {
+        let guard = self.pack_membership.read().await;
+        guard.as_ref()?.location_in(oid, pack_key)
+    }
+
+    /// Read one pack's index without fetching the pack body: the trailer
+    /// (`chunk_index_offset u64` + 32-byte checksum) gives the index range.
+    async fn read_pack_index(&self, pack_key: &str) -> anyhow::Result<Vec<(Oid, u64, u32)>> {
+        use crate::pack::{PACK_HEADER_SIZE, PackIndex};
+        const TRAILER: u64 = 8 + 32;
+        let size = self
+            .storage
+            .head(pack_key)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("pack {} not found", pack_key))?;
+        if size < PACK_HEADER_SIZE as u64 + 4 + TRAILER {
+            anyhow::bail!("pack {} too short", pack_key);
+        }
+        let idx_end = size - TRAILER;
+        let off_bytes = self.storage.get_range(pack_key, idx_end, 8).await?;
+        let idx_off = u64::from_le_bytes(off_bytes[..8].try_into()?);
+        if idx_off < PACK_HEADER_SIZE as u64 || idx_off + 4 > idx_end {
+            anyhow::bail!("pack {} has an invalid index offset", pack_key);
+        }
+        let raw = self
+            .storage
+            .get_range(pack_key, idx_off, idx_end - idx_off)
+            .await?;
+        let index = PackIndex::from_bytes(&raw)?;
+        Ok(index
+            .iter()
+            .filter(|(_, (off, len))| off + *len as u64 <= idx_off)
+            .map(|(oid, (off, len))| (*oid, *off, *len))
+            .collect())
+    }
+
+    /// Index every pack key `locator.packs` doesn't know yet.
+    async fn index_new_packs(&self, locator: &mut crate::odb::PackLocator) -> anyhow::Result<()> {
+        for pack_key in self.list_pack_files().await? {
+            if locator.has_pack(&pack_key) {
+                continue;
+            }
+            match self.read_pack_index(&pack_key).await {
+                Ok(entries) => {
+                    let pack = locator.add_pack(&pack_key);
+                    for (oid, offset, len) in entries {
+                        locator.insert(oid, pack, offset, len);
+                    }
+                }
+                Err(e) => warn!(pack = pack_key, error = %e, "Failed to index pack file"),
+            }
+        }
+        locator.finish();
+        Ok(())
+    }
+
+    /// Pick up packs written since the locator was built (e.g. by another process).
+    async fn refresh_pack_locator(&self) -> anyhow::Result<()> {
+        let mut guard = self.pack_membership.write().await;
+        let mut locator = guard.take().unwrap_or_default();
+        let result = self.index_new_packs(&mut locator).await;
+        *guard = Some(locator);
+        result
     }
 
     /// Reconstruct chunked object from manifest and chunks
@@ -3185,10 +3309,10 @@ impl ObjectDatabase {
         Ok(guard.as_ref().is_some_and(|set| set.contains(chunk_id)))
     }
 
-    /// Lazily build the in-memory set of every OID embedded in a pack index.
-    /// Reads each pack file once (to parse its trailing index) — cheap
-    /// relative to a per-call full-pack scan, and never re-run once loaded
-    /// except to extend it (`repack()` does this directly).
+    /// Lazily build the in-memory `Oid -> pack location` map from every pack's
+    /// index (ranged reads of the index region only). Built once under the
+    /// write lock; reset to `None` by `repack()` and refreshed incrementally
+    /// on a lookup miss.
     ///
     /// `pub(super)`: also used by `odb::core`'s `exists()` and
     /// `resolve_abbreviated_oid()` for pack-membership union semantics.
@@ -3204,18 +3328,9 @@ impl ObjectDatabase {
             // Another task raced us and already loaded it.
             return Ok(());
         }
-        use crate::pack::PackReader;
-        let mut set = std::collections::HashSet::new();
-        for pack_key in self.list_pack_files().await? {
-            if let Ok(pack_data) = self.storage.get(&pack_key).await
-                && let Ok(pack_reader) = PackReader::new(pack_data)
-            {
-                for (oid, _) in pack_reader.index().iter() {
-                    set.insert(*oid);
-                }
-            }
-        }
-        *guard = Some(set);
+        let mut locator = crate::odb::PackLocator::default();
+        self.index_new_packs(&mut locator).await?;
+        *guard = Some(locator);
         Ok(())
     }
 
