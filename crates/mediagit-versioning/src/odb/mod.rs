@@ -1568,6 +1568,54 @@ mod tests {
     /// another such test's value mid-run.
     static REPACK_CHUNKS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// A one-pass packed restore must not fill the object cache: chunk reads never
+    /// repeat, so caching them just pins up to the cache budget in memory.
+    #[tokio::test]
+    // Deliberately holds the env lock across awaits (see REPACK_CHUNKS_ENV_LOCK).
+    #[allow(clippy::await_holding_lock)]
+    async fn packed_chunk_restore_leaves_object_cache_empty() {
+        let _env_lock = REPACK_CHUNKS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MEDIAGIT_REPACK_CHUNKS") };
+
+        let storage = Arc::new(MockBackend::new());
+        let writer = ObjectDatabase::with_optimizations(
+            storage.clone(),
+            100,
+            Some(ChunkStrategy::Fixed { size: 64 * 1024 }),
+            false,
+            0,
+        );
+        let data: Vec<u8> = (0..1024 * 1024).map(|i| ((i * 13) % 251) as u8).collect();
+        let oid = writer
+            .write_chunked(ObjectType::Blob, &data, "big.bin")
+            .await
+            .unwrap();
+        writer.repack(0, true).await.unwrap();
+
+        // Fresh ODB: empty cache, chunks only reachable through packs.
+        let odb = ObjectDatabase::with_optimizations(
+            storage,
+            100,
+            Some(ChunkStrategy::Fixed { size: 64 * 1024 }),
+            false,
+            0,
+        );
+        let dir = tempfile::TempDir::new().unwrap();
+        let dest = dir.path().join("out.bin");
+        odb.read_to_file(&oid, &dest).await.unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), data);
+
+        odb.cache.run_pending_tasks().await;
+        assert_eq!(
+            odb.cache.entry_count(),
+            0,
+            "packed chunk reads must not populate the object cache"
+        );
+    }
+
     /// I9: loose chunks default-route into Track-F-style cloud packs
     /// (`MEDIAGIT_REPACK_CHUNKS` unset = enabled). Packed chunks must stay
     /// byte-identical and readable via the pack-fallback path in

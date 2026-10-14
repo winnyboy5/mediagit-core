@@ -679,7 +679,7 @@ impl ObjectDatabase {
             }
 
             // Try pack files
-            self.read_from_packs(&oid).await
+            self.read_packed_object(&oid).await
         })
     }
 }

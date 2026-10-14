@@ -1872,6 +1872,16 @@ impl ObjectDatabase {
         unreachable!("loop returns on its second attempt")
     }
 
+    /// `read_from_packs` for whole objects (commits, trees, small blobs), which
+    /// are worth keeping in the object cache. Chunk reads must not use this.
+    pub(super) async fn read_packed_object(&self, oid: &Oid) -> anyhow::Result<Vec<u8>> {
+        let data = self.read_from_packs(oid).await?;
+        if data.len() <= MAX_CACHEABLE_OBJECT_SIZE {
+            self.cache.insert(*oid, Arc::new(data.clone())).await;
+        }
+        Ok(data)
+    }
+
     /// Decompress a packed payload and verify it hashes to `oid`.
     async fn decode_packed(
         &self,
@@ -1921,12 +1931,10 @@ impl ObjectDatabase {
             );
         }
 
-        // Cache the decompressed data (skip large objects)
-        if data.len() <= MAX_CACHEABLE_OBJECT_SIZE {
-            let arc_data = Arc::new(data.clone());
-            self.cache.insert(*oid, arc_data).await;
-        }
-
+        // Deliberately NOT cached here: chunk reads (get_chunk base reads) come
+        // through this path too, and a one-pass restore never re-reads a chunk,
+        // so caching them just fills the object cache to capacity. Whole-object
+        // callers cache via `read_packed_object`.
         info!(
             oid = %oid,
             pack = %loc.pack_key,
@@ -2498,7 +2506,7 @@ impl ObjectDatabase {
             Err(_) => {
                 // Loose object not found - fallback to pack files
                 debug!(oid = %oid, "Loose object not found, trying pack files");
-                return self.read_from_packs(oid).await;
+                return self.read_packed_object(oid).await;
             }
         };
 
