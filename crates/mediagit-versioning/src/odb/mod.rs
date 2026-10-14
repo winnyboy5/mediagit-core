@@ -909,14 +909,14 @@ pub struct ObjectDatabase {
     /// on-disk one. All storage IO happens outside the lock.
     delta_written_pairs: Arc<Mutex<DeltaGraph>>,
 
-    /// Lazily-built set of OIDs embedded in pack indexes. `None` until the
-    /// first `chunk_exists()` call (or a repack) populates it — packs are
-    /// immutable once written and only ever grow in number, so this can be
-    /// extended in place by `repack()` instead of reloading from scratch.
+    /// Lazily-built locator of every OID embedded in pack indexes. `None` until
+    /// the first `chunk_exists()` / packed read populates it; `repack()` resets
+    /// it to `None` so the next use re-indexes (packs are immutable, so a miss
+    /// also triggers an incremental refresh for packs written elsewhere).
     /// Without this, `chunk_exists()` only checked `chunks/` and
     /// `chunk-deltas/`, so post-repack (which deletes the loose copies)
     /// every chunk looked "new" and push dedup re-uploaded everything.
-    pack_membership: Arc<RwLock<Option<std::collections::HashSet<Oid>>>>,
+    pack_membership: Arc<RwLock<Option<PackLocator>>>,
 }
 
 impl Clone for ObjectDatabase {
@@ -939,6 +939,8 @@ impl Clone for ObjectDatabase {
     }
 }
 
+mod pack_locator;
+use pack_locator::{PackLocation, PackLocator};
 pub(crate) mod chunks;
 pub(crate) mod core;
 pub(crate) mod delta;

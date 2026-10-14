@@ -480,6 +480,37 @@ impl StorageBackend for LocalBackend {
         }
     }
 
+    async fn get_range(&self, key: &str, offset: u64, len: u64) -> anyhow::Result<Vec<u8>> {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        if key.is_empty() {
+            return Err(anyhow::anyhow!("key cannot be empty"));
+        }
+        let path = self.object_path_checked(key)?;
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- key validated by object_path_checked
+        let mut file = tokio::fs::File::open(&path).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                anyhow::anyhow!("object not found: {}", key)
+            } else {
+                anyhow::anyhow!("get_range open {}: {}", key, e)
+            }
+        })?;
+        let file_len = file.metadata().await?.len();
+        let end = offset.checked_add(len);
+        if end.is_none_or(|e| e > file_len) {
+            anyhow::bail!(
+                "get_range: {}..+{} out of bounds for key '{}' (object len {})",
+                offset,
+                len,
+                key,
+                file_len
+            );
+        }
+        file.seek(std::io::SeekFrom::Start(offset)).await?;
+        let mut buf = vec![0u8; len as usize];
+        file.read_exact(&mut buf).await?;
+        Ok(buf)
+    }
+
     async fn get_streaming_range(
         &self,
         key: &str,
@@ -889,6 +920,50 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn get_range_bounds_and_content() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalBackend::new(temp_dir.path()).await.unwrap();
+        let data: Vec<u8> = (0..=255u8).collect();
+        backend.put("packs/range.bin", &data).await.unwrap();
+
+        assert_eq!(
+            backend.get_range("packs/range.bin", 10, 20).await.unwrap(),
+            &data[10..30]
+        );
+        // Whole object, empty range at start and exactly at the end are valid.
+        assert_eq!(
+            backend.get_range("packs/range.bin", 0, 256).await.unwrap(),
+            data
+        );
+        assert!(
+            backend
+                .get_range("packs/range.bin", 0, 0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            backend
+                .get_range("packs/range.bin", 256, 0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // Out of range, including offset overflow, is an error.
+        assert!(backend.get_range("packs/range.bin", 250, 7).await.is_err());
+        assert!(backend.get_range("packs/range.bin", 257, 0).await.is_err());
+        assert!(
+            backend
+                .get_range("packs/range.bin", u64::MAX, 2)
+                .await
+                .is_err()
+        );
+        // Missing key and path escape are errors.
+        assert!(backend.get_range("packs/missing", 0, 1).await.is_err());
+        assert!(backend.get_range("../escape", 0, 1).await.is_err());
+    }
 
     #[tokio::test]
     async fn test_new_creates_root_directory() {

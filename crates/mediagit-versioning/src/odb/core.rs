@@ -923,18 +923,9 @@ impl ObjectDatabase {
             // Store pack file
             self.storage.put(&pack_key, &pack_data).await?;
 
-            // Extend the pack-membership set in place if it's already loaded, so
-            // chunk_exists() sees these OIDs immediately without a full pack
-            // rescan. If it hasn't been loaded yet, leave it as None — the next
-            // chunk_exists() call will lazily build it from all packs including
-            // this new one.
-            {
-                let mut guard = self.pack_membership.write().await;
-                if let Some(set) = guard.as_mut() {
-                    set.extend(packed_oids.iter().copied());
-                    set.extend(legacy_packed_chunk_oids.iter().copied());
-                }
-            }
+            // Drop the pack locator so the next chunk_exists()/packed read
+            // re-indexes all packs including this new one.
+            *self.pack_membership.write().await = None;
 
             info!(
                 pack_id,
@@ -1016,7 +1007,7 @@ impl ObjectDatabase {
     /// are.
     ///
     /// Abort-safety per pack (see `seal_chunk_cloud_pack`): store pack bytes
-    /// -> persist JSONL index -> extend in-memory `pack_membership` -> delete
+    /// -> persist JSONL index -> reset in-memory `pack_membership` -> delete
     /// loose chunks, in that order. A crash before the JSONL write leaves the
     /// loose chunks untouched; a crash after leaves the pack fully readable
     /// via `read_from_packs`/`get_chunk` regardless of whether the loose
@@ -1155,10 +1146,7 @@ impl ObjectDatabase {
         //    so a reader racing this repack never sees a chunk as "gone"
         //    (loose deleted) without it also being visible in the pack index.
         {
-            let mut guard = self.pack_membership.write().await;
-            if let Some(set) = guard.as_mut() {
-                set.extend(pending.iter().map(|(id, _, _)| *id));
-            }
+            *self.pack_membership.write().await = None;
         }
 
         let original_bytes: u64 = pending.iter().map(|(_, _, len)| len).sum();

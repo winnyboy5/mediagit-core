@@ -518,8 +518,10 @@ impl PackWriter {
         self.data.extend_from_slice(b"DELTA");
         self.data.extend_from_slice(base_oid.as_bytes());
 
-        // Write delta data
-        let size = delta_data.len() as u32;
+        // Write delta data. The index size covers the whole entry (magic +
+        // base oid + payload): `read_delta_object` slices the payload as
+        // `[offset + 37, offset + size)`, so a payload-only size truncated it.
+        let size = (DELTA_MAGIC.len() + base_oid.as_bytes().len() + delta_data.len()) as u32;
         self.data.extend_from_slice(delta_data);
 
         // Record entry
