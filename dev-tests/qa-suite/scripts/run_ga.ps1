@@ -24,7 +24,11 @@
 #     peak RSS process-wide, so it gets the same treatment: sequential
 #     execution is the isolation. ~2 minutes and ~2.3 GB through the local
 #     S3 endpoint.
-# Both sit before 09 so the report aggregates them.
+#   16_video guards the frame-aligned video chunker (dedup chain, >16 GiB, RSS).
+#     Same process-wide RSS sampling, so same sequential isolation; it writes
+#     ~20 GB of scratch and removes it. It SKIPs (never passes) without fixtures
+#     or ffmpeg.
+# All of these sit before 09 so the report aggregates them.
 #
 # Run scratchpad\clean_before_run.ps1 FIRST. It is not called from here on
 # purpose: it kills leftover servers and drops the MinIO volume, and folding a
@@ -87,7 +91,7 @@ Start-QaLinkProbe -LogDir $logDir -Hosts (Get-QaLinkHosts)
 $sw = [Diagnostics.Stopwatch]::StartNew()
 # -Command, not -File: under -File every argument is a literal string, so a
 # comma-separated -Phases list arrives as ONE token and run_all rejects it.
-powershell -NoProfile -Command "& '.\run_all.ps1' -Phases @('00','01','02','03','04','05','06','07','08','10','11','12','13','14','15','09') -ContinueOnFail"
+powershell -NoProfile -Command "& '.\run_all.ps1' -Phases @('00','01','02','03','04','05','06','07','08','10','11','12','13','14','15','16','09') -ContinueOnFail"
 $code = $LASTEXITCODE
 $sw.Stop()
 Stop-QaLinkProbe
