@@ -195,3 +195,99 @@ async fn merge_conflict_writes_markers_and_stages_clean_paths() {
         "ORIG_HEAD content mismatch"
     );
 }
+
+/// Chunked blobs must never be reassembled in RAM by merge: clean paths stream
+/// to disk and a chunked conflict is treated as binary without being loaded.
+/// `read()` bumps a cache hit-or-miss counter on every call, so a zero delta
+/// proves the whole-object path was not taken.
+#[tokio::test]
+async fn merge_of_chunked_blobs_does_not_use_whole_object_read() {
+    use mediagit_versioning::ChunkStrategy;
+
+    let odb = Arc::new(ObjectDatabase::with_optimizations(
+        Arc::new(MockBackend::new()),
+        100,
+        Some(ChunkStrategy::Fixed { size: 256 * 1024 }),
+        false,
+        0,
+    ));
+    let tmpdir = TempDir::new().unwrap();
+    let workdir = tmpdir.path();
+    std::fs::create_dir_all(workdir.join(".mediagit")).unwrap();
+
+    let mk = |seed: usize| -> Vec<u8> {
+        (0..2 * 1024 * 1024)
+            .map(|i| ((i * seed) % 251) as u8)
+            .collect()
+    };
+    let (ours_data, theirs_data, clean_data) = (mk(3), mk(5), mk(7));
+    let mut oids = Vec::new();
+    for (data, name) in [
+        (&ours_data, "c.bin"),
+        (&theirs_data, "c.bin"),
+        (&clean_data, "clean.bin"),
+    ] {
+        let oid = odb
+            .write_chunked(ObjectType::Blob, data, name)
+            .await
+            .unwrap();
+        assert!(odb.is_chunked(&oid).await.unwrap(), "fixture must chunk");
+        oids.push(oid);
+    }
+
+    let mut ours_tree = Tree::new();
+    ours_tree.add_entry(TreeEntry::new("c.bin".into(), FileMode::Regular, oids[0]));
+    let mut theirs_tree = Tree::new();
+    theirs_tree.add_entry(TreeEntry::new("c.bin".into(), FileMode::Regular, oids[1]));
+    theirs_tree.add_entry(TreeEntry::new(
+        "clean.bin".into(),
+        FileMode::Regular,
+        oids[2],
+    ));
+
+    let side = |oid| ConflictSide {
+        oid,
+        mode: 0o100644,
+    };
+    let merge_result = MergeResult {
+        tree_oid: None,
+        conflicts: vec![Conflict {
+            path: "c.bin".to_string(),
+            conflict_type: ConflictType::ModifyModify,
+            base: None,
+            ours: Some(side(oids[0])),
+            theirs: Some(side(oids[1])),
+        }],
+        success: false,
+        fast_forward: None,
+        strategy: MergeStrategy::Recursive,
+    };
+
+    let before = odb.metrics().await;
+    let mut index = Index::new();
+    apply_merge_to_workdir(
+        &merge_result,
+        &ours_tree,
+        &theirs_tree,
+        &odb,
+        workdir,
+        &mut index,
+        Oid::hash(b"theirs-tip"),
+        Oid::hash(b"orig-head"),
+    )
+    .await
+    .unwrap();
+    let after = odb.metrics().await;
+
+    assert_eq!(
+        (after.cache_hits - before.cache_hits) + (after.cache_misses - before.cache_misses),
+        0,
+        "merge called odb.read() on a chunked blob"
+    );
+    assert_eq!(
+        std::fs::read(workdir.join("clean.bin")).unwrap(),
+        clean_data
+    );
+    // Binary conflict: ours written verbatim, no text markers.
+    assert_eq!(std::fs::read(workdir.join("c.bin")).unwrap(), ours_data);
+}

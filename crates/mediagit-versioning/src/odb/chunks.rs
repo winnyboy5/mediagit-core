@@ -2120,151 +2120,184 @@ impl ObjectDatabase {
 
         let path = path.as_ref();
 
-        // Check for chunk manifest (use to_hex() for consistent storage paths)
-        let manifest_key = format!("manifests/{}", oid.to_hex());
+        // Ensure parent directory exists
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
 
-        if self.storage.exists(&manifest_key).await? {
-            // CHUNKED OBJECT: Stream chunks directly to file
-            info!(oid = %oid, "Streaming chunked object to file");
+        // Open a sibling tmp file for streaming write; only renamed into
+        // place (via `finalize_atomic_write`) once every chunk has been
+        // verified and written. A crash or error mid-stream leaves at
+        // worst a stale `.mgtmp`, never a truncated file at `path`.
+        let tmp_path = atomic_tmp_path(path)?;
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- destination validated by caller (checkout worktree_path, A1)
+        let mut file = tokio::fs::File::create(&tmp_path).await?;
 
-            let manifest_data = self.storage.get(&manifest_key).await?;
-            let manifest: ChunkManifest = ChunkManifest::from_bytes(&open_manifest(
-                self.smart_compressor.as_deref(),
-                &manifest_data,
-            )?)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize chunk manifest: {}", e))?;
+        let write_result: anyhow::Result<u64> = async {
+            let n = self.stream_object_to(oid, &mut file).await?;
+            file.flush().await?;
+            Ok(n)
+        }
+        .await;
 
-            // Ensure parent directory exists
-            if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-
-            // Open a sibling tmp file for streaming write; only renamed into
-            // place (via `finalize_atomic_write`) once every chunk has been
-            // verified and written. A crash or error mid-stream leaves at
-            // worst a stale `.mgtmp`, never a truncated file at `path`.
-            let tmp_path = atomic_tmp_path(path)?;
-            // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- destination validated by caller (checkout worktree_path, A1)
-            let mut file = tokio::fs::File::create(&tmp_path).await?;
-            let mut bytes_written = 0u64;
-
-            let write_result: anyhow::Result<()> = async {
-                use futures::StreamExt;
-
-                // ORDERED read-ahead. `buffered`, NEVER `buffer_unordered`: the
-                // file is assembled by appending, so chunk N must be written
-                // before N+1. `buffered` overlaps the reads while still
-                // yielding results in manifest order.
-                //
-                // Why this exists: this loop used to await one chunk at a time,
-                // so reconstructing a large file was
-                // read -> decompress -> hash -> write, fully serialised, with
-                // nothing overlapping. `MEDIAGIT_CHECKOUT_PARALLELISM` does not
-                // help — it parallelises across FILES, and a corpus of a few
-                // very large files (measured: a 10.18 GB parquet, ~160K chunks)
-                // has no file-level parallelism to exploit. Clone pays this
-                // stage in full after the download finishes; push has no
-                // equivalent stage at all, which is part of why clone has never
-                // matched push on any backend.
-                // Owned (id, size) per chunk, not a borrow of `manifest`: a
-                // future holding a reference into the manifest is not general
-                // enough for `checkout.rs`'s JoinSet caller (higher-ranked
-                // lifetime error at the spawn site).
-                let wanted: Vec<(Oid, usize)> =
-                    manifest.chunks.iter().map(|c| (c.id, c.size)).collect();
-
-                // Derived from THIS manifest's actual average chunk size, so
-                // the read-ahead costs the same bytes whether the file was
-                // chunked at 1 MB or 8 MB. See `checkout_readahead_bytes`.
-                let total_bytes: u64 = wanted.iter().map(|(_, s)| *s as u64).sum();
-                let prefetch = checkout_chunk_prefetch_for(total_bytes, wanted.len());
-
-                let mut stream =
-                    futures::stream::iter(wanted.into_iter().map(|(id, size)| async move {
-                        // get_chunk() handles both full and delta-encoded chunks
-                        let decompressed = self.get_chunk(&id).await.map_err(|e| {
-                            anyhow::anyhow!("Failed to read chunk {}: {}", id.to_hex(), e)
-                        })?;
-                        Ok::<_, anyhow::Error>((id, size, decompressed))
-                    }))
-                    .buffered(prefetch);
-
-                while let Some(next) = stream.next().await {
-                    let (chunk_id, chunk_size, decompressed) = next?;
-
-                    // Verify chunk integrity (hash + size).
-                    //
-                    // KEPT, not dropped as redundant. `put_compressed_chunk`
-                    // verifies the same hash at DOWNLOAD time, so on the
-                    // immediately-post-clone path this is a second check of
-                    // bytes just checked. But `read_to_file` also runs for an
-                    // ordinary `checkout` of another commit, where the bytes
-                    // have been sitting on local disk since some earlier pull
-                    // and nothing has re-read them. Removing this would trade a
-                    // real at-rest integrity check for a little CPU on one path.
-                    let computed_chunk_oid = Oid::hash(&decompressed);
-                    if computed_chunk_oid != chunk_id {
-                        anyhow::bail!(
-                            "Chunk integrity check failed for {}: expected {}, computed {}",
-                            chunk_id.to_hex(),
-                            chunk_id,
-                            computed_chunk_oid
-                        );
-                    }
-
-                    if decompressed.len() != chunk_size {
-                        anyhow::bail!(
-                            "Chunk size mismatch for {}: expected {}, got {}",
-                            chunk_id.to_hex(),
-                            chunk_size,
-                            decompressed.len()
-                        );
-                    }
-
-                    // Stream to file (chunk is dropped after write)
-                    file.write_all(&decompressed).await?;
-                    bytes_written += decompressed.len() as u64;
-                }
-
-                file.flush().await?;
-                Ok(())
-            }
-            .await;
-
-            if let Err(e) = write_result {
-                drop(file);
+        drop(file);
+        let bytes_written = match write_result {
+            Ok(n) => n,
+            Err(e) => {
                 let _ = tokio::fs::remove_file(&tmp_path).await;
                 return Err(e);
             }
-            drop(file);
+        };
 
-            finalize_atomic_write(&tmp_path, path).await?;
+        finalize_atomic_write(&tmp_path, path).await?;
+        Ok(bytes_written)
+    }
 
-            info!(
-                oid = %oid,
-                bytes = bytes_written,
-                chunks = manifest.chunks.len(),
-                "Streaming write complete"
-            );
+    /// Stream an object's verified content into `writer` (constant memory for
+    /// chunked objects).
+    ///
+    /// Chunked objects are read through an ordered read-ahead stream; every
+    /// chunk's hash and size, the manifest total size, and the whole-object
+    /// hash are verified. The whole-object hash is only known at the end, so
+    /// on `Err` the writer may already hold partial bytes: callers writing to
+    /// a destination must discard it (see `read_to_file`). Non-chunked objects
+    /// are small by construction and go through `read()`.
+    ///
+    /// Does not flush `writer`.
+    pub async fn stream_object_to<W>(&self, oid: &Oid, writer: &mut W) -> anyhow::Result<u64>
+    where
+        W: tokio::io::AsyncWrite + Unpin + Send,
+    {
+        use tokio::io::AsyncWriteExt;
 
-            Ok(bytes_written)
-        } else {
+        // Check for chunk manifest (use to_hex() for consistent storage paths)
+        let manifest_key = format!("manifests/{}", oid.to_hex());
+
+        if !self.storage.exists(&manifest_key).await? {
             // NON-CHUNKED OBJECT: Read and write normally
             let data = self.read(oid).await?;
-
-            // Ensure parent directory exists
-            if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-
-            let tmp_path = atomic_tmp_path(path)?;
-            if let Err(e) = tokio::fs::write(&tmp_path, &data).await {
-                let _ = tokio::fs::remove_file(&tmp_path).await;
-                return Err(e.into());
-            }
-            finalize_atomic_write(&tmp_path, path).await?;
-            Ok(data.len() as u64)
+            writer.write_all(&data).await?;
+            return Ok(data.len() as u64);
         }
+
+        // CHUNKED OBJECT: Stream chunks directly to the writer
+        info!(oid = %oid, "Streaming chunked object");
+
+        let manifest_data = self.storage.get(&manifest_key).await?;
+        let manifest: ChunkManifest = ChunkManifest::from_bytes(&open_manifest(
+            self.smart_compressor.as_deref(),
+            &manifest_data,
+        )?)
+        .map_err(|e| anyhow::anyhow!("Failed to deserialize chunk manifest: {}", e))?;
+
+        let mut bytes_written = 0u64;
+        let mut whole_hasher = crate::hash::Hasher::new();
+
+        use futures::StreamExt;
+
+        // ORDERED read-ahead. `buffered`, NEVER `buffer_unordered`: the
+        // output is assembled by appending, so chunk N must be written
+        // before N+1. `buffered` overlaps the reads while still
+        // yielding results in manifest order.
+        //
+        // Why this exists: this loop used to await one chunk at a time,
+        // so reconstructing a large file was
+        // read -> decompress -> hash -> write, fully serialised, with
+        // nothing overlapping. `MEDIAGIT_CHECKOUT_PARALLELISM` does not
+        // help — it parallelises across FILES, and a corpus of a few
+        // very large files (measured: a 10.18 GB parquet, ~160K chunks)
+        // has no file-level parallelism to exploit. Clone pays this
+        // stage in full after the download finishes; push has no
+        // equivalent stage at all, which is part of why clone has never
+        // matched push on any backend.
+        // Owned (id, size) per chunk, not a borrow of `manifest`: a
+        // future holding a reference into the manifest is not general
+        // enough for `checkout.rs`'s JoinSet caller (higher-ranked
+        // lifetime error at the spawn site).
+        let wanted: Vec<(Oid, usize)> = manifest.chunks.iter().map(|c| (c.id, c.size)).collect();
+
+        // Derived from THIS manifest's actual average chunk size, so
+        // the read-ahead costs the same bytes whether the file was
+        // chunked at 1 MB or 8 MB. See `checkout_readahead_bytes`.
+        let total_bytes: u64 = wanted.iter().map(|(_, s)| *s as u64).sum();
+        let prefetch = checkout_chunk_prefetch_for(total_bytes, wanted.len());
+
+        let mut stream = futures::stream::iter(wanted.into_iter().map(|(id, size)| async move {
+            // get_chunk() handles both full and delta-encoded chunks
+            let decompressed = self
+                .get_chunk(&id)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to read chunk {}: {}", id.to_hex(), e))?;
+            Ok::<_, anyhow::Error>((id, size, decompressed))
+        }))
+        .buffered(prefetch);
+
+        while let Some(next) = stream.next().await {
+            let (chunk_id, chunk_size, decompressed) = next?;
+
+            // Verify chunk integrity (hash + size).
+            //
+            // KEPT, not dropped as redundant. `put_compressed_chunk`
+            // verifies the same hash at DOWNLOAD time, so on the
+            // immediately-post-clone path this is a second check of
+            // bytes just checked. But this also runs for an
+            // ordinary `checkout` of another commit, where the bytes
+            // have been sitting on local disk since some earlier pull
+            // and nothing has re-read them. Removing this would trade a
+            // real at-rest integrity check for a little CPU on one path.
+            let computed_chunk_oid = Oid::hash(&decompressed);
+            if computed_chunk_oid != chunk_id {
+                anyhow::bail!(
+                    "Chunk integrity check failed for {}: expected {}, computed {}",
+                    chunk_id.to_hex(),
+                    chunk_id,
+                    computed_chunk_oid
+                );
+            }
+
+            if decompressed.len() != chunk_size {
+                anyhow::bail!(
+                    "Chunk size mismatch for {}: expected {}, got {}",
+                    chunk_id.to_hex(),
+                    chunk_size,
+                    decompressed.len()
+                );
+            }
+
+            // Stream out (chunk is dropped after write)
+            writer.write_all(&decompressed).await?;
+            whole_hasher.update(&decompressed);
+            bytes_written += decompressed.len() as u64;
+        }
+
+        if bytes_written != manifest.total_size {
+            anyhow::bail!(
+                "Reconstructed size mismatch: expected {}, got {}",
+                manifest.total_size,
+                bytes_written
+            );
+        }
+
+        // Whole-object check, same rationale as `read_chunked` (B2):
+        // per-chunk checks cannot see a reordered, duplicated or
+        // omitted manifest entry.
+        let computed_oid = Oid::from_bytes(whole_hasher.finalize());
+        if computed_oid != *oid {
+            anyhow::bail!(
+                "Chunk reconstruction failed: expected OID {}, computed {}",
+                oid,
+                computed_oid
+            );
+        }
+
+        info!(
+            oid = %oid,
+            bytes = bytes_written,
+            chunks = manifest.chunks.len(),
+            "Streaming write complete"
+        );
+
+        Ok(bytes_written)
     }
 
     /// Read an object from the database
@@ -3452,6 +3485,65 @@ mod read_to_file_atomicity_tests {
         );
 
         // No stray .mgtmp sibling.
+        for entry in std::fs::read_dir(tmp_dir.path()).unwrap() {
+            let path = entry.unwrap().path();
+            assert!(
+                !path.to_string_lossy().ends_with(".mgtmp"),
+                "stray tmp file left behind: {}",
+                path.display()
+            );
+        }
+    }
+
+    /// B2: a manifest whose entries are individually valid but swapped passes
+    /// every per-chunk and total-size check; only the whole-object hash
+    /// catches it. Also covers the unmodified happy path.
+    #[tokio::test]
+    async fn read_to_file_rejects_swapped_manifest_entries() {
+        let storage = StdArc::new(MockBackend::new());
+        let odb = ObjectDatabase::with_optimizations(
+            storage.clone(),
+            100,
+            Some(ChunkStrategy::Fixed { size: 256 * 1024 }),
+            false,
+            0,
+        );
+
+        let data: Vec<u8> = (0..2 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        let oid = odb
+            .write_chunked(ObjectType::Blob, &data, "big.bin")
+            .await
+            .expect("write_chunked should succeed");
+
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let dest = tmp_dir.path().join("out.bin");
+
+        // Happy path first.
+        let n = odb.read_to_file(&oid, &dest).await.unwrap();
+        assert_eq!(n, data.len() as u64);
+        assert_eq!(std::fs::read(&dest).unwrap(), data);
+        std::fs::remove_file(&dest).unwrap();
+
+        // Swap two chunk entries with distinct ids (same size, so totals match).
+        let manifest_key = format!("manifests/{}", oid.to_hex());
+        let manifest_data = storage.get(&manifest_key).await.unwrap();
+        let mut manifest = crate::chunking::ChunkManifest::from_bytes(&manifest_data).unwrap();
+        let (i, j) = (0, 1);
+        assert_ne!(manifest.chunks[i].id, manifest.chunks[j].id, "fixture");
+        assert_eq!(manifest.chunks[i].size, manifest.chunks[j].size, "fixture");
+        manifest.chunks.swap(i, j);
+        storage
+            .put(&manifest_key, &manifest.to_bytes().unwrap())
+            .await
+            .unwrap();
+
+        let result = odb.read_to_file(&oid, &dest).await;
+        let err = result.expect_err("swapped manifest must be rejected");
+        assert!(
+            err.to_string().contains("Chunk reconstruction failed"),
+            "wrong failure reason: {err}"
+        );
+        assert!(!dest.exists(), "no final file may be created");
         for entry in std::fs::read_dir(tmp_dir.path()).unwrap() {
             let path = entry.unwrap().path();
             assert!(

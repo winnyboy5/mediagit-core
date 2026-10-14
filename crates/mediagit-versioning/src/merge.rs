@@ -548,22 +548,18 @@ pub async fn apply_merge_to_workdir(
             None => continue,
         };
 
-        // Read blob content
-        let content = odb
-            .read(&entry.oid)
-            .await
-            .with_context(|| format!("Failed to read blob for {}", path_str))?;
-
-        // Write to workdir
+        // Write to workdir, streamed: a chunked blob can be far larger than RAM.
         let dest = crate::checkout::worktree_path(workdir, Path::new(path_str))?;
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create dirs for {}", path_str))?;
         }
-        std::fs::write(&dest, &content).with_context(|| format!("Failed to write {}", path_str))?;
+        let size = odb
+            .read_to_file(&entry.oid, &dest)
+            .await
+            .with_context(|| format!("Failed to write {}", path_str))?;
 
         // Stage at index stage 0
-        let size = content.len() as u64;
         let index_entry = IndexEntry::new(
             std::path::PathBuf::from(path_str),
             entry.oid,
@@ -579,12 +575,18 @@ pub async fn apply_merge_to_workdir(
         let path_str = &conflict.path;
 
         // Read each side's blob content (may be absent for delete conflicts)
-        let ours_bytes = read_blob_opt(odb, conflict.ours.as_ref().map(|s| s.oid)).await?;
-        let theirs_bytes = read_blob_opt(odb, conflict.theirs.as_ref().map(|s| s.oid)).await?;
+        let (ours_bytes, ours_chunked) =
+            read_blob_opt(odb, conflict.ours.as_ref().map(|s| s.oid)).await?;
+        let (theirs_bytes, theirs_chunked) =
+            read_blob_opt(odb, conflict.theirs.as_ref().map(|s| s.oid)).await?;
 
         // Binary detection: a NUL byte in either side means inline text markers
         // would corrupt the file (e.g. a 74MB PSD becoming 149MB of "merged" garbage).
-        let is_binary = ours_bytes.as_deref().is_some_and(contains_nul_byte)
+        // Chunked blobs are large media by construction: treated as binary
+        // without being loaded (`read_blob_opt` returns no bytes for them).
+        let is_binary = ours_chunked
+            || theirs_chunked
+            || ours_bytes.as_deref().is_some_and(contains_nul_byte)
             || theirs_bytes.as_deref().is_some_and(contains_nul_byte);
 
         // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- validated by worktree_path
@@ -599,19 +601,22 @@ pub async fn apply_merge_to_workdir(
             // Binary conflict: write ONE side (ours, falling back to theirs)
             // unmodified. The conflict is still flagged via the stage1/2/3
             // entries below; the user resolves by picking a side.
-            let (side_oid, side_bytes) = match (&conflict.ours, ours_bytes.as_ref()) {
-                (Some(cs), Some(b)) => (cs.oid, b),
-                _ => match (&conflict.theirs, theirs_bytes.as_ref()) {
-                    (Some(cs), Some(b)) => (cs.oid, b),
-                    _ => anyhow::bail!(
-                        "Binary conflict at {} has neither ours nor theirs content",
-                        path_str
-                    ),
-                },
+            let Some(side_oid) = conflict
+                .ours
+                .as_ref()
+                .or(conflict.theirs.as_ref())
+                .map(|s| s.oid)
+            else {
+                anyhow::bail!(
+                    "Binary conflict at {} has neither ours nor theirs content",
+                    path_str
+                );
             };
-            std::fs::write(&dest, side_bytes)
+            let len = odb
+                .read_to_file(&side_oid, &dest)
+                .await
                 .with_context(|| format!("Failed to write conflict file {}", path_str))?;
-            (side_oid, side_bytes.len())
+            (side_oid, len as usize)
         } else {
             // Text conflict: inline markers as before.
             let mut marker = Vec::new();
@@ -679,16 +684,23 @@ fn contains_nul_byte(bytes: &[u8]) -> bool {
     bytes.contains(&0)
 }
 
-/// Helper: read a blob from ODB by OID, returning None if the OID is absent.
-async fn read_blob_opt(odb: &Arc<ObjectDatabase>, oid: Option<Oid>) -> Result<Option<Vec<u8>>> {
+/// Helper: read a blob from ODB by OID. Returns `(None, false)` if the OID is
+/// absent and `(None, true)` for a chunked blob, which is never loaded whole.
+async fn read_blob_opt(
+    odb: &Arc<ObjectDatabase>,
+    oid: Option<Oid>,
+) -> Result<(Option<Vec<u8>>, bool)> {
     match oid {
-        None => Ok(None),
+        None => Ok((None, false)),
         Some(o) => {
+            if odb.is_chunked(&o).await? {
+                return Ok((None, true));
+            }
             let data = odb
                 .read(&o)
                 .await
                 .with_context(|| format!("Failed to read blob {}", o))?;
-            Ok(Some(data))
+            Ok((Some(data), false))
         }
     }
 }

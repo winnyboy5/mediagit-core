@@ -1311,6 +1311,15 @@ pub async fn verify_object_integrity(
                 let Ok(oid) = mediagit_versioning::Oid::from_hex(&oid_hex) else {
                     return Some(oid_hex);
                 };
+                // Chunked blobs can be far larger than RAM: stream them into a
+                // sink; `stream_object_to` checks every chunk and the
+                // whole-object hash against the oid.
+                if matches!(odb.is_chunked(&oid).await, Ok(true)) {
+                    return match odb.stream_object_to(&oid, &mut tokio::io::sink()).await {
+                        Ok(_) => None,
+                        Err(_) => Some(oid_hex),
+                    };
+                }
                 match odb.read(&oid).await {
                     Ok(data) if blake3::hash(&data).to_hex().to_string() == oid_hex => None,
                     _ => Some(oid_hex),
