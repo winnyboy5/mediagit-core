@@ -41,6 +41,7 @@ use tracing::{debug, info, warn};
 
 pub(crate) mod chunker;
 pub(crate) mod formats;
+pub(crate) mod mp4_stream;
 
 /// Chunk identifier (BLAKE3 hash of chunk content)
 pub type ChunkId = Oid;
