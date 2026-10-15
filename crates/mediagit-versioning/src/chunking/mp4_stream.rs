@@ -610,7 +610,7 @@ pub(crate) fn chunk_slice(data: &[u8], seed: u64) -> Result<Vec<ContentChunk>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::chunking::{ChunkStrategy, ContentChunker};
     use proptest::prelude::*;
@@ -677,7 +677,7 @@ mod tests {
 
     /// ftyp | mdat(interleaved video sample + PCM-like audio chunk) | moov.
     /// Returns (file, [(offset, size)] of video samples).
-    fn make_mp4(video: &[u32], audio_spc: u32) -> (Vec<u8>, Vec<(u64, u32)>) {
+    pub(crate) fn make_mp4(video: &[u32], audio_spc: u32) -> (Vec<u8>, Vec<(u64, u32)>) {
         let ftyp = atom(b"ftyp", b"isom\x00\x00\x00\x01isom");
         let mut mdat_body = Vec::new();
         let (mut voff, mut aoff, mut vsamples) = (Vec::new(), Vec::new(), Vec::new());

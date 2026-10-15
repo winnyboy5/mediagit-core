@@ -21,6 +21,135 @@ fn similarity_seed_max_chunks() -> usize {
     }
 }
 
+/// Whether `chunk` takes part in chunk-delta: it may be nominated a delta base
+/// and, if later chunks pick it, must be reachable in `base_chunk_cache`.
+/// Single source of truth for the producer's similarity step AND the cache
+/// insert, so chunks that can never be a base (tiny, or lossy/unknown-codec
+/// video that is stored as-is) do not occupy the byte-weighted cache.
+fn is_delta_candidate(
+    delta_enabled: bool,
+    chunk: &crate::chunking::ContentChunk,
+    comp_type: CompressionObjectType,
+) -> bool {
+    use crate::chunking::{ChunkType, CodecHint};
+    if !delta_enabled || chunk.data.len() < 4096 {
+        return false;
+    }
+    let is_store_video_chunk = if chunk.codec_hint == CodecHint::Unknown {
+        chunk.chunk_type == ChunkType::VideoStream
+            && matches!(
+                comp_type,
+                CompressionObjectType::Mp4
+                    | CompressionObjectType::Mov
+                    | CompressionObjectType::Avi
+                    | CompressionObjectType::Mkv
+                    | CompressionObjectType::Webm
+                    | CompressionObjectType::Flv
+                    | CompressionObjectType::Wmv
+                    | CompressionObjectType::Mpg
+                    | CompressionObjectType::Mxf
+            )
+    } else {
+        matches!(
+            chunk.codec_hint,
+            CodecHint::H264
+                | CodecHint::H265
+                | CodecHint::VP9
+                | CodecHint::AV1
+                | CodecHint::AAC
+                | CodecHint::Opus
+                | CodecHint::Vorbis
+                | CodecHint::MP3
+        )
+    };
+    !is_store_video_chunk
+}
+
+/// Granularity of the in-flight byte budget (one semaphore permit).
+const INFLIGHT_UNIT: usize = 64 * 1024;
+
+/// Byte budget for chunk data in flight between the forwarder and the write
+/// workers (`MEDIAGIT_ADD_INFLIGHT_MB`, default 128). The channels are bounded
+/// by COUNT, which at 2-8 MiB per chunk is hundreds of MiB; this bounds bytes,
+/// so a slow backend backpressures the producer instead of growing RSS.
+#[derive(Clone)]
+struct InflightBudget {
+    sem: Arc<tokio::sync::Semaphore>,
+    total: usize,
+    in_flight: Arc<std::sync::atomic::AtomicUsize>,
+    peak: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// Holds budget for one chunk; releases it (and the accounting) on drop.
+struct InflightPermit {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    bytes: usize,
+    in_flight: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Drop for InflightPermit {
+    fn drop(&mut self) {
+        self.in_flight
+            .fetch_sub(self.bytes, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl InflightBudget {
+    fn new(budget_bytes: usize) -> Self {
+        let total = (budget_bytes / INFLIGHT_UNIT).max(1);
+        Self {
+            sem: Arc::new(tokio::sync::Semaphore::new(total)),
+            total,
+            in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            peak: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    fn from_env() -> Self {
+        let mb = std::env::var("MEDIAGIT_ADD_INFLIGHT_MB")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(128);
+        Self::new(mb * 1024 * 1024)
+    }
+
+    /// Wait for `len` bytes of budget. A chunk bigger than the whole budget is
+    /// clamped to it (it then runs alone) so it can never wait forever.
+    /// `closed` is polled while waiting: if every worker died holding queued
+    /// permits, nothing would ever release them.
+    async fn acquire(
+        &self,
+        len: usize,
+        closed: impl Fn() -> bool,
+    ) -> anyhow::Result<InflightPermit> {
+        use std::sync::atomic::Ordering;
+        let units = len.div_ceil(INFLIGHT_UNIT).clamp(1, self.total);
+        loop {
+            let wait = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                self.sem.clone().acquire_many_owned(units as u32),
+            )
+            .await;
+            match wait {
+                Ok(Ok(permit)) => {
+                    let bytes = units * INFLIGHT_UNIT;
+                    let now = self.in_flight.fetch_add(bytes, Ordering::SeqCst) + bytes;
+                    self.peak.fetch_max(now, Ordering::SeqCst);
+                    return Ok(InflightPermit {
+                        _permit: permit,
+                        bytes,
+                        in_flight: self.in_flight.clone(),
+                    });
+                }
+                Ok(Err(_)) => anyhow::bail!("in-flight budget closed"),
+                Err(_) if closed() => anyhow::bail!("Worker channel closed unexpectedly"),
+                Err(_) => {}
+            }
+        }
+    }
+}
+
 /// Read-ahead budget IN BYTES per file while reconstructing one chunked file
 /// (`read_to_file`). Override via `MEDIAGIT_CHECKOUT_READAHEAD_BYTES`.
 ///
@@ -709,41 +838,8 @@ impl ObjectDatabase {
         let producer_base_chunk_cache = self.base_chunk_cache.clone();
         let producer = tokio::spawn(async move {
             for (seq_id, chunk) in chunks.into_iter().enumerate() {
-                // Replicate the worker's "should attempt delta" predicate.
-                let is_high_entropy_codec = matches!(
-                    chunk.codec_hint,
-                    crate::chunking::CodecHint::H264
-                        | crate::chunking::CodecHint::H265
-                        | crate::chunking::CodecHint::VP9
-                        | crate::chunking::CodecHint::AV1
-                        | crate::chunking::CodecHint::AAC
-                        | crate::chunking::CodecHint::Opus
-                        | crate::chunking::CodecHint::Vorbis
-                        | crate::chunking::CodecHint::MP3
-                );
-                let is_store_video_chunk =
-                    if chunk.codec_hint == crate::chunking::CodecHint::Unknown {
-                        chunk.chunk_type == crate::chunking::ChunkType::VideoStream
-                            && matches!(
-                                comp_type,
-                                CompressionObjectType::Mp4
-                                    | CompressionObjectType::Mov
-                                    | CompressionObjectType::Avi
-                                    | CompressionObjectType::Mkv
-                                    | CompressionObjectType::Webm
-                                    | CompressionObjectType::Flv
-                                    | CompressionObjectType::Wmv
-                                    | CompressionObjectType::Mpg
-                                    | CompressionObjectType::Mxf
-                            )
-                    } else {
-                        is_high_entropy_codec
-                    };
-
-                let base_oid_opt: Option<Oid> = if producer_delta_enabled
-                    && chunk.data.len() >= 4096
-                    && !is_store_video_chunk
-                {
+                let delta_candidate = is_delta_candidate(producer_delta_enabled, &chunk, comp_type);
+                let base_oid_opt: Option<Oid> = if delta_candidate {
                     let mut chunk_meta = crate::similarity::ObjectMetadata::new(
                         chunk.id,
                         chunk.data.len(),
@@ -782,9 +878,11 @@ impl ObjectDatabase {
                 // Pre-cache the chunk's raw data so that workers looking for
                 // this chunk as a delta base can find it even before it has been
                 // compressed and stored to the backend.
-                producer_base_chunk_cache
-                    .insert(chunk.id, Arc::new(chunk.data.clone()))
-                    .await;
+                if delta_candidate {
+                    producer_base_chunk_cache
+                        .insert(chunk.id, Arc::new(chunk.data.clone()))
+                        .await;
+                }
 
                 if tx.send((seq_id, chunk, base_oid_opt)).await.is_err() {
                     break; // receivers dropped
@@ -1163,6 +1261,26 @@ impl ObjectDatabase {
         on_progress: Option<Arc<dyn Fn(u64) + Send + Sync>>,
         precomputed_oid: Option<Oid>,
     ) -> anyhow::Result<Oid> {
+        self.write_chunked_from_file_budgeted(
+            path,
+            filename,
+            on_progress,
+            precomputed_oid,
+            InflightBudget::from_env(),
+        )
+        .await
+    }
+
+    /// [`Self::write_chunked_from_file`] with an explicit in-flight byte budget
+    /// (the public entry reads `MEDIAGIT_ADD_INFLIGHT_MB`).
+    async fn write_chunked_from_file_budgeted<P: AsRef<std::path::Path>>(
+        &self,
+        path: P,
+        filename: &str,
+        on_progress: Option<Arc<dyn Fn(u64) + Send + Sync>>,
+        precomputed_oid: Option<Oid>,
+        inflight: InflightBudget,
+    ) -> anyhow::Result<Oid> {
         use std::sync::atomic::{AtomicU64, Ordering};
 
         let path = path.as_ref();
@@ -1232,8 +1350,12 @@ impl ObjectDatabase {
             .and_then(|v| v.trim().parse::<usize>().ok())
             .filter(|n| *n > 0)
             .unwrap_or_else(|| num_cpus::get().clamp(2, 16));
-        let (tx, rx) =
-            async_channel::bounded::<(usize, crate::chunking::ContentChunk, Option<Oid>)>(64);
+        let (tx, rx) = async_channel::bounded::<(
+            usize,
+            crate::chunking::ContentChunk,
+            Option<Oid>,
+            InflightPermit,
+        )>(64);
 
         // Spawn worker tasks BEFORE producing chunks to avoid deadlock.
         // The producer (collect_file_chunks_blocking) uses mmap + format-aware chunking
@@ -1255,7 +1377,7 @@ impl ObjectDatabase {
             let handle = tokio::spawn(async move {
                 let mut results: Vec<(usize, ChunkRef)> = Vec::new();
 
-                while let Ok((seq_id, chunk, base_oid_opt)) = rx.recv().await {
+                while let Ok((seq_id, chunk, base_oid_opt, _inflight_permit)) = rx.recv().await {
                     let chunk_ref = ChunkRef {
                         id: chunk.id,
                         offset: chunk.offset,
@@ -1629,7 +1751,9 @@ impl ObjectDatabase {
         //   spawn_blocking → blocking_send → tokio_rx.recv() → async_channel tx → workers
         let seq_counter = Arc::new(AtomicU64::new(0));
         let (blocking_tx, mut blocking_rx) =
-            tokio::sync::mpsc::channel::<crate::chunking::ContentChunk>(32);
+            // Small on purpose: this queue sits OUTSIDE the in-flight byte budget
+            // (permits are taken after recv), so 8 x max chunk bounds what it can hold.
+            tokio::sync::mpsc::channel::<crate::chunking::ContentChunk>(8);
 
         let path_owned = path.to_path_buf();
         let chunk_strategy = self.chunk_strategy.unwrap_or(ChunkStrategy::MediaAware);
@@ -1650,67 +1774,34 @@ impl ObjectDatabase {
 
             // Producer-side similarity: replicate the delta-eligibility predicate,
             // then query the detector for the best base.
-            let base_oid_opt = if producer_delta_enabled && chunk.data.len() >= 4096 {
-                let is_high_entropy_codec = matches!(
-                    chunk.codec_hint,
-                    crate::chunking::CodecHint::H264
-                        | crate::chunking::CodecHint::H265
-                        | crate::chunking::CodecHint::VP9
-                        | crate::chunking::CodecHint::AV1
-                        | crate::chunking::CodecHint::AAC
-                        | crate::chunking::CodecHint::Opus
-                        | crate::chunking::CodecHint::Vorbis
-                        | crate::chunking::CodecHint::MP3
+            let delta_candidate = is_delta_candidate(producer_delta_enabled, &chunk, comp_type);
+            let base_oid_opt = if delta_candidate {
+                let mut chunk_meta = crate::similarity::ObjectMetadata::new(
+                    chunk.id,
+                    chunk.data.len(),
+                    crate::ObjectType::Blob,
+                    None,
                 );
-                let is_store_video_chunk =
-                    if chunk.codec_hint == crate::chunking::CodecHint::Unknown {
-                        chunk.chunk_type == crate::chunking::ChunkType::VideoStream
-                            && matches!(
-                                comp_type,
-                                CompressionObjectType::Mp4
-                                    | CompressionObjectType::Mov
-                                    | CompressionObjectType::Avi
-                                    | CompressionObjectType::Mkv
-                                    | CompressionObjectType::Webm
-                                    | CompressionObjectType::Flv
-                                    | CompressionObjectType::Wmv
-                                    | CompressionObjectType::Mpg
-                                    | CompressionObjectType::Mxf
-                            )
-                    } else {
-                        is_high_entropy_codec
-                    };
+                chunk_meta.generate_samples(&chunk.data);
 
-                if !is_store_video_chunk {
-                    let mut chunk_meta = crate::similarity::ObjectMetadata::new(
-                        chunk.id,
-                        chunk.data.len(),
-                        crate::ObjectType::Blob,
-                        None,
-                    );
-                    chunk_meta.generate_samples(&chunk.data);
+                let detector = producer_similarity_detector.read().await;
+                let similar = detector.find_similar_with_size_ratio(
+                    &chunk_meta,
+                    min_similarity,
+                    size_ratio_threshold,
+                );
+                drop(detector);
 
-                    let detector = producer_similarity_detector.read().await;
-                    let similar = detector.find_similar_with_size_ratio(
-                        &chunk_meta,
-                        min_similarity,
-                        size_ratio_threshold,
-                    );
-                    drop(detector);
+                let base_oid = similar.map(|(oid, _)| oid);
+                // Optimistic marking: keep is_delta=false so this chunk
+                // remains available as a future base candidate.
+                chunk_meta.is_delta = false;
 
-                    let base_oid = similar.map(|(oid, _)| oid);
-                    // Optimistic marking: keep is_delta=false so this chunk
-                    // remains available as a future base candidate.
-                    chunk_meta.is_delta = false;
+                let mut detector = producer_similarity_detector.write().await;
+                detector.add_object(chunk_meta);
+                drop(detector);
 
-                    let mut detector = producer_similarity_detector.write().await;
-                    detector.add_object(chunk_meta);
-                    drop(detector);
-
-                    base_oid
-                } else {
-                    None
-                }
+                base_oid
             } else {
                 None
             };
@@ -1718,11 +1809,18 @@ impl ObjectDatabase {
             // Pre-cache the chunk's raw data so that workers looking for
             // this chunk as a delta base can find it even before it has been
             // compressed and stored to the backend.
-            producer_base_chunk_cache
-                .insert(chunk.id, Arc::new(chunk.data.clone()))
-                .await;
+            if delta_candidate {
+                producer_base_chunk_cache
+                    .insert(chunk.id, Arc::new(chunk.data.clone()))
+                    .await;
+            }
 
-            tx.send((seq_id, chunk, base_oid_opt))
+            // Byte budget: wait here (before the chunk enters the worker
+            // channel) so slow storage backpressures the producer.
+            let permit = inflight
+                .acquire(chunk.data.len(), || tx.is_closed())
+                .await?;
+            tx.send((seq_id, chunk, base_oid_opt, permit))
                 .await
                 .map_err(|_| anyhow::anyhow!("Worker channel closed unexpectedly"))?;
         }
@@ -4127,5 +4225,117 @@ mod compressed_chunk_len_tests {
 
         let absent_id = Oid::hash(b"never written");
         assert_eq!(odb.compressed_chunk_len(&absent_id).await, None);
+    }
+}
+
+#[cfg(test)]
+mod add_memory_tests {
+    use super::*;
+    use crate::chunking::{ChunkStrategy, ContentChunker};
+    use mediagit_storage::mock::MockBackend;
+    use std::sync::Arc as StdArc;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    /// Chunks that can never be a delta base (H.264 frames, tiny chunks) must not
+    /// occupy `base_chunk_cache`; eligible chunks (audio runs here) still must.
+    #[tokio::test]
+    async fn only_delta_candidates_enter_base_chunk_cache() {
+        let (data, _) = crate::chunking::mp4_stream::tests::make_mp4(&[300_000; 3], 3000);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.mp4");
+        std::fs::write(&path, &data).unwrap();
+        let odb = ObjectDatabase::with_optimizations(
+            StdArc::new(MockBackend::new()),
+            10_000_000,
+            Some(ChunkStrategy::MediaAware),
+            true,
+            0,
+        );
+        odb.write_chunked_from_file(&path, "x.mp4", None, None)
+            .await
+            .unwrap();
+
+        let chunks = ContentChunker::with_seed(ChunkStrategy::MediaAware, 0)
+            .chunk(&data, "x.mp4")
+            .await
+            .unwrap();
+        let (mut cached, mut skipped) = (0, 0);
+        for c in &chunks {
+            let want = is_delta_candidate(true, c, CompressionObjectType::Mp4);
+            let got = odb.base_chunk_cache.get(&c.id).await.is_some();
+            assert_eq!(got, want, "chunk at {} ({:?})", c.offset, c.codec_hint);
+            if want { cached += 1 } else { skipped += 1 }
+        }
+        assert!(cached > 0 && skipped >= 3, "fixture must have both kinds");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn inflight_budget_bounds_concurrent_bytes() {
+        let budget = InflightBudget::new(1 << 20);
+        let live = StdArc::new(AtomicUsize::new(0));
+        let peak = StdArc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for _ in 0..32 {
+            let (b, live, peak) = (budget.clone(), live.clone(), peak.clone());
+            tasks.push(tokio::spawn(async move {
+                let permit = b.acquire(300_000, || false).await.unwrap();
+                let now = live.fetch_add(300_000, AtomicOrdering::SeqCst) + 300_000;
+                peak.fetch_max(now, AtomicOrdering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                live.fetch_sub(300_000, AtomicOrdering::SeqCst);
+                drop(permit);
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+        let peak = peak.load(AtomicOrdering::SeqCst);
+        assert!(peak <= 1 << 20, "peak {peak} exceeded the 1 MiB budget");
+        assert!(peak >= 600_000, "tasks must actually overlap, peak {peak}");
+    }
+
+    #[tokio::test]
+    async fn chunk_larger_than_budget_is_clamped_not_deadlocked() {
+        let budget = InflightBudget::new(256 * 1024);
+        let got = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            budget.acquire(10 << 20, || false),
+        )
+        .await;
+        assert!(got.expect("must not wait forever").is_ok());
+    }
+
+    /// Wiring: the real pipeline takes budget for every chunk and never holds
+    /// more than the budget (chunks here are ~1 MiB against a 512 KiB budget,
+    /// so each one runs alone).
+    #[tokio::test]
+    async fn write_chunked_from_file_respects_inflight_budget() {
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let data: Vec<u8> = (0..6 * 1024 * 1024)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (x >> 24) as u8
+            })
+            .collect();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.bin");
+        std::fs::write(&path, &data).unwrap();
+        let odb = ObjectDatabase::new(StdArc::new(MockBackend::new()), 100);
+        let budget = InflightBudget::new(512 * 1024);
+        let oid = odb
+            .write_chunked_from_file_budgeted(&path, "r.bin", None, None, budget.clone())
+            .await
+            .unwrap();
+        assert_eq!(oid, Oid::hash(&data));
+        let peak = budget.peak.load(AtomicOrdering::SeqCst);
+        assert!(peak > 0, "pipeline never took budget");
+        assert!(peak <= 512 * 1024, "peak {peak} exceeded the budget");
+        assert_eq!(
+            budget.in_flight.load(AtomicOrdering::SeqCst),
+            0,
+            "permits leaked"
+        );
     }
 }
