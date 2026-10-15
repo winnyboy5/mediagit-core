@@ -105,6 +105,7 @@ MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurre
 | `MEDIAGIT_ADD_MAX_INFLIGHT_BYTES` | Global in-flight byte budget for parallel file processing during `add`. | `536870912` (512 MiB) |
 | `MEDIAGIT_ADD_COMPRESS_BLOCKING` | Offload add-time chunk compression to `spawn_blocking`. | `1` (ON) |
 | `MEDIAGIT_ADD_COMPRESS_BLOCKING_THRESHOLD` | Byte size above which add-time compression is offloaded. | `262144` (256 KiB) |
+| `MEDIAGIT_ADD_INFLIGHT_MB` | Byte budget (MiB) for chunk data in flight between the chunk producer and the write workers of one file. | `128` |
 | `MEDIAGIT_CDC_SEED` | Per-repo CDC chunk-boundary seed. Overrides `config.toml` `cdc_seed`. | repo config (`0` legacy) |
 | `MEDIAGIT_CODEC_DETECT` | Container-aware codec detection for compression routing. `0` forces `CodecHint::Unknown`. | `1` (ON) |
 | `MEDIAGIT_CHUNK_FBX` | Opt-in structure-aware FBX chunking walker (measured net-negative vs. generic CDC; off by design). | unset/`0` (OFF) |

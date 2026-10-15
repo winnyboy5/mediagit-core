@@ -48,6 +48,7 @@ Lifecycle: **experimental** → **stable** (2 clean deep-test releases) → **de
 | `MEDIAGIT_HASH_PARALLEL` | `1` (ON) | 0.3.0-rc.4 | add | stable | Parallel mmap-based hashing for files ≥ the streaming threshold (5 MiB). `0` forces sequential hashing. |
 | `MEDIAGIT_ADD_COMPRESS_BLOCKING` | `1` (ON) | 0.3.0-rc.4 | add/chunking | stable | Offload add-time chunk compression to `spawn_blocking` for chunks ≥ threshold. `0` reverts to inline compression. |
 | `MEDIAGIT_ADD_COMPRESS_BLOCKING_THRESHOLD` | `262144` (256 KiB) | 0.3.0-rc.4 | add/chunking | stable | Byte size above which add-time compression is offloaded to `spawn_blocking`. |
+| `MEDIAGIT_ADD_INFLIGHT_MB` | `128` | 0.4.0-rc.1 | add/chunking | stable | Byte budget (MiB) for chunk data in flight between the chunk producer and the write workers of ONE file; slow storage backpressures the producer instead of growing RSS. Distinct from `MEDIAGIT_ADD_MAX_INFLIGHT_BYTES` (across files). |
 | `MEDIAGIT_CHUNK_FBX` | unset/`0` (OFF) | 0.3.0-rc.4 | add/chunking | experimental | Opt-in structure-aware FBX chunking walker. Measured net-negative vs. generic CDC on real files ([[project_smart_media_execution_2026_07_07]]) — set `=1` to opt in. |
 | `MEDIAGIT_CHUNK_BLEND` | `1` (ON) | 0.3.0-rc.4 | add/chunking | stable | Structure-aware Blender `.blend` chunking walker. `0` disables (falls back to generic CDC). |
 | `MEDIAGIT_CHUNK_STL` | `1` (ON) | 0.3.0-rc.4 | add/chunking | stable | Structure-aware STL chunking walker. `0` disables. |
