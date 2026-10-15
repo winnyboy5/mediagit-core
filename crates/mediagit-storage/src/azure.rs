@@ -450,9 +450,24 @@ impl AzureBackend {
         // provisioned once, then reused for the life of the deployment). This
         // also keeps the signed-create path — the fragile part — off the hot
         // path entirely.
-        if self.op.list_with("").limit(1).await.is_ok() {
-            tracing::debug!(container = %self.container_name, "Azure container reachable");
-            return Ok(());
+        match self.op.list_with("").limit(1).await {
+            Ok(_) => {
+                tracing::debug!(container = %self.container_name, "Azure container reachable");
+                return Ok(());
+            }
+            // Only "the container is missing" may proceed to create. Any other
+            // failure (a disabled account, bad credentials, a network error)
+            // is the real problem; creating would only bury it under a
+            // misleading "could not be created".
+            Err(e) if e.kind() == opendal::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Azure container '{}' is not usable: {} (OpenDAL kind {:?}).                      Not attempting to create it; fix this error first.",
+                    self.container_name,
+                    e,
+                    e.kind()
+                ));
+            }
         }
 
         let Some(account_key) = &self.account_key else {
@@ -495,7 +510,7 @@ impl AzureBackend {
         // runs at most once per backend, only when the container is absent)
         // and avoids hardcoding emulator detection, which would misfire on
         // Azurite behind TLS or a custom endpoint.
-        let mut last: Option<(reqwest::StatusCode, String)> = None;
+        let mut attempts: Vec<(bool, reqwest::StatusCode, String)> = Vec::new();
         for send_content_length in [true, false] {
             let mut builder = http::Request::builder()
                 .method(http::Method::PUT)
@@ -544,18 +559,29 @@ impl AzureBackend {
                 %status,
                 "container-create attempt rejected; trying alternate Content-Length form"
             );
-            last = Some((status, body));
+            attempts.push((send_content_length, status, body));
         }
 
-        let (status, body) = last.unwrap_or((
-            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
-            "no response".to_string(),
-        ));
+        // Report EVERY attempt: the first (spec-correct) one usually carries the
+        // real cause, e.g. a 403 AccountIsDisabled that the Azurite-compat
+        // fallback then masks with an unrelated 411.
+        let detail = attempts
+            .iter()
+            .map(|(with_len, status, body)| {
+                let excerpt: String = body.chars().take(300).collect();
+                format!(
+                    "[{} Content-Length] {} {}",
+                    if *with_len { "with" } else { "without" },
+                    status,
+                    excerpt
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
         Err(anyhow::anyhow!(
-            "Azure container '{}' does not exist and could not be created ({} {}). Create it manually and retry.",
+            "Azure container '{}' does not exist and could not be created. Attempts: {}. Create it manually and retry.",
             self.container_name,
-            status,
-            body
+            detail
         ))
     }
 
@@ -1026,6 +1052,114 @@ impl StorageBackend for AzureBackend {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    // ---- container-check diagnosability (stub Azure endpoint) ----
+
+    /// Azurite's PUBLISHED development key (not a secret); the stub never checks it.
+    const STUB_CONN: &str = "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;\
+        AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;";
+
+    /// Minimal HTTP stub: answers every request via `respond(method, nth_put)`
+    /// with `(status line, body)` and records the request lines it saw.
+    async fn stub_azure(
+        respond: impl Fn(&str, usize) -> (&'static str, String) + Send + Sync + 'static,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen2 = seen.clone();
+        tokio::spawn(async move {
+            let puts = std::sync::atomic::AtomicUsize::new(0);
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = vec![0u8; 8192];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let line = head.lines().next().unwrap_or("").to_string();
+                let method = line.split(' ').next().unwrap_or("").to_string();
+                let nth = if method == "PUT" {
+                    puts.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                } else {
+                    0
+                };
+                seen2.lock().unwrap().push(line);
+                let (status, body) = respond(&method, nth);
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        (
+            format!("{STUB_CONN}BlobEndpoint=http://127.0.0.1:{port}/devstoreaccount1;"),
+            seen,
+        )
+    }
+
+    fn azure_error_xml(code: &str) -> String {
+        format!(
+            "<?xml version=\"1.0\"?><Error><Code>{code}</Code><Message>stub {code}</Message></Error>"
+        )
+    }
+
+    /// A disabled account must be reported as such, and must not trigger a
+    /// container create (which then failed with an unrelated 411).
+    #[tokio::test]
+    async fn disabled_account_is_reported_not_masked_by_a_create_attempt() {
+        let (conn, seen) = stub_azure(|method, _| match method {
+            "PUT" => (
+                "411 Length Required",
+                azure_error_xml("MissingContentLengthHeader"),
+            ),
+            _ => ("403 Forbidden", azure_error_xml("AccountIsDisabled")),
+        })
+        .await;
+        let err = match AzureBackend::with_connection_string("c", conn).await {
+            Ok(_) => panic!("a disabled account must fail"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("AccountIsDisabled") && err.contains("403"),
+            "cause missing from: {err}"
+        );
+        assert!(
+            !seen.lock().unwrap().iter().any(|l| l.starts_with("PUT")),
+            "must not attempt to create the container: {:?}",
+            seen.lock().unwrap()
+        );
+    }
+
+    /// When the container is genuinely missing and every create attempt is
+    /// rejected, the error must carry ALL attempts, not just the last.
+    #[tokio::test]
+    async fn create_failure_reports_every_attempt() {
+        let (conn, _seen) = stub_azure(|method, nth| match (method, nth) {
+            ("PUT", 0) => ("403 Forbidden", azure_error_xml("AuthorizationFailure")),
+            ("PUT", _) => (
+                "411 Length Required",
+                azure_error_xml("MissingContentLengthHeader"),
+            ),
+            _ => ("404 Not Found", azure_error_xml("ContainerNotFound")),
+        })
+        .await;
+        let err = match AzureBackend::with_connection_string("c", conn).await {
+            Ok(_) => panic!("rejected creates must fail"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("403") && err.contains("AuthorizationFailure"),
+            "{err}"
+        );
+        assert!(
+            err.contains("411") && err.contains("MissingContentLengthHeader"),
+            "{err}"
+        );
+    }
 
     #[test]
     fn test_validate_key_empty() {
