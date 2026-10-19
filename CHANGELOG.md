@@ -53,7 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (measured ratio 1.0000).
 - The server verifies pushed packs with one ranged read per span of adjacent
   entries instead of one per entry (`MEDIAGIT_PACK_VERIFY_SPAN_BYTES`), and the
-  chunk proxy checks the pack index before the loose path. Fewer billed
+  chunk proxy checks the pack index before the loose path. A batch proxy
+  download reads a whole pack only when at least 90% of it is wanted (was 50%). Fewer billed
   storage requests; every entry is still hash-checked.
 
 ## [v0.4.0-rc.1] - 2026-09-19
