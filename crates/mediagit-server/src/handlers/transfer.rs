@@ -1714,11 +1714,35 @@ mod presign_pack_downloads_verification_tests {
                 length,
                 compressed_hash: None,
             });
+            // One padding byte after every entry. Adjacent entries share a single
+            // ranged read per verification pass, which would make one pass and
+            // the old "two passes" both small numbers; a gap keeps one pass at
+            // one read PER ENTRY so a duplicated pass is unmistakable.
+            pack_bytes.push(0);
         }
         PackFixture {
             pack_bytes,
             manifest,
         }
+    }
+
+    /// Ranged reads ONE verification pass issues for this layout: one per group
+    /// of exactly-adjacent entries (the span rule in
+    /// `pack_entries_failing_content_verification`, small packs being far under
+    /// the span cap). Computed from the layout rather than hard-coded, so these
+    /// dedup tests assert "exactly one PASS", not "exactly N reads".
+    fn ranged_reads_per_pass(manifest: &[ManifestEntry]) -> usize {
+        let mut sorted: Vec<&ManifestEntry> = manifest.iter().collect();
+        sorted.sort_by_key(|e| e.offset);
+        let mut spans = 0;
+        let mut prev_end = None;
+        for e in sorted {
+            if prev_end != Some(e.offset) {
+                spans += 1;
+            }
+            prev_end = Some(e.offset + e.length as u64);
+        }
+        spans
     }
 
     /// Same pack, but the second entry's compressed bytes are corrupted.
@@ -1937,7 +1961,7 @@ mod presign_pack_downloads_verification_tests {
             verify_reads: Arc::clone(&verify_reads),
         });
         let fixture = build_valid_pack();
-        let entries_per_verify = fixture.manifest.len();
+        let reads_per_pass = ranged_reads_per_pass(&fixture.manifest);
         let pack_oid = "3".repeat(64);
         write_pack_and_manifest(&storage, &repo_path, &pack_oid, &fixture).await;
         install_backend(&state, &repo_path, Arc::clone(&storage)).await;
@@ -1968,8 +1992,8 @@ mod presign_pack_downloads_verification_tests {
 
         let reads = verify_reads.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
-            reads, entries_per_verify,
-            "the pack was read {reads} times for {entries_per_verify} entries — the sweep              and the presign each ran their own full pass instead of sharing one"
+            reads, reads_per_pass,
+            "the pack was read {reads} times for {reads_per_pass} entries — the sweep              and the presign each ran their own full pass instead of sharing one"
         );
     }
 
@@ -1990,7 +2014,7 @@ mod presign_pack_downloads_verification_tests {
         write_pack_and_manifest(&storage, &repo_path, &pack_oid, &fixture).await;
         mark_unverified(&state, &repo, &pack_oid).await;
 
-        let entries_per_verify = fixture.manifest.len();
+        let reads_per_pass = ranged_reads_per_pass(&fixture.manifest);
         let mut handles = Vec::new();
         for _ in 0..8 {
             let state = Arc::clone(&state);
@@ -2012,9 +2036,9 @@ mod presign_pack_downloads_verification_tests {
 
         assert_eq!(
             verify_reads.load(std::sync::atomic::Ordering::SeqCst),
-            entries_per_verify,
+            reads_per_pass,
             "8 concurrent presign requests for the same pack must trigger exactly ONE \
-             verification pass ({entries_per_verify} reads), not one per caller"
+             verification pass ({reads_per_pass} reads), not one per caller"
         );
     }
 
@@ -2044,7 +2068,7 @@ mod presign_pack_downloads_verification_tests {
         write_pack_and_manifest(&storage, &repo_path, &pack_oid, &fixture).await;
         mark_unverified(&state, &repo, &pack_oid).await;
 
-        let entries_per_verify = fixture.manifest.len();
+        let reads_per_pass = ranged_reads_per_pass(&fixture.manifest);
 
         // Simulates complete_pack's spawn: get-or-create the shared cell,
         // resolve it via verify_pack_in_background, then release the slot.
@@ -2099,9 +2123,9 @@ mod presign_pack_downloads_verification_tests {
 
         assert_eq!(
             verify_reads.load(std::sync::atomic::Ordering::SeqCst),
-            entries_per_verify,
+            reads_per_pass,
             "a push's own verification and a racing presign's verification of the SAME \
-             pack must share one in-flight pass ({entries_per_verify} reads), not run it twice"
+             pack must share one in-flight pass ({reads_per_pass} reads), not run it twice"
         );
     }
 

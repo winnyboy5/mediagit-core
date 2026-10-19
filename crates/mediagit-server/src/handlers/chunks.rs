@@ -671,6 +671,88 @@ async fn open_chunk_stream(
     }
 }
 
+/// Serve one chunk straight out of its pack (the proxy path for a packed chunk):
+/// one Range-GET of the entry, verified inline when the pack has not yet passed
+/// background verification. Returns the HTTP status to answer with on failure.
+async fn serve_chunk_from_pack(
+    state: &Arc<AppState>,
+    repo: &str,
+    repo_path: &std::path::Path,
+    storage: &Arc<dyn StorageBackend>,
+    chunk_id: &str,
+    loc: &PackLoc,
+) -> Result<Response, StatusCode> {
+    if loc.length < 5 {
+        tracing::error!(
+            chunk = %chunk_id,
+            pack = %loc.pack_oid,
+            length = loc.length,
+            "Pack index entry has length < 5 — corrupt index"
+        );
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    let pack_key = format!("packs/{}", loc.pack_oid);
+    // Skip 5-byte pack entry header [type:1][size:4] to get raw chunk data.
+    let data_offset = loc.offset + 5;
+    let data_len = (loc.length as u64) - 5;
+    match storage.get_range(&pack_key, data_offset, data_len).await {
+        Ok(data) => {
+            // D1 (never-speculative reads): `complete_pack` registers
+            // a pack before its background content verification has
+            // run (see `state.unverified_packs`). Verify THIS slice
+            // inline before serving it — the compressed bytes are
+            // already in hand, so this is a decompress + BLAKE3, not
+            // an extra round trip. Packs NOT in the unverified set
+            // (the steady state) skip this entirely — same cost as
+            // before this change.
+            let is_unverified = {
+                let unverified = state.unverified_packs.read().await;
+                unverified
+                    .get(repo)
+                    .is_some_and(|s| s.contains(&loc.pack_oid))
+            };
+            let body = Bytes::from(data);
+            if is_unverified {
+                let compressor = Arc::new(crate::handlers::repo_compressor(state, repo_path)?);
+                if !verify_chunk_content(&compressor, chunk_id, body.clone())
+                    .await
+                    .is_verified()
+                {
+                    tracing::error!(
+                        chunk = %chunk_id,
+                        pack = %loc.pack_oid,
+                        "download_chunk: refusing to serve — inline verification failed for unverified pack"
+                    );
+                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                }
+            }
+            tracing::debug!(
+                chunk = %chunk_id,
+                pack = %loc.pack_oid,
+                "Served chunk from pack via proxy"
+            );
+            Ok((
+                StatusCode::OK,
+                [("Content-Type", "application/octet-stream")],
+                body,
+            )
+                .into_response())
+        }
+        Err(e) => {
+            // warn, not error: download_chunk falls back to the loose copy, so
+            // this alone may still end in a 200 (e.g. a stale index after gc).
+            // The caller logs at error when the loose copy is missing too.
+            tracing::warn!(
+                chunk = %chunk_id,
+                pack = %loc.pack_oid,
+                err = %e,
+                "Failed to Range-GET chunk from pack; trying the loose copy"
+            );
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
 /// GET /:repo/chunks/:chunk_id - Download a single chunk
 ///
 /// Returns raw compressed chunk data, or 409 JSON `{"kind":"delta","base_id":"<hex>"}` if
@@ -732,9 +814,27 @@ pub async fn download_chunk(
     // every download to restore a header nothing reads.
     //
     // `open_chunk_stream` proves a byte is readable before this answers 200 —
-    // see its doc comment for the truncated-200 failure that motivated it. The
-    // NoSuchKey -> pack-index -> chunk-delta fallback chain below is reached by
-    // `Absent` and is otherwise unchanged.
+    // see its doc comment for the truncated-200 failure that motivated it.
+    // Lookup order: pack index -> loose copy -> chunk-delta (reached by `Absent`).
+    //
+    // Pack index first — in-memory, free. A packed chunk has no loose copy, so
+    // trying `chunks/<id>` first (as this used to) cost a guaranteed-404 storage
+    // round trip on every proxied packed chunk (D1 moved the index ahead of the
+    // chunk-deltas GET; this moves it ahead of the loose GET too). If the pack
+    // attempt fails, fall through to the loose copy exactly as before, and
+    // report the pack's status only if there is no loose copy either.
+    let pack_loc = {
+        let idx = state.pack_index.read().await;
+        idx.get(&repo).and_then(|m| m.get(&chunk_id)).cloned()
+    };
+    let mut pack_failure: Option<StatusCode> = None;
+    if let Some(loc) = &pack_loc {
+        match serve_chunk_from_pack(&state, &repo, &repo_path, &storage, &chunk_id, loc).await {
+            Ok(resp) => return Ok(resp),
+            Err(status) => pack_failure = Some(status),
+        }
+    }
+
     match open_chunk_stream(&storage, &chunk_key, &chunk_id).await {
         ChunkOpen::Ready(stream) => {
             tracing::debug!(chunk = %chunk_id, "Chunk download started (streaming)");
@@ -775,81 +875,14 @@ pub async fn download_chunk(
         }
         ChunkOpen::Absent(e) => {
             {
-                // Check pack index first — in-memory, free (D1: this used to run
-                // after the chunk-deltas storage GET below, costing an extra
-                // storage RTT on every packed-chunk proxy download).
-                let pack_loc = {
-                    let idx = state.pack_index.read().await;
-                    idx.get(&repo).and_then(|m| m.get(&chunk_id)).cloned()
-                };
-                if let Some(loc) = pack_loc {
-                    if loc.length < 5 {
-                        tracing::error!(
-                            chunk = %chunk_id,
-                            pack = %loc.pack_oid,
-                            length = loc.length,
-                            "Pack index entry has length < 5 — corrupt index"
-                        );
-                        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                    }
-                    let pack_key = format!("packs/{}", loc.pack_oid);
-                    // Skip 5-byte pack entry header [type:1][size:4] to get raw chunk data.
-                    let data_offset = loc.offset + 5;
-                    let data_len = (loc.length as u64) - 5;
-                    match storage.get_range(&pack_key, data_offset, data_len).await {
-                        Ok(data) => {
-                            // D1 (never-speculative reads): `complete_pack` registers
-                            // a pack before its background content verification has
-                            // run (see `state.unverified_packs`). Verify THIS slice
-                            // inline before serving it — the compressed bytes are
-                            // already in hand, so this is a decompress + BLAKE3, not
-                            // an extra round trip. Packs NOT in the unverified set
-                            // (the steady state) skip this entirely — same cost as
-                            // before this change.
-                            let is_unverified = {
-                                let unverified = state.unverified_packs.read().await;
-                                unverified
-                                    .get(&repo)
-                                    .is_some_and(|s| s.contains(&loc.pack_oid))
-                            };
-                            let body = Bytes::from(data);
-                            if is_unverified {
-                                let compressor =
-                                    Arc::new(crate::handlers::repo_compressor(&state, &repo_path)?);
-                                if !verify_chunk_content(&compressor, &chunk_id, body.clone())
-                                    .await
-                                    .is_verified()
-                                {
-                                    tracing::error!(
-                                        chunk = %chunk_id,
-                                        pack = %loc.pack_oid,
-                                        "download_chunk: refusing to serve — inline verification failed for unverified pack"
-                                    );
-                                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                                }
-                            }
-                            tracing::debug!(
-                                chunk = %chunk_id,
-                                pack = %loc.pack_oid,
-                                "Served chunk from pack via proxy"
-                            );
-                            return Ok((
-                                StatusCode::OK,
-                                [("Content-Type", "application/octet-stream")],
-                                body,
-                            )
-                                .into_response());
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                chunk = %chunk_id,
-                                pack = %loc.pack_oid,
-                                err = %e,
-                                "Failed to Range-GET chunk from pack"
-                            );
-                            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                        }
-                    }
+                // A pack failure was already reported by the pack-first attempt
+                // above (and there was no loose copy to fall back to).
+                if let Some(status) = pack_failure {
+                    tracing::error!(
+                        chunk = %chunk_id,
+                        "Chunk unreadable from its pack and no loose copy exists"
+                    );
+                    return Err(status);
                 }
                 // Not in pack index — check whether this chunk is stored as a delta.
                 // This catches the case where the client's POST /chunk-deltas/check probe
@@ -1286,6 +1319,17 @@ async fn write_batch_frame<W: tokio::io::AsyncWrite + Unpin>(
     Ok(())
 }
 
+/// Read the whole pack only when almost all of it is wanted. At the old 50%
+/// cut-off a request for half a pack made the server read the other half out of
+/// the bucket for nothing (up to 2x the bytes), billed as egress on cloud
+/// backends; the coalesced-range path reads only what was asked for.
+const WHOLE_PACK_WANTED_PERCENT: u64 = 90;
+
+fn use_whole_pack(total_wanted: u64, pack_size: u64) -> bool {
+    pack_size > 0
+        && total_wanted.saturating_mul(100) >= pack_size.saturating_mul(WHOLE_PACK_WANTED_PERCENT)
+}
+
 /// POST /:repo/packs/batch-get — batch-fetch multiple chunk slices out of one
 /// pack object in a single request/response.
 ///
@@ -1370,11 +1414,12 @@ pub async fn batch_get_pack_chunks(
     };
 
     // ponytail: whole-pack read ceiling is the pack size (Track F caps packs
-    // at 64 MiB), not a strict 32 MiB bound. Only taken when >=50% of the
-    // pack is wanted, so it's rarely worse than the coalesced-range path,
-    // which itself buffers at most `MAX_RANGE_BYTES` (8 MiB) at a time.
+    // at 64 MiB), not a strict 32 MiB bound. Only taken when nearly all of the
+    // pack is wanted (see `use_whole_pack`); below that the coalesced-range path
+    // reads just what was asked for and buffers at most `MAX_RANGE_BYTES`
+    // (8 MiB) at a time.
     let total_wanted: u64 = valid.iter().map(|(_, _, len)| *len as u64).sum();
-    let whole_pack = pack_size > 0 && total_wanted.saturating_mul(2) >= pack_size;
+    let whole_pack = use_whole_pack(total_wanted, pack_size);
 
     // D2 (never-speculative reads): mirrors D1's inline check in
     // `download_chunk` — a pack registered by `complete_pack` may still be
@@ -1567,6 +1612,271 @@ mod batch_get_tests {
             out.push((oid.to_hex(), data));
         }
         out
+    }
+
+    // ---- egress: pack-first proxy download, 90% whole-pack threshold ----
+
+    /// Counts storage calls by key class so tests can see wasted round trips.
+    #[derive(Debug)]
+    struct KeyCountingBackend {
+        inner: Arc<dyn StorageBackend>,
+        /// Any call touching a `chunks/` key (the loose-copy lookups).
+        loose_calls: Arc<std::sync::atomic::AtomicUsize>,
+        /// Whole-object `get`s of `packs/` keys.
+        pack_whole_gets: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl KeyCountingBackend {
+        fn note(&self, key: &str) {
+            if key.starts_with("chunks/") {
+                self.loose_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StorageBackend for KeyCountingBackend {
+        async fn get(&self, key: &str) -> anyhow::Result<Vec<u8>> {
+            self.note(key);
+            if key.starts_with("packs/") {
+                self.pack_whole_gets
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            self.inner.get(key).await
+        }
+        async fn get_range(&self, key: &str, offset: u64, len: u64) -> anyhow::Result<Vec<u8>> {
+            self.note(key);
+            self.inner.get_range(key, offset, len).await
+        }
+        async fn put(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
+            self.inner.put(key, data).await
+        }
+        async fn exists(&self, key: &str) -> anyhow::Result<bool> {
+            self.note(key);
+            self.inner.exists(key).await
+        }
+        async fn delete(&self, key: &str) -> anyhow::Result<()> {
+            self.inner.delete(key).await
+        }
+        async fn list_objects(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
+            self.inner.list_objects(prefix).await
+        }
+        async fn head(&self, key: &str) -> anyhow::Result<Option<u64>> {
+            self.note(key);
+            self.inner.head(key).await
+        }
+        async fn get_streaming(
+            &self,
+            key: &str,
+        ) -> anyhow::Result<
+            std::pin::Pin<
+                Box<dyn futures::Stream<Item = anyhow::Result<bytes::Bytes>> + Send + 'static>,
+            >,
+        > {
+            self.note(key);
+            self.inner.get_streaming(key).await
+        }
+    }
+
+    struct CountingRepo {
+        state: Arc<AppState>,
+        storage: Arc<dyn StorageBackend>,
+        repo: String,
+        loose_calls: Arc<std::sync::atomic::AtomicUsize>,
+        pack_whole_gets: Arc<std::sync::atomic::AtomicUsize>,
+        _tmp: tempfile::TempDir,
+    }
+
+    async fn counting_repo() -> CountingRepo {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = "test-repo".to_string();
+        let repo_path = tmp.path().join(&repo);
+        tokio::fs::create_dir_all(&repo_path).await.unwrap();
+        let state = Arc::new(AppState::new(tmp.path().to_path_buf()));
+        let inner = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        let loose_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pack_whole_gets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let storage: Arc<dyn StorageBackend> = Arc::new(KeyCountingBackend {
+            inner,
+            loose_calls: Arc::clone(&loose_calls),
+            pack_whole_gets: Arc::clone(&pack_whole_gets),
+        });
+        state
+            .storage_backends
+            .write()
+            .await
+            .insert(repo_path, Arc::clone(&storage));
+        CountingRepo {
+            state,
+            storage,
+            repo,
+            loose_calls,
+            pack_whole_gets,
+            _tmp: tmp,
+        }
+    }
+
+    async fn body_bytes(resp: Response) -> Vec<u8> {
+        use futures::TryStreamExt;
+        let chunks: Vec<bytes::Bytes> = resp
+            .into_body()
+            .into_data_stream()
+            .try_collect()
+            .await
+            .unwrap();
+        chunks.concat()
+    }
+
+    /// A packed chunk has no loose copy: serving it must not first probe
+    /// `chunks/<id>` (a guaranteed miss and a billed request).
+    #[tokio::test]
+    async fn packed_chunk_download_makes_no_loose_lookup() {
+        let c = counting_repo().await;
+        let pack_oid = "b".repeat(64);
+        let (id, _) =
+            write_pack_entry(&c.state, &c.storage, &c.repo, &pack_oid, 0, b"hello packed").await;
+        c.loose_calls.store(0, std::sync::atomic::Ordering::SeqCst);
+
+        let resp = download_chunk(
+            Path((c.repo.clone(), id.clone())),
+            State(Arc::clone(&c.state)),
+            None,
+        )
+        .await
+        .expect("packed chunk must be served");
+        let data = body_bytes(resp).await;
+        assert_eq!(
+            SmartCompressor::new().decompress(&data).unwrap(),
+            b"hello packed"
+        );
+        assert_eq!(
+            c.loose_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no lookup of the loose chunk key may precede the pack read"
+        );
+    }
+
+    /// Behaviour preserved: a pack-index entry whose pack read fails still falls
+    /// back to the loose copy, and only when there is none is the pack error
+    /// reported.
+    #[tokio::test]
+    async fn pack_failure_falls_back_to_loose_copy_then_reports_the_pack_error() {
+        let c = counting_repo().await;
+        let pack_oid = "c".repeat(64);
+        let content = b"loose and indexed";
+        let compressed = SmartCompressor::new().compress(content).unwrap();
+        let id = Oid::hash(content).to_hex();
+        // Index points at a pack object that does not exist.
+        {
+            let mut idx = c.state.pack_index.write().await;
+            idx.entry(c.repo.clone()).or_default().insert(
+                id.clone(),
+                PackLoc {
+                    pack_oid: pack_oid.clone(),
+                    offset: 0,
+                    length: 5 + compressed.len() as u32,
+                    compressed_hash: None,
+                },
+            );
+        }
+
+        // No loose copy: the pack's own failure is what is reported.
+        let err = download_chunk(
+            Path((c.repo.clone(), id.clone())),
+            State(Arc::clone(&c.state)),
+            None,
+        )
+        .await
+        .expect_err("missing pack and no loose copy must fail");
+        assert_eq!(err, StatusCode::INTERNAL_SERVER_ERROR);
+
+        // With a loose copy, it is served exactly as before.
+        c.storage
+            .put(&format!("chunks/{id}"), &compressed)
+            .await
+            .unwrap();
+        let resp = download_chunk(
+            Path((c.repo.clone(), id)),
+            State(Arc::clone(&c.state)),
+            None,
+        )
+        .await
+        .expect("loose copy must still be served");
+        assert_eq!(body_bytes(resp).await, compressed);
+    }
+
+    #[test]
+    fn whole_pack_threshold_is_ninety_percent() {
+        assert!(!use_whole_pack(0, 0));
+        assert!(
+            !use_whole_pack(50, 100),
+            "half used to trigger a whole read"
+        );
+        assert!(!use_whole_pack(89, 100));
+        assert!(use_whole_pack(90, 100));
+        assert!(use_whole_pack(100, 100));
+    }
+
+    /// Ten packed chunks; asking for six of them (a majority, but nowhere near
+    /// all) must read just those ranges, not the whole pack.
+    #[tokio::test]
+    async fn partial_batch_get_reads_ranges_not_the_whole_pack() {
+        let c = counting_repo().await;
+        let pack_oid = "d".repeat(64);
+        let mut entries = Vec::new();
+        let mut offset = 0u64;
+        for i in 0..10 {
+            let body = format!("batch chunk {i} {}", "y".repeat(300)).into_bytes();
+            let (id, len) =
+                write_pack_entry(&c.state, &c.storage, &c.repo, &pack_oid, offset, &body).await;
+            entries.push((id, offset, len));
+            offset += len as u64;
+        }
+        let run = |specs: Vec<(String, u64, u32)>| {
+            let state = Arc::clone(&c.state);
+            let repo = c.repo.clone();
+            let pack_oid = pack_oid.clone();
+            let entries: Vec<BatchGetEntry> = specs
+                .into_iter()
+                .map(|(chunk_oid, offset, length)| BatchGetEntry {
+                    chunk_oid,
+                    offset,
+                    length,
+                })
+                .collect();
+            async move {
+                let resp = batch_get_pack_chunks(
+                    Path(repo),
+                    State(state),
+                    None,
+                    Json(BatchGetRequest { pack_oid, entries }),
+                )
+                .await
+                .expect("handler ok");
+                body_bytes(resp).await
+            }
+        };
+
+        c.pack_whole_gets
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        let partial = run(entries[..6].to_vec()).await;
+        assert!(!partial.is_empty());
+        assert_eq!(
+            c.pack_whole_gets.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "60% of a pack must not trigger a whole-pack read"
+        );
+
+        let all = run(entries.clone()).await;
+        assert!(all.len() > partial.len());
+        assert_eq!(
+            c.pack_whole_gets.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a request for the whole pack still reads it in one go"
+        );
     }
 
     #[tokio::test]

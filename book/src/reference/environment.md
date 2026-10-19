@@ -132,6 +132,7 @@ MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurre
 | `MEDIAGIT_PACK_UPLOAD_CONCURRENCY` | Concurrent pack uploads from the client pack builder. | `8` |
 | `MEDIAGIT_PACK_PROXY_BATCH` | Batch small chunk fetches through the server proxy. `0` disables. | `1` (ON) |
 | `MEDIAGIT_PACK_RANGE_COALESCE_MAX_GAP` / `MEDIAGIT_PACK_RANGE_COALESCE_MAX_BYTES` | Coalescing thresholds for ranged pack GETs. | `1 MiB` / `8 MiB` |
+| `MEDIAGIT_PACK_VERIFY_SPAN_BYTES` | Max bytes one ranged GET covers when the server verifies a pack's contents; adjacent entries share a request but each is still hash-checked individually. | `16 MiB` |
 | `MEDIAGIT_REPACK_CHUNKS` | Whether `gc --repack` bundles loose chunks into cloud packs. | `1` (ON) |
 | `MEDIAGIT_BATCH_GET_CONCURRENCY` | Server-side semaphore capacity for batched chunk GET requests. | `4` |
 | `MEDIAGIT_DISABLE_BATCH_GET` | `1` disables the batch-GET endpoint, forcing per-chunk fallback. | `0` (OFF) |
