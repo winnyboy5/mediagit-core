@@ -9,7 +9,7 @@
 
 ## 🎯 Status
 
-**Version**: v0.4.0-rc.1
+**Version**: v0.5.0-rc.1
 **Status**: 🚧 **RELEASE CANDIDATE**
 **Features**: 100% complete (all P0–P3 items from the rc.3 feature-completeness sprint implemented — a closed batch, distinct from the forward-looking backlog in [FUTURE_TODOS.md](FUTURE_TODOS.md), which reuses the same P0–P3 labels as effort/impact tiers for planned work)
 **Last Validated**: September 19, 2026 — two SCALE QA campaigns (`v040-ga8`, `v040-ga9`), **247 gates each: 246 pass, 0 failures, 1 skip, all 14 phases**, on byte-identical binaries, across MinIO, AWS S3, Azure Blob, GCS and local. The skip is the same gate in both runs — `A8-disk-full`, which needs an elevated shell to attach a size-capped volume. It has since been run under elevation and passes: `add` onto a full volume fails cleanly with `os error 112` and leaves the repository fsck-PERFECT
@@ -142,19 +142,19 @@ curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/instal
 
 **Linux x86_64 — manual:**
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.4.0-rc.1/mediagit-0.4.0-rc.1-x86_64-linux.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.5.0-rc.1/mediagit-0.5.0-rc.1-x86_64-linux.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 **macOS Apple Silicon — manual:**
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.4.0-rc.1/mediagit-0.4.0-rc.1-aarch64-macos.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.5.0-rc.1/mediagit-0.5.0-rc.1-aarch64-macos.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 **Windows x86_64 (PowerShell):**
 ```powershell
-Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.4.0-rc.1/mediagit-0.4.0-rc.1-x86_64-windows.zip" -OutFile mediagit.zip
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.5.0-rc.1/mediagit-0.5.0-rc.1-x86_64-windows.zip" -OutFile mediagit.zip
 Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 # Add to PATH:
 [Environment]::SetEnvironmentVariable("Path", "$env:Path;$env:LOCALAPPDATA\MediaGit\bin", "User")
@@ -163,8 +163,8 @@ Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 #### Docker
 
 ```bash
-docker pull ghcr.io/winnyboy5/mediagit-core:0.4.0-rc.1
-docker run --rm ghcr.io/winnyboy5/mediagit-core:0.4.0-rc.1 mediagit --version
+docker pull ghcr.io/winnyboy5/mediagit-core:0.5.0-rc.1
+docker run --rm ghcr.io/winnyboy5/mediagit-core:0.5.0-rc.1 mediagit --version
 ```
 
 #### From Source
@@ -184,11 +184,11 @@ cargo build --release
 
 | Platform | Archive |
 |----------|---------|
-| Linux x86_64 | `mediagit-0.4.0-rc.1-x86_64-linux.tar.gz` |
-| Linux ARM64 | `mediagit-0.4.0-rc.1-aarch64-linux.tar.gz` |
-| macOS Intel | `mediagit-0.4.0-rc.1-x86_64-macos.tar.gz` |
-| macOS Apple Silicon | `mediagit-0.4.0-rc.1-aarch64-macos.tar.gz` |
-| Windows x86_64 | `mediagit-0.4.0-rc.1-x86_64-windows.zip` |
+| Linux x86_64 | `mediagit-0.5.0-rc.1-x86_64-linux.tar.gz` |
+| Linux ARM64 | `mediagit-0.5.0-rc.1-aarch64-linux.tar.gz` |
+| macOS Intel | `mediagit-0.5.0-rc.1-x86_64-macos.tar.gz` |
+| macOS Apple Silicon | `mediagit-0.5.0-rc.1-aarch64-macos.tar.gz` |
+| Windows x86_64 | `mediagit-0.5.0-rc.1-x86_64-windows.zip` |
 
 Each archive includes `mediagit` (CLI) and `mediagit-server` binaries, plus a `.sha256` checksum file.
 
@@ -833,7 +833,7 @@ aws iam get-user-policy --user-name mediagit-user --policy-name MediaGitS3Policy
 ```bash
 # The /releases/latest API returns 404 when only pre-releases exist.
 # Pass the version explicitly:
-VERSION=0.4.0-rc.1 curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
+VERSION=0.5.0-rc.1 curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 
 # Or on Windows PowerShell:
 iwr -UseBasicParsing https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.ps1 | iex

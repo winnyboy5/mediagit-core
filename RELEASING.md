@@ -95,7 +95,7 @@ After the workflow completes:
   ```
 - [ ] Test Docker image:
   ```bash
-  docker run --rm ghcr.io/winnyboy5/mediagit-core:0.4.0-rc.1 --version
+  docker run --rm ghcr.io/winnyboy5/mediagit-core:0.5.0-rc.1 --version
   ```
 
 ### 6. Post-Release Tasks
