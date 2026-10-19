@@ -1112,6 +1112,123 @@ enum EntryVerification {
     Unreadable,
 }
 
+/// One manifest entry as the span verifier sees it: `(index, offset, length, chunk_oid)`.
+type SpanEntry = (usize, u64, u64, String);
+
+/// Group offset-sorted entries into spans of exactly-adjacent entries, each
+/// span at most `span_cap` bytes. Gaps, overlaps and duplicate offsets start a
+/// new span. An entry larger than the cap still gets a span of its own: the
+/// cap only stops a span from growing, so every entry is read exactly once.
+fn group_into_spans(by_offset: Vec<SpanEntry>, span_cap: u64) -> Vec<Vec<SpanEntry>> {
+    let mut spans: Vec<Vec<SpanEntry>> = Vec::new();
+    for e in by_offset {
+        let extend = spans.last().is_some_and(|span| {
+            let last = span.last().expect("spans are never empty");
+            let span_len = last.1 + last.2 - span[0].1;
+            last.1 + last.2 == e.1 && span_len + e.2 <= span_cap
+        });
+        if extend {
+            spans.last_mut().expect("checked above").push(e);
+        } else {
+            spans.push(vec![e]);
+        }
+    }
+    spans
+}
+
+/// Verify a run of exactly-adjacent pack entries read from ONE ranged stream.
+///
+/// Each entry is consumed in order: skip its 5-byte `[type:1][size:4]` header
+/// (the same header `read_and_verify_chunk` skips), then feed exactly
+/// `length - 5` bytes through the streaming decoder and a raw hasher. The
+/// verdict rules are unchanged from the per-entry version: a stream error or
+/// a short read is `Unreadable` (never `Corrupt`), a full read that matches
+/// neither the decompressed nor the raw digest is `Corrupt`. Once the stream
+/// itself is broken the position of every later entry is unknown, so those
+/// stay `Unreadable` rather than being judged on garbage.
+///
+/// Returns `(entry index, verdict, ms)` in span order.
+fn verify_span_entries<R: std::io::Read>(
+    mut reader: R,
+    entries: &[SpanEntry],
+    compressor: &SmartCompressor,
+    pack_key: &str,
+) -> Vec<(usize, EntryVerification, u64)> {
+    let mut out = Vec::with_capacity(entries.len());
+    let mut broken = false;
+    for (idx, _offset, length, chunk_oid) in entries {
+        if broken {
+            out.push((*idx, EntryVerification::Unreadable, 0));
+            continue;
+        }
+        let started = std::time::Instant::now();
+        let mut header = [0u8; 5];
+        if reader.read_exact(&mut header).is_err() {
+            broken = true;
+            out.push((*idx, EntryVerification::Unreadable, 0));
+            continue;
+        }
+        let expected_len = length - 5;
+        // Compute BOTH candidate digests in one pass: the decompressed bytes
+        // (normal case) and the raw bytes (the fallback `decompress_typed`
+        // applies when a decoder errors on a misdetected codec). Accepting
+        // either mirrors the whole-buffer path exactly. Still fail-closed: a
+        // chunk matching NEITHER is rejected.
+        let mut tee = TeeHasher {
+            inner: std::io::Read::take(&mut reader, expected_len),
+            hasher: blake3::Hasher::new(),
+            eof: false,
+            io_error: false,
+            bytes_seen: 0,
+        };
+        let mut decompressed = HashWriter(blake3::Hasher::new());
+        let decoded_ok = compressor
+            .decompress_streaming(&mut tee, &mut decompressed)
+            .is_ok();
+        // Drain whatever the decoder did not consume, so the RAW digest covers
+        // the whole slice even when decoding aborted early (and so the stream is
+        // positioned at the next entry's header).
+        let _ = std::io::copy(&mut tee, &mut std::io::sink());
+
+        // A partially-read slice hashes to garbage. Reporting that as a mismatch
+        // is what evicted valid chunks, so the transport verdict is checked
+        // BEFORE either digest is trusted. A mid-stream error is a visible
+        // transport failure; a SHORT read with no error is a silent one (the body
+        // simply ends early), and only the byte count catches it.
+        let verdict = if tee.io_error {
+            tracing::warn!(
+                pack = %pack_key,
+                entry = idx,
+                read = tee.bytes_seen,
+                expected = expected_len,
+                "pack verification: stream error mid-entry; entry unreadable"
+            );
+            EntryVerification::Unreadable
+        } else if tee.bytes_seen != expected_len {
+            tracing::warn!(
+                pack = %pack_key,
+                entry = idx,
+                read = tee.bytes_seen,
+                expected = expected_len,
+                "pack verification: range body ended early with no error \
+                 (silent short read); entry unreadable"
+            );
+            EntryVerification::Unreadable
+        } else if tee.hasher.finalize().to_hex().to_string() == *chunk_oid
+            || (decoded_ok && decompressed.0.finalize().to_hex().to_string() == *chunk_oid)
+        {
+            EntryVerification::Verified
+        } else {
+            EntryVerification::Corrupt
+        };
+        if verdict == EntryVerification::Unreadable {
+            broken = true;
+        }
+        out.push((*idx, verdict, started.elapsed().as_millis() as u64));
+    }
+    out
+}
+
 /// Core streaming verification, shared by the first-bad-entry and
 /// all-bad-entries views below.
 ///
@@ -1165,38 +1282,56 @@ async fn pack_entries_failing_content_verification(
         .and_then(|v| v.parse().ok())
         .filter(|&n: &usize| n > 0)
         .unwrap_or(16);
-    // Futures yield an INDEX, not a `&ManifestEntry`: keeping the borrow out of the
-    // async block is what lets these be spawned concurrently without the lifetime
-    // fighting `buffer_unordered`'s HRTB inference.
-    let owned: Vec<(usize, u64, u64, String)> = manifest
-        .iter()
-        .enumerate()
-        .map(|(i, e)| (i, e.offset, e.length as u64, e.chunk_oid.clone()))
-        .collect();
+    // Adjacent entries are verified from ONE ranged GET (a "span") instead of
+    // one GET each: a ~64 MiB pack of ~1 MiB chunks was ~26 requests, and each
+    // is a billed, latency-bound round trip. Bytes read are unchanged (plus the
+    // 5-byte header of every entry after the first, which used to be skipped by
+    // starting each range 5 bytes in). The span is still consumed as a STREAM,
+    // one entry at a time through the same decoder + hasher, so peak memory
+    // stays a fixed buffer per in-flight span, independent of span size.
+    // `MEDIAGIT_PACK_VERIFY_SPAN_BYTES` bounds how much one request covers
+    // (default 16 MiB), which also bounds how many entries a transport failure
+    // can leave unverified (they stay Unreadable, never Corrupt).
+    let span_cap: u64 = std::env::var("MEDIAGIT_PACK_VERIFY_SPAN_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n: &u64| n > 0)
+        .unwrap_or(16 * 1024 * 1024);
 
     // (entry index, verdict, ms to open the range, ms to read+hash it)
-    let results: Vec<(usize, EntryVerification, u64, u64)> =
-        futures::stream::iter(owned.into_iter().map(|(idx, offset, length, chunk_oid)| {
+    let mut results: Vec<(usize, EntryVerification, u64, u64)> = Vec::new();
+
+    // Entries that cannot hold the 5-byte header are a manifest-level defect,
+    // not a transport one: the claim itself is impossible, so this IS corruption.
+    let mut by_offset: Vec<SpanEntry> = Vec::with_capacity(manifest.len());
+    for (i, e) in manifest.iter().enumerate() {
+        if (e.length as u64) < 5 {
+            results.push((i, EntryVerification::Corrupt, 0, 0));
+        } else {
+            by_offset.push((i, e.offset, e.length as u64, e.chunk_oid.clone()));
+        }
+    }
+    by_offset.sort_by_key(|e| e.1);
+
+    let spans = group_into_spans(by_offset, span_cap);
+
+    let span_results: Vec<Vec<(usize, EntryVerification, u64, u64)>> =
+        futures::stream::iter(spans.into_iter().map(|entries| {
             let storage = Arc::clone(storage);
             let compressor = Arc::clone(compressor);
             let pack_key = pack_key.to_string();
             async move {
-                // Same 5-byte pack entry header `[type:1][size:4]` that
-                // `read_and_verify_chunk` skips — see its comment for the layout.
-                // A too-short entry is a manifest-level defect, not a transport
-                // one: the claim itself is impossible, so this IS corruption.
-                if length < 5 {
-                    return (idx, EntryVerification::Corrupt, 0u64, 0u64);
-                }
+                let idxs: Vec<usize> = entries.iter().map(|e| e.0).collect();
+                let span_start = entries[0].1;
+                let last = entries.last().expect("spans are never empty");
+                let span_end = last.1 + last.2;
                 // Split timing: `open_ms` is how long the backend took to ANSWER,
                 // `read_ms` is how long the bytes took to arrive. Those are two
                 // different faults — a storage service throttling request starts
-                // looks nothing like a transfer that crawls — and without the
-                // split, a slow pack is just one opaque `elapsed_ms`, which is
-                // exactly what made the 2026-08-20 stall cost hours to diagnose.
-                let entry_start = std::time::Instant::now();
+                // looks nothing like a transfer that crawls.
+                let started = std::time::Instant::now();
                 let stream = match storage
-                    .get_streaming_range(&pack_key, (offset + 5)..(offset + length))
+                    .get_streaming_range(&pack_key, span_start..span_end)
                     .await
                 {
                     Ok(s) => s,
@@ -1205,99 +1340,51 @@ async fn pack_entries_failing_content_verification(
                     Err(e) => {
                         tracing::warn!(
                             pack = %pack_key,
-                            entry = idx,
+                            first_entry = idxs[0],
+                            entries = idxs.len(),
                             err = %e,
-                            "pack verification: range read failed; entry left unverified"
+                            "pack verification: range read failed; entries left unverified"
                         );
-                        return (
-                            idx,
-                            EntryVerification::Unreadable,
-                            entry_start.elapsed().as_millis() as u64,
-                            0u64,
-                        );
+                        let open_ms = started.elapsed().as_millis() as u64;
+                        return idxs
+                            .into_iter()
+                            .map(|i| (i, EntryVerification::Unreadable, open_ms, 0u64))
+                            .collect::<Vec<_>>();
                     }
                 };
-                let open_ms = entry_start.elapsed().as_millis() as u64;
+                let open_ms = started.elapsed().as_millis() as u64;
                 let async_reader = StreamReader::new(stream.map_err(std::io::Error::other));
                 // Must be constructed here (captures the current Tokio Handle) and
                 // then moved into spawn_blocking — never used directly on an async
                 // worker thread.
                 let sync_reader = SyncIoBridge::new(async_reader);
-                let outcome = tokio::task::spawn_blocking(move || {
-                    // Compute BOTH candidate digests in one pass: the decompressed
-                    // bytes (normal case) and the raw bytes (the fallback
-                    // `decompress_typed` applies when a decoder errors on a
-                    // misdetected codec). Accepting either mirrors the whole-buffer
-                    // path exactly. Still fail-closed: a chunk matching NEITHER is
-                    // rejected.
-                    let expected_len = length - 5;
-                    let mut tee = TeeHasher {
-                        inner: sync_reader,
-                        hasher: blake3::Hasher::new(),
-                        eof: false,
-                        io_error: false,
-                        bytes_seen: 0,
-                    };
-                    let mut decompressed = HashWriter(blake3::Hasher::new());
-                    let decoded_ok = compressor
-                        .decompress_streaming(&mut tee, &mut decompressed)
-                        .is_ok();
-                    // Drain whatever the decoder did not consume, so the RAW digest
-                    // covers the whole slice even when decoding aborted early.
-                    let _ = std::io::copy(&mut tee, &mut std::io::sink());
-
-                    // A partially-read slice hashes to garbage. Reporting that as a
-                    // mismatch is what evicted valid chunks, so the transport
-                    // verdict is checked BEFORE either digest is trusted.
-                    //
-                    // The two cases are logged apart on purpose. A mid-stream
-                    // error is a visible transport failure; a SHORT read with no
-                    // error is a silent one (the body simply ends early and the
-                    // reader reports clean EOF), and only the byte count catches
-                    // it. Telling them apart in the log is what makes the next
-                    // occurrence diagnosable.
-                    if tee.io_error {
-                        tracing::warn!(
-                            pack = %pack_key,
-                            entry = idx,
-                            read = tee.bytes_seen,
-                            expected = expected_len,
-                            "pack verification: stream error mid-entry; entry unreadable"
-                        );
-                        return EntryVerification::Unreadable;
-                    }
-                    if tee.bytes_seen != expected_len {
-                        tracing::warn!(
-                            pack = %pack_key,
-                            entry = idx,
-                            read = tee.bytes_seen,
-                            expected = expected_len,
-                            "pack verification: range body ended early with no error \
-                             (silent short read); entry unreadable"
-                        );
-                        return EntryVerification::Unreadable;
-                    }
-
-                    let raw_hex = tee.hasher.finalize().to_hex().to_string();
-                    if raw_hex == chunk_oid {
-                        return EntryVerification::Verified;
-                    }
-                    if decoded_ok && decompressed.0.finalize().to_hex().to_string() == chunk_oid {
-                        return EntryVerification::Verified;
-                    }
-                    EntryVerification::Corrupt
+                let key_for_task = pack_key.clone();
+                let verdicts = tokio::task::spawn_blocking(move || {
+                    verify_span_entries(sync_reader, &entries, &compressor, &key_for_task)
                 })
-                .await
-                // A JoinError means the check never produced a verdict — that is
-                // an absence of evidence, not evidence of corruption.
-                .unwrap_or(EntryVerification::Unreadable);
-                let read_ms = (entry_start.elapsed().as_millis() as u64).saturating_sub(open_ms);
-                (idx, outcome, open_ms, read_ms)
+                .await;
+                match verdicts {
+                    Ok(v) => v
+                        .into_iter()
+                        .enumerate()
+                        // The span open is charged to its first entry only.
+                        .map(|(k, (i, verdict, read_ms))| {
+                            (i, verdict, if k == 0 { open_ms } else { 0 }, read_ms)
+                        })
+                        .collect(),
+                    // A JoinError means the check never produced a verdict — that
+                    // is an absence of evidence, not evidence of corruption.
+                    Err(_) => idxs
+                        .into_iter()
+                        .map(|i| (i, EntryVerification::Unreadable, open_ms, 0u64))
+                        .collect(),
+                }
             }
         }))
         .buffer_unordered(range_concurrency)
-        .collect::<Vec<(usize, EntryVerification, u64, u64)>>()
+        .collect()
         .await;
+    results.extend(span_results.into_iter().flatten());
 
     // One summary line per pack. Always emitted, not gated on a threshold: the
     // healthy numbers are what make an unhealthy one legible, and a pack that is
@@ -4324,6 +4411,200 @@ mod pack_verify_budget_tests {
             tokio::time::sleep(self.delay).await;
             self.inner.get_streaming_range(key, range).await
         }
+    }
+
+    // ---- span-coalesced verification (egress/request-count reduction) ----
+
+    /// Counts `get_streaming_range` calls (one per ranged GET verification issues).
+    #[derive(Debug)]
+    struct RangeCountingBackend {
+        inner: Arc<dyn StorageBackend>,
+        range_gets: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl StorageBackend for RangeCountingBackend {
+        async fn get(&self, key: &str) -> anyhow::Result<Vec<u8>> {
+            self.inner.get(key).await
+        }
+        async fn put(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
+            self.inner.put(key, data).await
+        }
+        async fn exists(&self, key: &str) -> anyhow::Result<bool> {
+            self.inner.exists(key).await
+        }
+        async fn delete(&self, key: &str) -> anyhow::Result<()> {
+            self.inner.delete(key).await
+        }
+        async fn list_objects(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
+            self.inner.list_objects(prefix).await
+        }
+        async fn head(&self, key: &str) -> anyhow::Result<Option<u64>> {
+            self.inner.head(key).await
+        }
+        async fn get_streaming_range(
+            &self,
+            key: &str,
+            range: std::ops::Range<u64>,
+        ) -> anyhow::Result<
+            std::pin::Pin<
+                Box<dyn futures::Stream<Item = anyhow::Result<bytes::Bytes>> + Send + 'static>,
+            >,
+        > {
+            self.range_gets
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.get_streaming_range(key, range).await
+        }
+    }
+
+    /// `n` contiguous entries, each a distinct compressible payload.
+    fn build_contiguous_pack(n: usize) -> (Vec<u8>, Vec<ManifestEntry>) {
+        let compressor = SmartCompressor::new();
+        let mut pack_bytes = Vec::new();
+        let mut manifest = Vec::new();
+        for i in 0..n {
+            let content = format!("span chunk number {i} {}", "x".repeat(200 + i)).into_bytes();
+            let chunk_id = blake3::hash(&content).to_hex().to_string();
+            let compressed = compressor.compress(&content).expect("compress");
+            let offset = pack_bytes.len() as u64;
+            pack_bytes.extend_from_slice(&[0u8; 5]);
+            pack_bytes.extend_from_slice(&compressed);
+            manifest.push(ManifestEntry {
+                chunk_oid: chunk_id,
+                offset,
+                length: (5 + compressed.len()) as u32,
+                compressed_hash: None,
+            });
+        }
+        (pack_bytes, manifest)
+    }
+
+    /// Runs the verifier over `pack_bytes` and returns `(corrupt, unreadable, range GETs)`.
+    async fn verify_counting(
+        pack_bytes: &[u8],
+        manifest: &[ManifestEntry],
+    ) -> (Vec<usize>, Vec<usize>, usize) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("span-repo");
+        tokio::fs::create_dir_all(&repo_path).await.unwrap();
+        let state = Arc::new(AppState::new(tmp.path().to_path_buf()));
+        let inner = get_or_init_storage(&state, &repo_path)
+            .await
+            .expect("storage");
+        inner.put("packs/spanpack01", pack_bytes).await.unwrap();
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counting: Arc<dyn StorageBackend> = Arc::new(RangeCountingBackend {
+            inner,
+            range_gets: Arc::clone(&count),
+        });
+        let compressor = Arc::new(SmartCompressor::new());
+        let (corrupt, unreadable) = pack_entries_failing_content_verification(
+            &counting,
+            &compressor,
+            "packs/spanpack01",
+            manifest,
+        )
+        .await;
+        (
+            corrupt,
+            unreadable,
+            count.load(std::sync::atomic::Ordering::SeqCst),
+        )
+    }
+
+    /// 24 contiguous entries used to cost 24 ranged GETs; they are one span now,
+    /// and every entry is still verified.
+    #[tokio::test]
+    async fn contiguous_entries_verify_in_one_ranged_get() {
+        let (pack, manifest) = build_contiguous_pack(24);
+        let (corrupt, unreadable, gets) = verify_counting(&pack, &manifest).await;
+        assert!(corrupt.is_empty() && unreadable.is_empty());
+        assert_eq!(gets, 1, "24 adjacent entries must share one range GET");
+    }
+
+    /// Coalescing must not hide corruption: a flipped byte in one entry is reported
+    /// as exactly that entry, and its neighbours in the same span still verify.
+    #[tokio::test]
+    async fn corrupt_entry_inside_a_span_is_still_detected() {
+        let (mut pack, manifest) = build_contiguous_pack(24);
+        let victim = 9;
+        let last = (manifest[victim].offset + manifest[victim].length as u64 - 1) as usize;
+        pack[last] ^= 0xFF;
+        let (corrupt, unreadable, gets) = verify_counting(&pack, &manifest).await;
+        assert_eq!(corrupt, vec![victim]);
+        assert!(unreadable.is_empty());
+        assert_eq!(gets, 1);
+    }
+
+    /// A span that ends early (truncated body) leaves the unread entries
+    /// Unreadable, never Corrupt: nothing may be quarantined for a short read.
+    #[tokio::test]
+    async fn truncated_span_marks_the_tail_unreadable_not_corrupt() {
+        let (pack, manifest) = build_contiguous_pack(24);
+        let cut = (manifest[15].offset + 3) as usize; // mid-header of entry 15
+        let (corrupt, unreadable, _) = verify_counting(&pack[..cut], &manifest).await;
+        assert!(
+            corrupt.is_empty(),
+            "short read must not look like corruption"
+        );
+        assert_eq!(unreadable, (15..24).collect::<Vec<_>>());
+    }
+
+    /// A gap between entries must split the span: the gap bytes are never fed
+    /// to a decoder, and both halves still verify.
+    #[tokio::test]
+    async fn a_gap_between_entries_splits_the_span() {
+        let (pack, mut manifest) = build_contiguous_pack(6);
+        let mut gapped = pack[..manifest[3].offset as usize].to_vec();
+        gapped.extend_from_slice(&[0xAB; 7]); // junk between entries 2 and 3
+        gapped.extend_from_slice(&pack[manifest[3].offset as usize..]);
+        for e in &mut manifest[3..] {
+            e.offset += 7;
+        }
+        let (corrupt, unreadable, gets) = verify_counting(&gapped, &manifest).await;
+        assert!(corrupt.is_empty() && unreadable.is_empty());
+        assert_eq!(gets, 2, "a gap must start a new span");
+    }
+
+    fn span_entry(i: usize, offset: u64, len: u64) -> SpanEntry {
+        (i, offset, len, String::new())
+    }
+
+    /// The cap only stops a span from GROWING: entries bigger than the cap are
+    /// each read alone (never dropped, never looping), and every entry appears
+    /// in exactly one span.
+    #[test]
+    fn group_into_spans_handles_caps_smaller_than_an_entry() {
+        let entries: Vec<SpanEntry> = (0..4).map(|i| span_entry(i, i as u64 * 100, 100)).collect();
+        let spans = group_into_spans(entries, 10);
+        assert_eq!(spans.len(), 4);
+        assert!(spans.iter().all(|s| s.len() == 1));
+
+        let entries: Vec<SpanEntry> = (0..4).map(|i| span_entry(i, i as u64 * 100, 100)).collect();
+        let spans = group_into_spans(entries, 250);
+        assert_eq!(
+            spans.iter().map(|s| s.len()).collect::<Vec<_>>(),
+            vec![2, 2],
+            "a 250-byte cap fits two adjacent 100-byte entries per span"
+        );
+    }
+
+    /// Duplicate and overlapping offsets are not "adjacent": each starts its own
+    /// span, so no entry's bytes are skipped or read as part of another.
+    #[test]
+    fn group_into_spans_never_merges_overlaps_or_duplicates() {
+        let entries = vec![
+            span_entry(0, 0, 100),
+            span_entry(1, 0, 100),   // duplicate offset
+            span_entry(2, 50, 100),  // overlaps entry 1
+            span_entry(3, 150, 100), // adjacent to entry 2
+        ];
+        let spans = group_into_spans(entries, u64::MAX);
+        let idx: Vec<Vec<usize>> = spans
+            .iter()
+            .map(|s| s.iter().map(|e| e.0).collect())
+            .collect();
+        assert_eq!(idx, vec![vec![0], vec![1], vec![2, 3]]);
     }
 
     fn build_pack() -> (Vec<u8>, Vec<ManifestEntry>) {
