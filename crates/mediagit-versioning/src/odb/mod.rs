@@ -632,6 +632,14 @@ pub(crate) async fn commit_delta_pair(
         if g.pairs.contains(&(base_id, chunk_id)) {
             return false;
         }
+        // Already a delta against a different base: concurrent writers of the
+        // same chunk raced. Committing a second base would overwrite the memo
+        // while both `.meta` puts race on disk, so memory could keep the
+        // shallow chain and storage the deep one, and every later depth check
+        // would measure the wrong chain. Store this copy in full instead.
+        if matches!(g.edges.get(&chunk_id), Some(Some(existing)) if *existing != base_id) {
+            return false;
+        }
         // Re-decide and require the *same* answer: the delta bytes were
         // encoded against `base_id`, so a re-target here would be invalid.
         // Any change (a concurrent write closed a cycle, or pushed the chain
@@ -1250,6 +1258,31 @@ mod tests {
             Ok(Some(root)),
             "at MAX_DELTA_DEPTH the memo must re-target to the root, like storage"
         );
+    }
+
+    /// A chunk already committed as a delta must not be committed again against
+    /// a DIFFERENT base.
+    ///
+    /// Concurrent writers of similar versions store the same chunk at once, and
+    /// each may nominate its own base. Accepting both overwrote the memo's edge
+    /// while the two `.meta` puts raced on disk, so memory could say `C -> B2`
+    /// (shallow) while storage kept `C -> B1` (deep). Every later depth check
+    /// then measured the wrong chain: `delta_depth_concurrent` reached depth 11
+    /// and 13 against a cap of 10.
+    #[tokio::test]
+    async fn test_second_base_for_committed_delta_is_refused() {
+        let storage = MockBackend::new();
+        let graph = Mutex::new(DeltaGraph::default());
+        let chunk = Oid::hash(b"rebase-chunk");
+        let first = Oid::hash(b"rebase-base-1");
+        let second = Oid::hash(b"rebase-base-2");
+
+        assert!(commit_delta_pair(&storage, &graph, chunk, first).await);
+        assert!(
+            !commit_delta_pair(&storage, &graph, chunk, second).await,
+            "a chunk already committed against one base was re-committed against another"
+        );
+        assert_eq!(graph.lock().await.edges.get(&chunk), Some(&Some(first)));
     }
 
     /// Drift test: the in-memory walk and the storage walk must agree on the
