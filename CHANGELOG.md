@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [v0.5.0-rc.1] - Unreleased (GA-cleared 2026-10-19; date set when tagged)
+
 ### Licence
 
 - **Free production use is now limited to Small Organisations**: fewer than 10
@@ -17,10 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   organisations need a Team or Enterprise licence for production use.
   Non-production use (evaluation, pilots, testing) stays free for everyone. See [LICENSE](LICENSE) and
   [LICENSE-COMMERCIAL.md](LICENSE-COMMERCIAL.md).
-- Applies to releases published after `v0.4.0-rc.1`. Earlier releases keep the
-  grant they were published under.
+- Applies from `v0.5.0-rc.1` onward. Earlier releases keep the grant they were
+  published under.
 
-### Added (0.5.0-rc.1)
+### Added
 
 - **Frame-aligned chunking for MOV/MP4/M4V/M4A/3GP at any file size.** The
   sample tables are read and chunks are cut on frame boundaries, so trims,
@@ -32,7 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   old path.
 - **Whole-file BLAKE3 check at checkout**, on top of the per-chunk check.
 
-### Fixed (0.5.0-rc.1)
+### Fixed
 
 - **Files over 16 GiB**: `fsck`, `show`, `merge`, `diff`, `stash`, `download`
   and the server's repair endpoint read whole objects into memory and failed
@@ -47,15 +51,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Azure**: a disabled account or auth failure was reported as
   "container could not be created (411)"; the real cause is now shown.
 
-### Changed (0.5.0-rc.1)
+### Changed
 
 - Intra-only video (ProRes, DNxHR) chunks are stored, not zstd-compressed
   (measured ratio 1.0000).
 - The server verifies pushed packs with one ranged read per span of adjacent
   entries instead of one per entry (`MEDIAGIT_PACK_VERIFY_SPAN_BYTES`), and the
   chunk proxy checks the pack index before the loose path. A batch proxy
-  download reads a whole pack only when at least 90% of it is wanted (was 50%). Fewer billed
-  storage requests; every entry is still hash-checked.
+  download reads a whole pack only when at least 90% of it is wanted (was
+  50%). Fewer billed storage requests; every entry is still hash-checked.
+
+### Validation
+
+- Two consecutive SCALE QA campaigns on one artifact (`ga-050rc1-1`,
+  `ga-050rc1-2`): 259 gates each, 258 pass, 0 failures, 1 skip (`A8-disk-full`,
+  needs an elevated shell), all 17 phases, across MinIO, AWS S3, Azure Blob, GCS
+  and local. New campaign phase `16_video` (video dedup chain, a file over
+  16 GiB through every command, memory ceiling, round-trip hash).
 
 ## [v0.4.0-rc.1] - 2026-09-19
 
