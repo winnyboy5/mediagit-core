@@ -20,6 +20,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Applies to releases published after `v0.4.0-rc.1`. Earlier releases keep the
   grant they were published under.
 
+### Added (0.5.0-rc.1)
+
+- **Frame-aligned chunking for MOV/MP4/M4V/M4A/3GP at any file size.** The
+  sample tables are read and chunks are cut on frame boundaries, so trims,
+  inserts and re-exports of the same frames store only the changed frames.
+  Measured on DaVinci Resolve ProRes 422 HQ exports: an insert stores 1.4 MB
+  instead of 53.9 MB, a trim 0 MB instead of 4.4 MB. Colour grades and full
+  re-encodes still store a full new copy. Any parse or validation failure
+  falls back to the previous chunker. `MEDIAGIT_VIDEO_CHUNKER=cdc` selects the
+  old path.
+- **Whole-file BLAKE3 check at checkout**, on top of the per-chunk check.
+
+### Fixed (0.5.0-rc.1)
+
+- **Files over 16 GiB**: `fsck`, `show`, `merge`, `diff`, `stash`, `download`
+  and the server's repair endpoint read whole objects into memory and failed
+  above 16 GiB. They now stream (tested at 17.9 and 19.3 GiB).
+- **Restore from packed chunks** was quadratic (hours for a 5 GB file); packed
+  reads now use an in-memory locator and ranged reads. A truncated pack delta
+  entry that made some packed chunks unreadable is also fixed.
+- **`add` memory**: hashing a large file no longer maps the whole file (working
+  set 7.8 GB to 361 MB on a 19 GB file), and in-flight chunk data is capped
+  (`MEDIAGIT_ADD_INFLIGHT_MB`, default 128).
+- **Legacy MP4 parser** overflow and hang on crafted box sizes.
+- **Azure**: a disabled account or auth failure was reported as
+  "container could not be created (411)"; the real cause is now shown.
+
+### Changed (0.5.0-rc.1)
+
+- Intra-only video (ProRes, DNxHR) chunks are stored, not zstd-compressed
+  (measured ratio 1.0000).
+- The server verifies pushed packs with one ranged read per span of adjacent
+  entries instead of one per entry (`MEDIAGIT_PACK_VERIFY_SPAN_BYTES`), and the
+  chunk proxy checks the pack index before the loose path. Fewer billed
+  storage requests; every entry is still hash-checked.
+
 ## [v0.4.0-rc.1] - 2026-09-19
 
 ### Upgrading — every breaking change in one place
