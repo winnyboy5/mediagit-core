@@ -21,6 +21,27 @@ fn similarity_seed_max_chunks() -> usize {
     }
 }
 
+/// Process-wide cap on concurrent large-chunk compressions during `add`.
+///
+/// Every file gets its own pool of up to 16 workers, and each worker used to
+/// compress on its own blocking thread with nothing shared across files. A
+/// zstd level-19 context is tens of MB, so one `add` of five WAV versions ran
+/// ~80 contexts at once and peaked at 5.4-7.1 GB (measured 2026-10-19) for
+/// 214 MB of input. More compressions than cores buy no throughput, only
+/// memory, so the cap is the core count. `MEDIAGIT_ADD_COMPRESS_CONCURRENCY`
+/// overrides it.
+fn compress_permits() -> &'static tokio::sync::Semaphore {
+    static PERMITS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    PERMITS.get_or_init(|| {
+        let n = std::env::var("MEDIAGIT_ADD_COMPRESS_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or_else(|| num_cpus::get().clamp(2, 16));
+        tokio::sync::Semaphore::new(n)
+    })
+}
+
 /// Whether `chunk` takes part in chunk-delta: it may be nominated a delta base
 /// and, if later chunks pick it, must be reachable in `base_chunk_cache`.
 /// Single source of truth for the producer's similarity step AND the cache
@@ -68,6 +89,11 @@ fn is_delta_candidate(
 /// Granularity of the in-flight byte budget (one semaphore permit).
 const INFLIGHT_UNIT: usize = 64 * 1024;
 
+/// Default per-file in-flight budget in MiB (`MEDIAGIT_ADD_INFLIGHT_MB`). The
+/// delta-base cache default must cover it: a base still in flight can only be
+/// reached through the cache. Guarded by `cache_default_covers_inflight_budget`.
+pub(crate) const DEFAULT_INFLIGHT_MB: usize = 128;
+
 /// Byte budget for chunk data in flight between the forwarder and the write
 /// workers (`MEDIAGIT_ADD_INFLIGHT_MB`, default 128). The channels are bounded
 /// by COUNT, which at 2-8 MiB per chunk is hundreds of MiB; this bounds bytes,
@@ -110,7 +136,7 @@ impl InflightBudget {
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
             .filter(|n| *n > 0)
-            .unwrap_or(128);
+            .unwrap_or(DEFAULT_INFLIGHT_MB);
         Self::new(mb * 1024 * 1024)
     }
 
@@ -1667,6 +1693,12 @@ impl ObjectDatabase {
                             let chunk_data = chunk.data.clone();
                             let smart2 = smart_comp.clone();
                             let compressor2 = compressor.clone();
+                            // Held across the blocking compress: bounds live
+                            // compression contexts process-wide, not per file.
+                            let _compress_permit = compress_permits()
+                                .acquire()
+                                .await
+                                .map_err(|e| anyhow::anyhow!("compress permit: {}", e))?;
                             tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
                                 if let Some(ref smart) = smart2 {
                                     match smart.compress_by_codec(&chunk_data, codec_hint) {

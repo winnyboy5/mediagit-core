@@ -106,6 +106,7 @@ MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurre
 | `MEDIAGIT_ADD_COMPRESS_BLOCKING` | Offload add-time chunk compression to `spawn_blocking`. | `1` (ON) |
 | `MEDIAGIT_ADD_COMPRESS_BLOCKING_THRESHOLD` | Byte size above which add-time compression is offloaded. | `262144` (256 KiB) |
 | `MEDIAGIT_ADD_INFLIGHT_MB` | Byte budget (MiB) for chunk data in flight between the chunk producer and the write workers of one file. | `128` |
+| `MEDIAGIT_ADD_COMPRESS_CONCURRENCY` | Process-wide cap on concurrent large-chunk compressions during `add`, shared by every file's workers; bounds zstd level-19 memory on multi-file adds. | CPU cores, clamped 2–16 |
 | `MEDIAGIT_CDC_SEED` | Per-repo CDC chunk-boundary seed. Overrides `config.toml` `cdc_seed`. | repo config (`0` legacy) |
 | `MEDIAGIT_CODEC_DETECT` | Container-aware codec detection for compression routing. `0` forces `CodecHint::Unknown`. | `1` (ON) |
 | `MEDIAGIT_CHUNK_FBX` | Opt-in structure-aware FBX chunking walker (measured net-negative vs. generic CDC; off by design). | unset/`0` (OFF) |
@@ -116,7 +117,7 @@ MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurre
 | `MEDIAGIT_PHASH` | Perceptual image hashing for delta candidacy. `0` disables hashing and image delta. | `1` (ON) |
 | `MEDIAGIT_PHASH_MAX_MB` | Max image size (MiB) perceptual-hashed for delta candidacy. | `64` |
 | `MEDIAGIT_SIMILARITY_SEED_MAX_CHUNKS` | Max chunks scanned when seeding delta-candidate similarity search. | `256` |
-| `MEDIAGIT_CHUNK_CACHE_BYTES` | Delta-base cache used by `add`: recently stored chunks, kept decompressed, so a similar later chunk can be delta-encoded without re-reading its base from storage. The largest single item in `add` memory (230–390 MB of a 4 GB `add` in measurement); lower it, or set `0`, on low-memory machines. A miss falls back to storage, so a smaller cache only slows delta encoding — it never affects correctness. | `268435456` (256 MiB) |
+| `MEDIAGIT_CHUNK_CACHE_BYTES` | Delta-base cache used by `add`: chunks kept decompressed so a similar chunk can be delta-encoded against them. Its real job is reachability: a base still in flight within the same `add` is not in storage yet, so a miss silently stores the chunk in full. With it off, one `add` of 12 similar files stored 29% more (10 deltas lost) — correctness is never affected, storage savings are. Sized to `MEDIAGIT_ADD_INFLIGHT_MB` by default; lowering it below that trades savings on multi-file adds for memory. | `134217728` (128 MiB) |
 | `MEDIAGIT_CHUNK_WRITE_CONCURRENCY` | Worker threads for parallel chunk writes during `add`. | `num_cpus` (clamped 2–16) |
 | `MEDIAGIT_MEDIA_META` | Show `media: ...` summary lines in `status`. `0` disables. | `1` (ON) |
 | `MEDIAGIT_CHECKOUT_PARALLELISM` | Worker threads for parallel checkout. `1` forces the sequential loop. | `num_cpus` (capped at 8) |

@@ -47,6 +47,16 @@ Nothing yet.
 - **`add` memory**: hashing a large file no longer maps the whole file (working
   set 7.8 GB to 361 MB on a 19 GB file), and in-flight chunk data is capped
   (`MEDIAGIT_ADD_INFLIGHT_MB`, default 128).
+- **`add` of several files at once** could peak at 5–7 GB (five 42 MB WAV
+  versions): every file compressed on its own unbounded set of threads, and
+  zstd was not told the input size. Compression now passes the size (same
+  output size, ~40% less memory per context) and large-chunk compressions
+  share one process-wide cap (`MEDIAGIT_ADD_COMPRESS_CONCURRENCY`, default one
+  per core, max 16).
+- **Concurrent writes could build an over-deep delta chain** (depth 11–13
+  against a cap of 10, leaving a repository unpushable) when two writers
+  stored the same chunk against different bases. A chunk already committed
+  as a delta now refuses a second base.
 - **Legacy MP4 parser** overflow and hang on crafted box sizes.
 - **Azure**: a disabled account or auth failure was reported as
   "container could not be created (411)"; the real cause is now shown.
@@ -55,6 +65,12 @@ Nothing yet.
 
 - Intra-only video (ProRes, DNxHR) chunks are stored, not zstd-compressed
   (measured ratio 1.0000).
+- The `add` delta-base cache default is 128 MiB, down from 256 MiB
+  (`MEDIAGIT_CHUNK_CACHE_BYTES`). Measured: across commits the cache never
+  changed what is stored; within one `add` it is what lets a chunk delta
+  against a base still in flight, and 64 MiB already kept every delta.
+- `rustls` 0.23.46 and patch releases of `event-listener` and `chacha20`
+  (security advisories).
 - The server verifies pushed packs with one ranged read per span of adjacent
   entries instead of one per entry (`MEDIAGIT_PACK_VERIFY_SPAN_BYTES`), and the
   chunk proxy checks the pack index before the loose path. A batch proxy
