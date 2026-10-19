@@ -95,7 +95,7 @@ knob, not a config key** — `[performance.cache]` was removed in
 
 ```bash
 export MEDIAGIT_ODB_CACHE_MB=1024        # 1 GiB — repositories with many reads
-export MEDIAGIT_CHUNK_CACHE_BYTES=536870912   # 512 MiB chunk read cache
+export MEDIAGIT_CHUNK_CACHE_BYTES=536870912   # 512 MiB delta-base cache (used by add)
 ```
 
 Reduce if your system has less than 8 GB RAM:

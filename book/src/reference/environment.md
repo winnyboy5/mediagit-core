@@ -116,7 +116,7 @@ MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurre
 | `MEDIAGIT_PHASH` | Perceptual image hashing for delta candidacy. `0` disables hashing and image delta. | `1` (ON) |
 | `MEDIAGIT_PHASH_MAX_MB` | Max image size (MiB) perceptual-hashed for delta candidacy. | `64` |
 | `MEDIAGIT_SIMILARITY_SEED_MAX_CHUNKS` | Max chunks scanned when seeding delta-candidate similarity search. | `256` |
-| `MEDIAGIT_CHUNK_CACHE_BYTES` | In-process chunk read cache size. | `268435456` (256 MiB) |
+| `MEDIAGIT_CHUNK_CACHE_BYTES` | Delta-base cache used by `add`: recently stored chunks, kept decompressed, so a similar later chunk can be delta-encoded without re-reading its base from storage. The largest single item in `add` memory (230–390 MB of a 4 GB `add` in measurement); lower it, or set `0`, on low-memory machines. A miss falls back to storage, so a smaller cache only slows delta encoding — it never affects correctness. | `268435456` (256 MiB) |
 | `MEDIAGIT_CHUNK_WRITE_CONCURRENCY` | Worker threads for parallel chunk writes during `add`. | `num_cpus` (clamped 2–16) |
 | `MEDIAGIT_MEDIA_META` | Show `media: ...` summary lines in `status`. `0` disables. | `1` (ON) |
 | `MEDIAGIT_CHECKOUT_PARALLELISM` | Worker threads for parallel checkout. `1` forces the sequential loop. | `num_cpus` (capped at 8) |

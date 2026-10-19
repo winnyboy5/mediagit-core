@@ -12,7 +12,7 @@
 **Version**: v0.5.0-rc.1
 **Status**: 🚧 **RELEASE CANDIDATE**
 **Features**: 100% complete (all P0–P3 items from the rc.3 feature-completeness sprint implemented — a closed batch, distinct from the forward-looking backlog in [FUTURE_TODOS.md](FUTURE_TODOS.md), which reuses the same P0–P3 labels as effort/impact tiers for planned work)
-**Last Validated**: September 19, 2026 — two SCALE QA campaigns (`v040-ga8`, `v040-ga9`), **247 gates each: 246 pass, 0 failures, 1 skip, all 14 phases**, on byte-identical binaries, across MinIO, AWS S3, Azure Blob, GCS and local. The skip is the same gate in both runs — `A8-disk-full`, which needs an elevated shell to attach a size-capped volume. It has since been run under elevation and passes: `add` onto a full volume fails cleanly with `os error 112` and leaves the repository fsck-PERFECT
+**Last Validated**: October 19, 2026 (v0.5.0-rc.1) — two SCALE QA campaigns (`ga-050rc1-1`, `ga-050rc1-2`), **259 gates each: 258 pass, 0 failures, 1 skip, all 17 phases**, on byte-identical binaries, across MinIO, AWS S3, Azure Blob, GCS and local. The skip is the same gate in both runs — `A8-disk-full`, which needs an elevated shell to attach a size-capped volume. It has since been run under elevation and passes: `add` onto a full volume fails cleanly with `os error 112` and leaves the repository fsck-PERFECT
 **At-rest encryption (DC-7)**: now campaign-covered. Every campaign runs 15 encryption gates — push, clone and byte-for-byte roundtrip against MinIO, AWS S3, Azure Blob and GCS, each asserting every object is actually sealed, plus three key-mismatch drills. (This line previously said encryption had never been in a campaign; that stopped being true and the README did not follow.)
 **🚨 WARNING 🚨**: This project is under active development. Be aware that large breaking changes may happen before 1.0 is reached.
 
@@ -899,7 +899,7 @@ Special thanks to:
 
 - **Lines of Code**: 122,000+ (Rust, 193 source files across 12 crates); 161,000+ across 313 files including test code
 - **Features**: 100% complete (all P0–P3 items from the rc.3 feature-completeness sprint — see disambiguation note above)
-- **Test Coverage**: **2,324 unit/integration tests, 0 failures** (measured 2026-09-19); 247 QA-campaign gates per run across all five backends — 246 pass, 0 fail, 1 skip (2026-09-19); **614/614 deep-tests** across MinIO, AWS S3, Azure Blob, GCS (validated 2026-06-02)
+- **Test Coverage**: **2,367 unit/integration tests, 0 failures** (measured 2026-10-15); 259 QA-campaign gates per run across all five backends — 258 pass, 0 fail, 1 skip (2026-10-19); **614/614 deep-tests** across MinIO, AWS S3, Azure Blob, GCS (validated 2026-06-02)
 - **Staging Throughput**: 25–240 MB/s for small files; 2.8–5.2 MB/s for chunked large files (WAV/PSD/GLB)
 - **Network Throughput**: 134–267 MB/s push (local server, pack negotiation); WAN-bound on cloud backends
 - **Storage Savings**: **26.3–26.5%** validated on 4 cloud backends (June 2026); ~30% average across mixed media projects
@@ -912,4 +912,4 @@ Special thanks to:
 
 **Made with 🦀 and ❤️ by Aswin Krishnamoorthy**
 
-**Status**: Release Candidate | **Version**: v0.4.0-rc.1 | **Updated**: September 19, 2026 | **Cloud-Validated**: QA campaigns `v040-ga8` + `v040-ga9`, 247 gates each, 0 failures, 1 skip ✅
+**Status**: Release Candidate | **Version**: v0.5.0-rc.1 | **Updated**: October 19, 2026 | **Cloud-Validated**: QA campaigns `ga-050rc1-1` + `ga-050rc1-2`, 259 gates each, 0 failures, 1 skip ✅

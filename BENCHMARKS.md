@@ -71,7 +71,7 @@ little.
 
 ## Video revisions (frame-aligned chunking, measured 2026-10-14/15)
 
-**Build:** release, Windows, branch `spike/video-frame-chunking` | MP4/MOV/M4V/M4A/3GP now use a streaming, frame-aligned chunker at any file size. Video samples of 256 KiB or more become their own chunk (split at 4 MiB); audio, small frames and headers are content-defined chunked between frames. `MEDIAGIT_VIDEO_CHUNKER=cdc` restores the previous frame-blind chunking.
+**Build:** release, Windows, 0.5.0-rc.1 (branch `feat/v0.5.0-video`, originally `spike/video-frame-chunking`) | MP4/MOV/M4V/M4A/3GP now use a streaming, frame-aligned chunker at any file size. Video samples of 256 KiB or more become their own chunk (split at 4 MiB); audio, small frames and headers are content-defined chunked between frames. `MEDIAGIT_VIDEO_CHUNKER=cdc` restores the previous frame-blind chunking.
 
 **New bytes stored per revision** (real NLE ProRes 422 HQ exports and an H.264 export):
 
@@ -94,6 +94,31 @@ little.
 Private memory: about 365 MB for `add`, 44-46 MB for a packed restore. `add` on a 19 GB file went from a 7.8 GB to a 361 MB working set (windowed hashing). Packed chunk reads were quadratic (a 481 MB file: 0.7 s loose vs 21.6 s packed); they are now one ranged read per chunk through a pack locator (48 bytes per entry). Files over 16 GiB now work through add, commit, status, fsck, show, diff, merge/cherry-pick/rebase/revert, download and checkout (tested at 17.93 and 19.25 GiB).
 
 **Limits:** ProRes, DNxHR and JPEG 2000 chunks are stored raw (zstd ratio measured 1.0000 on Resolve 422 HQ and ARRI 4444 XQ). A colour-graded or fully re-encoded render still stores about 100% new bytes: no byte-level reuse exists between such revisions. The gains apply to edits that keep frames intact (trim, insert).
+
+---
+
+## Memory per command (4 GB random file, measured 2026-10-19)
+
+**Build:** release 0.5.0-rc.1, Windows, local server backed by MinIO-compatible storage. Shape is the campaign S4 drill: one 4 GB random file plus a 10,000-file corpus (56 MB). Peak **private** bytes, sampled by the campaign harness (`Measure-PeakRSS`).
+
+| Command | Client peak | Server peak | Time |
+|---|---:|---:|---:|
+| `add` (4 GB file only) | 537 MB | — | 13.5 s |
+| `add` (10k small files only) | 56 MB | — | 10.1 s |
+| `add` (both) | 548 MB | — | 29.1 s |
+| `push` (both) | 194 MB | 68 MB | 46.2 s |
+| `clone` (both, file hash verified) | 289 MB | 98 MB | 80.5 s |
+
+`add` is the only command near half a gigabyte, and most of that is the delta-base cache (`MEDIAGIT_CHUNK_CACHE_BYTES`, default 256 MiB). Interleaved A/B on `add` of the 4 GB file:
+
+| Run | Cache | Client peak | Time |
+|---|---|---:|---:|
+| 1 | default (256 MiB) | 627 MB | 13.2 s |
+| 2 | off (`0`) | 257 MB | 13.5 s |
+| 3 | default | 489 MB | 13.9 s |
+| 4 | off | 239 MB | 13.3 s |
+
+The cache is worth 230–390 MB of peak and nothing in speed **on random data**, because random chunks never find a delta base. On delta-heavy data (PSD, WAV revision chains) the cache saves a storage read and decompress per delta hit, so it is kept on by default; set it lower on low-memory machines. Push does not buffer whole packs: an earlier estimate of ~1 GB push memory was never measured, and this measurement refutes it.
 
 ---
 
