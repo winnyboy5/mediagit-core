@@ -104,6 +104,23 @@ foreach ($backend in $QA.Backends) {
     Rec $backend "push" $payloadMB $r.Sec ($r.Exit -eq 0) "exit=$($r.Exit)"
     if ($r.Exit -ne 0) { continue }
 
+    # -- pack fast path: did the push silently drop to the per-chunk route? --
+    # Same backend-independent rule as 10_scale's S5 packfastpath (see the
+    # history there): every pack offered an upload URL must register. A pack
+    # failure falls back to per-chunk uploads, still exits 0, and is ~9x slower
+    # (20260821-ga11), so exit code and parity above cannot see it. Read BEFORE
+    # the clone so clone traffic cannot enter the counts.
+    $fp = Get-QaPackFastPathCounts $srv.OutLog
+    if ($null -eq $fp) {
+      Rec $backend "packfastpath" "" "" "SKIP" "server log unreadable at $($srv.OutLog)"
+    } elseif ($fp.Offered -le 0) {
+      Rec $backend "packfastpath" "" "" "SKIP" "fast path not offered (no pack upload URLs minted)"
+    } else {
+      $fpPass = ($fp.Completed -ge $fp.Offered)
+      Rec $backend "packfastpath" "" "" $fpPass ("packsOffered={0} packsCompleted={1} perChunkProxyPUTs={2}{3}" -f `
+        $fp.Offered, $fp.Completed, $fp.ChunkPuts, $(if ($fpPass) { "" } else { " - FAST PATH BROKE: the push fell back to the per-chunk path" }))
+    }
+
     # -- clone (timed) + full hash parity --
     $CL = Join-Path $QA.Work "remote-clone-$backend"
     if (Test-Path $CL) { Remove-Item -Recurse -Force $CL }
