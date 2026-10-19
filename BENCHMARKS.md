@@ -118,7 +118,24 @@ Private memory: about 365 MB for `add`, 44-46 MB for a packed restore. `add` on 
 | 3 | default | 489 MB | 13.9 s |
 | 4 | off | 239 MB | 13.3 s |
 
-The cache is worth 230–390 MB of peak and nothing in speed **on random data**, because random chunks never find a delta base. On delta-heavy data (PSD, WAV revision chains) the cache saves a storage read and decompress per delta hit, so it is kept on by default; set it lower on low-memory machines. Push does not buffer whole packs: an earlier estimate of ~1 GB push memory was never measured, and this measurement refutes it.
+The cache is worth 230–390 MB of peak and nothing in speed **on random data**, because random chunks never find a delta base. Push does not buffer whole packs: an earlier estimate of ~1 GB push memory was never measured, and this measurement refutes it.
+
+### Delta-base cache sizing (measured 2026-10-19, release `0.5.0-rc.1`)
+
+Two questions, interleaved runs at 256 MiB, 64 MiB and off, two of each. **Across commits** (one version added per commit, WAV ×5, GLB ×3, PNG ×5, real ProRes ×4) the cache changed nothing that is stored: store sizes identical at every size, base fetches 1–27 ms in total. It only cost memory — ProRes peaked at 379–390 MB with 256 MiB, 205–210 MB with 64 MiB, 102–108 MB with it off, because ProRes frames are cached but never become bases.
+
+**Within one `add`** of many similar files the cache is what makes deltas possible, because a base still in flight is not in storage yet:
+
+| One `add` of… | 256 MiB | 64 MiB | off |
+|---|---:|---:|---:|
+| 12 similar 32 MiB files | 33.1 MB, 10 deltas | 33.2 MB, 10 deltas | **42.7–43.7 MB, 0–1 deltas** |
+| 5 WAV versions | 41.0 MB, 2 deltas | 41.0 MB, 2 deltas | **43.4 MB, 0 deltas** |
+
+So the default is now **128 MiB**: the per-file in-flight budget, which covers every in-flight base by construction while dropping the memory 256 MiB spent on chunks that are never bases.
+
+### Compression memory on multi-file adds (measured 2026-10-19)
+
+The same runs exposed a larger cost the cache does not explain: one `add` of five 42 MB WAV versions peaked at **5.4–7.1 GB**, three 14 MB GLB versions at ~1.5 GB, cache on or off. Each file ran its own pool of up to 16 workers, each compressing on its own thread, so ~80 zstd level-19 contexts were live at once; and `encode_all` never told zstd the input size, so each context was sized for an unbounded stream. Two fixes: compression now passes the size (`bulk::compress` — on a 42 MB WAV across 12 threads, 1,075 → 635 MB with byte-identical output size), and large-chunk compressions share one process-wide cap of one per core (`MEDIAGIT_ADD_COMPRESS_CONCURRENCY`).
 
 ---
 

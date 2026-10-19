@@ -104,7 +104,7 @@ Reduce if your system has less than 8 GB RAM:
 export MEDIAGIT_ODB_CACHE_MB=256
 ```
 
-Defaults are 512 MiB (`MEDIAGIT_ODB_CACHE_MB`) and 256 MiB
+Defaults are 512 MiB (`MEDIAGIT_ODB_CACHE_MB`) and 128 MiB
 (`MEDIAGIT_CHUNK_CACHE_BYTES`). See [Environment Variables](../reference/environment.md).
 
 ---

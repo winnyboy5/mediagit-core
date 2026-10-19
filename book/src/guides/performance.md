@@ -129,7 +129,7 @@ For workstations with < 8 GB RAM:
 export MEDIAGIT_ODB_CACHE_MB=256
 ```
 
-Defaults: 512 MiB and 256 MiB respectively. There is no TTL setting — neither
+Defaults: 512 MiB and 128 MiB respectively. There is no TTL setting — neither
 cache expires by time; both evict by size.
 
 ## Clone Behaviour

@@ -49,11 +49,22 @@ pub(crate) fn cache_max_bytes() -> u64 {
     }
 }
 
-/// Default byte budget for `base_chunk_cache` (256 MiB). Previously this
+/// Default byte budget for `base_chunk_cache` (128 MiB). Previously this
 /// cache was bounded by *entry count* (64 entries) with no size weigher —
 /// with chunks up to 32 MiB each, 64 entries could balloon to multiple GB.
 /// Override via `MEDIAGIT_CHUNK_CACHE_BYTES`.
-const DEFAULT_BASE_CHUNK_CACHE_BYTES: u64 = 256 * 1024 * 1024;
+///
+/// Sized to the per-file in-flight budget (`MEDIAGIT_ADD_INFLIGHT_MB`, 128 MiB)
+/// on purpose. The cache's job that matters is reachability, not speed: a base
+/// that is still in flight is not in storage yet, so a cache miss silently
+/// drops the delta. Measured 2026-10-19 on one `add` of many similar files:
+/// with the cache off, 12 similar 32 MiB files stored 42.7 MB (1 delta)
+/// instead of 33.1 MB (10 deltas), and 5 WAV versions lost every delta.
+/// 64 MiB kept every delta in that test; 128 MiB covers the whole in-flight
+/// window by construction. Across commits the cache bought nothing: identical
+/// store sizes at 256, 64 and 0 MiB, base fetches of 1-27 ms. Meanwhile 256 MiB
+/// cost up to ~290 MB of peak memory on ProRes, whose frames are never bases.
+const DEFAULT_BASE_CHUNK_CACHE_BYTES: u64 = 128 * 1024 * 1024;
 
 fn base_chunk_cache_bytes() -> u64 {
     match std::env::var("MEDIAGIT_CHUNK_CACHE_BYTES") {
@@ -1257,6 +1268,21 @@ mod tests {
                 .resolve_delta_base(leaf, Oid::hash(b"memo-deep-new")),
             Ok(Some(root)),
             "at MAX_DELTA_DEPTH the memo must re-target to the root, like storage"
+        );
+    }
+
+    /// The delta-base cache default must cover the per-file in-flight budget.
+    ///
+    /// A base that is still in flight is not in storage yet, so the cache is the
+    /// only way to reach it; a cache smaller than the in-flight window silently
+    /// stores chunks in full. Measured: with the cache off, one `add` of 12
+    /// similar files stored 29% more. Raising one default without the other
+    /// reopens that.
+    #[test]
+    fn cache_default_covers_inflight_budget() {
+        assert!(
+            DEFAULT_BASE_CHUNK_CACHE_BYTES >= (chunks::DEFAULT_INFLIGHT_MB as u64) * 1024 * 1024,
+            "delta-base cache default is smaller than the in-flight budget"
         );
     }
 
