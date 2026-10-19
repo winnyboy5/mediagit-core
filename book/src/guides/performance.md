@@ -120,7 +120,7 @@ and validated, and no cache ever read it:
 
 ```bash
 export MEDIAGIT_ODB_CACHE_MB=1024             # 1 GiB, for large repos
-export MEDIAGIT_CHUNK_CACHE_BYTES=536870912   # 512 MiB chunk read cache
+export MEDIAGIT_CHUNK_CACHE_BYTES=536870912   # 512 MiB delta-base cache (used by add)
 ```
 
 For workstations with < 8 GB RAM:
