@@ -88,9 +88,25 @@ pub async fn download_file_by_path(
         tokio::spawn(async move {
             use tokio::io::AsyncWriteExt;
             let mut w = writer;
-            for chunk_ref in &manifest.chunks {
+            // Whole-file check: per-chunk hashes cannot see a reordered or
+            // omitted manifest entry. The last chunk is withheld until the
+            // hash matches, so a bad file ends short of Content-Length and the
+            // client sees a failed download instead of a clean one.
+            let mut hasher = mediagit_versioning::hash::Hasher::new();
+            let last = manifest.chunks.len().saturating_sub(1);
+            for (idx, chunk_ref) in manifest.chunks.iter().enumerate() {
                 match odb_clone.get_chunk(&chunk_ref.id).await {
                     Ok(data) => {
+                        hasher.update(&data);
+                        if idx == last
+                            && Oid::from_bytes(std::mem::take(&mut hasher).finalize()) != blob_oid
+                        {
+                            tracing::error!(
+                                oid = %blob_oid,
+                                "Chunked file failed whole-object verification; aborting download"
+                            );
+                            return;
+                        }
                         if w.write_all(&data).await.is_err() {
                             tracing::warn!("Client disconnected during chunked file download");
                             return;
