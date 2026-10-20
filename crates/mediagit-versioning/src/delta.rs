@@ -56,6 +56,25 @@ fn zstd_dict_level() -> i32 {
     })
 }
 
+/// Magic bytes identifying the XOR-planes delta format
+const XOR_PLANES_MAGIC: [u8; 2] = [0x58, 0x50]; // "XP"
+
+/// Only XP wire version this build reads and writes.
+const XOR_PLANES_VERSION: u8 = 1;
+
+/// zstd level for the XP payload. The XOR residual is mostly zeros, so a
+/// cheap level is enough.
+const XOR_PLANES_ZSTD_LEVEL: i32 = 3;
+
+/// Which codec produced a delta's payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeltaCodec {
+    /// zstd with the base as a raw dictionary ("ZD")
+    ZstdDict,
+    /// `target ^ base`, byte-plane split with stride `w` at `phase`, zstd ("XP")
+    XorPlanes { w: u8, phase: u8 },
+}
+
 /// Delta encoding result
 #[derive(Debug, Clone)]
 pub struct Delta {
@@ -65,15 +84,23 @@ pub struct Delta {
     pub result_size: usize,
     /// Compression ratio of delta vs original
     pub compression_ratio: f64,
-    /// Zstd-dict compressed data
+    /// Codec that produced `zstd_data`
+    codec: DeltaCodec,
+    /// Compressed payload (zstd-dict for ZD, zstd of planes(xor) for XP)
     zstd_data: Vec<u8>,
 }
 
 impl Delta {
     /// Serialize delta to bytes
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(4 + self.zstd_data.len());
-        bytes.extend_from_slice(&ZSTD_DICT_MAGIC);
+        let mut bytes = Vec::with_capacity(8 + self.zstd_data.len());
+        match self.codec {
+            DeltaCodec::ZstdDict => bytes.extend_from_slice(&ZSTD_DICT_MAGIC),
+            DeltaCodec::XorPlanes { w, phase } => {
+                bytes.extend_from_slice(&XOR_PLANES_MAGIC);
+                bytes.extend_from_slice(&[XOR_PLANES_VERSION, w, phase]);
+            }
+        }
         encode_varint(&mut bytes, self.base_size as u64);
         encode_varint(&mut bytes, self.result_size as u64);
         bytes.extend_from_slice(&self.zstd_data);
@@ -82,11 +109,27 @@ impl Delta {
 
     /// Deserialize delta from bytes
     pub fn from_bytes(data: &[u8]) -> anyhow::Result<Self> {
-        if data.len() < 2 || data[0] != ZSTD_DICT_MAGIC[0] || data[1] != ZSTD_DICT_MAGIC[1] {
-            anyhow::bail!("Invalid delta format: missing ZD magic bytes");
+        let codec;
+        let mut pos = 2; // skip magic
+        if data.len() >= 2 && data[..2] == ZSTD_DICT_MAGIC {
+            codec = DeltaCodec::ZstdDict;
+        } else if data.len() >= 2 && data[..2] == XOR_PLANES_MAGIC {
+            if data.len() < 5 {
+                anyhow::bail!("Invalid XP delta: truncated header");
+            }
+            if data[2] != XOR_PLANES_VERSION {
+                anyhow::bail!("Unsupported XP delta version {}", data[2]);
+            }
+            let (w, phase) = (data[3], data[4]);
+            if !(1..=8).contains(&w) || phase >= w {
+                anyhow::bail!("Invalid XP delta parameters: w={w} phase={phase}");
+            }
+            codec = DeltaCodec::XorPlanes { w, phase };
+            pos = 5;
+        } else {
+            anyhow::bail!("Invalid delta format: missing ZD or XP magic bytes");
         }
 
-        let mut pos = 2; // skip magic
         let base_size = decode_varint(data, &mut pos)? as usize;
         let result_size = decode_varint(data, &mut pos)? as usize;
         let zstd_data = data[pos..].to_vec();
@@ -96,9 +139,44 @@ impl Delta {
             base_size,
             result_size,
             compression_ratio,
+            codec,
             zstd_data,
         })
     }
+}
+
+/// `target ^ base` over the overlap; target bytes past `base.len()` kept as-is.
+fn xor_residual(base: &[u8], target: &[u8]) -> Vec<u8> {
+    let mut out = target.to_vec();
+    for (o, b) in out.iter_mut().zip(base) {
+        *o ^= *b;
+    }
+    out
+}
+
+/// Stable byte-plane split: byte `j` goes to plane `(j + phase) % w`.
+fn planes(data: &[u8], w: usize, phase: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len());
+    for p in 0..w {
+        // first j with (j + phase) % w == p
+        let start = (p + w - phase % w) % w;
+        out.extend(data.iter().skip(start).step_by(w));
+    }
+    out
+}
+
+/// Exact inverse of [`planes`].
+fn unplanes(data: &[u8], w: usize, phase: usize) -> Vec<u8> {
+    let mut out = vec![0u8; data.len()];
+    let mut src = data.iter();
+    for p in 0..w {
+        let start = (p + w - phase % w) % w;
+        for slot in out.iter_mut().skip(start).step_by(w) {
+            // lengths match by construction
+            *slot = *src.next().expect("plane length invariant");
+        }
+    }
+    out
 }
 
 /// Delta encoder using zstd dictionary compression
@@ -114,6 +192,7 @@ impl DeltaEncoder {
                 base_size: base.len(),
                 result_size: 0,
                 compression_ratio: 0.0,
+                codec: DeltaCodec::ZstdDict,
                 zstd_data: Vec::new(),
             };
         }
@@ -132,6 +211,42 @@ impl DeltaEncoder {
             base_size: base.len(),
             result_size: target.len(),
             compression_ratio,
+            codec: DeltaCodec::ZstdDict,
+            zstd_data,
+        }
+    }
+
+    /// Encode with the XP codec: `zstd(planes(target ^ base, w, phase))`.
+    ///
+    /// Invalid `w` (not 1..=8) or `phase >= w` falls back to `w = 1, phase = 0`
+    /// (plain XOR) instead of failing, matching `encode`'s infallible signature.
+    pub fn encode_xor_planes(base: &[u8], target: &[u8], w: u8, phase: u8) -> Delta {
+        let (w, phase) = if (1..=8).contains(&w) && phase < w {
+            (w, phase)
+        } else {
+            (1, 0)
+        };
+        let codec = DeltaCodec::XorPlanes { w, phase };
+        if target.is_empty() {
+            return Delta {
+                base_size: base.len(),
+                result_size: 0,
+                compression_ratio: 0.0,
+                codec,
+                zstd_data: Vec::new(),
+            };
+        }
+
+        let split = planes(&xor_residual(base, target), w as usize, phase as usize);
+        let zstd_data = zstd::bulk::compress(&split, XOR_PLANES_ZSTD_LEVEL)
+            .expect("in-memory zstd compression cannot fail");
+        let compression_ratio = zstd_data.len() as f64 / target.len() as f64;
+
+        Delta {
+            base_size: base.len(),
+            result_size: target.len(),
+            compression_ratio,
+            codec,
             zstd_data,
         }
     }
@@ -161,6 +276,30 @@ impl DeltaDecoder {
 
         if delta.zstd_data.is_empty() {
             return Ok(Vec::new());
+        }
+
+        if let DeltaCodec::XorPlanes { w, phase } = delta.codec {
+            if delta.base_size != base.len() {
+                anyhow::bail!(
+                    "XP delta base size mismatch: delta expects {}, got {}",
+                    delta.base_size,
+                    base.len()
+                );
+            }
+            let split = zstd::bulk::decompress(&delta.zstd_data, delta.result_size)
+                .map_err(|e| anyhow::anyhow!("Failed to decompress XP delta: {}", e))?;
+            if split.len() != delta.result_size {
+                anyhow::bail!(
+                    "Delta reconstruction size mismatch: {} != {}",
+                    split.len(),
+                    delta.result_size
+                );
+            }
+            let mut out = unplanes(&split, w as usize, phase as usize);
+            for (o, b) in out.iter_mut().zip(base) {
+                *o ^= *b;
+            }
+            return Ok(out);
         }
 
         let mut decoder = zstd::bulk::Decompressor::with_dictionary(base)?;
@@ -420,5 +559,112 @@ mod tests {
             "Delta of 95% similar 1MB chunks should be < 80%, was {:.1}%",
             ratio * 100.0
         );
+    }
+
+    fn pseudo(len: usize, seed: u32) -> Vec<u8> {
+        let mut s = seed.wrapping_mul(2654435761).wrapping_add(1);
+        (0..len)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 17;
+                s ^= s << 5;
+                (s >> 8) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_xp_roundtrip_matrix() {
+        for w in [1u8, 2, 4, 8] {
+            for phase in 0..w {
+                let wu = w as usize;
+                for len in [0, 1, wu - 1, wu + 1, 1001] {
+                    let target = pseudo(len, len as u32 + 7);
+                    let mut bases = vec![Vec::new(), pseudo(len, 99)];
+                    bases.push(pseudo(len / 2, 5));
+                    bases.push(pseudo(len + 13, 6));
+                    for base in bases {
+                        let d = DeltaEncoder::encode_xor_planes(&base, &target, w, phase);
+                        let d = Delta::from_bytes(&d.to_bytes()).unwrap();
+                        assert_eq!(
+                            DeltaDecoder::apply(&base, &d).unwrap(),
+                            target,
+                            "w={w} phase={phase} len={len} base={}",
+                            base.len()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_xp_invalid_params_fall_back_to_plain_xor() {
+        let (base, target) = (pseudo(100, 1), pseudo(100, 2));
+        for (w, p) in [(0u8, 0u8), (9, 0), (4, 4)] {
+            let d = DeltaEncoder::encode_xor_planes(&base, &target, w, p);
+            let bytes = d.to_bytes();
+            assert_eq!(&bytes[..5], &[b'X', b'P', 1, 1, 0]);
+            assert_eq!(DeltaDecoder::apply(&base, &d).unwrap(), target);
+        }
+    }
+
+    #[test]
+    fn test_xp_rejects_wrong_base_size_and_bad_header() {
+        let (base, target) = (pseudo(64, 1), pseudo(64, 2));
+        let d = DeltaEncoder::encode_xor_planes(&base, &target, 4, 1);
+        assert!(DeltaDecoder::apply(&base[..63], &d).is_err());
+
+        let mut bytes = d.to_bytes();
+        bytes[2] = 2; // unknown version
+        assert!(Delta::from_bytes(&bytes).is_err());
+        assert!(Delta::from_bytes(b"QQ\x00\x00\x00").is_err());
+        assert!(Delta::from_bytes(b"XP").is_err());
+    }
+
+    /// Pre-change ZD-only parser, copied verbatim: old binaries must error on XP.
+    fn old_zd_only_from_bytes(data: &[u8]) -> anyhow::Result<()> {
+        if data.len() < 2 || data[0] != ZSTD_DICT_MAGIC[0] || data[1] != ZSTD_DICT_MAGIC[1] {
+            anyhow::bail!("Invalid delta format: missing ZD magic bytes");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_xp_rejected_by_pre_change_parser() {
+        let d = DeltaEncoder::encode_xor_planes(b"abcd", b"abce", 2, 0);
+        assert!(old_zd_only_from_bytes(&d.to_bytes()).is_err());
+    }
+
+    #[test]
+    fn test_zd_wire_bytes_golden() {
+        let delta = DeltaEncoder::encode(
+            b"The quick brown fox jumps over the lazy dog",
+            b"The quick brown cat jumps over the lazy dog today",
+        );
+        let expected: &[u8] = &[
+            90, 68, 43, 49, 40, 181, 47, 253, 32, 49, 149, 0, 0, 80, 84, 99, 97, 116, 32, 116, 111,
+            100, 97, 121, 2, 0, 0, 28, 215, 169, 43,
+        ];
+        assert_eq!(delta.to_bytes(), expected);
+    }
+
+    #[test]
+    fn test_xp_beats_zd_on_perturbed_floats() {
+        let base: Vec<u8> = (0..16384u32)
+            .flat_map(|i| (1000.0f32 + (i as f32) * 0.37).to_le_bytes())
+            .collect();
+        let target: Vec<u8> = base
+            .chunks(4)
+            .enumerate()
+            .flat_map(|(i, c)| {
+                let v = f32::from_le_bytes([c[0], c[1], c[2], c[3]])
+                    + (((i * 2654435761) % 1000) as f32) * 1e-6;
+                v.to_le_bytes()
+            })
+            .collect();
+        let xp = DeltaEncoder::encode_xor_planes(&base, &target, 4, 0).to_bytes();
+        let zd = DeltaEncoder::encode(&base, &target).to_bytes();
+        assert!(xp.len() < zd.len(), "xp {} vs zd {}", xp.len(), zd.len());
     }
 }
