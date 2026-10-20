@@ -1275,6 +1275,7 @@ impl ObjectDatabase {
     ///     "/path/to/large_video.mp4",
     ///     "large_video.mp4",
     ///     None,
+    ///     None,
     /// ).await?;
     /// println!("Stored file with OID: {}", oid);
     /// # Ok(())
