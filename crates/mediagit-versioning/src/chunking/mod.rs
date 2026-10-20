@@ -241,7 +241,65 @@ fn get_chunk_params(file_size: u64) -> (usize, usize, usize) {
 /// delta_psd / delta_indd at 100 MB+.
 fn get_creative_chunk_params(_file_size: u64) -> (usize, usize, usize) {
     const MB: usize = 1024 * 1024;
-    (MB, 512 * 1024, 4 * MB)
+    creative_params_from_kb(creative_avg_kb()).unwrap_or((MB, 512 * 1024, 4 * MB))
+}
+
+/// Extensions of creative container formats (embedded compressed streams +
+/// trailing table). Single source of truth for the creative-params arms in
+/// `ContentChunker::chunk` and for the `MEDIAGIT_CREATIVE_AVG_KB` streaming path.
+fn is_creative_container_ext(ext: &str) -> bool {
+    matches!(
+        ext,
+        "pdf"
+            | "eps"
+            | "ai"
+            | "psd"
+            | "psb"
+            | "fig"
+            | "sketch"
+            | "xd"
+            | "indd"
+            | "indt"
+            | "aep"
+            | "prproj"
+            | "mb"
+    )
+}
+
+static CREATIVE_AVG_KB: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+
+/// Parse the `MEDIAGIT_CREATIVE_AVG_KB` value. Unset, `0` or unparsable means
+/// "knob off" (`None`); otherwise the value is clamped to 16..=4096 KiB.
+/// Split out so tests can exercise the parsing without the process-wide `OnceLock`.
+fn creative_avg_kb_from_env(var: Option<&str>) -> Option<usize> {
+    match var.and_then(|v| v.parse::<usize>().ok()) {
+        None | Some(0) => None,
+        Some(kb) => Some(kb.clamp(16, 4096)),
+    }
+}
+
+/// Average chunk size (KiB) override for creative containers, from
+/// `MEDIAGIT_CREATIVE_AVG_KB` (default: unset = today's sizing). Read once and cached.
+fn creative_avg_kb() -> Option<usize> {
+    *CREATIVE_AVG_KB.get_or_init(|| {
+        creative_avg_kb_from_env(std::env::var("MEDIAGIT_CREATIVE_AVG_KB").ok().as_deref())
+    })
+}
+
+/// `(avg, min, max)` = `(N, N/4, N*4)` KiB for the knob value, `None` when off.
+fn creative_params_from_kb(kb: Option<usize>) -> Option<(usize, usize, usize)> {
+    kb.map(|kb| (kb * 1024, kb / 4 * 1024, kb * 4 * 1024))
+}
+
+/// Params for the `StreamCDC` path of `collect_file_chunks_blocking`: tier
+/// params by size, unless the creative knob is set and `ext` is a creative container.
+fn stream_chunk_params(ext: &str, file_size: u64, kb: Option<usize>) -> (usize, usize, usize) {
+    if is_creative_container_ext(ext)
+        && let Some(p) = creative_params_from_kb(kb)
+    {
+        return p;
+    }
+    get_chunk_params(file_size)
 }
 
 /// Chunk params for the audio tier.
@@ -2556,5 +2614,89 @@ mod tests {
             streamed.iter().map(|c| c.id).collect::<Vec<_>>(),
             "below the cap, streaming collection must match direct chunk() byte-for-byte"
         );
+    }
+
+    #[test]
+    fn test_creative_avg_kb_env_parsing() {
+        assert_eq!(creative_avg_kb_from_env(None), None);
+        assert_eq!(creative_avg_kb_from_env(Some("0")), None);
+        assert_eq!(creative_avg_kb_from_env(Some("garbage")), None);
+        assert_eq!(creative_avg_kb_from_env(Some("128")), Some(128));
+        assert_eq!(creative_avg_kb_from_env(Some("1")), Some(16));
+        assert_eq!(creative_avg_kb_from_env(Some("99999")), Some(4096));
+        assert_eq!(
+            creative_params_from_kb(Some(128)),
+            Some((128 * 1024, 32 * 1024, 512 * 1024))
+        );
+        assert_eq!(creative_params_from_kb(None), None);
+    }
+
+    #[test]
+    fn test_stream_chunk_params_knob_scoping() {
+        let size = 8 * 1024 * 1024;
+        // Knob off: identical to the tier params, creative extension or not.
+        assert_eq!(
+            stream_chunk_params("pdf", size, None),
+            get_chunk_params(size)
+        );
+        // Knob on: creative extensions only.
+        assert_eq!(
+            stream_chunk_params("pdf", size, Some(128)),
+            (128 * 1024, 32 * 1024, 512 * 1024)
+        );
+        assert_eq!(stream_chunk_params("mb", size, Some(128)).0, 128 * 1024);
+        assert_eq!(
+            stream_chunk_params("mp4", size, Some(128)),
+            get_chunk_params(size)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_creative_knob_average_chunk_size() {
+        let data = pseudo_random_bytes(8 * 1024 * 1024, 11);
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let (avg, min, max) = stream_chunk_params("pdf", data.len() as u64, Some(128));
+        let chunks = chunker.chunk_fastcdc(&data, avg, min, max).await.unwrap();
+        let mean = data.len() / chunks.len();
+        assert!(
+            (64 * 1024..=256 * 1024).contains(&mean),
+            "mean chunk {mean} not near 128 KiB"
+        );
+    }
+
+    /// Knob unset: a >=5 MiB `.pdf` streams with the tier params, exactly as
+    /// before the knob existed (it never used creative params on this path).
+    #[tokio::test]
+    async fn test_collect_blocking_creative_ext_unchanged_without_knob() {
+        if creative_avg_kb().is_some() {
+            return; // knob set in the environment; this test pins the unset behavior
+        }
+        let data = pseudo_random_bytes(6 * 1024 * 1024, 5);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.pdf");
+        std::fs::write(&path, &data).unwrap();
+
+        let (avg, min, max) = get_chunk_params(data.len() as u64);
+        let expected: Vec<_> = fastcdc::v2020::StreamCDC::with_level_and_seed(
+            std::io::Cursor::new(&data),
+            min,
+            avg,
+            max,
+            fastcdc::v2020::Normalization::Level1,
+            0,
+        )
+        .map(|c| c.unwrap().length)
+        .collect();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let chunker = ContentChunker::new(ChunkStrategy::MediaAware);
+        let handle =
+            tokio::task::spawn_blocking(move || chunker.collect_file_chunks_blocking(path, tx));
+        let mut got = Vec::new();
+        while let Some(c) = rx.recv().await {
+            got.push(c.size);
+        }
+        handle.await.unwrap().unwrap();
+        assert_eq!(got, expected);
     }
 }
