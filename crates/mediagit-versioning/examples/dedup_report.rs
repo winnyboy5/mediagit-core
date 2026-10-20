@@ -17,6 +17,19 @@
 //!   Defaults to repo-root `test-files/`. The `# pairs` section is always
 //!   resolved against `dev-tests/dedup-pairs/`, regardless of this override.
 //!
+//!   `MEDIAGIT_BENCH_MANIFEST` / `MEDIAGIT_BENCH_PAIRS` - override the
+//!   manifest file and the pairs directory, so a study corpus can be measured
+//!   without touching the gate corpus. Default to the paths above.
+//!
+//!   `MEDIAGIT_BENCH_NEGATIVE_CONTROL=1` - pair each `_v2` with the `_v1` of a
+//!   DIFFERENT pair (rotated by one) for both chunk dedup and delta, and emit
+//!   `"negative_control": true`. Dedup/delta should collapse to ~0; if they
+//!   don't, the harness is measuring something other than version similarity.
+//!
+//! Files >= `STREAMING_THRESHOLD` are chunked through
+//! `collect_file_chunks_blocking`, exactly as `mediagit add` does; smaller
+//! files use the in-memory `chunk()`. Seed comes from `MEDIAGIT_CDC_SEED`.
+//!
 //! Peak working set (Windows `PeakWorkingSet64`) is printed to stderr as
 //! `PEAK_RSS_MB: <value>` rather than embedded in the JSON, since it is not
 //! reproducible byte-for-byte between runs the way chunk/compression/delta
@@ -38,6 +51,11 @@ use std::time::Instant;
 /// only used to exercise the same code path as production, not to gate
 /// pass/fail here (that's based on the actual delta size, see `compute_deltas`).
 const MIN_SIMILARITY_THRESHOLD: f64 = 0.30;
+
+/// Mirrors `STREAMING_THRESHOLD` in `crates/mediagit-cli/src/commands/utils.rs`
+/// (the CLI crate can't be depended on from here). Files at or above this size
+/// take the streaming/file chunk path in production `add`.
+const STREAMING_THRESHOLD: u64 = 5 * 1024 * 1024;
 
 #[derive(Debug, Default, Clone, Serialize)]
 struct ExtStats {
@@ -127,6 +145,8 @@ impl ExtAccum {
 #[derive(Debug, Serialize)]
 struct Report {
     schema_version: u32,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    negative_control: bool,
     generated: String,
     corpus: String,
     totals: ExtStats,
@@ -136,12 +156,18 @@ struct Report {
 #[tokio::main]
 async fn main() -> Result<()> {
     let repo_root = repo_root()?;
-    let manifest_path = repo_root.join("dev-tests").join("dedup-corpus.txt");
+    let manifest_path = match std::env::var("MEDIAGIT_BENCH_MANIFEST") {
+        Ok(p) => PathBuf::from(p),
+        Err(_) => repo_root.join("dev-tests").join("dedup-corpus.txt"),
+    };
     let corpus_root = match std::env::var("MEDIAGIT_BENCH_CORPUS") {
         Ok(p) => PathBuf::from(p),
         Err(_) => repo_root.join("test-files"),
     };
-    let pairs_root = repo_root.join("dev-tests").join("dedup-pairs");
+    let pairs_root = match std::env::var("MEDIAGIT_BENCH_PAIRS") {
+        Ok(p) => PathBuf::from(p),
+        Err(_) => repo_root.join("dev-tests").join("dedup-pairs"),
+    };
 
     let (corpus_files, pair_files) = parse_manifest(&manifest_path)?;
 
@@ -162,20 +188,55 @@ async fn main() -> Result<()> {
         )
         .await?;
     }
-    for rel in &pair_files {
-        let path = pairs_root.join(rel);
-        process_file(
-            &path,
-            rel,
-            &chunker,
-            &compressor,
-            &mut seen_chunks,
-            &mut per_ext,
-        )
-        .await?;
+    let negative_control = std::env::var("MEDIAGIT_BENCH_NEGATIVE_CONTROL").as_deref() == Ok("1");
+    let pairs = group_pairs(&pair_files);
+    // (v1, v2) actually compared; in control mode v2 of pair i meets v1 of pair i+1.
+    let mut effective: Vec<(String, String)> = Vec::new();
+    if negative_control {
+        anyhow::ensure!(
+            pairs.len() >= 2,
+            "negative control needs at least 2 complete pairs"
+        );
+        for (i, (_, _, v2)) in pairs.iter().enumerate() {
+            let v1 = &pairs[(i + 1) % pairs.len()].1;
+            effective.push((v1.clone(), v2.clone()));
+        }
+        // Dedup: each v2 only sees the foreign v1 it is paired with.
+        for (v1, v2) in &effective {
+            seen_chunks.clear();
+            for rel in [v1, v2] {
+                let path = pairs_root.join(rel);
+                process_file(
+                    &path,
+                    rel,
+                    &chunker,
+                    &compressor,
+                    &mut seen_chunks,
+                    &mut per_ext,
+                )
+                .await?;
+            }
+        }
+    } else {
+        for rel in &pair_files {
+            let path = pairs_root.join(rel);
+            process_file(
+                &path,
+                rel,
+                &chunker,
+                &compressor,
+                &mut seen_chunks,
+                &mut per_ext,
+            )
+            .await?;
+        }
+        effective = pairs
+            .iter()
+            .map(|(_, a, b)| (a.clone(), b.clone()))
+            .collect();
     }
 
-    compute_deltas(&pairs_root, &pair_files, &mut per_ext)?;
+    compute_deltas(&pairs_root, &effective, &mut per_ext)?;
 
     let mut totals = ExtAccum::default();
     for acc in per_ext.values() {
@@ -184,6 +245,7 @@ async fn main() -> Result<()> {
 
     let report = Report {
         schema_version: 1,
+        negative_control,
         generated: chrono::Utc::now().to_rfc3339(),
         corpus: corpus_root.display().to_string(),
         totals: totals.finalize(),
@@ -276,16 +338,35 @@ async fn process_file(
         .unwrap_or(rel);
     let obj_type = CompObjectType::from_path(rel);
 
-    // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- dev example tool, local CLI args
-    let data = tokio::fs::read(path)
-        .await
-        .with_context(|| format!("reading {}", path.display()))?;
+    let size = std::fs::metadata(path)
+        .with_context(|| format!("stat {}", path.display()))?
+        .len();
 
     let start = Instant::now();
-    let chunks = chunker
-        .chunk(&data, filename)
-        .await
-        .with_context(|| format!("chunking {}", path.display()))?;
+    let chunks = if size >= STREAMING_THRESHOLD {
+        // Production path for large files (add.rs -> collect_file_chunks_blocking).
+        // ponytail: collected into a Vec (production streams); fine for a bench.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let drain = tokio::spawn(async move {
+            let mut out = Vec::new();
+            while let Some(c) = rx.recv().await {
+                out.push(c);
+            }
+            out
+        });
+        tokio::task::block_in_place(|| chunker.collect_file_chunks_blocking(path, tx))
+            .with_context(|| format!("chunking {}", path.display()))?;
+        drain.await?
+    } else {
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- dev example tool, local CLI args
+        let data = tokio::fs::read(path)
+            .await
+            .with_context(|| format!("reading {}", path.display()))?;
+        chunker
+            .chunk(&data, filename)
+            .await
+            .with_context(|| format!("chunking {}", path.display()))?
+    };
 
     let acc = per_ext.entry(ext).or_default();
     acc.file_count += 1;
@@ -308,14 +389,8 @@ async fn process_file(
     Ok(())
 }
 
-/// Find `<name>_v1.<ext>` / `<name>_v2.<ext>` pairs among the pair-section
-/// manifest entries and run similarity + delta encoding v2-against-v1,
-/// folding the result into the same per-extension accumulator used above.
-fn compute_deltas(
-    pairs_root: &Path,
-    pair_files: &[String],
-    per_ext: &mut BTreeMap<String, ExtAccum>,
-) -> Result<()> {
+/// Group pair-section entries into complete `(ext, v1, v2)` triples.
+fn group_pairs(pair_files: &[String]) -> Vec<(String, String, String)> {
     let mut groups: BTreeMap<(String, String), (Option<String>, Option<String>)> = BTreeMap::new();
 
     for rel in pair_files {
@@ -330,10 +405,22 @@ fn compute_deltas(
         }
     }
 
-    for ((_, ext), (v1_rel, v2_rel)) in groups {
-        let (Some(v1_rel), Some(v2_rel)) = (v1_rel, v2_rel) else {
-            continue; // incomplete pair, skip
-        };
+    groups
+        .into_iter()
+        .filter_map(|((_, ext), (v1, v2))| Some((ext, v1?, v2?)))
+        .collect()
+}
+
+/// Run similarity + delta encoding v2-against-v1 for each `(v1, v2)` pair,
+/// folding the result into the per-extension accumulator (keyed by v2's ext).
+fn compute_deltas(
+    pairs_root: &Path,
+    pairs: &[(String, String)],
+    per_ext: &mut BTreeMap<String, ExtAccum>,
+) -> Result<()> {
+    for (v1_rel, v2_rel) in pairs {
+        let ext = extension_of(v2_rel);
+        let (v1_rel, v2_rel) = (v1_rel.clone(), v2_rel.clone());
 
         // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- dev example tool, local CLI args
         let v1_data = std::fs::read(pairs_root.join(&v1_rel))
