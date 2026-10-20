@@ -101,15 +101,17 @@ Private memory: about 365 MB for `add`, 44-46 MB for a packed restore. `add` on 
 
 **Build:** release 0.5.0-rc.1, Windows, local server backed by MinIO-compatible storage. Shape is the campaign S4 drill: one 4 GB random file plus a 10,000-file corpus (56 MB). Peak **private** bytes, sampled by the campaign harness (`Measure-PeakRSS`).
 
-| Command | Client peak | Server peak | Time |
+| Command | Client peak (before → after) | Server peak | Time (before → after) |
 |---|---:|---:|---:|
-| `add` (4 GB file only) | 537 MB | — | 13.5 s |
-| `add` (10k small files only) | 56 MB | — | 10.1 s |
-| `add` (both) | 548 MB | — | 29.1 s |
-| `push` (both) | 194 MB | 68 MB | 46.2 s |
-| `clone` (both, file hash verified) | 289 MB | 98 MB | 80.5 s |
+| `add` (4 GB file only) | 537 → **417 MB** | — | 13.5 → 8.7 s |
+| `add` (10k small files only) | 56 → 55 MB | — | 10.1 → 6.7 s |
+| `add` (both) | 548 → **487 MB** | — | 29.1 → 16.2 s |
+| `push` (both) | 194 → 191 MB | 68 → 66 MB | 46.2 → 30.4 s |
+| `clone` (both, file hash verified) | 289 → 314 MB | 98 → 98 MB | 80.5 → 49.7 s |
 
-`add` is the only command near half a gigabyte, and most of that is the delta-base cache (`MEDIAGIT_CHUNK_CACHE_BYTES`, default 256 MiB). Interleaved A/B on `add` of the 4 GB file:
+"Before" is the first measurement (256 MiB cache, unbounded zstd contexts); "after" is with the 128 MiB cache, size-aware zstd and the compression cap. Single runs each; the clone change is within run-to-run noise (that path was not modified). Every command now peaks under 512 MB.
+
+Before the fixes, `add` was the only command near half a gigabyte, and most of that was the delta-base cache (`MEDIAGIT_CHUNK_CACHE_BYTES`, then 256 MiB). Interleaved A/B on `add` of the 4 GB file:
 
 | Run | Cache | Client peak | Time |
 |---|---|---:|---:|
@@ -136,6 +138,14 @@ So the default is now **128 MiB**: the per-file in-flight budget, which covers e
 ### Compression memory on multi-file adds (measured 2026-10-19)
 
 The same runs exposed a larger cost the cache does not explain: one `add` of five 42 MB WAV versions peaked at **5.4–7.1 GB**, three 14 MB GLB versions at ~1.5 GB, cache on or off. Each file ran its own pool of up to 16 workers, each compressing on its own thread, so ~80 zstd level-19 contexts were live at once; and `encode_all` never told zstd the input size, so each context was sized for an unbounded stream. Two fixes: compression now passes the size (`bulk::compress` — on a 42 MB WAV across 12 threads, 1,075 → 635 MB with byte-identical output size), and large-chunk compressions share one process-wide cap of one per core (`MEDIAGIT_ADD_COMPRESS_CONCURRENCY`).
+
+Measured after both fixes (release build, default 128 MiB cache, 3 runs each):
+
+| One `add` of | Before | After | Store / deltas |
+|---|---|---|---|
+| 5 WAV versions (214 MB) | 5,427–7,114 MB, 9.4–11.7 s | **1,088–1,128 MB**, 6.8–7.4 s | 40.96 MB / 2, unchanged |
+| 3 GLB versions (41 MB) | 1,438–1,483 MB, 2.2–2.8 s | **854–855 MB**, 1.4–1.8 s | 7.8 MB / 1, unchanged |
+| 12 similar 32 MB files | 487–620 MB, 1.5–2.8 s | 478–574 MB, 1.4–1.7 s | 33.1 MB / 10, unchanged |
 
 ---
 
