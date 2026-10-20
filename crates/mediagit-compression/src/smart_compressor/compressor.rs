@@ -573,11 +573,12 @@ mod tests {
             CompressionStrategy::Zstd(CompressionLevel::Default)
         );
 
-        // PDF-based creative containers → Store (already compressed internally)
+        // Illustrator → Zstd Default (small files compress; large fall back to Store)
         assert_eq!(
             CompressionStrategy::for_object_type(ObjectType::AdobeIllustrator),
-            CompressionStrategy::Store
+            CompressionStrategy::Zstd(CompressionLevel::Default)
         );
+        // InDesign → Store (PDF container, unmeasured)
         assert_eq!(
             CompressionStrategy::for_object_type(ObjectType::AdobeIndesign),
             CompressionStrategy::Store

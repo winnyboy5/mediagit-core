@@ -114,10 +114,12 @@ impl CompressionStrategy {
             // GLB/FBX/DAE: binary mesh with metadata → 30-50% compression typical
             ObjectType::Model3D => CompressionStrategy::Zstd(CompressionLevel::Best),
 
-            // PDF-based creative containers: store without recompression
-            // AI/InDesign files are PDF containers with embedded compressed streams
-            // Zstd compression expands the data on every chunk, wasting CPU
-            ObjectType::AdobeIllustrator | ObjectType::AdobeIndesign => CompressionStrategy::Store,
+            // Illustrator: measured, small .ai files save 13.5% with Zstd, large ones
+            // ~0.3%; compress_with_strategy falls back to Store when output is not smaller.
+            ObjectType::AdobeIllustrator => CompressionStrategy::Zstd(CompressionLevel::Default),
+
+            // InDesign: PDF container with embedded compressed streams (unmeasured): store
+            ObjectType::AdobeIndesign => CompressionStrategy::Store,
 
             // Creative project files: Zstd default with heavy delta compression
             // These files have internal structure and benefit from both compression + delta
