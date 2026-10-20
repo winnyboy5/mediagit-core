@@ -166,7 +166,9 @@ async fn download_file_reconstructs_chunk_delta_whose_base_is_only_in_a_cloud_pa
         total_size: (base_payload.len() + leaf_payload.len()) as u64,
         filename: Some("hero.glb".to_string()),
     };
-    let blob_oid = Oid::hash(b"g5-hero-glb-manifest-marker");
+    // A chunked blob's OID is the hash of its reassembled content; the
+    // download handler verifies it before sending the last chunk.
+    let blob_oid = Oid::hash(&[base_payload.as_slice(), leaf_payload.as_slice()].concat());
     odb.put_manifest(&blob_oid, &manifest)
         .await
         .expect("put manifest");
@@ -209,5 +211,88 @@ async fn download_file_reconstructs_chunk_delta_whose_base_is_only_in_a_cloud_pa
         &body[..],
         &expected[..],
         "downloaded bytes must match base chunk + delta-reconstructed chunk"
+    );
+}
+
+/// The download handler must refuse to complete a chunked file whose
+/// reassembled bytes do not hash to the blob OID (here: two valid chunks
+/// listed in the wrong order). Per-chunk hashes all pass, so only the
+/// whole-file check can catch it; the client must see a failed body.
+#[tokio::test]
+async fn download_file_fails_when_reassembled_bytes_do_not_match_blob_oid() {
+    let server_temp = TempDir::new().unwrap();
+    let server_repos = server_temp.path().join("repos");
+    let server_repo = server_repos.join("order-repo");
+    let server_mediagit = server_repo.join(".mediagit");
+    tokio::fs::create_dir_all(server_mediagit.join("objects"))
+        .await
+        .unwrap();
+    tokio::fs::create_dir_all(server_mediagit.join("refs/heads"))
+        .await
+        .unwrap();
+
+    let storage = open_server_storage(&server_repo).await;
+    let odb = ObjectDatabase::with_smart_compression(storage.clone(), 100);
+    let smart = SmartCompressor::new();
+
+    let first = b"FIRST CHUNK of the file. ".repeat(64);
+    let second = b"SECOND CHUNK of the file. ".repeat(64);
+    let mut refs = Vec::new();
+    for payload in [&second, &first] {
+        // Listed second-then-first: each chunk is valid, the order is not.
+        let id = Oid::hash(payload);
+        let compressed = smart
+            .compress_typed(payload, CompObjectType::Unknown)
+            .expect("compress chunk");
+        odb.put_compressed_chunk(&id, &compressed)
+            .await
+            .expect("put chunk");
+        refs.push(ChunkRef {
+            id,
+            offset: 0,
+            size: payload.len(),
+            chunk_type: ChunkType::Generic,
+            codec_hint: Default::default(),
+        });
+    }
+    let manifest = ChunkManifest {
+        chunks: refs,
+        total_size: (first.len() + second.len()) as u64,
+        filename: Some("ordered.bin".to_string()),
+    };
+    let blob_oid = Oid::hash(&[first.as_slice(), second.as_slice()].concat());
+    odb.put_manifest(&blob_oid, &manifest)
+        .await
+        .expect("put manifest");
+
+    let mut tree = Tree::new();
+    tree.add_entry(TreeEntry::new(
+        "ordered.bin".to_string(),
+        FileMode::Regular,
+        blob_oid,
+    ));
+    let tree_oid = tree.write(&odb).await.unwrap();
+    let author = Signature::now("Test".to_string(), "t@e".to_string());
+    let commit = Commit::new(tree_oid, author.clone(), author, "add".to_string());
+    let commit_oid = commit.write(&odb).await.unwrap();
+    RefDatabase::new(server_mediagit.clone())
+        .write(&Ref::new_direct("refs/heads/main".to_string(), commit_oid))
+        .await
+        .unwrap();
+
+    let (base_url, _handle) = start_test_server(server_repos).await;
+    mediagit_protocol::ensure_crypto_provider();
+    let resp = reqwest::Client::new()
+        .get(format!(
+            "{}/order-repo/files/ordered.bin?ref=main",
+            base_url
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert!(
+        resp.bytes().await.is_err(),
+        "a body that fails whole-file verification must not complete"
     );
 }
