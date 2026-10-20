@@ -113,6 +113,7 @@ MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurre
 | `MEDIAGIT_CHUNK_BLEND` / `MEDIAGIT_CHUNK_STL` / `MEDIAGIT_CHUNK_PLY` | Structure-aware chunking walkers for `.blend`/STL/PLY. `0` disables each. | `1` (ON) |
 | `MEDIAGIT_AUDIO_TIER` | Audio-format chunk tier. `0` disables. | `1` (ON) |
 | `MEDIAGIT_CONTAINER_CHUNK_CAP_MB` | Ceiling (MiB) above which container-format chunking is skipped for plain `StreamCDC`. `0` disables the cap. Does not apply to MP4/MOV/M4V/M4A/3GP. | `100` |
+| `MEDIAGIT_CREATIVE_AVG_KB` | Average chunk size (KiB, clamped 16..=4096) for creative containers (pdf, eps, ai, psd, psb, fig, sketch, xd, indd, indt, aep, prproj, mb); min = avg/4, max = avg*4. Applies to the in-memory and streaming (>= 5 MiB) paths. `0` or unset keeps the current sizing. | unset (today's sizing) |
 | `MEDIAGIT_VIDEO_CHUNKER` | Frame-aligned chunker for MP4/MOV/M4V/M4A/3GP. `cdc` (or `0`) restores plain content-defined chunking. | frame-aligned (ON) |
 | `MEDIAGIT_PHASH` | Perceptual image hashing for delta candidacy. `0` disables hashing and image delta. | `1` (ON) |
 | `MEDIAGIT_PHASH_MAX_MB` | Max image size (MiB) perceptual-hashed for delta candidacy. | `64` |

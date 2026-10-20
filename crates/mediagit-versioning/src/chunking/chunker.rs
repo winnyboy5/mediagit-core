@@ -354,7 +354,8 @@ impl ContentChunker {
         // container files when mmap or format-aware parsing fails.
         // A10/XET: cut-point skip is built into fastcdc::v2020::StreamCDC — no mask
         // test runs until min_size bytes have been consumed per chunk.
-        let (avg_size, min_size, max_size) = get_chunk_params(file_size);
+        let (avg_size, min_size, max_size) =
+            stream_chunk_params(&ext, file_size, creative_avg_kb());
         let file = std::fs::File::open(path)
             .map_err(|e| anyhow::anyhow!("Failed to open file '{}': {}", path.display(), e))?;
         let stream_cdc = fastcdc::v2020::StreamCDC::with_level_and_seed(
@@ -573,23 +574,11 @@ impl ContentChunker {
                 let (avg, min, max) = get_chunk_params(data.len() as u64);
                 self.chunk_fastcdc(data, avg, min, max).await
             }
-            "pdf" | "eps" | "ai" | "psd" | "psb" => {
-                let (avg, min, max) = get_creative_chunk_params(data.len() as u64);
-                self.chunk_fastcdc(data, avg, min, max).await
-            }
-
-            // Design tools - creative containers (Fig/Sketch/XD/INDD) use
-            // the same small-chunk params for cross-version dedup. AE (.aep,
-            // RIFX) and Premiere (.prproj, gzipped XML — never transformed;
-            // decompressing would break byte-perfect reproduction) too.
-            "fig" | "sketch" | "xd" | "indd" | "indt" | "aep" | "prproj" => {
-                let (avg, min, max) = get_creative_chunk_params(data.len() as u64);
-                self.chunk_fastcdc(data, avg, min, max).await
-            }
-
-            // Maya binary - creative-tier params (small chunks improve
-            // boundary re-sync after scene edits, same rationale as AI/PSD).
-            "mb" => {
+            // Also design tools (Fig/Sketch/XD/INDD), AE (.aep, RIFX), Premiere
+            // (.prproj, gzipped XML — never transformed; decompressing would
+            // break byte-perfect reproduction) and Maya binary (.mb): same
+            // small-chunk params for cross-version dedup / boundary re-sync.
+            e if is_creative_container_ext(e) => {
                 let (avg, min, max) = get_creative_chunk_params(data.len() as u64);
                 self.chunk_fastcdc(data, avg, min, max).await
             }
