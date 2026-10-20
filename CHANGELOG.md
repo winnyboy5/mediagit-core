@@ -79,10 +79,12 @@ Nothing yet.
 
 ### Validation
 
-- Two consecutive SCALE QA campaigns on one artifact (`ga-050rc1-1`,
-  `ga-050rc1-2`): 259 gates each, 258 pass, 0 failures, 1 skip (`A8-disk-full`,
-  needs an elevated shell), all 17 phases, across MinIO, AWS S3, Azure Blob, GCS
-  and local. New campaign phase `16_video` (video dedup chain, a file over
+- Two consecutive SCALE QA campaigns on the final build (`ga-050rc1-3`,
+  `ga-050rc1-4`, 2026-10-20): 262 gates each, 261 pass, 0 failures, 1 skip
+  (`A8-disk-full`, needs an elevated shell), all 17 phases, across MinIO, AWS S3,
+  Azure Blob, GCS and local. An earlier clearance (`ga-050rc1-1`/`-2`,
+  2026-10-19) was voided by the security and memory fixes that followed it.
+  Campaigns now empty the cloud test stores after each run. New campaign phase `16_video` (video dedup chain, a file over
   16 GiB through every command, memory ceiling, round-trip hash).
 
 ## [v0.4.0-rc.1] - 2026-09-19
