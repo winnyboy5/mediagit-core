@@ -971,8 +971,11 @@ impl GarbageCollector {
                 Ok(None) => {
                     debug!("Manifest {} vanished between listing and read", oid);
                 }
+                // Never skip: its chunks would look unreachable and be deleted.
                 Err(e) => {
-                    debug!("Failed to read manifest {}: {}", oid, e);
+                    return Err(anyhow::anyhow!(
+                        "cannot read reachable chunk manifest {oid}: {e}; aborting gc without deleting anything"
+                    ));
                 }
             }
         }
@@ -1091,9 +1094,17 @@ impl GarbageCollector {
         let mut reachable_chunk_ids: HashSet<String> = HashSet::new();
 
         for (oid, _) in &all_manifests {
-            if reachable.contains(oid)
-                && let Ok(Some(manifest)) = self.odb.get_chunk_manifest(oid).await
-            {
+            if !reachable.contains(oid) {
+                continue;
+            }
+            // An unreadable reachable manifest must abort, not be skipped:
+            // its chunk-deltas would look unreachable and be deleted.
+            let manifest = self.odb.get_chunk_manifest(oid).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "cannot read reachable chunk manifest {oid}: {e}; aborting gc without deleting anything"
+                )
+            })?;
+            if let Some(manifest) = manifest {
                 for chunk_ref in &manifest.chunks {
                     reachable_chunk_ids.insert(chunk_ref.id.to_hex());
                 }
