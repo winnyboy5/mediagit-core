@@ -12,7 +12,7 @@
 **Version**: v0.5.0-rc.1
 **Status**: 🚧 **RELEASE CANDIDATE**
 **Features**: 100% complete (all P0–P3 items from the rc.3 feature-completeness sprint implemented — a closed batch, distinct from the forward-looking backlog in [FUTURE_TODOS.md](FUTURE_TODOS.md), which reuses the same P0–P3 labels as effort/impact tiers for planned work)
-**Last Validated**: October 19, 2026 (v0.5.0-rc.1) — two SCALE QA campaigns (`ga-050rc1-1`, `ga-050rc1-2`), **259 gates each: 258 pass, 0 failures, 1 skip, all 17 phases**, on byte-identical binaries, across MinIO, AWS S3, Azure Blob, GCS and local. The skip is the same gate in both runs — `A8-disk-full`, which needs an elevated shell to attach a size-capped volume. It has since been run under elevation and passes: `add` onto a full volume fails cleanly with `os error 112` and leaves the repository fsck-PERFECT
+**Last Validated**: October 20, 2026 (v0.5.0-rc.1, final build) — two SCALE QA campaigns (`ga-050rc1-3`, `ga-050rc1-4`), **262 gates each: 261 pass, 0 failures, 1 skip, all 17 phases**, on byte-identical binaries, across MinIO, AWS S3, Azure Blob, GCS and local. The skip is the same gate in both runs — `A8-disk-full`, which needs an elevated shell to attach a size-capped volume. It has since been run under elevation and passes: `add` onto a full volume fails cleanly with `os error 112` and leaves the repository fsck-PERFECT
 **At-rest encryption (DC-7)**: now campaign-covered. Every campaign runs 15 encryption gates — push, clone and byte-for-byte roundtrip against MinIO, AWS S3, Azure Blob and GCS, each asserting every object is actually sealed, plus three key-mismatch drills. (This line previously said encryption had never been in a campaign; that stopped being true and the README did not follow.)
 **🚨 WARNING 🚨**: This project is under active development. Be aware that large breaking changes may happen before 1.0 is reached.
 
@@ -912,4 +912,4 @@ Special thanks to:
 
 **Made with 🦀 and ❤️ by Aswin Krishnamoorthy**
 
-**Status**: Release Candidate | **Version**: v0.5.0-rc.1 | **Updated**: October 19, 2026 | **Cloud-Validated**: QA campaigns `ga-050rc1-1` + `ga-050rc1-2`, 259 gates each, 0 failures, 1 skip ✅
+**Status**: Release Candidate | **Version**: v0.5.0-rc.1 | **Updated**: October 20, 2026 | **Cloud-Validated**: QA campaigns `ga-050rc1-3` + `ga-050rc1-4`, 262 gates each, 0 failures, 1 skip ✅
