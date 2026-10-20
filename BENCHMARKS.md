@@ -115,9 +115,9 @@ Before the fixes, `add` was the only command near half a gigabyte, and most of t
 
 | Run | Cache | Client peak | Time |
 |---|---|---:|---:|
-| 1 | default (256 MiB) | 627 MB | 13.2 s |
+| 1 | 256 MiB (old default) | 627 MB | 13.2 s |
 | 2 | off (`0`) | 257 MB | 13.5 s |
-| 3 | default | 489 MB | 13.9 s |
+| 3 | 256 MiB (old default) | 489 MB | 13.9 s |
 | 4 | off | 239 MB | 13.3 s |
 
 The cache is worth 230–390 MB of peak and nothing in speed **on random data**, because random chunks never find a delta base. Push does not buffer whole packs: an earlier estimate of ~1 GB push memory was never measured, and this measurement refutes it.

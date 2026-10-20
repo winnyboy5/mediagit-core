@@ -12,11 +12,11 @@
 **Version**: v0.5.0-rc.1
 **Status**: 🚧 **RELEASE CANDIDATE**
 **Features**: 100% complete (all P0–P3 items from the rc.3 feature-completeness sprint implemented — a closed batch, distinct from the forward-looking backlog in [FUTURE_TODOS.md](FUTURE_TODOS.md), which reuses the same P0–P3 labels as effort/impact tiers for planned work)
-**Last Validated**: October 20, 2026 (v0.5.0-rc.1, final build) — two SCALE QA campaigns (`ga-050rc1-3`, `ga-050rc1-4`), **262 gates each: 261 pass, 0 failures, 1 skip, all 17 phases**, on byte-identical binaries, across MinIO, AWS S3, Azure Blob, GCS and local. The skip is the same gate in both runs — `A8-disk-full`, which needs an elevated shell to attach a size-capped volume. It has since been run under elevation and passes: `add` onto a full volume fails cleanly with `os error 112` and leaves the repository fsck-PERFECT
+**Last Validated**: October 20, 2026 (v0.5.0-rc.1, final build) — two SCALE QA campaigns (`ga-050rc1-3`, `ga-050rc1-4`), **262 gates each: 261 pass, 0 failures, 1 skip, all 17 phases**, on byte-identical binaries, across MinIO, AWS S3, Azure Blob, GCS and local. The skip is the same gate in both runs — `A8-disk-full`, which needs an elevated shell to attach a size-capped volume. It was then run on its own under elevation against this same build (2026-10-20) and passes: `add` onto a full volume fails cleanly with `os error 112` and leaves the repository fsck-PERFECT
 **At-rest encryption (DC-7)**: now campaign-covered. Every campaign runs 15 encryption gates — push, clone and byte-for-byte roundtrip against MinIO, AWS S3, Azure Blob and GCS, each asserting every object is actually sealed, plus three key-mismatch drills. (This line previously said encryption had never been in a campaign; that stopped being true and the README did not follow.)
 **🚨 WARNING 🚨**: This project is under active development. Be aware that large breaking changes may happen before 1.0 is reached.
 
-✅ **614/614 deep-tests passing** across MinIO, AWS S3 (ap-south-1), Azure Blob (South India), Google Cloud Storage *(deep-test sweep, June 2026; the current per-campaign gate count is 247 — see Last Validated above)*
+✅ **614/614 deep-tests passing** across MinIO, AWS S3 (ap-south-1), Azure Blob (South India), Google Cloud Storage *(deep-test sweep, June 2026; the current per-campaign gate count is 262 — see Last Validated above)*
 ✅ **32 CLI commands validated end-to-end** — 0 crashes, 0 data corruption across all 4 cloud backends *(that sweep's command count; the CLI now exposes 35 — see [CLI Reference](#cli-reference))*
 ✅ **27+ file types tested** (58 GB dataset) across video, audio, 3D, image, design, ML
 ✅ **26.3–26.5% storage savings** measured on cloud backends (compression + dedup + delta, validated June 2026)
@@ -899,7 +899,7 @@ Special thanks to:
 
 - **Lines of Code**: 122,000+ (Rust, 193 source files across 12 crates); 161,000+ across 313 files including test code
 - **Features**: 100% complete (all P0–P3 items from the rc.3 feature-completeness sprint — see disambiguation note above)
-- **Test Coverage**: **2,367 unit/integration tests, 0 failures** (measured 2026-10-15); 259 QA-campaign gates per run across all five backends — 258 pass, 0 fail, 1 skip (2026-10-19); **614/614 deep-tests** across MinIO, AWS S3, Azure Blob, GCS (validated 2026-06-02)
+- **Test Coverage**: **2,379 unit/integration tests, 0 failures** (measured 2026-10-19); 262 QA-campaign gates per run across all five backends — 261 pass, 0 fail, 1 skip, and the skipped A8 passes when run elevated (2026-10-20); **614/614 deep-tests** across MinIO, AWS S3, Azure Blob, GCS (validated 2026-06-02)
 - **Staging Throughput**: 25–240 MB/s for small files; 2.8–5.2 MB/s for chunked large files (WAV/PSD/GLB)
 - **Network Throughput**: 134–267 MB/s push (local server, pack negotiation); WAN-bound on cloud backends
 - **Storage Savings**: **26.3–26.5%** validated on 4 cloud backends (June 2026); ~30% average across mixed media projects

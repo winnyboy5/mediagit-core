@@ -84,7 +84,12 @@ Nothing yet.
   (`A8-disk-full`, needs an elevated shell), all 17 phases, across MinIO, AWS S3,
   Azure Blob, GCS and local. An earlier clearance (`ga-050rc1-1`/`-2`,
   2026-10-19) was voided by the security and memory fixes that followed it.
-  Campaigns now empty the cloud test stores after each run. New campaign phase `16_video` (video dedup chain, a file over
+  Campaigns now empty the cloud test stores after each run.
+- `A8-disk-full`, the one skipped gate, was run separately under elevation on
+  the same build (2026-10-20) and passes: `add` onto a full 100 MB volume fails
+  cleanly without a panic, the repository stays fsck-clean, and a retry after
+  freeing space succeeds.
+- New campaign phase `16_video` (video dedup chain, a file over
   16 GiB through every command, memory ceiling, round-trip hash).
 
 ## [v0.4.0-rc.1] - 2026-09-19
