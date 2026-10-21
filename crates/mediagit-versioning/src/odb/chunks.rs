@@ -1288,18 +1288,65 @@ impl ObjectDatabase {
         on_progress: Option<Arc<dyn Fn(u64) + Send + Sync>>,
         precomputed_oid: Option<Oid>,
     ) -> anyhow::Result<Oid> {
+        self.write_chunked_from_file_positional(path, filename, on_progress, precomputed_oid, None)
+            .await
+    }
+
+    /// [`Self::write_chunked_from_file`] plus an optional positional delta base
+    /// (previous version of the same `.safetensors` path). Only consulted when
+    /// `MEDIAGIT_TENSOR_DELTA=1` and the file's tensor layout matches
+    /// `positional.layout`; otherwise identical to the plain entry.
+    pub async fn write_chunked_from_file_positional<P: AsRef<std::path::Path>>(
+        &self,
+        path: P,
+        filename: &str,
+        on_progress: Option<Arc<dyn Fn(u64) + Send + Sync>>,
+        precomputed_oid: Option<Oid>,
+        positional: Option<crate::chunking::PositionalBase>,
+    ) -> anyhow::Result<Oid> {
         self.write_chunked_from_file_budgeted(
             path,
             filename,
             on_progress,
             precomputed_oid,
             InflightBudget::from_env(),
+            positional,
+            crate::chunking::safetensors_stream::tensor_delta_enabled(),
         )
         .await
     }
 
+    /// Positional base for the next version of a `.safetensors` file, from the
+    /// previous version's manifest (chunk 0 = header, data chunks after it).
+    /// `None` when the manifest is not in walker shape or its header is unreadable.
+    pub async fn positional_base_from_manifest(
+        &self,
+        old: &ChunkManifest,
+    ) -> Option<crate::chunking::PositionalBase> {
+        use crate::chunking::safetensors_stream::TensorLayout;
+        let head = old.chunks.first()?;
+        if head.offset != 0 || head.chunk_type != crate::chunking::ChunkType::Metadata {
+            return None;
+        }
+        let prefix = self.get_chunk(&head.id).await.ok()?;
+        let layout = TensorLayout::parse(&prefix).ok()?;
+        if layout.data_start != head.size as u64 {
+            return None;
+        }
+        let map = old.chunks[1..]
+            .iter()
+            .filter(|c| c.offset >= layout.data_start)
+            .map(|c| (c.offset - layout.data_start, c.id))
+            .collect();
+        Some(crate::chunking::PositionalBase {
+            map,
+            layout: layout.fingerprint,
+        })
+    }
+
     /// [`Self::write_chunked_from_file`] with an explicit in-flight byte budget
     /// (the public entry reads `MEDIAGIT_ADD_INFLIGHT_MB`).
+    #[allow(clippy::too_many_arguments)] // positional/knob are explicit so tests can drive them
     async fn write_chunked_from_file_budgeted<P: AsRef<std::path::Path>>(
         &self,
         path: P,
@@ -1307,6 +1354,8 @@ impl ObjectDatabase {
         on_progress: Option<Arc<dyn Fn(u64) + Send + Sync>>,
         precomputed_oid: Option<Oid>,
         inflight: InflightBudget,
+        positional: Option<crate::chunking::PositionalBase>,
+        tensor_delta: bool,
     ) -> anyhow::Result<Oid> {
         use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1377,10 +1426,36 @@ impl ObjectDatabase {
             .and_then(|v| v.trim().parse::<usize>().ok())
             .filter(|n| *n > 0)
             .unwrap_or_else(|| num_cpus::get().clamp(2, 16));
+        // Tensor XOR-planes pairing is active only with the knob on, a
+        // previous version, a parseable header and an unchanged tensor layout
+        // (a changed layout shifts tensors, so same-offset pairing is noise).
+        let tensor_pairing: Option<(
+            crate::chunking::PositionalBase,
+            crate::chunking::safetensors_stream::TensorLayout,
+        )> = match positional {
+            Some(pb) if tensor_delta && filename.to_lowercase().ends_with(".safetensors") => {
+                let p = path.to_path_buf();
+                tokio::task::spawn_blocking(move || {
+                    let mut f = std::fs::File::open(&p).ok()?;
+                    let size = f.metadata().ok()?.len();
+                    crate::chunking::safetensors_stream::TensorLayout::read(&mut f, size)
+                        .ok()
+                        .map(|(l, _)| l)
+                })
+                .await
+                .ok()
+                .flatten()
+                .filter(|l| l.fingerprint == pb.layout)
+                .map(|l| (pb, l))
+            }
+            _ => None,
+        };
+
         let (tx, rx) = async_channel::bounded::<(
             usize,
             crate::chunking::ContentChunk,
             Option<Oid>,
+            Option<(u8, u8)>,
             InflightPermit,
         )>(64);
 
@@ -1396,6 +1471,7 @@ impl ObjectDatabase {
             let smart_comp = self.smart_compressor.clone();
             let base_chunk_cache = self.base_chunk_cache.clone();
             let delta_pairs = self.delta_written_pairs.clone();
+            let odb = self.clone();
             let compression_enabled = self.compression_enabled;
             let chunks_w = chunks_written.clone();
             let bytes_w = bytes_written.clone();
@@ -1404,7 +1480,9 @@ impl ObjectDatabase {
             let handle = tokio::spawn(async move {
                 let mut results: Vec<(usize, ChunkRef)> = Vec::new();
 
-                while let Ok((seq_id, chunk, base_oid_opt, _inflight_permit)) = rx.recv().await {
+                while let Ok((seq_id, chunk, base_oid_opt, xp_params, _inflight_permit)) =
+                    rx.recv().await
+                {
                     let chunk_ref = ChunkRef {
                         id: chunk.id,
                         offset: chunk.offset,
@@ -1511,6 +1589,23 @@ impl ObjectDatabase {
                                         _ => None,
                                     }
                                 };
+                                // A positional XP base is the previous version's
+                                // chunk, which is usually itself stored as a delta
+                                // (no loose `chunks/` object): rebuild it through
+                                // the depth-checked chain reader.
+                                let base_data_arc = match base_data_arc {
+                                    None if xp_params.is_some() => {
+                                        match odb.get_chunk(&base_id).await {
+                                            Ok(data) => {
+                                                let arc = Arc::new(data);
+                                                base_chunk_cache.insert(base_id, arc.clone()).await;
+                                                Some(arc)
+                                            }
+                                            Err(_) => None,
+                                        }
+                                    }
+                                    other => other,
+                                };
                                 crate::add_phases::record(
                                     crate::add_phases::Phase::DeltaBaseFetch,
                                     _basefetch_timer.elapsed(),
@@ -1518,7 +1613,15 @@ impl ObjectDatabase {
 
                                 if let Some(base_data) = base_data_arc {
                                     let _encode_timer = std::time::Instant::now();
-                                    let delta = DeltaEncoder::encode(&base_data, &chunk.data);
+                                    let delta = match xp_params {
+                                        Some((w, phase)) => DeltaEncoder::encode_xor_planes(
+                                            &base_data,
+                                            &chunk.data,
+                                            w,
+                                            phase,
+                                        ),
+                                        None => DeltaEncoder::encode(&base_data, &chunk.data),
+                                    };
                                     let delta_bytes = delta.to_bytes();
                                     crate::add_phases::record(
                                         crate::add_phases::Phase::DeltaEncode,
@@ -1793,7 +1896,7 @@ impl ObjectDatabase {
         let cdc_seed = self.cdc_seed;
         let file_producer = tokio::task::spawn_blocking(move || {
             let chunker_inner = ContentChunker::with_seed(chunk_strategy, cdc_seed);
-            chunker_inner.collect_file_chunks_blocking(&path_owned, blocking_tx)
+            chunker_inner.collect_file_chunks_with(&path_owned, blocking_tx, tensor_delta)
         });
 
         // Forward chunks from the blocking thread to the async worker channel.
@@ -1808,6 +1911,21 @@ impl ObjectDatabase {
             // Producer-side similarity: replicate the delta-eligibility predicate,
             // then query the detector for the best base.
             let delta_candidate = is_delta_candidate(producer_delta_enabled, &chunk, comp_type);
+            // Tensor pairing: previous version's chunk at the same data offset
+            // overrides similarity and selects the XOR-planes codec.
+            let positional_hit = match &tensor_pairing {
+                Some((pb, layout))
+                    if delta_candidate
+                        && chunk.chunk_type == crate::chunking::ChunkType::Generic
+                        && chunk.offset >= layout.data_start =>
+                {
+                    let rel = chunk.offset - layout.data_start;
+                    pb.map
+                        .get(&rel)
+                        .map(|base| (*base, layout.plane_params(rel)))
+                }
+                _ => None,
+            };
             let base_oid_opt = if delta_candidate {
                 let mut chunk_meta = crate::similarity::ObjectMetadata::new(
                     chunk.id,
@@ -1817,15 +1935,18 @@ impl ObjectDatabase {
                 );
                 chunk_meta.generate_samples(&chunk.data);
 
-                let detector = producer_similarity_detector.read().await;
-                let similar = detector.find_similar_with_size_ratio(
-                    &chunk_meta,
-                    min_similarity,
-                    size_ratio_threshold,
-                );
-                drop(detector);
-
-                let base_oid = similar.map(|(oid, _)| oid);
+                let base_oid = if let Some((base, _)) = positional_hit {
+                    Some(base)
+                } else {
+                    let detector = producer_similarity_detector.read().await;
+                    let similar = detector.find_similar_with_size_ratio(
+                        &chunk_meta,
+                        min_similarity,
+                        size_ratio_threshold,
+                    );
+                    drop(detector);
+                    similar.map(|(oid, _)| oid)
+                };
                 // Optimistic marking: keep is_delta=false so this chunk
                 // remains available as a future base candidate.
                 chunk_meta.is_delta = false;
@@ -1853,9 +1974,15 @@ impl ObjectDatabase {
             let permit = inflight
                 .acquire(chunk.data.len(), || tx.is_closed())
                 .await?;
-            tx.send((seq_id, chunk, base_oid_opt, permit))
-                .await
-                .map_err(|_| anyhow::anyhow!("Worker channel closed unexpectedly"))?;
+            tx.send((
+                seq_id,
+                chunk,
+                base_oid_opt,
+                positional_hit.map(|(_, p)| p),
+                permit,
+            ))
+            .await
+            .map_err(|_| anyhow::anyhow!("Worker channel closed unexpectedly"))?;
         }
 
         // Propagate any error from the blocking producer
@@ -4358,7 +4485,15 @@ mod add_memory_tests {
         let odb = ObjectDatabase::new(StdArc::new(MockBackend::new()), 100);
         let budget = InflightBudget::new(512 * 1024);
         let oid = odb
-            .write_chunked_from_file_budgeted(&path, "r.bin", None, None, budget.clone())
+            .write_chunked_from_file_budgeted(
+                &path,
+                "r.bin",
+                None,
+                None,
+                budget.clone(),
+                None,
+                false,
+            )
             .await
             .unwrap();
         assert_eq!(oid, Oid::hash(&data));
@@ -4370,5 +4505,179 @@ mod add_memory_tests {
             0,
             "permits leaked"
         );
+    }
+}
+
+#[cfg(test)]
+mod tensor_xp_tests {
+    use super::*;
+    use crate::chunking::safetensors_stream::tests::make_safetensors;
+    use mediagit_storage::mock::MockBackend;
+    use std::sync::Arc as StdArc;
+
+    /// ~3 MiB of F32 "weights".
+    fn base_weights() -> Vec<u8> {
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        let mut out = Vec::with_capacity(3 << 20);
+        for _ in 0..(3usize << 20) / 4 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let f = ((x >> 40) as f32 / 16_777_216.0) - 0.5;
+            out.extend_from_slice(&f.to_le_bytes());
+        }
+        out
+    }
+
+    /// Small training step: flip the low mantissa byte of ~2% of the floats.
+    fn perturb(w: &mut [u8], step: usize) {
+        for i in (step % 50..w.len() / 4).step_by(50) {
+            w[i * 4] ^= 0x5a;
+        }
+    }
+
+    async fn xp_delta_count(odb: &ObjectDatabase, storage: &StdArc<MockBackend>) -> usize {
+        let mut n = 0;
+        for key in storage.list_objects("chunk-deltas/").await.unwrap() {
+            if key.ends_with(".meta") {
+                continue;
+            }
+            let raw = storage.get(&key).await.unwrap();
+            let bytes = match &odb.smart_compressor {
+                Some(s) => decompress_typed_blocking(s.clone(), raw).await.unwrap(),
+                None => decompress_blocking(odb.compressor.clone(), raw)
+                    .await
+                    .unwrap(),
+            };
+            if bytes.starts_with(b"XP") {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// Writes `versions` successive perturbations; returns (oid, bytes) per
+    /// version. `pair` = pass the previous manifest's positional base with the knob on.
+    async fn write_versions(
+        odb: &ObjectDatabase,
+        versions: usize,
+        pair: bool,
+    ) -> Vec<(Oid, Vec<u8>)> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("m.safetensors");
+        let mut w = base_weights();
+        let mut out: Vec<(Oid, Vec<u8>)> = Vec::new();
+        for v in 0..versions {
+            perturb(&mut w, v);
+            let file = make_safetensors(&[("w", "F32", &w)], v % 3 * 40);
+            std::fs::write(&path, &file).unwrap();
+            let positional = match (pair, out.last()) {
+                (true, Some((prev, _))) => {
+                    let m = odb.get_chunk_manifest(prev).await.unwrap().unwrap();
+                    odb.positional_base_from_manifest(&m).await
+                }
+                _ => None,
+            };
+            let oid = odb
+                .write_chunked_from_file_budgeted(
+                    &path,
+                    "m.safetensors",
+                    None,
+                    None,
+                    InflightBudget::from_env(),
+                    positional,
+                    pair,
+                )
+                .await
+                .unwrap();
+            out.push((oid, file));
+        }
+        out
+    }
+
+    fn new_odb() -> (ObjectDatabase, StdArc<MockBackend>) {
+        let storage = StdArc::new(MockBackend::new());
+        let odb = ObjectDatabase::with_optimizations(
+            storage.clone(),
+            100_000_000,
+            Some(ChunkStrategy::MediaAware),
+            true,
+            0,
+        );
+        (odb, storage)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn xp_deltas_round_trip_and_respect_depth_cap() {
+        let (odb, storage) = new_odb();
+        let versions = write_versions(&odb, 12, true).await;
+
+        assert!(
+            xp_delta_count(&odb, &storage).await >= 3,
+            "positional pairing wrote no XP deltas"
+        );
+        for key in storage.list_objects("chunk-deltas/").await.unwrap() {
+            if let Some(hex) = key.strip_suffix(".meta") {
+                let id = Oid::from_hex(hex.trim_start_matches("chunk-deltas/")).unwrap();
+                let depth = odb.chunk_delta_depth(&id).await;
+                assert!(depth <= MAX_DELTA_DEPTH as usize, "depth {depth} for {id}");
+            }
+        }
+        let out_dir = tempfile::tempdir().unwrap();
+        for (i, (oid, expected)) in versions.iter().enumerate() {
+            let dest = out_dir.path().join(format!("v{i}.safetensors"));
+            odb.read_to_file(oid, &dest).await.unwrap();
+            assert_eq!(&std::fs::read(&dest).unwrap(), expected, "version {i}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn knob_off_writes_no_xp_deltas() {
+        let (odb, storage) = new_odb();
+        let versions = write_versions(&odb, 3, false).await;
+        assert_eq!(xp_delta_count(&odb, &storage).await, 0);
+        let dest = tempfile::tempdir().unwrap().keep().join("o.safetensors");
+        odb.read_to_file(&versions[2].0, &dest).await.unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), versions[2].1);
+    }
+
+    /// A changed tensor layout must decline pairing even with the knob on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn layout_change_declines_positional_pairing() {
+        let (odb, storage) = new_odb();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("m.safetensors");
+        let w = base_weights();
+        std::fs::write(&path, make_safetensors(&[("w", "F32", &w)], 0)).unwrap();
+        let v1 = odb
+            .write_chunked_from_file_budgeted(
+                &path,
+                "m.safetensors",
+                None,
+                None,
+                InflightBudget::from_env(),
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+        let m = odb.get_chunk_manifest(&v1).await.unwrap().unwrap();
+        let pb = odb.positional_base_from_manifest(&m).await.unwrap();
+
+        let mut w2 = w.clone();
+        perturb(&mut w2, 1);
+        std::fs::write(&path, make_safetensors(&[("renamed", "F32", &w2)], 0)).unwrap();
+        odb.write_chunked_from_file_budgeted(
+            &path,
+            "m.safetensors",
+            None,
+            None,
+            InflightBudget::from_env(),
+            Some(pb),
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(xp_delta_count(&odb, &storage).await, 0);
     }
 }

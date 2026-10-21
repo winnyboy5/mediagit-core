@@ -102,7 +102,7 @@ pub use branch::{BranchInfo, BranchManager, DetachedHead};
 pub use checkout::{CheckoutManager, CheckoutStats, FreshCheckoutPlan};
 pub use chunking::{
     ChunkId, ChunkManifest, ChunkRef, ChunkStore, ChunkStoreStats, ChunkStrategy, ChunkType,
-    CodecHint, ContentChunk, ContentChunker,
+    CodecHint, ContentChunk, ContentChunker, PositionalBase, tensor_delta_enabled,
 };
 pub use commit::{Commit, Signature};
 pub use config::{ChunkingStrategyConfig, StorageConfig};
