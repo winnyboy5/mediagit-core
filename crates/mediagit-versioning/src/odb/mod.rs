@@ -305,16 +305,22 @@ async fn decompress_typed_blocking(
 /// Same gate as `decompress_typed_blocking` (`MEDIAGIT_DECOMPRESS_BLOCKING`,
 /// `MEDIAGIT_DECOMPRESS_BLOCKING_THRESHOLD`) applied to a payload of `len`
 /// bytes: should its CPU work run on the blocking pool?
+/// Called per chunk on the hot read path, so the knobs are read once.
 fn cpu_blocking(len: usize) -> bool {
-    let enabled = std::env::var("MEDIAGIT_DECOMPRESS_BLOCKING")
-        .as_deref()
-        .unwrap_or("1")
-        != "0";
-    let threshold: usize = std::env::var("MEDIAGIT_DECOMPRESS_BLOCKING_THRESHOLD")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(262144);
-    enabled && len >= threshold
+    static GATE: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    let threshold = *GATE.get_or_init(|| {
+        let enabled = std::env::var("MEDIAGIT_DECOMPRESS_BLOCKING")
+            .as_deref()
+            .unwrap_or("1")
+            != "0";
+        enabled.then(|| {
+            std::env::var("MEDIAGIT_DECOMPRESS_BLOCKING_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(262144)
+        })
+    });
+    threshold.is_some_and(|t| len >= t)
 }
 
 /// Run `f` on the blocking pool when `len` is at/above the decompress
