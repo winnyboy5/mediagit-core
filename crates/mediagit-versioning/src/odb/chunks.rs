@@ -243,6 +243,25 @@ pub(crate) fn checkout_chunk_prefetch_for(total_bytes: u64, chunk_count: usize) 
 /// key, because the server holds a key per repository and has no process key
 /// at all -- with the global, a server writing a manifest for a keyed
 /// repository wrote it in the clear.
+/// `data` if it hashes to `base_id`, else `None`. `get_chunk` verifies only
+/// the terminal base of a delta chain, not the rebuilt result, and a loose
+/// chunk can decompress cleanly to the wrong bytes; encoding a delta against
+/// either would chain new data onto a corrupt base.
+async fn verified_base(base_id: Oid, data: Vec<u8>) -> Option<Vec<u8>> {
+    let (data, actual) = run_cpu(data.len(), move || {
+        let h = Oid::hash(&data);
+        (data, h)
+    })
+    .await
+    .ok()?;
+    if actual == base_id {
+        Some(data)
+    } else {
+        warn!(base = %base_id, actual = %actual, "Delta base failed integrity check; storing chunk full");
+        None
+    }
+}
+
 fn seal_manifest<'a>(
     compressor: Option<&SmartCompressor>,
     bytes: &'a [u8],
@@ -381,7 +400,11 @@ impl ObjectDatabase {
             };
 
             // Try to load base chunk and create delta
-            if let Ok(base_data) = self.get_chunk(&base_id).await {
+            let base_data = match self.get_chunk(&base_id).await {
+                Ok(data) => verified_base(base_id, data).await,
+                Err(_) => None,
+            };
+            if let Some(base_data) = base_data {
                 // Create delta
                 let delta = DeltaEncoder::encode(&base_data, &chunk.data);
                 let delta_bytes = delta.to_bytes();
@@ -1011,6 +1034,10 @@ impl ObjectDatabase {
                                                 .await
                                                 .ok()
                                             };
+                                            let decompressed = match decompressed {
+                                                Some(d) => verified_base(base_id, d).await,
+                                                None => None,
+                                            };
                                             if let Some(data) = decompressed {
                                                 let arc = Arc::new(data);
                                                 base_chunk_cache.insert(base_id, arc.clone()).await;
@@ -1578,6 +1605,10 @@ impl ObjectDatabase {
                                                 .await
                                                 .ok()
                                             };
+                                            let decompressed = match decompressed {
+                                                Some(d) => verified_base(base_id, d).await,
+                                                None => None,
+                                            };
                                             if let Some(data) = decompressed {
                                                 let arc = Arc::new(data);
                                                 base_chunk_cache.insert(base_id, arc.clone()).await;
@@ -1595,13 +1626,17 @@ impl ObjectDatabase {
                                 // the depth-checked chain reader.
                                 let base_data_arc = match base_data_arc {
                                     None if xp_params.is_some() => {
-                                        match odb.get_chunk(&base_id).await {
-                                            Ok(data) => {
+                                        let rebuilt = match odb.get_chunk(&base_id).await {
+                                            Ok(data) => verified_base(base_id, data).await,
+                                            Err(_) => None,
+                                        };
+                                        match rebuilt {
+                                            Some(data) => {
                                                 let arc = Arc::new(data);
                                                 base_chunk_cache.insert(base_id, arc.clone()).await;
                                                 Some(arc)
                                             }
-                                            Err(_) => None,
+                                            None => None,
                                         }
                                     }
                                     other => other,
@@ -4711,6 +4746,95 @@ mod tensor_xp_tests {
         let dest = tempfile::tempdir().unwrap().keep().join("o.safetensors");
         odb.read_to_file(&versions[2].0, &dest).await.unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), versions[2].1);
+    }
+
+    /// A base rebuilt from a corrupt chain (decodes fine, wrong bytes) must
+    /// not become a delta base: the add stores the new chunk full instead.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn corrupt_chain_base_is_not_used_for_delta() {
+        let (odb, storage) = new_odb();
+        let versions = write_versions(&odb, 2, true).await;
+
+        // Rewrite every v2 delta as a valid delta to the wrong bytes.
+        let v2 = odb
+            .get_chunk_manifest(&versions[1].0)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut corrupted = std::collections::HashSet::new();
+        for c in &v2.chunks {
+            let Some((base, _)) = odb.get_local_chunk_delta_raw(&c.id).await.unwrap() else {
+                continue;
+            };
+            let base_data = odb.get_chunk(&base).await.unwrap();
+            let mut wrong = base_data.clone();
+            let n = wrong.len();
+            wrong[n / 2] ^= 0xff;
+            let bytes = DeltaEncoder::encode(&base_data, &wrong).to_bytes();
+            let payload = match &odb.smart_compressor {
+                Some(s) => s
+                    .compress_typed(&bytes, CompressionObjectType::Unknown)
+                    .unwrap(),
+                None => odb.compressor.compress(&bytes).unwrap(),
+            };
+            storage
+                .put(&format!("chunk-deltas/{}", c.id.to_hex()), &payload)
+                .await
+                .unwrap();
+            corrupted.insert(c.id);
+        }
+        assert!(!corrupted.is_empty(), "fixture: v2 stored no deltas");
+
+        // Fresh ODB: an empty base cache forces the chain rebuild.
+        let odb = ObjectDatabase::with_optimizations(
+            storage.clone(),
+            100_000_000,
+            Some(ChunkStrategy::MediaAware),
+            true,
+            0,
+        );
+        let mut w = base_weights();
+        for step in 0..3 {
+            perturb(&mut w, step);
+        }
+        let v3 = write_weight_versions_from(&odb, versions[1].0, &w).await;
+        let m = odb.get_chunk_manifest(&v3.0).await.unwrap().unwrap();
+        for c in &m.chunks {
+            if let Some((base, _)) = odb.get_local_chunk_delta_raw(&c.id).await.unwrap() {
+                assert!(
+                    !corrupted.contains(&base),
+                    "delta against corrupt base {base}"
+                );
+            }
+        }
+        assert_byte_exact(&odb, &[v3]).await;
+    }
+
+    /// One more version of `m.safetensors`, positionally paired with `prev`.
+    async fn write_weight_versions_from(
+        odb: &ObjectDatabase,
+        prev: Oid,
+        w: &[u8],
+    ) -> (Oid, Vec<u8>) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("m.safetensors");
+        let file = make_safetensors(&[("w", "F32", w)], 2 * 40);
+        std::fs::write(&path, &file).unwrap();
+        let m = odb.get_chunk_manifest(&prev).await.unwrap().unwrap();
+        let positional = odb.positional_base_from_manifest(&m).await;
+        let oid = odb
+            .write_chunked_from_file_budgeted(
+                &path,
+                "m.safetensors",
+                None,
+                None,
+                InflightBudget::from_env(),
+                positional,
+                true,
+            )
+            .await
+            .unwrap();
+        (oid, file)
     }
 
     async fn assert_byte_exact(odb: &ObjectDatabase, versions: &[(Oid, Vec<u8>)]) {
