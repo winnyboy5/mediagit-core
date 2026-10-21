@@ -368,6 +368,9 @@ pub struct ContentChunker {
     /// Per-repo CDC seed for gear-hash mixing. `0` reproduces the original
     /// (pre-seed) chunk boundaries exactly — this is the legacy/default value.
     pub(super) seed: u64,
+    /// E2 stream-boundary cuts for PDF/ZIP-family containers
+    /// (`MEDIAGIT_STREAM_CUTS`, default on; see [`stream_cuts`]).
+    pub(super) stream_cuts: bool,
 }
 
 /// Resolve the effective CDC seed for chunking.
