@@ -302,6 +302,39 @@ async fn decompress_typed_blocking(
     }
 }
 
+/// Same gate as `decompress_typed_blocking` (`MEDIAGIT_DECOMPRESS_BLOCKING`,
+/// `MEDIAGIT_DECOMPRESS_BLOCKING_THRESHOLD`) applied to a payload of `len`
+/// bytes: should its CPU work run on the blocking pool?
+fn cpu_blocking(len: usize) -> bool {
+    let enabled = std::env::var("MEDIAGIT_DECOMPRESS_BLOCKING")
+        .as_deref()
+        .unwrap_or("1")
+        != "0";
+    let threshold: usize = std::env::var("MEDIAGIT_DECOMPRESS_BLOCKING_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(262144);
+    enabled && len >= threshold
+}
+
+/// Run `f` on the blocking pool when `len` is at/above the decompress
+/// threshold, inline otherwise. Lets chunk-delta reconstruction and chunk
+/// hashing overlap across the `buffered` read-ahead like full-chunk
+/// decompression already does.
+async fn run_cpu<T, F>(len: usize, f: F) -> anyhow::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    if cpu_blocking(len) {
+        tokio::task::spawn_blocking(f)
+            .await
+            .map_err(|e| anyhow::anyhow!("blocking task failed: {}", e))
+    } else {
+        Ok(f())
+    }
+}
+
 use moka::future::Cache;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};

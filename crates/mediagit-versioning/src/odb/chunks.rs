@@ -2642,12 +2642,20 @@ impl ObjectDatabase {
                 .get_chunk(&id)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to read chunk {}: {}", id.to_hex(), e))?;
-            Ok::<_, anyhow::Error>((id, size, decompressed))
+            // Per-chunk hash runs in the read-ahead future (blocking pool
+            // for large chunks) so it overlaps; the check itself is in the
+            // consumer loop, unchanged and still in manifest order.
+            let (decompressed, computed_chunk_oid) = run_cpu(decompressed.len(), move || {
+                let h = Oid::hash(&decompressed);
+                (decompressed, h)
+            })
+            .await?;
+            Ok::<_, anyhow::Error>((id, size, decompressed, computed_chunk_oid))
         }))
         .buffered(prefetch);
 
         while let Some(next) = stream.next().await {
-            let (chunk_id, chunk_size, decompressed) = next?;
+            let (chunk_id, chunk_size, decompressed, computed_chunk_oid) = next?;
 
             // Verify chunk integrity (hash + size).
             //
@@ -2659,7 +2667,6 @@ impl ObjectDatabase {
             // have been sitting on local disk since some earlier pull
             // and nothing has re-read them. Removing this would trade a
             // real at-rest integrity check for a little CPU on one path.
-            let computed_chunk_oid = Oid::hash(&decompressed);
             if computed_chunk_oid != chunk_id {
                 anyhow::bail!(
                     "Chunk integrity check failed for {}: expected {}, computed {}",
@@ -3183,7 +3190,7 @@ impl ObjectDatabase {
         // (chunk IDs are content hashes too, so its integrity check applies
         // unchanged). `read_from_packs` returns already-decompressed data.
         let base_key = format!("chunks/{}", base_id.to_hex());
-        let mut current = match self.storage.get(&base_key).await {
+        let current = match self.storage.get(&base_key).await {
             Ok(compressed_base) => {
                 if let Some(smart_comp) = &self.smart_compressor {
                     decompress_typed_blocking(smart_comp.clone(), compressed_base)
@@ -3231,7 +3238,11 @@ impl ObjectDatabase {
         // `read_from_packs` already performs this check, so the pack path
         // pays for it twice; a wrong-but-verified chunk is worth more than a
         // saved hash.
-        let actual = Oid::hash(&current);
+        let (mut current, actual) = run_cpu(current.len(), move || {
+            let h = Oid::hash(&current);
+            (current, h)
+        })
+        .await?;
         if actual != base_id {
             anyhow::bail!(
                 "base chunk {} failed integrity check: computed {}. \
@@ -3251,19 +3262,23 @@ impl ObjectDatabase {
                 .get(&delta_key)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to load chunk delta: {}", e))?;
-            let delta_bytes = if let Some(smart_comp) = &self.smart_compressor {
-                decompress_typed_blocking(smart_comp.clone(), compressed_delta)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to decompress chunk delta: {}", e))?
-            } else {
-                decompress_blocking(self.compressor.clone(), compressed_delta)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to decompress chunk delta: {}", e))?
-            };
-            let delta = Delta::from_bytes(&delta_bytes)
-                .map_err(|e| anyhow::anyhow!("Failed to parse chunk delta: {}", e))?;
-            current = DeltaDecoder::apply(&current, &delta)
-                .map_err(|e| anyhow::anyhow!("Failed to apply chunk delta: {}", e))?;
+            // Store decompress + parse + apply are all CPU: one blocking
+            // hop per chain link so prefetched chunks overlap.
+            let smart_comp = self.smart_compressor.clone();
+            let compressor = self.compressor.clone();
+            current = run_cpu(current.len(), move || -> anyhow::Result<Vec<u8>> {
+                let delta_bytes = if let Some(smart_comp) = &smart_comp {
+                    smart_comp.decompress_typed(&compressed_delta)
+                } else {
+                    compressor.decompress(&compressed_delta)
+                }
+                .map_err(|e| anyhow::anyhow!("Failed to decompress chunk delta: {}", e))?;
+                let delta = Delta::from_bytes(&delta_bytes)
+                    .map_err(|e| anyhow::anyhow!("Failed to parse chunk delta: {}", e))?;
+                DeltaDecoder::apply(&current, &delta)
+                    .map_err(|e| anyhow::anyhow!("Failed to apply chunk delta: {}", e))
+            })
+            .await??;
             if current.len() as u64 > MAX_OBJECT_SIZE {
                 anyhow::bail!(
                     "Reconstructed chunk size {} exceeds maximum {} bytes",
@@ -4809,5 +4824,117 @@ mod tensor_xp_tests {
         .await
         .unwrap();
         assert_eq!(xp_delta_count(&odb, &storage).await, 0);
+    }
+
+    /// Delta reconstruction runs on the blocking pool for chunks at/above the
+    /// decompress threshold. Chunks here are >= it, the chain is read through
+    /// `read_to_file`, and the integrity gates must still fire from there.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn blocking_delta_path_is_byte_exact_and_gates_fire() {
+        let (odb, storage) = new_odb();
+        let versions = write_versions(&odb, 4, true, MAX_DELTA_DEPTH).await;
+        assert!(xp_delta_count(&odb, &storage).await >= 1);
+        let m = odb
+            .get_chunk_manifest(&versions[3].0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            m.chunks.iter().any(|c| cpu_blocking(c.size)),
+            "no chunk reaches the blocking threshold"
+        );
+        assert_byte_exact(&odb, &versions).await;
+
+        // Corrupt a delta payload: some version must now fail to read.
+        let keys = storage.list_objects("chunk-deltas/").await.unwrap();
+        let delta_key = keys.iter().find(|k| !k.ends_with(".meta")).unwrap();
+        let good = storage.get(delta_key).await.unwrap();
+        let mut bad = good.clone();
+        let mid = bad.len() / 2;
+        for b in &mut bad[mid..mid + 8] {
+            *b ^= 0xff;
+        }
+        storage.put(delta_key, &bad).await.unwrap();
+        let out_dir = tempfile::tempdir().unwrap();
+        let mut failed = false;
+        for (i, (oid, _)) in versions.iter().enumerate() {
+            failed |= odb
+                .read_to_file(oid, &out_dir.path().join(format!("c{i}")))
+                .await
+                .is_err();
+        }
+        assert!(failed, "corrupt delta payload was not detected");
+        storage.put(delta_key, &good).await.unwrap();
+        assert_byte_exact(&odb, &versions).await;
+
+        // Corrupt a depth-1 base: swap in a different valid chunk's bytes.
+        let meta_key = keys.iter().find(|k| k.ends_with(".meta")).unwrap();
+        let meta = String::from_utf8(storage.get(meta_key).await.unwrap()).unwrap();
+        let base_key = format!("chunks/{}", meta.strip_prefix("base:").unwrap().trim());
+        let other_key = storage
+            .list_objects("chunks/")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|k| *k != base_key)
+            .unwrap();
+        let good_base = storage.get(&base_key).await.unwrap();
+        let other = storage.get(&other_key).await.unwrap();
+        storage.put(&base_key, &other).await.unwrap();
+        let mut errs = Vec::new();
+        for (i, (oid, _)) in versions.iter().enumerate() {
+            if let Err(e) = odb
+                .read_to_file(oid, &out_dir.path().join(format!("b{i}")))
+                .await
+            {
+                errs.push(format!("{e:#}"));
+            }
+        }
+        assert!(
+            errs.iter().any(|e| e.contains("integrity")),
+            "corrupt base not caught by integrity check: {errs:?}"
+        );
+        storage.put(&base_key, &good_base).await.unwrap();
+        assert_byte_exact(&odb, &versions).await;
+    }
+
+    /// Micro-bench: `read_to_file` of ~64 x 1 MiB depth-1 delta chunks.
+    /// `cargo test -p mediagit-versioning --lib delta_read_bench -- --ignored --nocapture`
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn delta_read_bench() {
+        let len = 64usize << 20;
+        let base = random_bytes(len, 11);
+        let mut xp = base.clone();
+        for i in (0..len / 4).step_by(50) {
+            xp[i * 4] ^= 0x5a;
+        }
+        let mut zd = base[4..].to_vec();
+        zd.extend_from_slice(&base[..4]);
+        for (name, target) in [("XP", xp), ("ZD", zd)] {
+            let (odb, storage) = new_odb();
+            let versions = write_weight_versions(&odb, &[base.clone(), target], true, 3).await;
+            let n_delta = storage
+                .list_objects("chunk-deltas/")
+                .await
+                .unwrap()
+                .iter()
+                .filter(|k| !k.ends_with(".meta"))
+                .count();
+            let dir = tempfile::tempdir().unwrap();
+            let dest = dir.path().join("o");
+            let mut ms = Vec::new();
+            for _ in 0..5 {
+                let t = std::time::Instant::now();
+                odb.read_to_file(&versions[1].0, &dest).await.unwrap();
+                ms.push(t.elapsed().as_millis());
+            }
+            assert_eq!(std::fs::read(&dest).unwrap(), versions[1].1);
+            ms.sort();
+            println!(
+                "BENCH {name}: deltas={n_delta} median_ms={} all={ms:?}",
+                ms[2]
+            );
+        }
     }
 }
