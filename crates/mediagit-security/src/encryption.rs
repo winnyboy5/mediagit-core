@@ -366,11 +366,22 @@ pub fn encrypt(key: &EncryptionKey, plaintext: &[u8]) -> Result<Vec<u8>, Encrypt
     getrandom::fill(&mut nonce24)
         .map_err(|e| EncryptionError::EncryptionFailed(format!("OS RNG unavailable: {e}")))?;
 
+    encrypt_with_nonce(key, &nonce24, plaintext)
+}
+
+/// [`encrypt`] with the 192-bit nonce supplied — split out so
+/// `tests::golden_*` can pin byte-exact ciphertext from the real write path.
+/// Never call with a non-random nonce outside tests.
+fn encrypt_with_nonce(
+    key: &EncryptionKey,
+    nonce24: &[u8; XNONCE_SIZE],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, EncryptionError> {
     let key_bytes: [u8; KEY_SIZE] = key
         .expose_key()
         .try_into()
         .expect("EncryptionKey::from_bytes enforces KEY_SIZE");
-    let (kx, nx) = xaes_derive(&key_bytes, &nonce24);
+    let (kx, nx) = xaes_derive(&key_bytes, nonce24);
 
     let cipher = Aes256Gcm::new_from_slice(kx.as_slice())
         .map_err(|e| EncryptionError::EncryptionFailed(e.to_string()))?;
@@ -378,7 +389,7 @@ pub fn encrypt(key: &EncryptionKey, plaintext: &[u8]) -> Result<Vec<u8>, Encrypt
 
     let mut output = Vec::with_capacity(1 + XNONCE_SIZE + plaintext.len() + TAG_SIZE);
     output.push(ENCRYPTION_VERSION);
-    output.extend_from_slice(&nonce24);
+    output.extend_from_slice(nonce24);
 
     if plaintext.len() > STREAM_THRESHOLD {
         output.extend_from_slice(&encrypt_stream(&cipher, &nx, &aad, plaintext)?);
@@ -913,5 +924,146 @@ mod tests {
 
         let k1 = double_block(&expected_l);
         assert_eq!(k1, expected_k1);
+    }
+
+    // ------------------------------------------------------------------
+    // At-rest golden vectors: byte-exact ciphertext pinned from the code as
+    // it stood on aes 0.8 / aes-gcm 0.10. Any dependency bump or refactor
+    // that changes a single byte here would leave existing encrypted repos
+    // unreadable — these must never be regenerated to make a test pass.
+    // Small outputs are pinned as hex; stream outputs (> 64 KiB) by BLAKE3.
+    // ------------------------------------------------------------------
+
+    const GOLDEN_PLAIN: &[u8] = b"mediagit at-rest golden vector";
+
+    fn golden_key() -> EncryptionKey {
+        EncryptionKey::from_bytes((0u8..32).collect()).unwrap()
+    }
+
+    fn golden_nonce24() -> [u8; XNONCE_SIZE] {
+        core::array::from_fn(|i| 0x40 + i as u8)
+    }
+
+    /// 2 full stream chunks + a 100-byte tail, so both the multi-chunk
+    /// nonce XOR and the short final chunk are covered.
+    fn golden_stream_plain() -> Vec<u8> {
+        (0..2 * CHUNK_SIZE + 100)
+            .map(|i| (i * 31 % 251) as u8)
+            .collect()
+    }
+
+    /// `pinned` is hex of the bytes, or (`hashed`) hex of their BLAKE3.
+    fn golden_check(
+        name: &str,
+        key: &EncryptionKey,
+        bytes: &[u8],
+        plain: &[u8],
+        hashed: bool,
+        pinned: &str,
+    ) {
+        let actual = if hashed {
+            blake3::hash(bytes).to_hex().to_string()
+        } else {
+            hex::encode(bytes)
+        };
+        assert_eq!(actual, pinned, "{name}: ciphertext drifted from golden");
+        assert_eq!(decrypt(key, bytes).unwrap(), plain, "{name}: decrypt");
+    }
+
+    const GOLDEN_V2_SHORT: &str = "02404142434445464748494a4b4c4d4e4f505152535455565713a422ba81940c0d19c757a0cc5f9b9a107ea3bb52eeb86ec3943d131e7f2aeefb315d3b799e93303529f548b272";
+    const GOLDEN_V2_STREAM_B3: &str =
+        "6714fa4c9d31e8d47e17a7fc63ebc8455a3ce49c4da42c8612deb7ec3ca526bd";
+    const GOLDEN_V1_SHORT: &str = "01090909090909090909090909de7d6c52e6f82ad0f16844d4d9f3c8bb1975b0423e632e956592011ffc4507ecbd3b94bd6ea270cbccde3ef7a607";
+    const GOLDEN_V1_STREAM_B3: &str =
+        "7da4ffabaa90f73f998f5dad8d727f2b22c000ed235a8ef118345c6be8e45cde";
+    const GOLDEN_SEALED_WRAP: &str = "4d47454e02404142434445464748494a4b4c4d4e4f50515253545556573054b6fb25a44e8935bf840a493bc48c4108527c27eeb82e5a53f442b02ff5cd93f23842752914a8efceed1e8b715e19";
+
+    #[test]
+    fn golden_v2_short() {
+        let k = golden_key();
+        let ct = encrypt_with_nonce(&k, &golden_nonce24(), GOLDEN_PLAIN).unwrap();
+        golden_check("v2 short", &k, &ct, GOLDEN_PLAIN, false, GOLDEN_V2_SHORT);
+        // (b) the pinned bytes themselves, not just a fresh re-encryption.
+        assert_eq!(
+            decrypt(&k, &hex::decode(GOLDEN_V2_SHORT).unwrap()).unwrap(),
+            GOLDEN_PLAIN
+        );
+    }
+
+    #[test]
+    fn golden_v2_stream() {
+        let k = golden_key();
+        let plain = golden_stream_plain();
+        let ct = encrypt_with_nonce(&k, &golden_nonce24(), &plain).unwrap();
+        golden_check("v2 stream", &k, &ct, &plain, true, GOLDEN_V2_STREAM_B3);
+    }
+
+    /// v1 is read-only: built the way pre-XAES builds wrote it (raw key,
+    /// 12-byte nonce, no AAD).
+    fn golden_v1(plain: &[u8]) -> Vec<u8> {
+        let k = golden_key();
+        let cipher = Aes256Gcm::new_from_slice(k.expose_key()).unwrap();
+        let nonce12 = [9u8; NONCE_SIZE];
+        let body = if plain.len() > STREAM_THRESHOLD {
+            encrypt_stream(&cipher, &nonce12, &[], plain).unwrap()
+        } else {
+            cipher.encrypt(Nonce::from_slice(&nonce12), plain).unwrap()
+        };
+        let mut out = vec![LEGACY_VERSION];
+        out.extend_from_slice(&nonce12);
+        out.extend_from_slice(&body);
+        out
+    }
+
+    #[test]
+    fn golden_v1_short() {
+        let ct = golden_v1(GOLDEN_PLAIN);
+        golden_check(
+            "v1 short",
+            &golden_key(),
+            &ct,
+            GOLDEN_PLAIN,
+            false,
+            GOLDEN_V1_SHORT,
+        );
+        assert_eq!(
+            decrypt(&golden_key(), &hex::decode(GOLDEN_V1_SHORT).unwrap()).unwrap(),
+            GOLDEN_PLAIN
+        );
+    }
+
+    #[test]
+    fn golden_v1_stream() {
+        let plain = golden_stream_plain();
+        let ct = golden_v1(&plain);
+        golden_check(
+            "v1 stream",
+            &golden_key(),
+            &ct,
+            &plain,
+            true,
+            GOLDEN_V1_STREAM_B3,
+        );
+    }
+
+    /// The repo-key wrap path end to end: Argon2id passphrase master key ->
+    /// BLAKE3 wrap subkey -> `MGEN` envelope over a 32-byte repo key.
+    #[test]
+    fn golden_passphrase_wrapped_repo_key() {
+        use crate::kdf::{Argon2Params, Salt, derive_key};
+        let master = derive_key(
+            &secrecy::SecretString::from("golden passphrase"),
+            &Salt::from_bytes(vec![7u8; 16]).unwrap(),
+            Argon2Params::testing(),
+        )
+        .unwrap();
+        let wrap = master.derive_subkey("mediagit/wrap/v2").unwrap();
+        let repo_key: Vec<u8> = (100u8..132).collect();
+
+        let mut sealed = crate::envelope::MGEN_MAGIC.to_vec();
+        sealed.extend(encrypt_with_nonce(&wrap, &golden_nonce24(), &repo_key).unwrap());
+        assert_eq!(hex::encode(&sealed), GOLDEN_SEALED_WRAP, "wrap drifted");
+        let pinned = hex::decode(GOLDEN_SEALED_WRAP).unwrap();
+        assert_eq!(crate::envelope::open(&wrap, &pinned).unwrap(), repo_key);
     }
 }
