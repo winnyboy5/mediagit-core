@@ -3786,6 +3786,19 @@ impl ObjectDatabase {
         })?;
         Ok(Some((base_id, delta_bytes)))
     }
+
+    /// Whether a stored chunk-delta payload, as returned by
+    /// [`Self::get_local_chunk_delta_raw`], is in the XOR-planes ("XP")
+    /// format. The payload is stored compressed (and possibly sealed), so the
+    /// magic is only visible after the decode `get_chunk_limited` applies.
+    pub fn is_xp_delta_payload(&self, raw: &[u8]) -> anyhow::Result<bool> {
+        let bytes = match &self.smart_compressor {
+            Some(s) => s.decompress_typed(raw),
+            None => self.compressor.decompress(raw),
+        }
+        .map_err(|e| anyhow::anyhow!("Failed to decompress chunk delta: {}", e))?;
+        Ok(bytes.starts_with(b"XP"))
+    }
 }
 
 /// Compute the sibling `.mgtmp` temp path used by `read_to_file` for an
