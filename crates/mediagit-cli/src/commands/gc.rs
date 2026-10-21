@@ -923,6 +923,68 @@ impl GarbageCollector {
         Ok(chunks)
     }
 
+    /// Chunk IDs that reachable data needs: every chunk named by a reachable
+    /// manifest, plus every base along each one's chunk-delta `.meta` chain.
+    /// A base is named only by its delta's `.meta`, so once the version that
+    /// introduced it is unreachable no manifest keeps it alive. Any read
+    /// failure aborts: a chunk we could not account for would be deleted.
+    async fn reachable_chunk_ids(&self, manifest_oids: &[Oid]) -> Result<HashSet<Oid>> {
+        let mut ids: HashSet<Oid> = HashSet::new();
+        for oid in manifest_oids {
+            // Through the ODB, never `storage.get`: on a keyed repo the manifest
+            // is sealed, and a raw read would fail to parse — leaving every
+            // chunk it references looking unreachable, i.e. deletable.
+            match self.odb.get_chunk_manifest(oid).await {
+                Ok(Some(manifest)) => ids.extend(manifest.chunks.iter().map(|c| c.id)),
+                Ok(None) => {
+                    debug!("Manifest {} vanished between listing and read", oid);
+                }
+                // Never skip: its chunks would look unreachable and be deleted.
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "cannot read reachable chunk manifest {oid}: {e}; aborting gc without deleting anything"
+                    ));
+                }
+            }
+        }
+
+        // One listing tells which chunks are stored as deltas; only those
+        // have a `.meta` to follow. `ids.insert` doubles as the cycle guard.
+        let delta_ids: HashSet<String> = self
+            .storage
+            .list_objects("chunk-deltas/")
+            .await?
+            .iter()
+            .filter_map(|k| k.strip_prefix("chunk-deltas/")?.strip_suffix(".meta"))
+            .map(str::to_owned)
+            .collect();
+        let mut stack: Vec<Oid> = ids.iter().copied().collect();
+        while let Some(id) = stack.pop() {
+            let hex = id.to_hex();
+            if !delta_ids.contains(&hex) {
+                continue;
+            }
+            let base = self
+                .storage
+                .get(&format!("chunk-deltas/{hex}.meta"))
+                .await
+                .ok()
+                .and_then(|b| {
+                    let s = String::from_utf8(b).ok()?;
+                    Oid::from_hex(s.trim().strip_prefix("base:")?.trim()).ok()
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "cannot read base of reachable chunk-delta {hex}; aborting gc without deleting anything"
+                    )
+                })?;
+            if ids.insert(base) {
+                stack.push(base);
+            }
+        }
+        Ok(ids)
+    }
+
     /// Find orphaned manifests and chunks using the reachability set.
     ///
     /// Algorithm:
@@ -954,31 +1016,14 @@ impl GarbageCollector {
             orphan_manifest_keys.len()
         );
 
-        // Step 2: Read reachable manifests to collect referenced chunk IDs
-        let mut reachable_chunk_keys: HashSet<String> = HashSet::new();
-
-        for oid in &reachable_manifest_oids {
-            // Through the ODB, never `storage.get`: on a keyed repo the manifest
-            // is sealed, and a raw read would fail to parse — leaving every
-            // chunk it references looking unreachable, i.e. deletable.
-            match self.odb.get_chunk_manifest(oid).await {
-                Ok(Some(manifest)) => {
-                    for chunk_ref in &manifest.chunks {
-                        let chunk_key = format!("chunks/{}", chunk_ref.id.to_hex());
-                        reachable_chunk_keys.insert(chunk_key);
-                    }
-                }
-                Ok(None) => {
-                    debug!("Manifest {} vanished between listing and read", oid);
-                }
-                // Never skip: its chunks would look unreachable and be deleted.
-                Err(e) => {
-                    return Err(anyhow::anyhow!(
-                        "cannot read reachable chunk manifest {oid}: {e}; aborting gc without deleting anything"
-                    ));
-                }
-            }
-        }
+        // Step 2: Collect chunk IDs reachable data needs (manifest chunks
+        // plus their chunk-delta bases).
+        let reachable_chunk_keys: HashSet<String> = self
+            .reachable_chunk_ids(&reachable_manifest_oids)
+            .await?
+            .iter()
+            .map(|id| format!("chunks/{}", id.to_hex()))
+            .collect();
 
         debug!(
             "Found {} reachable chunk references",
@@ -1089,27 +1134,19 @@ impl GarbageCollector {
         &self,
         reachable: &HashSet<Oid>,
     ) -> Result<Vec<(String, String, u64)>> {
-        // Collect all chunk IDs referenced by reachable manifests
-        let all_manifests = self.list_all_manifests().await?;
-        let mut reachable_chunk_ids: HashSet<String> = HashSet::new();
-
-        for (oid, _) in &all_manifests {
-            if !reachable.contains(oid) {
-                continue;
-            }
-            // An unreadable reachable manifest must abort, not be skipped:
-            // its chunk-deltas would look unreachable and be deleted.
-            let manifest = self.odb.get_chunk_manifest(oid).await.map_err(|e| {
-                anyhow::anyhow!(
-                    "cannot read reachable chunk manifest {oid}: {e}; aborting gc without deleting anything"
-                )
-            })?;
-            if let Some(manifest) = manifest {
-                for chunk_ref in &manifest.chunks {
-                    reachable_chunk_ids.insert(chunk_ref.id.to_hex());
-                }
-            }
-        }
+        let reachable_manifest_oids: Vec<Oid> = self
+            .list_all_manifests()
+            .await?
+            .into_iter()
+            .map(|(oid, _)| oid)
+            .filter(|oid| reachable.contains(oid))
+            .collect();
+        let reachable_chunk_ids: HashSet<String> = self
+            .reachable_chunk_ids(&reachable_manifest_oids)
+            .await?
+            .iter()
+            .map(|id| id.to_hex())
+            .collect();
 
         // Find chunk-deltas whose chunk ID is NOT in reachable set
         let all_chunk_deltas = self.list_all_chunk_delta_keys().await?;
