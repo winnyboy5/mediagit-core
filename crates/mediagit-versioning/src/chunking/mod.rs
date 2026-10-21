@@ -43,6 +43,7 @@ pub(crate) mod chunker;
 pub(crate) mod formats;
 pub(crate) mod mp4_stream;
 pub(crate) mod safetensors_stream;
+pub(crate) mod stream_cuts;
 
 pub use safetensors_stream::{PositionalBase, tensor_delta_enabled};
 

@@ -312,6 +312,15 @@ impl ContentChunker {
             }
         }
 
+        // E2 stream-boundary cuts (knob-gated). Declines (falls through) on a
+        // missing magic, an mmap failure, or a file above the container cap.
+        if super::stream_cuts::stream_cuts_enabled()
+            && super::stream_cuts::is_stream_cut_ext(&ext)
+            && self.collect_stream_cuts(path, file_size, &ext, &sender)?
+        {
+            return Ok(());
+        }
+
         let cap_bytes = container_chunk_cap_bytes();
         if has_structure_parser && file_size > cap_bytes {
             debug!(
@@ -431,6 +440,57 @@ impl ContentChunker {
         }
 
         Ok(())
+    }
+
+    /// E2 chunking of an in-memory buffer; `None` declines (see [`super::stream_cuts`]).
+    pub(super) fn chunk_stream_cuts(&self, data: &[u8], ext: &str) -> Option<Vec<ContentChunk>> {
+        let ranges = super::stream_cuts::chunk_ranges(
+            data,
+            ext,
+            get_creative_chunk_params(data.len() as u64),
+            self.seed,
+        )?;
+        Some(
+            ranges
+                .into_iter()
+                .map(|(o, l)| stream_cuts_chunk(&data[o..o + l], o))
+                .collect(),
+        )
+    }
+
+    /// E2 chunking of `path` through a read-only mmap, sending chunks as they are
+    /// cut (one chunk copy live at a time, no whole-file copy). Returns `Ok(false)`
+    /// to decline: file above the container cap, mmap failure or no matching magic.
+    #[allow(unsafe_code)] // audited: read-only mmap, file not modified while mapped
+    pub(super) fn collect_stream_cuts(
+        &self,
+        path: &std::path::Path,
+        file_size: u64,
+        ext: &str,
+        sender: &tokio::sync::mpsc::Sender<ContentChunk>,
+    ) -> anyhow::Result<bool> {
+        if file_size > container_chunk_cap_bytes() {
+            return Ok(false);
+        }
+        let file = std::fs::File::open(path)
+            .map_err(|e| anyhow::anyhow!("Failed to open file '{}': {}", path.display(), e))?;
+        let Ok(mmap) = (unsafe { memmap2::Mmap::map(&file) }) else {
+            return Ok(false);
+        };
+        let Some(ranges) = super::stream_cuts::chunk_ranges(
+            &mmap[..],
+            ext,
+            get_creative_chunk_params(file_size),
+            self.seed,
+        ) else {
+            return Ok(false);
+        };
+        for (o, l) in ranges {
+            sender
+                .blocking_send(stream_cuts_chunk(&mmap[o..o + l], o))
+                .map_err(|_| anyhow::anyhow!("Chunk worker channel closed unexpectedly"))?;
+        }
+        Ok(true)
     }
 
     /// Fixed-size chunking
@@ -625,6 +685,12 @@ impl ContentChunker {
             // (.prproj, gzipped XML — never transformed; decompressing would
             // break byte-perfect reproduction) and Maya binary (.mb): same
             // small-chunk params for cross-version dedup / boundary re-sync.
+            e if super::stream_cuts::stream_cuts_enabled()
+                && super::stream_cuts::is_stream_cut_ext(e)
+                && let Some(chunks) = self.chunk_stream_cuts(data, e) =>
+            {
+                Ok(chunks)
+            }
             e if is_creative_container_ext(e) => {
                 let (avg, min, max) = get_creative_chunk_params(data.len() as u64);
                 self.chunk_fastcdc(data, avg, min, max).await
@@ -699,5 +765,17 @@ impl ContentChunker {
                 self.chunk_fastcdc(data, avg, min, max).await
             }
         }
+    }
+}
+
+fn stream_cuts_chunk(bytes: &[u8], offset: usize) -> ContentChunk {
+    ContentChunk {
+        id: Oid::hash(bytes),
+        data: bytes.to_vec(),
+        offset: offset as u64,
+        size: bytes.len(),
+        chunk_type: ChunkType::Generic,
+        perceptual_hash: None,
+        codec_hint: CodecHint::Unknown,
     }
 }
