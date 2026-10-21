@@ -934,12 +934,15 @@ impl GarbageCollector {
             // Through the ODB, never `storage.get`: on a keyed repo the manifest
             // is sealed, and a raw read would fail to parse — leaving every
             // chunk it references looking unreachable, i.e. deletable.
+            // Never skip an unreadable or vanished manifest: its chunks would
+            // look unreachable and be deleted.
             match self.odb.get_chunk_manifest(oid).await {
                 Ok(Some(manifest)) => ids.extend(manifest.chunks.iter().map(|c| c.id)),
                 Ok(None) => {
-                    debug!("Manifest {} vanished between listing and read", oid);
+                    return Err(anyhow::anyhow!(
+                        "reachable chunk manifest {oid} vanished between listing and read; aborting gc without deleting anything"
+                    ));
                 }
-                // Never skip: its chunks would look unreachable and be deleted.
                 Err(e) => {
                     return Err(anyhow::anyhow!(
                         "cannot read reachable chunk manifest {oid}: {e}; aborting gc without deleting anything"
@@ -1768,4 +1771,22 @@ pub async fn run_gc(opts: &GcOptions) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A reachable manifest that is listed but gone by the time it is read
+    /// (`Ok(None)`) must abort like an unreadable one: skipping it leaves its
+    /// chunks looking unreachable, i.e. deletable.
+    #[tokio::test]
+    async fn vanished_reachable_manifest_aborts() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let storage: Arc<dyn StorageBackend> = Arc::new(mediagit_storage::mock::MockBackend::new());
+        let gc = GarbageCollector::new(storage, tmp.path());
+        let missing = Oid::hash(b"manifest that vanished");
+        let err = gc.reachable_chunk_ids(&[missing]).await.unwrap_err();
+        assert!(err.to_string().contains("aborting gc"), "{err}");
+    }
 }
