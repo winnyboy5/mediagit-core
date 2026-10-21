@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
-//! E2 stream-boundary chunking (`MEDIAGIT_STREAM_CUTS=1`, default off).
+//! E2 stream-boundary chunking (default on; `MEDIAGIT_STREAM_CUTS=0` turns it off).
 //!
 //! For PDF-family (`pdf`, `ai`) and ZIP-family (`fig`, `sketch`, `xd`, `idml`)
 //! containers, forces chunk cuts at the structural boundaries of embedded
@@ -22,9 +22,15 @@ const MERGE_UP_TO: usize = 256 * K;
 
 static STREAM_CUTS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
-/// `MEDIAGIT_STREAM_CUTS=1` turns the feature on; anything else is off.
+/// On by default; `MEDIAGIT_STREAM_CUTS=0` turns it off. Measured on a real
+/// repo (Figma -19%, 30 MB PDF -4%, others unchanged, add ~10% faster).
 pub(crate) fn stream_cuts_enabled() -> bool {
-    *STREAM_CUTS.get_or_init(|| std::env::var("MEDIAGIT_STREAM_CUTS").is_ok_and(|v| v == "1"))
+    *STREAM_CUTS
+        .get_or_init(|| stream_cuts_from(std::env::var("MEDIAGIT_STREAM_CUTS").ok().as_deref()))
+}
+
+fn stream_cuts_from(v: Option<&str>) -> bool {
+    v.map(str::trim) != Some("0")
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -264,19 +270,27 @@ mod tests {
         assert!(!c.collect_stream_cuts(&path, 6 << 20, "pdf", &tx).unwrap());
     }
 
-    /// Knob unset: `chunk()` for pdf and fig is exactly today's creative FastCDC.
+    #[test]
+    fn knob_parsing_defaults_on() {
+        assert!(stream_cuts_from(None));
+        assert!(stream_cuts_from(Some("1")));
+        assert!(stream_cuts_from(Some("")));
+        assert!(!stream_cuts_from(Some("0")));
+        assert!(!stream_cuts_from(Some(" 0 ")));
+    }
+
+    /// Knob off: `chunk()` for pdf and fig is exactly the pre-E2 creative FastCDC;
+    /// knob on: the same input is cut differently (the cuts are live).
     #[tokio::test]
     async fn knob_off_is_identical_to_today() {
-        if stream_cuts_enabled() {
-            return; // knob set in the environment; this test pins the unset behavior
-        }
         let (pdf_d, _) = pdf(&[300 * K, 2 << 20, 700 * K]);
         let mut fig_d = vec![];
         for i in 0..4 {
             fig_d.extend_from_slice(b"PK\x03\x04");
             fig_d.extend(rnd(300 * K, i + 9).into_iter().map(|b| b | 0x80));
         }
-        let c = ContentChunker::new(ChunkStrategy::MediaAware);
+        let c = ContentChunker::new(ChunkStrategy::MediaAware).with_stream_cuts(false);
+        let on = ContentChunker::new(ChunkStrategy::MediaAware).with_stream_cuts(true);
         for (d, name) in [(&pdf_d, "x.pdf"), (&fig_d, "x.fig")] {
             let (avg, min, max) = get_creative_chunk_params(d.len() as u64);
             let want: Vec<_> = c
@@ -294,6 +308,14 @@ mod tests {
                 .map(|c| (c.offset, c.size, c.id))
                 .collect();
             assert_eq!(got, want, "{name}");
+            let cut: Vec<_> = on
+                .chunk(d, name)
+                .await
+                .unwrap()
+                .iter()
+                .map(|c| (c.offset, c.size, c.id))
+                .collect();
+            assert_ne!(cut, want, "{name}: stream cuts did not apply");
         }
     }
 }

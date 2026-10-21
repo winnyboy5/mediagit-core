@@ -22,7 +22,15 @@ impl ContentChunker {
         Self {
             strategy,
             seed: resolve_cdc_seed(seed),
+            stream_cuts: super::stream_cuts::stream_cuts_enabled(),
         }
+    }
+
+    /// Override the E2 stream-cut setting (tests pin both paths without env vars).
+    #[cfg(test)]
+    pub(crate) fn with_stream_cuts(mut self, on: bool) -> Self {
+        self.stream_cuts = on;
+        self
     }
 
     /// Chunk data according to the configured strategy
@@ -314,7 +322,7 @@ impl ContentChunker {
 
         // E2 stream-boundary cuts (knob-gated). Declines (falls through) on a
         // missing magic, an mmap failure, or a file above the container cap.
-        if super::stream_cuts::stream_cuts_enabled()
+        if self.stream_cuts
             && super::stream_cuts::is_stream_cut_ext(&ext)
             && self.collect_stream_cuts(path, file_size, &ext, &sender)?
         {
@@ -685,7 +693,7 @@ impl ContentChunker {
             // (.prproj, gzipped XML — never transformed; decompressing would
             // break byte-perfect reproduction) and Maya binary (.mb): same
             // small-chunk params for cross-version dedup / boundary re-sync.
-            e if super::stream_cuts::stream_cuts_enabled()
+            e if self.stream_cuts
                 && super::stream_cuts::is_stream_cut_ext(e)
                 && let Some(chunks) = self.chunk_stream_cuts(data, e) =>
             {
