@@ -204,11 +204,26 @@ impl ContentChunker {
     ///
     /// # Errors
     /// Returns an error if the file cannot be opened, read, or if the receiver has been dropped.
-    #[allow(unsafe_code)] // audited: read-only mmap, file not modified while mapped
     pub fn collect_file_chunks_blocking<P: AsRef<std::path::Path>>(
         &self,
         path: P,
         sender: tokio::sync::mpsc::Sender<ContentChunk>,
+    ) -> anyhow::Result<()> {
+        self.collect_file_chunks_with(
+            path,
+            sender,
+            super::safetensors_stream::tensor_delta_enabled(),
+        )
+    }
+
+    /// [`Self::collect_file_chunks_blocking`] with the `.safetensors` walker
+    /// switch passed in (the public entry reads `MEDIAGIT_TENSOR_DELTA`).
+    #[allow(unsafe_code)] // audited: read-only mmap, file not modified while mapped
+    pub(crate) fn collect_file_chunks_with<P: AsRef<std::path::Path>>(
+        &self,
+        path: P,
+        sender: tokio::sync::mpsc::Sender<ContentChunk>,
+        tensor_walker: bool,
     ) -> anyhow::Result<()> {
         let path = path.as_ref();
         let file_size = std::fs::metadata(path)
@@ -271,6 +286,29 @@ impl ContentChunker {
                         "frame-aligned MP4 walker declined, using existing path"
                     );
                 }
+            }
+        }
+
+        // Fixed-chunk safetensors walker (knob-gated). A parse error before the
+        // first chunk is emitted falls through to the paths below.
+        if ext == "safetensors" && tensor_walker {
+            let mut file = std::fs::File::open(path)
+                .map_err(|e| anyhow::anyhow!("Failed to open file '{}': {}", path.display(), e))?;
+            let mut emitted = false;
+            let r = super::safetensors_stream::chunk_file(&mut file, file_size, &mut |chunk| {
+                emitted = true;
+                sender
+                    .blocking_send(chunk)
+                    .map_err(|_| anyhow::anyhow!("Chunk worker channel closed unexpectedly"))
+            });
+            match r {
+                Ok(()) => return Ok(()),
+                Err(e) if emitted => return Err(e),
+                Err(e) => debug!(
+                    path = %path.display(),
+                    error = %e,
+                    "safetensors walker declined, using existing path"
+                ),
             }
         }
 
@@ -553,6 +591,15 @@ impl ContentChunker {
             }
 
             // ML Models - Rolling CDC for fine-tuning dedup
+            "safetensors" if super::safetensors_stream::tensor_delta_enabled() => {
+                match super::safetensors_stream::chunk_slice(data) {
+                    Ok(chunks) => Ok(chunks),
+                    Err(_) => {
+                        let (avg, min, max) = get_chunk_params(data.len() as u64);
+                        self.chunk_fastcdc(data, avg, min, max).await
+                    }
+                }
+            }
             "pt" | "pth" | "ckpt" | "pb" | "safetensors" | "bin" | "pkl" | "joblib" => {
                 let (avg, min, max) = get_chunk_params(data.len() as u64);
                 self.chunk_fastcdc(data, avg, min, max).await

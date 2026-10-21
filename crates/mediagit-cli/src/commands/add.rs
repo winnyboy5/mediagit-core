@@ -768,10 +768,16 @@ impl AddCmd {
         let filename = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
         // Seed similarity detector from previous version (manifest for chunked, blob for small)
+        let mut positional = None;
         if let Some(head_oid) = head_files.get(&relative_path) {
             match odb.get_chunk_manifest(head_oid).await {
                 Ok(Some(old_manifest)) => {
                     let _ = odb.seed_similarity_from_manifest(&old_manifest).await;
+                    if mediagit_versioning::tensor_delta_enabled()
+                        && filename.to_lowercase().ends_with(".safetensors")
+                    {
+                        positional = odb.positional_base_from_manifest(&old_manifest).await;
+                    }
                 }
                 _ => {
                     if delta_enabled {
@@ -831,7 +837,13 @@ impl AddCmd {
             }
 
             let oid = odb
-                .write_chunked_from_file(file_path, filename, on_bytes.clone(), Some(content_oid))
+                .write_chunked_from_file_positional(
+                    file_path,
+                    filename,
+                    on_bytes.clone(),
+                    Some(content_oid),
+                    positional,
+                )
                 .await
                 .context("Failed to write chunked object (streaming)")?;
 
