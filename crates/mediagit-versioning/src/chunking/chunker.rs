@@ -409,8 +409,7 @@ impl ContentChunker {
         // container files when mmap or format-aware parsing fails.
         // A10/XET: cut-point skip is built into fastcdc::v2020::StreamCDC — no mask
         // test runs until min_size bytes have been consumed per chunk.
-        let (avg_size, min_size, max_size) =
-            stream_chunk_params(&ext, file_size, creative_avg_kb());
+        let (avg_size, min_size, max_size) = get_chunk_params(file_size);
         let file = std::fs::File::open(path)
             .map_err(|e| anyhow::anyhow!("Failed to open file '{}': {}", path.display(), e))?;
         let stream_cdc = fastcdc::v2020::StreamCDC::with_level_and_seed(

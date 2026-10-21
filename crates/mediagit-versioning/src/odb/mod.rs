@@ -860,19 +860,6 @@ pub(crate) async fn resolve_delta_base_observing(
     nominated_base: Oid,
     new_chunk: Oid,
 ) -> (Option<Oid>, Vec<(Oid, Option<Oid>)>) {
-    resolve_delta_base_capped(storage, nominated_base, new_chunk, MAX_DELTA_DEPTH).await
-}
-
-/// [`resolve_delta_base_observing`] with a caller-chosen depth cap (the tensor
-/// XP path uses a lower one to bound checkout cost). `max_depth` is clamped to
-/// `MAX_DELTA_DEPTH`, so a cap can only tighten the policy.
-pub(crate) async fn resolve_delta_base_capped(
-    storage: &dyn StorageBackend,
-    nominated_base: Oid,
-    new_chunk: Oid,
-    max_depth: u8,
-) -> (Option<Oid>, Vec<(Oid, Option<Oid>)>) {
-    let max_depth = max_depth.min(MAX_DELTA_DEPTH) as usize;
     if nominated_base == new_chunk {
         return (None, Vec::new());
     }
@@ -884,7 +871,7 @@ pub(crate) async fn resolve_delta_base_capped(
     let Some(root) = walk.root else {
         return (None, walk.observed);
     };
-    if walk.depth < max_depth {
+    if walk.depth < MAX_DELTA_DEPTH as usize {
         return (Some(nominated_base), walk.observed);
     }
     // At the cap: fall back to the chain root rather than abandoning the delta.

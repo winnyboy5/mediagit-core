@@ -1312,7 +1312,6 @@ impl ObjectDatabase {
             InflightBudget::from_env(),
             positional,
             crate::chunking::safetensors_stream::tensor_delta_enabled(),
-            crate::chunking::safetensors_stream::tensor_delta_max_depth(),
         )
         .await
     }
@@ -1357,7 +1356,6 @@ impl ObjectDatabase {
         inflight: InflightBudget,
         positional: Option<crate::chunking::PositionalBase>,
         tensor_delta: bool,
-        tensor_max_depth: u8,
     ) -> anyhow::Result<Oid> {
         use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1531,21 +1529,8 @@ impl ObjectDatabase {
                         // rationale, including why the producer pre-cache means
                         // a delta-stored base is still a cache hit here).
                         let _resolve_timer = std::time::Instant::now();
-                        // Positional XP pairing uses the lower tensor cap so
-                        // checkout cost stays bounded; everything else keeps
-                        // MAX_DELTA_DEPTH.
-                        let depth_cap = if xp_params.is_some() {
-                            tensor_max_depth
-                        } else {
-                            MAX_DELTA_DEPTH
-                        };
-                        let (resolved, observed) = resolve_delta_base_capped(
-                            &*storage,
-                            nominated_base,
-                            chunk.id,
-                            depth_cap,
-                        )
-                        .await;
+                        let (resolved, observed) =
+                            resolve_delta_base_observing(&*storage, nominated_base, chunk.id).await;
                         // Memoize the chain this walk just read so the guard
                         // below can re-check it without storage I/O under the
                         // lock — that re-walk was the serialised section.
@@ -4532,7 +4517,6 @@ mod add_memory_tests {
                 budget.clone(),
                 None,
                 false,
-                MAX_DELTA_DEPTH,
             )
             .await
             .unwrap();
@@ -4610,7 +4594,6 @@ mod tensor_xp_tests {
         odb: &ObjectDatabase,
         versions: usize,
         pair: bool,
-        cap: u8,
     ) -> Vec<(Oid, Vec<u8>)> {
         let mut w = base_weights();
         let ws: Vec<Vec<u8>> = (0..versions)
@@ -4619,7 +4602,7 @@ mod tensor_xp_tests {
                 w.clone()
             })
             .collect();
-        write_weight_versions(odb, &ws, pair, cap).await
+        write_weight_versions(odb, &ws, pair).await
     }
 
     /// Full-entropy bytes (a float-aligned length), so XP and ZD both fail on it.
@@ -4640,7 +4623,6 @@ mod tensor_xp_tests {
         odb: &ObjectDatabase,
         ws: &[Vec<u8>],
         pair: bool,
-        cap: u8,
     ) -> Vec<(Oid, Vec<u8>)> {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("m.safetensors");
@@ -4664,7 +4646,6 @@ mod tensor_xp_tests {
                     InflightBudget::from_env(),
                     positional,
                     pair,
-                    cap,
                 )
                 .await
                 .unwrap();
@@ -4688,7 +4669,7 @@ mod tensor_xp_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn xp_deltas_round_trip_and_respect_depth_cap() {
         let (odb, storage) = new_odb();
-        let versions = write_versions(&odb, 12, true, MAX_DELTA_DEPTH).await;
+        let versions = write_versions(&odb, 12, true).await;
 
         assert!(
             xp_delta_count(&odb, &storage).await >= 3,
@@ -4712,22 +4693,11 @@ mod tensor_xp_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn knob_off_writes_no_xp_deltas() {
         let (odb, storage) = new_odb();
-        let versions = write_versions(&odb, 3, false, MAX_DELTA_DEPTH).await;
+        let versions = write_versions(&odb, 3, false).await;
         assert_eq!(xp_delta_count(&odb, &storage).await, 0);
         let dest = tempfile::tempdir().unwrap().keep().join("o.safetensors");
         odb.read_to_file(&versions[2].0, &dest).await.unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), versions[2].1);
-    }
-
-    async fn max_meta_depth(odb: &ObjectDatabase, storage: &StdArc<MockBackend>) -> usize {
-        let mut max = 0;
-        for key in storage.list_objects("chunk-deltas/").await.unwrap() {
-            if let Some(hex) = key.strip_suffix(".meta") {
-                let id = Oid::from_hex(hex.trim_start_matches("chunk-deltas/")).unwrap();
-                max = max.max(odb.chunk_delta_depth(&id).await);
-            }
-        }
-        max
     }
 
     async fn assert_byte_exact(odb: &ObjectDatabase, versions: &[(Oid, Vec<u8>)]) {
@@ -4739,23 +4709,12 @@ mod tensor_xp_tests {
         }
     }
 
-    /// The XP-specific cap holds chains at K (and reaches it, so the bound is
-    /// not vacuous) while every version still reads back byte-exact.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn xp_depth_cap_bounds_chains() {
-        let (odb, storage) = new_odb();
-        let versions = write_versions(&odb, 12, true, 2).await;
-        assert!(xp_delta_count(&odb, &storage).await >= 3);
-        assert_eq!(max_meta_depth(&odb, &storage).await, 2);
-        assert_byte_exact(&odb, &versions).await;
-    }
-
     /// Both codecs useless (random data): store full chunks, no delta at all.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn xp_and_zd_both_fail_stores_full() {
         let (odb, storage) = new_odb();
         let ws = vec![random_bytes(3 << 20, 1), random_bytes(3 << 20, 2)];
-        let versions = write_weight_versions(&odb, &ws, true, 3).await;
+        let versions = write_weight_versions(&odb, &ws, true).await;
         assert!(
             storage
                 .list_objects("chunk-deltas/")
@@ -4775,7 +4734,7 @@ mod tensor_xp_tests {
         let base = random_bytes(3 << 20, 7);
         let mut shifted = base[4..].to_vec();
         shifted.extend_from_slice(&base[..4]);
-        let versions = write_weight_versions(&odb, &[base, shifted], true, 3).await;
+        let versions = write_weight_versions(&odb, &[base, shifted], true).await;
         assert_eq!(xp_delta_count(&odb, &storage).await, 0);
         assert!(
             delta_magic_count(&odb, &storage, b"ZD").await >= 1,
@@ -4801,7 +4760,6 @@ mod tensor_xp_tests {
                 InflightBudget::from_env(),
                 None,
                 true,
-                MAX_DELTA_DEPTH,
             )
             .await
             .unwrap();
@@ -4819,7 +4777,6 @@ mod tensor_xp_tests {
             InflightBudget::from_env(),
             Some(pb),
             true,
-            MAX_DELTA_DEPTH,
         )
         .await
         .unwrap();
@@ -4832,7 +4789,7 @@ mod tensor_xp_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn blocking_delta_path_is_byte_exact_and_gates_fire() {
         let (odb, storage) = new_odb();
-        let versions = write_versions(&odb, 4, true, MAX_DELTA_DEPTH).await;
+        let versions = write_versions(&odb, 4, true).await;
         assert!(xp_delta_count(&odb, &storage).await >= 1);
         let m = odb
             .get_chunk_manifest(&versions[3].0)
@@ -4913,7 +4870,7 @@ mod tensor_xp_tests {
         zd.extend_from_slice(&base[..4]);
         for (name, target) in [("XP", xp), ("ZD", zd)] {
             let (odb, storage) = new_odb();
-            let versions = write_weight_versions(&odb, &[base.clone(), target], true, 3).await;
+            let versions = write_weight_versions(&odb, &[base.clone(), target], true).await;
             let n_delta = storage
                 .list_objects("chunk-deltas/")
                 .await
