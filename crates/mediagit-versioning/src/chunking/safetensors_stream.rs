@@ -35,26 +35,6 @@ fn tensor_delta_from_env(var: Option<&str>) -> bool {
     var == Some("1")
 }
 
-/// `MEDIAGIT_TENSOR_DELTA_MAX_DEPTH`: chain-depth cap for positional XP deltas
-/// (default 3, clamped to `1..=MAX_DELTA_DEPTH`). Each hop costs a full decode
-/// pass at checkout, so this is lower than the general cap.
-pub fn tensor_delta_max_depth() -> u8 {
-    static D: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
-    *D.get_or_init(|| {
-        tensor_delta_max_depth_from_env(
-            std::env::var("MEDIAGIT_TENSOR_DELTA_MAX_DEPTH")
-                .ok()
-                .as_deref(),
-        )
-    })
-}
-
-fn tensor_delta_max_depth_from_env(var: Option<&str>) -> u8 {
-    var.and_then(|v| v.trim().parse::<u8>().ok())
-        .unwrap_or(3)
-        .clamp(1, crate::odb::MAX_DELTA_DEPTH)
-}
-
 /// Positional delta bases for one `.safetensors` path: previous version's
 /// data-chunk ids keyed by offset relative to the data start, plus the layout
 /// fingerprint of that version's header. Passed explicitly to the writer
@@ -307,18 +287,6 @@ pub(crate) mod tests {
         assert!(tensor_delta_from_env(Some("1")));
         assert!(!tensor_delta_from_env(Some("0")));
         assert!(!tensor_delta_from_env(None));
-    }
-
-    #[test]
-    fn max_depth_knob_parsing() {
-        assert_eq!(tensor_delta_max_depth_from_env(None), 3);
-        assert_eq!(tensor_delta_max_depth_from_env(Some("junk")), 3);
-        assert_eq!(tensor_delta_max_depth_from_env(Some("0")), 1);
-        assert_eq!(tensor_delta_max_depth_from_env(Some("5")), 5);
-        assert_eq!(
-            tensor_delta_max_depth_from_env(Some("200")),
-            crate::odb::MAX_DELTA_DEPTH
-        );
     }
 
     #[test]
