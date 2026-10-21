@@ -67,7 +67,41 @@ impl GeneratedPack {
     }
 }
 
+/// Remove chunk-delta payloads in the XOR-planes ("XP") format so those
+/// chunks fall through to the full-chunk path (`get_compressed_chunk`
+/// reconstructs them). Returns whether any were removed.
+fn strip_xp_deltas(lookup: &mut std::collections::HashMap<Oid, (Oid, Vec<u8>)>) -> usize {
+    let before = lookup.len();
+    lookup.retain(|_, (_, bytes)| !bytes.starts_with(b"XP"));
+    before - lookup.len()
+}
+
 impl ProtocolClient {
+    /// Drop XP deltas from `lookup` unless the remote advertises `delta-xp1`.
+    /// The capability probe (one `info/refs`) runs only when an XP payload is
+    /// actually present, and at most once per client.
+    async fn drop_unsupported_xp(
+        &self,
+        lookup: &mut std::collections::HashMap<Oid, (Oid, Vec<u8>)>,
+    ) {
+        if !lookup.values().any(|(_, b)| b.starts_with(b"XP")) {
+            return;
+        }
+        let supported = *self
+            .remote_xp
+            .get_or_init(|| async {
+                self.get_refs_or_empty()
+                    .await
+                    .map(|r| r.capabilities.iter().any(|c| c == "delta-xp1"))
+                    .unwrap_or(false)
+            })
+            .await;
+        if !supported {
+            let n = strip_xp_deltas(lookup);
+            tracing::info!(dropped = n, "remote lacks delta-xp1; sending full chunks");
+        }
+    }
+
     /// Push local objects and update remote refs
     ///
     /// # Arguments
@@ -766,6 +800,7 @@ impl ProtocolClient {
                 local_delta_lookup.insert(c.id, (base_id, delta_bytes));
             }
         }
+        self.drop_unsupported_xp(&mut local_delta_lookup).await;
 
         // Combined existence check: manifest chunks + speculative delta bases.
         let mut combined_check: Vec<String> = chunk_ids.clone();
@@ -1772,6 +1807,7 @@ impl ProtocolClient {
                     local_delta_lookup.insert(c.id, (base_id, delta_bytes));
                 }
             }
+            self.drop_unsupported_xp(&mut local_delta_lookup).await;
 
             // Combined existence check: manifest chunks + speculative delta bases.
             let mut combined_check: Vec<String> = chunk_ids.clone();
@@ -2613,7 +2649,67 @@ async fn detect_object_type(odb: &ObjectDatabase, oid: &Oid) -> ObjectType {
 
 #[cfg(test)]
 mod tests {
-    use super::signs_content_length;
+    use super::{signs_content_length, strip_xp_deltas};
+    use crate::ProtocolClient;
+    use mediagit_versioning::Oid;
+    use std::collections::HashMap;
+
+    fn lookup() -> HashMap<Oid, (Oid, Vec<u8>)> {
+        let a = Oid::hash(b"a");
+        let b = Oid::hash(b"b");
+        let base = Oid::hash(b"base");
+        HashMap::from([
+            (a, (base, b"XP\x01\x04\x00rest".to_vec())),
+            (b, (base, b"ZD\x01rest".to_vec())),
+        ])
+    }
+
+    /// Serve one `GET /info/refs` with the given capability list.
+    async fn mock_remote(caps: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = format!(r#"{{"refs":[],"capabilities":[{caps}]}}"#);
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                let mut buf = [0u8; 2048];
+                let _ = s.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = s.write_all(resp.as_bytes()).await;
+                let _ = s.shutdown().await;
+            }
+        });
+        format!("http://{addr}/r")
+    }
+
+    #[test]
+    fn strip_xp_keeps_only_zd() {
+        let mut l = lookup();
+        assert_eq!(strip_xp_deltas(&mut l), 1);
+        assert_eq!(l.len(), 1);
+        assert!(l.values().all(|(_, b)| b.starts_with(b"ZD")));
+    }
+
+    #[tokio::test]
+    async fn xp_dropped_when_remote_lacks_capability() {
+        let c = ProtocolClient::new(mock_remote(r#""pack-v1""#).await);
+        let mut l = lookup();
+        c.drop_unsupported_xp(&mut l).await;
+        assert_eq!(l.len(), 1);
+        assert!(l.values().all(|(_, b)| !b.starts_with(b"XP")));
+    }
+
+    #[tokio::test]
+    async fn xp_kept_when_remote_advertises_capability() {
+        let c = ProtocolClient::new(mock_remote(r#""pack-v1","delta-xp1""#).await);
+        let mut l = lookup();
+        c.drop_unsupported_xp(&mut l).await;
+        assert_eq!(l.len(), 2);
+    }
 
     #[test]
     fn detects_server_signed_content_length() {

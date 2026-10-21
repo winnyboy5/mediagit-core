@@ -266,6 +266,9 @@ pub struct ProtocolClient {
     /// over the internal default (24) but is itself overridden by the
     /// `MEDIAGIT_DOWNLOAD_CONCURRENCY` env var. Set via `with_concurrent_downloads`.
     concurrent_downloads: Option<usize>,
+    /// Lazily-fetched: does the remote advertise `delta-xp1`? Shared across
+    /// shallow copies so the info/refs probe happens at most once.
+    remote_xp: std::sync::Arc<tokio::sync::OnceCell<bool>>,
 }
 
 /// OP-2: absolute wall-clock budget for a download (pull / fetch / clone).
@@ -888,6 +891,7 @@ impl ProtocolClient {
             operation_id,
             concurrent_uploads: None,
             concurrent_downloads: None,
+            remote_xp: Default::default(),
         }
     }
 
@@ -950,6 +954,7 @@ impl ProtocolClient {
             operation_id: self.operation_id.clone(),
             concurrent_uploads: self.concurrent_uploads,
             concurrent_downloads: Some(n),
+            remote_xp: self.remote_xp.clone(),
         }
     }
 

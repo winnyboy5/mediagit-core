@@ -594,6 +594,12 @@ async fn test_list_refs() {
         response.capabilities
     );
 
+    assert!(
+        response.capabilities.contains(&"delta-xp1".to_string()),
+        "server must advertise XP delta support: {:?}",
+        response.capabilities
+    );
+
     // Check for expected refs
     let has_main = response.refs.iter().any(|r| r.name == "refs/heads/main");
     assert!(has_main, "Should have refs/heads/main");
