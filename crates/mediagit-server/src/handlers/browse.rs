@@ -80,6 +80,12 @@ pub async fn download_file_by_path(
     use axum::response::Response;
 
     if let Some(manifest) = manifest_opt {
+        // The whole-file check below runs on the last chunk, so a zero-chunk
+        // manifest would skip it; it can only be the empty blob.
+        if manifest.chunks.is_empty() && blob_oid != Oid::hash(b"") {
+            tracing::error!(oid = %blob_oid, "Zero-chunk manifest for a non-empty blob");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
         // Chunked blob: stream via duplex channel — O(64KB) memory regardless of file size.
         let total_size = manifest.total_size;
         let (writer, reader) = duplex(64 * 1024);

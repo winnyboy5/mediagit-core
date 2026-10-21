@@ -261,3 +261,40 @@ async fn missing_nested_path_returns_404_not_panic() {
         .unwrap();
     assert_eq!(resp.status(), 404);
 }
+
+/// A manifest with no chunks streams nothing, so the whole-file hash check in
+/// the chunk loop never runs: a zero-chunk manifest for a non-empty blob was
+/// served as a clean, empty 200.
+#[tokio::test]
+async fn zero_chunk_manifest_for_non_empty_blob_is_rejected() {
+    let (_temp, server_repos) =
+        setup_repo("empty-manifest-repo", &[("f.bin", b"real bytes" as &[u8])]).await;
+    let odb = open_server_odb(&server_repos.join("empty-manifest-repo")).await;
+    let blob_oid = odb.write(ObjectType::Blob, b"real bytes").await.unwrap();
+    odb.put_manifest(
+        &blob_oid,
+        &mediagit_versioning::ChunkManifest {
+            chunks: vec![],
+            total_size: 0,
+            filename: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let (base_url, _handle) = start_test_server(server_repos).await;
+    mediagit_protocol::ensure_crypto_provider();
+    let resp = reqwest::Client::new()
+        .get(format!(
+            "{}/empty-manifest-repo/files/f.bin?ref=main",
+            base_url
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_server_error(),
+        "zero-chunk manifest served as {}",
+        resp.status()
+    );
+}
