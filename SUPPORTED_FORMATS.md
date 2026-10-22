@@ -289,14 +289,21 @@ unchanged portions.
 | Application | Extensions | Compression | Chunking | Merge |
 |-------------|-----------|-------------|----------|-------|
 | Photoshop | `.psd`, `.psb` | 🗜️ Zstd Default | ✂️ FastCDC (≥5MB) | 🧩 PSD |
-| Illustrator | `.ai`, `.ait` | 💾 Store | ✂️ FastCDC (≥5MB) | 🧩 VFX |
+| Illustrator | `.ai`, `.ait` | 🗜️ Zstd Default | ✂️ FastCDC (≥5MB), stream-boundary cuts | 🧩 VFX |
 | InDesign | `.indd`, `.idml`, `.indt` | 💾 Store | ✂️ FastCDC (≥5MB) | 🧩 VFX |
 | After Effects | `.aep`, `.aet` | 🗜️ Zstd Default | ✂️ FastCDC (≥10MB) | 🧩 VFX |
 | Premiere Pro | `.prproj`, `.psq` | 🗜️ Zstd Default | ✂️ FastCDC (≥10MB) | 🧩 VFX |
 
-> **Why AI/InDesign use Store**: These are PDF-based containers with internally compressed
-> streams. Compression expands the data, wasting CPU. EPS and PDF are separate ObjectTypes
-> that receive Zstd Default; only `.ai`/`.ait` and InDesign map to the Store path.
+> **Why InDesign uses Store**: InDesign files hold internally compressed streams, so
+> compression mostly wastes CPU. Illustrator moved to Zstd Default in 0.5.0-rc.1: small
+> `.ai` files shrink 13–35% and large ones ~0.3% (incompressible data is still stored raw
+> by the expansion guard). EPS and PDF receive Zstd Default.
+>
+> **Stream-boundary cuts** (`MEDIAGIT_STREAM_CUTS`, default on): PDF/Illustrator files are
+> cut at embedded-stream boundaries and Figma/Sketch/XD/IDML at ZIP entries before
+> FastCDC runs inside each segment, so an edited stream no longer shifts its neighbours'
+> chunks. Real repo: Figma chain −19%, 30 MB PDF −4%. Files under 5 MiB are stored whole
+> and are not affected.
 
 > **AI delta ceiling**: Adobe Illustrator's proprietary DEFLATE encoder limits delta
 > efficiency to ~27% savings (theoretical floor ~40%). Whole-file normalization was
@@ -428,7 +435,7 @@ unchanged portions.
 
 | Format | Extensions | Compression | Chunking | Delta |
 |--------|-----------|-------------|----------|-------|
-| SafeTensors | `.safetensors` | 🗜️ Zstd Fast | ✂️ FastCDC (≥5MB) | ❌ |
+| SafeTensors | `.safetensors` | 🗜️ Zstd Fast | ✂️ FastCDC (≥5MB); header + fixed 1 MiB with `MEDIAGIT_TENSOR_DELTA=1` | ✅ XOR byte-plane, opt-in |
 | ProtoBuf | `.pb` | 🗜️ Zstd Fast | ✂️ FastCDC (≥5MB) | ❌ |
 | Pickle | `.pkl` | 🗜️ Zstd Fast | ✂️ FastCDC (≥5MB) | ❌ |
 | Joblib | `.joblib` | 🗜️ Zstd Fast | ✂️ FastCDC (≥5MB) | ❌ |

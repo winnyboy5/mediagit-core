@@ -210,7 +210,7 @@ mediagit verify --path /path/to/large-file.mov
 | **TIFF (uncompressed)** | Zstd compresses well. Large but effective delta encoding. |
 | **EXR** | Typically compressed. Stored as-is. |
 | **WAV / AIFF** | Audio-aware chunking. Zstd compresses ~40–60% on uncompressed audio. |
-| **PDF / AI / InDesign** | PDF containers with internal compression; stored as-is. |
+| **PDF / AI / InDesign** | PDF containers with internal compression; PDF and AI get zstd (Default), InDesign is stored as-is. |
 | **ZIP / DOCX / XLSX** | ZIP containers; stored as-is. |
 | **3D (OBJ, FBX, GLB, STL)** | Binary 3D data; Zstd Best compression applied. |
 

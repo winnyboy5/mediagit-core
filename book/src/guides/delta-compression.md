@@ -156,7 +156,7 @@ $ mediagit fsck --full
 
 ## Performance Tuning
 
-Delta has exactly two knobs, both environment variables. There is no
+Delta has exactly three knobs, all environment variables. There is no
 `[compression.delta]` table — earlier revisions of this guide showed
 `[compression.delta.thresholds]`, `[compression.delta.performance]` and
 `[compression.delta.memory]`, and none of them have ever existed in the config
@@ -166,6 +166,7 @@ schema.
 |---|---|---|
 | `MEDIAGIT_DELTA_LEVEL` | `19` | zstd dictionary compression level for delta encoding. Valid `1`-`22`; outside that range is rejected with a warning and the default used. |
 | `MEDIAGIT_DELTA_ENABLED` | — | Legacy toggle; set to `0`/`false` to force delta off for the whole repo, overriding repo config. Candidacy is otherwise decided per file. |
+| `MEDIAGIT_TENSOR_DELTA` | off | `1` stores `.safetensors` chunks as an XOR of their float byte-planes against the previous version's chunk at the same offset (falling back to the dictionary delta, then a full chunk). Measured: checkpoint chains 12–49% smaller, `add` 4–10x faster, peak `add` memory ~35% lower; checkout of the newest version up to ~1 s slower on deep chains. Binaries older than 0.5.0-rc.1 cannot read these deltas. |
 
 Parallelism is not delta-specific — it is `add`'s file-level parallelism, and
 the only control is `mediagit add --no-parallel` to turn it off.

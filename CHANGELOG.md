@@ -7,7 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+Container and model-weight savings cycle (2026-10-20/21, branch
+`feat/container-savings`). These changes postdate the 0.5.0-rc.1 GA
+clearance, so the release binary needs a new QA campaign before it ships.
+All numbers below are from real repositories (`add` + `commit` + `branch
+switch`, release build, two interleaved rounds, every checkout byte-exact).
+
+### Added
+
+- **Stream-boundary chunking for PDF, Illustrator, Figma, Sketch, XD and
+  IDML, on by default.** Chunk cuts land on embedded-stream boundaries (PDF
+  `stream`/`endstream`, ZIP entries), so an edited stream no longer shifts
+  its neighbours' chunks. Measured: a 6-version Figma chain stores 102.9 MB
+  instead of 127.6 MB (−19%), a 30 MB Adobe PDF pair −4%, `add` ~10% faster,
+  checkout unchanged; Photoshop, large Illustrator files and PDFs under
+  5 MiB are unchanged. `MEDIAGIT_STREAM_CUTS=0` restores the previous
+  chunking. Files without the format's magic bytes, and files above
+  `MEDIAGIT_CONTAINER_CHUNK_CAP_MB`, use the previous path.
+- **Model-weight deltas for `.safetensors` (opt-in, `MEDIAGIT_TENSOR_DELTA=1`).**
+  Each chunk is stored as an XOR of its float byte-planes against the
+  previous version's chunk at the same offset, falling back to the existing
+  dictionary delta and then to a full chunk. Measured on the final build:
+  Pythia-70M checkpoints −15% stored with `add` ~6.5x faster, SmolLM2
+  base→instruct −12% with `add` ~4x faster, a 12-version training chain −49%
+  with `add` 5–10x faster; peak `add` memory drops ~35% (551 → ~365 MB).
+  Checkout of the newest version costs up to ~1 s more (each delta hop is one
+  more decode pass); off by default for that reason. Repository format note: binaries older than this one cannot
+  read XP deltas (they stop with "missing ZD magic", they never misread data).
+
+### Fixed
+
+- **`gc` could delete chunks of a file it could not read.** A reachable
+  manifest that failed to parse was skipped with a debug log, so its chunks
+  and chunk-deltas looked unreachable and were removed. `gc` now aborts
+  without deleting anything.
+- **Server browse download did not check the whole file.** A manifest
+  listing valid chunks in the wrong order downloaded as a complete, wrong
+  file. The last chunk is now held until the file's BLAKE3 matches, so a
+  bad file ends short of `Content-Length` and the client sees a failed
+  download.
+- **`gc` could delete the base of a chunk delta.** A reachable chunk stored as
+  a delta keeps its base chunk alive only through the delta chain; `gc` did
+  not walk that chain, so a base reachable from nothing else was swept and the
+  file could no longer be checked out. `gc` now keeps every base on the chain
+  of every reachable chunk (cycle-guarded).
+- **`gc` now aborts when a reachable manifest has vanished** instead of
+  treating the file as having no chunks.
+- **Browse download rejects a manifest with no chunks for a non-empty file**
+  instead of returning an empty 200.
+- **A delta base is hash-checked before it is used for encoding,** so a
+  corrupt base can no longer be baked into a new delta.
+
+### Changed
+
+- **Checkout of delta-stored chunks runs in parallel.** Delta decode and the
+  per-chunk hash checks moved off the async reader onto the blocking pool,
+  as full chunks already did; every integrity check is unchanged. Measured
+  checkout ~30% faster on a mixed PDF/Illustrator/Photoshop/Figma repository
+  (0.7–0.8 s to 0.5 s), 1.6–2.2x faster on delta-only chunk reads.
+- **Illustrator files are compressed with zstd** instead of stored as-is:
+  small `.ai` files shrink 13–35%, large ones ~0.3% (existing expansion
+  guard still stores incompressible data raw).
+
+- **Dependencies:** `aes` 0.9 and `aes-gcm` 0.11 (at-rest ciphertext is
+  byte-identical; pinned golden vectors and the XAES spec vectors pass
+  unchanged), AWS SDK group and `google-cloud-auth` 1.17.
+
+### Investigated and not shipped
+
+Each was measured and parked because it did not improve the product; the
+evidence is in `.serena/memories/preflate-container-transform-parked-2026-10-20.md`
+and the project memory.
+
+- Reversible deflate recompression (preflate): large savings on gzip,
+  `.npz`, gzip `.blend` and some PDFs, but checkout 12–336x slower, also in
+  per-stream and "newest version raw" variants.
+- Bit-exact zstd re-encode of Figma and Blender payloads: works with pinned
+  libzstd versions, but needs a second vendored libzstd and gains less than
+  stream-boundary chunking.
+- A smaller creative chunk size: −30% on Figma but +34% on large Illustrator
+  files in a real repository.
+- A delta-depth cap and a folded multi-hop decoder for tensor deltas: the
+  cap cost storage and the fold did not help a real checkout; the parallel
+  reader above fixed the actual bottleneck.
 
 ## [v0.5.0-rc.1] - Unreleased (GA-cleared 2026-10-19; date set when tagged)
 

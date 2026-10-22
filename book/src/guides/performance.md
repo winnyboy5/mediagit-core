@@ -41,7 +41,8 @@ MediaGit never wastes CPU re-compressing already-compressed formats:
 | JPEG, PNG, WebP | Store | Already compressed |
 | MP4, MOV, AVI | Store | Already compressed |
 | ZIP, DOCX, XLSX | Store | ZIP container |
-| AI, InDesign | Store | Contains compressed streams; re-zstd would expand it |
+| InDesign | Store | Contains compressed streams; re-zstd would expand it |
+| AI | Zstd Default | Small files shrink 13–35%, large ones ~0.3%; incompressible output falls back to Store |
 | PDF, SVG, PSD | Zstd Default | PDF/SVG are documents; PSD is a creative-container format handled at Default, not Best |
 | TIFF, RAW, EXR (uncompressed images) | Zstd Best | Raw pixel data compresses well |
 | OBJ, FBX, GLB, STL (3D interchange) | Zstd Best | Binary/text mesh data |

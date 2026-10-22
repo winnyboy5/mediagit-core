@@ -97,6 +97,64 @@ Private memory: about 365 MB for `add`, 44-46 MB for a packed restore. `add` on 
 
 ---
 
+## Containers and model weights (real repositories, measured 2026-10-21)
+
+Release build, `add` + `commit` per version, then `branch switch` to the
+newest version timed as the median of three; two interleaved rounds per
+configuration; every checkout byte-exact. Scripts:
+`dev-tests/container-spike/scripts/{e2_breakdown,e2_realrepo,tensor_realrepo,realrepo_timing}.py`
+(local, gitignored; fixtures in `test-files/`).
+
+**Stream-boundary chunking** (`MEDIAGIT_STREAM_CUTS`, default on), stored bytes per chain:
+
+| Chain | Before | After |
+|---|---|---|
+| Figma, 6 versions (138 MB in) | 127.6 MB | **102.9 MB (−19%)** |
+| Adobe PDF pair (30 MB in) | 27.8 MB | **26.7 MB (−4%)** |
+| Illustrator 129/216 MB pair (above the 100 MB container cap) | 245.8 MB | 245.8 MB |
+| Photoshop pair | 45.7 MB | 45.7 MB |
+| PDFs and `.ai` under 5 MiB (stored whole) | unchanged | unchanged |
+
+Whole mixed repository: 450–475 MB → 429 MB, `add` 77–79 s → 69–71 s, checkout unchanged.
+
+**Parallel delta-chunk reads**, same mixed repository, knob defaults: checkout
+0.7–0.8 s → 0.5 s; storage and `add` unchanged. Micro-benchmark, 64 × 1 MiB
+depth-1 delta chunks: XP 208 → 93 ms, dictionary delta 136 → 87 ms.
+
+**Model weights** (`MEDIAGIT_TENSOR_DELTA=1`, uncapped, with parallel reads;
+final release build 2026-10-22, two interleaved rounds, peak working set of any
+`add` / checkout command):
+
+| Chain | Stored (off → on) | `add` (off → on) | Newest checkout (off → on) | Peak RSS `add` (off → on) |
+|---|---|---|---|---|
+| Pythia-70M, 4 checkpoints (1.1 GB in) | 619–622 → **529 MB (−15%)** | 588–667 s → **90–95 s** | 0.62–0.99 → 1.52–1.55 s | 551 → **361–373 MB** |
+| SmolLM2-135M base → instruct (538 MB in) | 412 → **363 MB (−12%)** | 140–171 s → **38–40 s** | 0.86–1.59 → 1.37–1.42 s | 566–569 → **343–344 MB** |
+| 12-version synthetic training chain (3.4 GB in) | 2997 → **1537 MB (−49%)** | 773–1516 s → **149–154 s** | 0.58–1.63 → 1.13–1.19 s | 538–551 → **361–364 MB** |
+
+Checkout peak RSS stays 57–98 MB either way. The knob-off `add` times vary run
+to run (shared machine); the ranges are the observed spread. With the knob on,
+checkout of the newest version costs up to ~1 s more (one decode pass per delta
+hop), which is why the knob stays off by default.
+
+**Whole branch vs `main` (4ca0ffe)**, default knobs, mixed creative repository
+(Illustrator, Figma, PDF, Photoshop chains, 675 MB in), release builds, three
+interleaved rounds, medians, every checkout byte-exact:
+
+| Metric | `main` | This branch |
+|---|---|---|
+| Stored | 450.3 MB | **437.7 MB (−2.8%)** |
+| `add` total | 60.2 s | **56.9 s (−5.5%)** |
+| Checkout, older versions | 0.65 s | **0.45 s (−31%)** |
+| Checkout, newest versions | 0.71 s | **0.55 s (−23%)** |
+| Peak RSS, `add` | 704 MB | **678 MB (−3.7%)** |
+| Peak RSS, checkout | 103 MB | 114 MB (+11 MB, parallel delta decode) |
+
+Measured and not shipped: reversible deflate recompression (preflate; up to
++82 pp on gzip data, checkout 12–336x slower), bit-exact zstd re-encode of
+Figma/Blender payloads, a 128 KiB creative chunk size (Figma −30% but large
+Illustrator +34%), a tensor delta-depth cap (costs storage) and a folded
+multi-hop decoder (no real-repository gain).
+
 ## Memory per command (4 GB random file, measured 2026-10-19)
 
 **Build:** release 0.5.0-rc.1, Windows, local server backed by MinIO-compatible storage. Shape is the campaign S4 drill: one 4 GB random file plus a 10,000-file corpus (56 MB). Peak **private** bytes, sampled by the campaign harness (`Measure-PeakRSS`).
@@ -427,7 +485,7 @@ The current MediaGit pipeline achieves **~26.5% aggregate savings** on a mixed r
 - Strong formats (WAV: 95%, GLB: 100%, Safetensors: 45%) establish the upper bound.
 - Pre-compressed formats (JPG/PNG/Video: 0%) dominate real corpora by byte weight and pull the aggregate down.
 
-Two follow-up approaches were measured and rejected before deployment: whole-file decompress-and-recompress normalization (compressed payloads in PNG/AI proved ~100% opaque to it), and stream-keyed delta-base matching (only ~50% of container keys survive an editor save; scored −2.2 pp vs baseline). **Future improvements require format-specific semantic parsing**, not generic codec or delta tuning.
+Two follow-up approaches were measured and rejected before deployment: whole-file decompress-and-recompress normalization (compressed payloads in PNG/AI proved ~100% opaque to it), and stream-keyed delta-base matching (only ~50% of container keys survive an editor save; scored −2.2 pp vs baseline). **Future improvements require format-specific semantic parsing**, not generic codec or delta tuning. Stream-boundary chunking (2026-10-21, above) is the first step in that direction: it uses the container's structure only to place chunk cuts, with no transform, and recovers −19% on Figma.
 
 ---
 
