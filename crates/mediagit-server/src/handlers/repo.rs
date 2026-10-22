@@ -94,13 +94,7 @@ pub async fn get_refs(
     // understand" from "this server is newer than me". Additive changes keep
     // this token; anything that removes, renames or retypes a field must
     // introduce `api-v2` rather than redefine v1 under clients' feet.
-    // `delta-xp1`: this server can decode XOR-planes ("XP") chunk-deltas.
-    // Clients omit XP payloads (sending full chunks) when it is absent.
-    let mut capabilities = vec![
-        "pack-v1".to_string(),
-        "api-v1".to_string(),
-        "delta-xp1".to_string(),
-    ];
+    let mut capabilities = vec!["pack-v1".to_string(), "api-v1".to_string()];
 
     // Advertise the repo's CDC seed (if any) so clones inherit matching chunk
     // boundaries. Omitted entirely when the seed is 0 (legacy repos / repos
