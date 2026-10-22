@@ -295,7 +295,7 @@ unchanged portions.
 | Premiere Pro | `.prproj`, `.psq` | 🗜️ Zstd Default | ✂️ FastCDC (≥10MB) | 🧩 VFX |
 
 > **Why InDesign uses Store**: InDesign files hold internally compressed streams, so
-> compression mostly wastes CPU. Illustrator moved to Zstd Default in 0.5.0-rc.1: small
+> compression mostly wastes CPU. Illustrator moved to Zstd Default in 0.6.0-rc.1: small
 > `.ai` files shrink 13–35% and large ones ~0.3% (incompressible data is still stored raw
 > by the expansion guard). EPS and PDF receive Zstd Default.
 >

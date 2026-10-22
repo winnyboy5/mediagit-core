@@ -257,7 +257,7 @@ graph TD
 graph TD
     A["File Input"] --> B["ObjectType::from_path()"]
     B --> C{"Already compressed?"}
-    C -->|"JPEG/PNG/GIF/WebP/AVIF/HEIC<br/>MP4/MOV/AVI/MKV/WebM<br/>MP3/AAC/OGG/Opus<br/>ZIP/GZ/7Z/RAR<br/>AI/InDesign<br/>DOCX/XLSX/PPTX"| D["💾 Store"]
+    C -->|"JPEG/PNG/GIF/WebP/AVIF/HEIC<br/>MP4/MOV/AVI/MKV/WebM<br/>MP3/AAC/OGG/Opus<br/>ZIP/GZ/7Z/RAR<br/>InDesign<br/>DOCX/XLSX/PPTX"| D["💾 Store"]
     C -->|No| E{"File category?"}
     E -->|"TIFF/BMP/RAW/EXR/HDR<br/>WAV/AIFF/FLAC/ALAC"| F["🗜️ Zstd Best"]
     E -->|"Text/Code/JSON/XML<br/>YAML/TOML/CSV"| G{"Size > 500MB?"}
@@ -266,7 +266,7 @@ graph TD
     E -->|"ML Data/Weights"| J["🗜️ Zstd Fast"]
     E -->|"ML Checkpoints"| K["🗜️ Zstd Fast"]
     E -->|"ML Inference/Deploy"| L["🗜️ Zstd Default"]
-    E -->|"Creative Projects<br/>(PSD/AEP/Blender/...)"| M["🗜️ Zstd Default"]
+    E -->|"Creative Projects<br/>(PSD/AI/AEP/Blender/...)"| M["🗜️ Zstd Default"]
     E -->|"Database (SQLite)"| N["🗜️ Zstd Default"]
     E -->|"TAR (uncompressed)"| O["🗜️ Zstd Default"]
     E -->|"Git Objects"| P["📋 Zlib Default"]
@@ -313,7 +313,8 @@ graph TD
 | **ML Data** | HDF5, NPY, TFRecords, etc. | **Zstd Fast** |
 | **ML Checkpoints** | .pt, .pth, .ckpt, .bin | **Zstd Fast** |
 | **ML Inference** | ONNX, GGUF, TFLite, etc. | **Zstd Default** |
-| **Adobe PDF-based** | AI, InDesign | **Store** (internal compression) |
+| **Adobe PDF-based** | AI | **Zstd Default** (stores raw if output is larger) |
+| **Adobe PDF-based** | InDesign | **Store** |
 | **Creative Projects** | PSD, AEP, Blender, Maya, C4D, etc. | **Zstd Default** |
 | **Office** | DOCX, XLSX, PPTX, ODP | **Store** (ZIP containers) |
 | **Database** | SQLite | **Zstd Default** |
@@ -418,6 +419,14 @@ Each media format has a dedicated parser that understands the container structur
 #### FBX Parser (`chunk_fbx`)
 - Parses binary FBX node tree structure
 
+#### Stream-Boundary Chunking (v0.6.0-rc.1)
+
+For `pdf`, `ai`, `fig`, `sketch`, `xd` and `idml`, chunk cuts are forced at embedded-stream boundaries (PDF `stream`/`endstream`; ZIP local headers) and FastCDC runs inside each segment. Segments under 64 KiB are merged, up to 256 KiB. The file must start with `%PDF-` or `PK`. On by default; `MEDIAGIT_STREAM_CUTS=0` disables it. Files of 5 MiB or less (stored whole) and files above `MEDIAGIT_CONTAINER_CHUNK_CAP_MB` (default 100) use the previous path. There is no format change. Measured: Figma 6-version chain -19% stored, 30 MB Adobe PDF -4%, AI above 100 MB, PSD and small PDF unchanged.
+
+#### Safetensors Walker (v0.6.0-rc.1, with `MEDIAGIT_TENSOR_DELTA=1`)
+
+Used only when tensor delta is enabled: a `.safetensors` file is split into one header chunk plus fixed 1 MiB data chunks, so each chunk lines up with the same offset in the previous version. See [Delta Compression](#delta-compression).
+
 ### FastCDC Integration
 
 MediaGit uses the **`fastcdc` crate v4.0** (specifically `fastcdc::v2020`, the 2020 algorithm revision) for all content-defined chunking. FastCDC replaces traditional rolling hash with a **gear table-based hash** that achieves **O(1) boundary detection per byte** — approximately **10× faster** than Buzhash or Rabin fingerprint.
@@ -518,6 +527,8 @@ The `get_chunk_params(file_size)` function selects FastCDC parameters:
 - **Decoder**: `zstd::bulk::Decompressor::with_dictionary(base_bytes)`
 - **Wire format**: `[0x5A, 0x44]` magic ("ZD") + varint(base_size) + varint(result_size) + zstd-compressed bytes
 - **Max chain depth**: 10 (then re-stored as full object)
+- **Base check**: the base chunk is hash-checked before a delta is encoded against it
+- **Tensor XOR-planes mode ("XP", experimental, opt-in)**: with `MEDIAGIT_TENSOR_DELTA=1` (since v0.6.0-rc.1), each `.safetensors` data chunk is stored as the XOR of its float byte-planes against the previous version's chunk at the same offset (magic `[0x58, 0x50]`). If XP does not win it falls back to the ZD delta, then to the full chunk. Measured: -12% to -49% stored, add 4-10x faster, add peak RSS about 35% lower; checkout of the newest version up to about 1 s slower on deep chains. Binaries older than v0.6.0-rc.1 stop with an error on an XP delta; they never misread it.
 - **Note**: Delta bytes are already zstd-compressed, so outer `compress_typed()` in ODB falls back to Store
 
 ### Similarity Detection
@@ -1120,6 +1131,11 @@ flowchart TD
     style K fill:#e74c3c,color:#fff
     style N fill:#27AE60,color:#fff
 ```
+
+### GC Safety
+
+- gc aborts and deletes nothing if a reachable chunk manifest is unreadable or vanished between listing and reading.
+- gc keeps every base on the delta chain of every reachable chunk (cycle-guarded); a base it cannot read also aborts gc.
 
 ### GC Stats
 

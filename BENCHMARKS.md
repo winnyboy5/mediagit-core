@@ -97,7 +97,7 @@ Private memory: about 365 MB for `add`, 44-46 MB for a packed restore. `add` on 
 
 ---
 
-## Containers and model weights (real repositories, measured 2026-10-21)
+## Containers and model weights (v0.6.0-rc.1, real repositories, measured 2026-10-21/22)
 
 Release build, `add` + `commit` per version, then `branch switch` to the
 newest version timed as the median of three; two interleaved rounds per

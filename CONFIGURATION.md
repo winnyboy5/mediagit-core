@@ -224,9 +224,10 @@ There is also a `"multi"` backend variant (`MultiBackendStorage`: `primary`, `re
 There is no `[compression]` section as of v0.4.0. It was removed from `schema.rs`: the keys it held (`enabled`, `algorithm`, `level`, `min_size`) were informational only — nothing outside `mediagit-config` itself ever read `config.compression.*`, and `SmartCompressor` (in `mediagit-versioning`) makes its algorithm/level choice purely from file type.
 
 **Automatic algorithm selection by file type** (always active, not configurable):
-- Already-compressed formats (JPEG, MP4, ZIP, DOCX, AI, PDF): stored as-is (`none`)
-- PSD, raw formats, 3D models: `zstd` at `Best` level (22)
-- Text, JSON, TOML: `zstd` at `Default` level (3)
+- Already-compressed formats (JPEG, MP4, ZIP, DOCX, InDesign): stored as-is (`none`)
+- PSD, AI, PDF: `zstd` at `Default` level (3); output larger than input is stored raw
+- Raw formats, 3D models: `zstd` at `Best` level (22)
+- Text, JSON, TOML: `brotli` at `Default` level (9; `zstd` above 500 MB)
 - ML checkpoints: `zstd` at `Fast` level (1)
 
 ---
