@@ -94,9 +94,9 @@ Objects are stored via one of four strategies — Store, Zstd, Brotli, or (inter
 
 | Format class | Strategy |
 |---|---|
-| JPEG, PNG, GIF, WebP, AVIF, HEIC, MP4, MOV, MKV, MP3, AAC, Opus, ZIP, docx/xlsx/pptx, AI/InDesign | Store (already compressed) |
+| JPEG, PNG, GIF, WebP, AVIF, HEIC, MP4, MOV, MKV, MP3, AAC, Opus, ZIP, docx/xlsx/pptx, InDesign | Store (already compressed) |
 | TIFF, BMP, RAW, EXR, HDR, DPX, WAV, AIFF, 3D models (OBJ, FBX, GLB, STL, PLY) | Zstd Best |
-| FLAC, ALAC, PDF, SVG, PSD, After Effects/Premiere/Resolve/Blender/Maya/Houdini project files | Zstd Default |
+| FLAC, ALAC, PDF, AI, SVG, PSD, After Effects/Premiere/Resolve/Blender/Maya/Houdini project files | Zstd Default |
 | Text, JSON, XML, YAML, TOML, CSV | Brotli Default (Zstd Default above 500 MB) |
 | Unknown/binary | Zstd Default (safe fallback) |
 

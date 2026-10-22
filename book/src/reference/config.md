@@ -228,9 +228,9 @@ left to imply a control that did not exist. A `[compression]` table in an existi
 `config.toml` is now simply an unknown key and is ignored (with a warning).
 
 Compression is decided entirely by `SmartCompressor`, per file type:
-- Already-compressed formats (JPEG, MP4, ZIP, docx, AI/InDesign): stored as-is (`none`) — PDF is *not* in this group, see below
+- Already-compressed formats (JPEG, MP4, ZIP, docx, InDesign): stored as-is (`none`) — PDF is *not* in this group, see below
 - Raw/uncompressed image formats (TIFF, RAW, EXR) and 3D interchange formats (OBJ/FBX/GLB/STL/PLY): `zstd` at `Best` level (level 19 — levels 20-22 are deliberately never used, they OOM under parallel adds for <0.5% extra ratio)
-- PSD and other creative project files (After Effects, Premiere, Blender, Maya, ...), plus PDF/SVG: `zstd` at `Default` level (level 3)
+- PSD and other creative project files (After Effects, Premiere, Blender, Maya, ...), plus PDF/SVG and Illustrator (AI): `zstd` at `Default` level (level 3)
 - Text, JSON, TOML: `brotli` at `Default` level (falls back to `zstd` above 500 MB)
 - ML checkpoints: `zstd` at `Fast` level (level 1)
 

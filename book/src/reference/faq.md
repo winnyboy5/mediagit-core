@@ -146,8 +146,8 @@ Concurrent writes to the same branch follow a push/pull model similar to Git.
 
 MediaGit's `SmartCompressor` picks one of four strategies automatically per file type — you don't choose an algorithm yourself:
 
-- **Store** (no recompression) for already-compressed formats: JPEG, PNG, MP4, ZIP, AI/InDesign, Office documents
-- **Zstd** (Best or Default level, depending on format) for uncompressed images (TIFF, RAW, EXR), PSD/3D models/creative project files, PDF/SVG, and as the safe fallback for unknown binary data
+- **Store** (no recompression) for already-compressed formats: JPEG, PNG, MP4, ZIP, InDesign, Office documents
+- **Zstd** (Best or Default level, depending on format) for uncompressed images (TIFF, RAW, EXR), PSD/3D models/creative project files, PDF/SVG/AI, and as the safe fallback for unknown binary data
 - **Brotli** (Default level) for text/code formats (TXT, JSON, XML, YAML, TOML, CSV) — falls back to Zstd above 500 MB, where Brotli's encode cost stops paying off
 - **Zlib** only for internal Git-compatible objects (not used on media files)
 

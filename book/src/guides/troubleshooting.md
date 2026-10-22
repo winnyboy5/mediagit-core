@@ -199,7 +199,7 @@ mediagit add --jobs 4 assets/
 mediagit add --no-parallel assets/
 ```
 
-Check if files are being re-compressed unnecessarily. Pre-compressed formats (JPEG, MP4, ZIP, PDF, AI) should be stored without re-compression — verify with:
+Check if files are being re-compressed unnecessarily. Pre-compressed formats (JPEG, MP4, ZIP, InDesign) should be stored without re-compression — verify with:
 
 ```bash
 RUST_LOG=mediagit_compression=debug mediagit add file.jpg
@@ -307,7 +307,7 @@ Supported 3D extensions: `stl`, `obj`, `fbx`, `glb`, `gltf`, `ply`, `dae`, `abc`
 
 ### AI / InDesign files inflate in size after add
 
-AI and InDesign (`.indd`) files are PDF containers with embedded compressed streams. MediaGit stores them as-is (no re-compression) because re-compressing compressed data increases size. This is correct behavior.
+AI and InDesign (`.indd`) files are PDF containers with embedded compressed streams. InDesign files are stored as-is; AI files get zstd, and any output larger than the input is stored as-is instead, so neither can grow beyond a few header bytes. A size jump after `add` comes from new content, not compression.
 
 ---
 
