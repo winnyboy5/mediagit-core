@@ -120,7 +120,7 @@ mod tests {
         let nonce_bytes = [9u8; 12];
         // v1 had no associated data at all.
         let body = cipher
-            .encrypt(Nonce::from_slice(&nonce_bytes), plain.as_slice())
+            .encrypt(&Nonce::from(nonce_bytes), plain.as_slice())
             .unwrap();
 
         let mut v1 = Vec::new();

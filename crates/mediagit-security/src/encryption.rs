@@ -54,11 +54,6 @@
 //! [version][nonce][chunk1_cipher][chunk1_tag][chunk2_cipher][chunk2_tag]...
 //! ```
 
-// Suppress deprecation warning for GenericArray::from_slice
-// This is a dependency warning from aes-gcm 0.10 using generic-array 0.14
-// Will be resolved when upgrading to aes-gcm with generic-array 1.x support
-#![allow(deprecated)]
-
 use aes_gcm::{
     Aes256Gcm, Nonce,
     aead::{Aead, KeyInit, Payload},
@@ -254,15 +249,15 @@ fn xaes_derive(
     key: &[u8; KEY_SIZE],
     nonce: &[u8; XNONCE_SIZE],
 ) -> (Zeroizing<[u8; KEY_SIZE]>, [u8; NONCE_SIZE]) {
-    use aes::Aes256;
-    use aes::cipher::{BlockEncrypt, KeyInit as _, generic_array::GenericArray};
+    use aes::cipher::{BlockCipherEncrypt, KeyInit as _};
+    use aes::{Aes256, Block};
 
-    let cipher = Aes256::new(GenericArray::from_slice(key));
+    let cipher = Aes256::new(key.into());
 
     // Steps 1-2: CMAC subkey K1, from L = AES_K(0^16) (NIST SP 800-38B §6.1
     // subkey generation — the "double" is a big-endian 128-bit left shift
     // with conditional XOR of the GCM reduction constant 0x87).
-    let mut l_block = GenericArray::clone_from_slice(&[0u8; 16]);
+    let mut l_block = Block::default();
     cipher.encrypt_block(&mut l_block);
     let mut l = [0u8; 16];
     l.copy_from_slice(l_block.as_slice());
@@ -278,16 +273,16 @@ fn xaes_derive(
     m2[1] = 0x02;
 
     // Step 5: Kx = AES_K(M1 ^ K1) || AES_K(M2 ^ K1).
-    let mut b1 = GenericArray::clone_from_slice(&xor16(&m1, &k1));
+    let mut b1 = Block::from(xor16(&m1, &k1));
     cipher.encrypt_block(&mut b1);
-    let mut b2 = GenericArray::clone_from_slice(&xor16(&m2, &k1));
+    let mut b2 = Block::from(xor16(&m2, &k1));
     cipher.encrypt_block(&mut b2);
 
     let mut kx = Zeroizing::new([0u8; KEY_SIZE]);
     kx.as_mut_slice()[..16].copy_from_slice(&b1);
     kx.as_mut_slice()[16..].copy_from_slice(&b2);
-    // `GenericArray` isn't `zeroize::Zeroize` here (that impl is behind a
-    // feature this workspace doesn't enable), so clear it by hand.
+    // `Block` (hybrid-array `Array`) isn't `zeroize::Zeroize` here (that impl
+    // is behind a feature this workspace doesn't enable), so clear it by hand.
     b1.as_mut_slice().fill(0);
     b2.as_mut_slice().fill(0);
 
@@ -394,7 +389,7 @@ fn encrypt_with_nonce(
     if plaintext.len() > STREAM_THRESHOLD {
         output.extend_from_slice(&encrypt_stream(&cipher, &nx, &aad, plaintext)?);
     } else {
-        let nonce = Nonce::from_slice(&nx);
+        let nonce = &Nonce::from(nx);
         let ciphertext = cipher
             .encrypt(
                 nonce,
@@ -544,7 +539,7 @@ fn decrypt_dispatch(
         }
     }
 
-    let nonce = Nonce::from_slice(nonce_base);
+    let nonce = &Nonce::from(*nonce_base);
     cipher
         .decrypt(
             nonce,
@@ -578,7 +573,7 @@ fn encrypt_stream(
 
     for (chunk_idx, chunk) in plaintext.chunks(CHUNK_SIZE).enumerate() {
         let nonce_bytes = chunk_nonce(base, chunk_idx);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = &Nonce::from(nonce_bytes);
         let chunk_ciphertext = cipher
             .encrypt(nonce, Payload { msg: chunk, aad })
             .map_err(|e| EncryptionError::EncryptionFailed(e.to_string()))?;
@@ -606,7 +601,7 @@ fn decrypt_stream(
 
     for (chunk_idx, chunk) in encrypted_data.chunks(chunk_size).enumerate() {
         let nonce_bytes = chunk_nonce(base, chunk_idx);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = &Nonce::from(nonce_bytes);
         let chunk_plaintext = cipher
             .decrypt(nonce, Payload { msg: chunk, aad })
             .map_err(|e| EncryptionError::DecryptionFailed(e.to_string()))?;
@@ -809,7 +804,7 @@ mod tests {
 
         let cipher = Aes256Gcm::new_from_slice(key.expose_key()).unwrap();
         let nonce_bytes = [7u8; NONCE_SIZE];
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = &Nonce::from(nonce_bytes);
         // v1 had no associated data at all.
         let body = cipher.encrypt(nonce, plaintext.as_slice()).unwrap();
 
@@ -859,7 +854,7 @@ mod tests {
         let cipher = Aes256Gcm::new_from_slice(&expected_kx).unwrap();
         let ct = cipher
             .encrypt(
-                Nonce::from_slice(&expected_nx),
+                &Nonce::from(expected_nx),
                 Payload {
                     msg: b"XAES-256-GCM",
                     aad: b"",
@@ -891,7 +886,7 @@ mod tests {
         let cipher = Aes256Gcm::new_from_slice(&expected_kx).unwrap();
         let ct = cipher
             .encrypt(
-                Nonce::from_slice(&expected_nx),
+                &Nonce::from(expected_nx),
                 Payload {
                     msg: b"XAES-256-GCM",
                     aad: b"c2sp.org/XAES-256-GCM",
@@ -910,15 +905,15 @@ mod tests {
     /// than only as a wrong final `Kx`.
     #[test]
     fn xaes_subkey_generation_matches_spec() {
-        use aes::Aes256;
-        use aes::cipher::{BlockEncrypt, KeyInit as _, generic_array::GenericArray};
+        use aes::cipher::{BlockCipherEncrypt, KeyInit as _};
+        use aes::{Aes256, Block};
 
         let key = hex32("0101010101010101010101010101010101010101010101010101010101010101");
         let expected_l = hex16("7298caa565031eadc6ce23d23ea66378");
         let expected_k1 = hex16("e531954aca063d5b8d9c47a47d4cc6f0");
 
-        let cipher = Aes256::new(GenericArray::from_slice(&key));
-        let mut l_block = GenericArray::clone_from_slice(&[0u8; 16]);
+        let cipher = Aes256::new((&key).into());
+        let mut l_block = Block::default();
         cipher.encrypt_block(&mut l_block);
         assert_eq!(l_block.as_slice(), &expected_l[..]);
 
@@ -1007,7 +1002,7 @@ mod tests {
         let body = if plain.len() > STREAM_THRESHOLD {
             encrypt_stream(&cipher, &nonce12, &[], plain).unwrap()
         } else {
-            cipher.encrypt(Nonce::from_slice(&nonce12), plain).unwrap()
+            cipher.encrypt(&Nonce::from(nonce12), plain).unwrap()
         };
         let mut out = vec![LEGACY_VERSION];
         out.extend_from_slice(&nonce12);
