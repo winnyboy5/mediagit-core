@@ -68,47 +68,6 @@ impl GeneratedPack {
 }
 
 impl ProtocolClient {
-    /// Drop XP deltas from `lookup` unless the remote advertises `delta-xp1`,
-    /// so those chunks fall through to the full-chunk path
-    /// (`get_compressed_chunk` reconstructs them). The payloads are stored
-    /// bytes, so the format check goes through the ODB's decode. The
-    /// capability probe (one `info/refs`) runs only when an XP payload is
-    /// actually present, and at most once per client.
-    async fn drop_unsupported_xp(
-        &self,
-        odb: &ObjectDatabase,
-        lookup: &mut std::collections::HashMap<Oid, (Oid, Vec<u8>)>,
-    ) -> Result<()> {
-        let mut xp = Vec::new();
-        for (id, (_, raw)) in lookup.iter() {
-            if odb.is_xp_delta_payload(raw)? {
-                xp.push(*id);
-            }
-        }
-        if xp.is_empty() {
-            return Ok(());
-        }
-        let supported = *self
-            .remote_xp
-            .get_or_init(|| async {
-                self.get_refs_or_empty()
-                    .await
-                    .map(|r| r.capabilities.iter().any(|c| c == "delta-xp1"))
-                    .unwrap_or(false)
-            })
-            .await;
-        if !supported {
-            for id in &xp {
-                lookup.remove(id);
-            }
-            tracing::info!(
-                dropped = xp.len(),
-                "remote lacks delta-xp1; sending full chunks"
-            );
-        }
-        Ok(())
-    }
-
     /// Push local objects and update remote refs
     ///
     /// # Arguments
@@ -807,9 +766,6 @@ impl ProtocolClient {
                 local_delta_lookup.insert(c.id, (base_id, delta_bytes));
             }
         }
-        self.drop_unsupported_xp(odb, &mut local_delta_lookup)
-            .await?;
-
         // Combined existence check: manifest chunks + speculative delta bases.
         let mut combined_check: Vec<String> = chunk_ids.clone();
         let chunk_id_set: std::collections::HashSet<&String> = chunk_ids.iter().collect();
@@ -1815,9 +1771,6 @@ impl ProtocolClient {
                     local_delta_lookup.insert(c.id, (base_id, delta_bytes));
                 }
             }
-            self.drop_unsupported_xp(odb, &mut local_delta_lookup)
-                .await?;
-
             // Combined existence check: manifest chunks + speculative delta bases.
             let mut combined_check: Vec<String> = chunk_ids.clone();
             let chunk_id_set: std::collections::HashSet<&String> = chunk_ids.iter().collect();
@@ -2659,141 +2612,6 @@ async fn detect_object_type(odb: &ObjectDatabase, oid: &Oid) -> ObjectType {
 #[cfg(test)]
 mod tests {
     use super::signs_content_length;
-    use crate::ProtocolClient;
-    use mediagit_versioning::Oid;
-    use std::collections::HashMap;
-
-    /// A real ODB holding two versions of a `.safetensors` file, the second
-    /// written against the first with tensor delta on, plus the push-side
-    /// delta lookup for v2 built exactly as `push_one_object` builds it. The
-    /// payloads are the STORED bytes (compressed), not raw `XP`/`ZD` frames.
-    async fn real_lookup() -> (
-        tempfile::TempDir,
-        mediagit_versioning::ObjectDatabase,
-        HashMap<Oid, (Oid, Vec<u8>)>,
-    ) {
-        // SAFETY: only these tests write chunked files in this binary, and
-        // they all set the same value before the process-wide OnceLock reads it.
-        unsafe { std::env::set_var("MEDIAGIT_TENSOR_DELTA", "1") };
-        let tmp = tempfile::TempDir::new().unwrap();
-        let backend = std::sync::Arc::new(
-            mediagit_storage::LocalBackend::new(tmp.path().join("store").to_str().unwrap())
-                .await
-                .unwrap(),
-        );
-        let odb = mediagit_versioning::ObjectDatabase::with_optimizations(
-            backend,
-            100_000_000,
-            Some(mediagit_versioning::ChunkStrategy::MediaAware),
-            true,
-            0,
-        );
-        // ~3 MiB of F32 weights; v2 flips the low mantissa byte of ~2% of them.
-        let mut x = 0x2545_F491_4F6C_DD1Du64;
-        let mut w: Vec<u8> = (0..(3usize << 20) / 4)
-            .flat_map(|_| {
-                x ^= x << 13;
-                x ^= x >> 7;
-                x ^= x << 17;
-                (((x >> 40) as f32 / 16_777_216.0) - 0.5).to_le_bytes()
-            })
-            .collect();
-        let path = tmp.path().join("m.safetensors");
-        let mut prev: Option<Oid> = None;
-        for v in 0..2 {
-            if v == 1 {
-                for i in (0..w.len() / 4).step_by(50) {
-                    w[i * 4] ^= 0x5a;
-                }
-            }
-            let hdr = format!(
-                r#"{{"w":{{"dtype":"F32","shape":[{}],"data_offsets":[0,{}]}}}}"#,
-                w.len() / 4,
-                w.len()
-            );
-            let mut file = (hdr.len() as u64).to_le_bytes().to_vec();
-            file.extend_from_slice(hdr.as_bytes());
-            file.extend_from_slice(&w);
-            std::fs::write(&path, &file).unwrap();
-            let positional = match prev {
-                Some(p) => {
-                    let m = odb.get_chunk_manifest(&p).await.unwrap().unwrap();
-                    odb.positional_base_from_manifest(&m).await
-                }
-                None => None,
-            };
-            prev = Some(
-                odb.write_chunked_from_file_positional(
-                    &path,
-                    "m.safetensors",
-                    None,
-                    None,
-                    positional,
-                )
-                .await
-                .unwrap(),
-            );
-        }
-        let manifest = odb
-            .get_chunk_manifest(&prev.unwrap())
-            .await
-            .unwrap()
-            .unwrap();
-        let mut l = HashMap::new();
-        for c in &manifest.chunks {
-            if let Some(d) = odb.get_local_chunk_delta_raw(&c.id).await.unwrap() {
-                l.insert(c.id, d);
-            }
-        }
-        assert!(!l.is_empty(), "v2 stored no chunk deltas");
-        (tmp, odb, l)
-    }
-
-    /// Serve one `GET /info/refs` with the given capability list.
-    async fn mock_remote(caps: &str) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let body = format!(r#"{{"refs":[],"capabilities":[{caps}]}}"#);
-        tokio::spawn(async move {
-            while let Ok((mut s, _)) = listener.accept().await {
-                let mut buf = [0u8; 2048];
-                let _ = s.read(&mut buf).await;
-                let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = s.write_all(resp.as_bytes()).await;
-                let _ = s.shutdown().await;
-            }
-        });
-        format!("http://{addr}/r")
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn xp_dropped_when_remote_lacks_capability() {
-        let (_tmp, odb, mut l) = real_lookup().await;
-        let before = l.len();
-        let c = ProtocolClient::new(mock_remote(r#""pack-v1""#).await);
-        c.drop_unsupported_xp(&odb, &mut l).await.unwrap();
-        assert!(l.len() < before, "no XP delta was dropped");
-        for (_, raw) in l.values() {
-            assert!(
-                !odb.is_xp_delta_payload(raw).unwrap(),
-                "an XP delta survived"
-            );
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn xp_kept_when_remote_advertises_capability() {
-        let (_tmp, odb, mut l) = real_lookup().await;
-        let before = l.len();
-        let c = ProtocolClient::new(mock_remote(r#""pack-v1","delta-xp1""#).await);
-        c.drop_unsupported_xp(&odb, &mut l).await.unwrap();
-        assert_eq!(l.len(), before);
-    }
 
     #[test]
     fn detects_server_signed_content_length() {
