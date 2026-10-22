@@ -63,8 +63,9 @@ switch`, release build, two interleaved rounds, every checkout byte-exact).
 - **Checkout of delta-stored chunks runs in parallel.** Delta decode and the
   per-chunk hash checks moved off the async reader onto the blocking pool,
   as full chunks already did; every integrity check is unchanged. Measured
-  checkout ~30% faster on a mixed PDF/Illustrator/Photoshop/Figma repository
-  (0.7–0.8 s to 0.5 s), 1.6–2.2x faster on delta-only chunk reads.
+  checkout 23–31% faster on a mixed PDF/Illustrator/Photoshop/Figma repository
+  (0.65 → 0.45 s older versions, 0.71 → 0.55 s newest; see BENCHMARKS),
+  1.6–2.2x faster on delta-only chunk reads, for ~11 MB more checkout peak memory.
 - **Illustrator files are compressed with zstd** instead of stored as-is:
   small `.ai` files shrink 13–35%, large ones ~0.3% (existing expansion
   guard still stores incompressible data raw).

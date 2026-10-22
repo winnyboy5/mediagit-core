@@ -1034,3 +1034,20 @@ function Get-QaAttestationCounts([string]$LogPath) {
 function Test-QaBackendAttests([string]$Backend) {
   return @('aws', 'gcs') -contains $Backend
 }
+
+# gc with the prune grace window and the reflog roots switched OFF
+# (MEDIAGIT_GC_GRACE_SECS=0, MEDIAGIT_GC_REFLOG_HORIZON_DAYS=0). With the defaults every
+# object is under the one-hour grace and gc deletes nothing, so a gc that loses data
+# would pass: a gate built on default gc cannot fail.
+function Invoke-QaGcHarsh([string]$Repo, [string]$Phase, [string[]]$GcArgs = @("-y")) {
+  $savedG = $env:MEDIAGIT_GC_GRACE_SECS
+  $savedR = $env:MEDIAGIT_GC_REFLOG_HORIZON_DAYS
+  try {
+    $env:MEDIAGIT_GC_GRACE_SECS = "0"
+    $env:MEDIAGIT_GC_REFLOG_HORIZON_DAYS = "0"
+    return (Invoke-MG $Repo (@("gc") + $GcArgs) $Phase -TimeoutSec 3600)
+  } finally {
+    if ($null -ne $savedG) { $env:MEDIAGIT_GC_GRACE_SECS = $savedG } else { Remove-Item Env:\MEDIAGIT_GC_GRACE_SECS -EA SilentlyContinue }
+    if ($null -ne $savedR) { $env:MEDIAGIT_GC_REFLOG_HORIZON_DAYS = $savedR } else { Remove-Item Env:\MEDIAGIT_GC_REFLOG_HORIZON_DAYS -EA SilentlyContinue }
+  }
+}

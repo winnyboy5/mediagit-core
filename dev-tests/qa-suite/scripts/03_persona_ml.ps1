@@ -321,9 +321,101 @@ function Run-M5 {
 }
 
 # ---------------------------------------------------------------------------
+# M6: opt-in tensor delta (MEDIAGIT_TENSOR_DELTA=1) on a 3-version real safetensors
+# chain (pythia70m, ~280MB each). Asserts, with the knob ON: every version checks
+# out byte-exact, fsck is clean, gc then re-checkout is still byte-exact, and the
+# store is smaller than the same chain stored with the knob OFF.
+# ~850MB of source per repo x2 repos, so it runs only on the SCALE tier (what
+# run_ga.ps1 uses) or when MG_QA_TENSOR_DELTA=1; the default tier skips it.
+# ---------------------------------------------------------------------------
+function Get-QaDirBytes([string]$Path) {
+  [long](Get-ChildItem $Path -Recurse -File -EA SilentlyContinue | Measure-Object Length -Sum).Sum
+}
+
+function Build-TensorChain([string]$Repo, [string[]]$Sources) {
+  $oids = @()
+  $dest = Join-Path $Repo "model.safetensors"
+  for ($v = 1; $v -le $Sources.Count; $v++) {
+    Copy-Item -LiteralPath $Sources[$v - 1] -Destination $dest -Force
+    Invoke-MG $Repo @("add", $dest) $Phase -TimeoutSec 3600 | Out-Null
+    $c = Invoke-MG $Repo @("commit", "-m", "tensor v$v") $Phase -TimeoutSec 3600
+    $oids += $(if ($c.Out -match "Created commit ([0-9a-fA-F]{8,})") { $Matches[1] } else { $null })
+  }
+  return $oids
+}
+
+function Run-M6 {
+  $id = "M6"
+  if (($QA.Tier -ne "SCALE") -and ($env:MG_QA_TENSOR_DELTA -ne "1")) {
+    Add-Row $id "tier" "tensor-delta chain" "SCALE tier or MG_QA_TENSOR_DELTA=1" 0 "SKIP" 0 "default tier skips the ~850MB chain"
+    Write-QaGate $Phase "M6-tensor-delta" "SKIP" "MG_QA_TENSOR_DELTA unset and tier $($QA.Tier): $QA_SKIP_NOT_SELECTED"
+    return
+  }
+  $stDir = Join-Path $QA.TestFiles "ml-pairs\safetensors"
+  $srcs = @("pythia70m_step71000", "pythia70m_step142000", "pythia70m_step143000") |
+    ForEach-Object { Join-Path $stDir "$_.safetensors" }
+  if (@($srcs | Where-Object { -not (Test-Path $_) }).Count -gt 0) {
+    Add-Row $id "fixture" "pythia70m_step{71000,142000,143000}.safetensors" "3 versions" 0 "SKIP" 0 "missing under $stDir"
+    Write-QaGate $Phase "M6-tensor-delta" "SKIP" "fixtures missing under $stDir"
+    return
+  }
+  $srcHashes = @($srcs | ForEach-Object { Get-QaHash $_ })
+
+  # knob OFF baseline: same chain, same pinned CDC seed, no tensor delta.
+  $savedSeed = $env:MEDIAGIT_CDC_SEED
+  $env:MEDIAGIT_CDC_SEED = "20260716"
+  try {
+    $env:MEDIAGIT_TENSOR_DELTA = "0"
+    $repoOff = New-SandboxRepo "ml-M6-off" $Phase
+    Build-TensorChain $repoOff $srcs | Out-Null
+    $offBytes = Get-QaDirBytes (Join-Path $repoOff ".mediagit")
+
+    $env:MEDIAGIT_TENSOR_DELTA = "1"
+    $repoOn = New-SandboxRepo "ml-M6-on" $Phase
+    $oids = Build-TensorChain $repoOn $srcs
+    $onBytes = Get-QaDirBytes (Join-Path $repoOn ".mediagit")
+
+    $smaller = $onBytes -lt $offBytes
+    Add-Row $id "store-size" "store bytes knob on vs off" "on < off" 0 $(if ($smaller) { "PASS" } else { "FAIL" }) 0 "on=$onBytes off=$offBytes"
+    Write-QaGate $Phase "M6-tensor-delta-smaller" $smaller "on=$onBytes off=$offBytes"
+
+    $dest = Join-Path $repoOn "model.safetensors"
+    function Test-AllVersions([string]$Tag) {
+      for ($v = 1; $v -le 3; $v++) {
+        if (-not $oids[$v - 1]) { $script:m6Exact = $false; $script:m6Detail += "$Tag-v${v}:no-oid"; continue }
+        Remove-Item -LiteralPath $dest -Force -EA SilentlyContinue  # force a read from the store
+        $rs = Invoke-MG $repoOn @("reset", "--hard", $oids[$v - 1]) $Phase -TimeoutSec 3600
+        $ok = ($rs.Exit -eq 0) -and (Test-Path $dest) -and ((Get-QaHash $dest) -eq $srcHashes[$v - 1])
+        if (-not $ok) { $script:m6Exact = $false; $script:m6Detail += "$Tag-v${v}:exit=$($rs.Exit)" }
+      }
+    }
+    $script:m6Exact = $true; $script:m6Detail = @()
+    Test-AllVersions "pre-gc"
+    Add-Row $id "checkout-exact" "reset --hard v1..v3" "byte-exact" 0 $(if ($script:m6Exact) { "PASS" } else { "FAIL" }) 0 ($script:m6Detail -join ";")
+    Write-QaGate $Phase "M6-tensor-delta-checkout-exact" $script:m6Exact ("versions=3 " + ($script:m6Detail -join ";"))
+
+    $f1 = Invoke-MG $repoOn @("fsck", "--full") $Phase -TimeoutSec 3600
+    $fsckOk = ($f1.Exit -eq 0) -and ($f1.Out -notmatch "corrupt|missing|failed")
+    Add-Row $id "fsck" "fsck --full" "clean" $f1.Exit $(if ($fsckOk) { "PASS" } else { "FAIL" }) $f1.Sec ""
+    Write-QaGate $Phase "M6-tensor-delta-fsck" $fsckOk "exit=$($f1.Exit)"
+
+    $gc = Invoke-QaGcHarsh $repoOn $Phase @("--repack", "-y")
+    $script:m6Exact = $true; $script:m6Detail = @()
+    Test-AllVersions "post-gc"
+    $f2 = Invoke-MG $repoOn @("fsck", "--full") $Phase -TimeoutSec 3600
+    $postOk = ($gc.Exit -eq 0) -and $script:m6Exact -and ($f2.Exit -eq 0)
+    Add-Row $id "gc-recheckout" "gc --repack -y; reset --hard v1..v3; fsck" "byte-exact, clean" $gc.Exit $(if ($postOk) { "PASS" } else { "FAIL" }) $gc.Sec ("fsck=$($f2.Exit) " + ($script:m6Detail -join ";"))
+    Write-QaGate $Phase "M6-tensor-delta-gc-recheckout" $postOk ("gc=$($gc.Exit) fsck=$($f2.Exit) " + ($script:m6Detail -join ";"))
+  } finally {
+    Remove-Item Env:\MEDIAGIT_TENSOR_DELTA -EA SilentlyContinue
+    if ($null -ne $savedSeed) { $env:MEDIAGIT_CDC_SEED = $savedSeed } else { Remove-Item Env:\MEDIAGIT_CDC_SEED -EA SilentlyContinue }
+  }
+}
+
+# ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
-$allScenarios = @("M1", "M2", "M3", "M4", "M5")
+$allScenarios = @("M1", "M2", "M3", "M4", "M5", "M6")
 $toRun = if ($Only) { @($Only) } else { $allScenarios }
 
 foreach ($sid in $toRun) {
@@ -333,6 +425,7 @@ foreach ($sid in $toRun) {
     "M3" { Invoke-Scenario "M3" { Run-M3 } }
     "M4" { Invoke-Scenario "M4" { Run-M4 } }
     "M5" { Invoke-Scenario "M5" { Run-M5 } }
+    "M6" { Invoke-Scenario "M6" { Run-M6 } }
     default { Write-QaLog $Phase "Unknown scenario id: $sid" }
   }
 }

@@ -317,6 +317,81 @@ foreach ($case in $cases) {
   }
 }
 
+# ---- checkout of a delta-heavy chain (parallel delta read) ----
+#
+# Checkout reads delta chunks in parallel. v2 of each chain is v1 with a 4 KiB slice
+# overwritten, so almost every chunk dedups and the rest is delta against v1: moving the
+# worktree v1 -> v2 is dominated by the delta read path, which `add`-only cases above
+# never time. Times `reset --hard <v2>` from a clean v1 worktree; op labels
+# checkout-psd / checkout-ai, field `wall`, keyed by input size like add-psd.
+#
+# BASELINE: perf.tsv has no checkout-* rows until a green campaign is promoted
+# (Copy-Item logs\<run>\perf-bench.tsv baselines\perf.tsv). Until then these rows print
+# baseline=none and are listed in the missing-baseline NOTE - first-run values, not a
+# gate. Existing thresholds are untouched; checkout rows use the default 10% bar plus the
+# shared 0.05s absolute floor, at the same 100 MB size floor as every other record.
+function Edit-QaBytes([string]$Path, [int]$Seed, [int]$SliceLen = 4096) {
+  $bytes = [IO.File]::ReadAllBytes($Path)
+  if ($bytes.Length -eq 0) { return }
+  $rnd = New-Object Random($Seed)
+  $len = [Math]::Min($SliceLen, $bytes.Length)
+  $start = if ($bytes.Length -gt $len) { [int](($bytes.Length - $len) / 2) } else { 0 }
+  for ($i = 0; $i -lt $len; $i++) { $bytes[$start + $i] = [byte]$rnd.Next(0, 256) }
+  [IO.File]::WriteAllBytes($Path, $bytes)
+}
+
+$coSrcs = @()
+if ($psdSrc) { $coSrcs += [pscustomobject]@{ op = "checkout-psd"; src = $psdSrc.FullName; ext = ".psd" } }
+$aiPerf = Get-ChildItem $QA.TestFiles -Filter *.ai -File -EA SilentlyContinue |
+  Where-Object { $_.Length -ge 100MB -and $_.Length -le ($QA.MaxFixtureMB * 1MB) } |
+  Sort-Object Length | Select-Object -First 1
+if ($aiPerf) { $coSrcs += [pscustomobject]@{ op = "checkout-ai"; src = $aiPerf.FullName; ext = ".ai" } }
+if ($coSrcs.Count -eq 0) { Write-QaLog $Phase "NO psd/ai fixture - checkout perf cases SKIPPED" }
+
+foreach ($co in $coSrcs) {
+  $coMB = [int][math]::Round((Get-Item $co.src).Length / 1MB)
+  $sb = New-SandboxRepo "perf-$($co.op)-$coMB" $Phase
+  $asset = Join-Path $sb "asset$($co.ext)"
+  Copy-Item $co.src $asset -Force
+  Invoke-MG $sb @("add", "asset$($co.ext)") $Phase -TimeoutSec 3600 | Out-Null
+  $c1 = Invoke-MG $sb @("commit", "-m", "co-v1") $Phase -TimeoutSec 3600
+  Edit-QaBytes $asset 7301
+  Invoke-MG $sb @("add", "asset$($co.ext)") $Phase -TimeoutSec 3600 | Out-Null
+  $c2 = Invoke-MG $sb @("commit", "-m", "co-v2") $Phase -TimeoutSec 3600
+  $v2Hash = Get-QaHash $asset
+  $oid1 = if ($c1.Out -match "Created commit ([0-9a-fA-F]{8,})") { $Matches[1] } else { $null }
+  $oid2 = if ($c2.Out -match "Created commit ([0-9a-fA-F]{8,})") { $Matches[1] } else { $null }
+  if (-not $oid1 -or -not $oid2) { Write-QaLog $Phase "$($co.op): could not parse commit oids - SKIPPED"; continue }
+  Invoke-MG $sb @("reset", "--hard", $oid1) $Phase -TimeoutSec 3600 | Out-Null
+
+  $coRes = Invoke-MG $sb @("reset", "--hard", $oid2) $Phase -TimeoutSec 3600
+  $coOk = ($coRes.Exit -eq 0) -and ((Get-QaHash $asset) -eq $v2Hash)
+  Write-QaRow $TIMING_OUT $TIMING_HEADER @($coMB, $co.op, $coRes.Sec)
+  # Own gate, not a regression count: with no baseline the aggregate below is WARN, which
+  # would hide a checkout that returned wrong bytes.
+  Write-QaGate $Phase "$($co.op)-byte-exact" $coOk "sizeMB=$coMB exit=$($coRes.Exit) sec=$($coRes.Sec)"
+
+  # The stopwatch wall is the record: `reset --hard` may not emit a [bench] line, and
+  # an unmeasured gate must not read as clean.
+  $gatable = $coMB -ge $MIN_GATED_SIZE_MB
+  $recordCount++
+  if ($gatable) { $gatedCount++ }
+  $baseVal = Find-BaselineValue $coMB $co.op "wall"
+  Write-QaRow $BENCH_OUT $BENCH_HEADER @($coMB, $co.op, "wall", $coRes.Sec, $(if ($null -ne $baseVal) { $baseVal } else { "none" }))
+  if ($gatable -and $null -eq $baseVal) { $missingBaseline += "$coMB/$($co.op)/wall" }
+  if ($gatable -and $null -ne $baseVal) {
+    $base = 0.0
+    if ([double]::TryParse(("$baseVal" -replace '[s%]$', ''), [ref]$base) -and $base -ne 0) {
+      $comparedCount++
+      $deltaPct = (($coRes.Sec - $base) / [Math]::Abs($base)) * 100.0
+      if (($deltaPct -gt $REGRESSION_PCT) -and ([Math]::Abs($coRes.Sec - $base) -ge $MIN_ABS_DELTA['wall'])) {
+        $regressionCount++
+        Write-QaLog $Phase "REGRESSION sizeMB=$coMB op=$($co.op) field=wall baseline=$baseVal current=$($coRes.Sec) delta=$([math]::Round($deltaPct,1))% threshold=$REGRESSION_PCT%"
+      }
+    }
+  }
+}
+
 if ($baseRows) {
   # A gate that measured nothing must not report PASS. The noise floor is
   # supposed to exclude the *small* size classes, not all of them -- if not one
