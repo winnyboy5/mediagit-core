@@ -251,6 +251,129 @@ if (ShouldRun "SAFE11") {
   finally { Pop-Location }
 }
 
+# --- gc must never turn "cannot read a reachable object" into "delete it" ------
+#
+# Both checks run gc with the prune grace window and the reflog roots switched OFF
+# (MEDIAGIT_GC_GRACE_SECS=0, MEDIAGIT_GC_REFLOG_HORIZON_DAYS=0). With the defaults
+# every object is under the one-hour grace and gc deletes nothing, so a gc that
+# loses data would pass: the gate would be unable to fail.
+
+
+# SAFE12: a reachable manifest that no longer parses. gc cannot enumerate that
+# blob's chunks; it must refuse (non-zero exit) and delete NO chunk file, rather
+# than treat the blob as having no chunks and sweep them all.
+if (ShouldRun "SAFE12") {
+  try {
+    $repo = New-SandboxRepo "safety-SAFE12" $Phase
+    $rnd = New-Object System.Random(120012)
+    $buf = New-Object byte[] (8MB)
+    $rnd.NextBytes($buf)
+    [IO.File]::WriteAllBytes((Join-Path $repo "asset.bin"), $buf)
+    Invoke-MG $repo @("add", "asset.bin") $Phase | Out-Null
+    Invoke-MG $repo @("commit", "-m", "chunked blob") $Phase | Out-Null
+
+    $objFiles = @(Get-ChildItem (Join-Path $repo ".mediagit\objects") -Recurse -File -EA SilentlyContinue)
+    $manifest = $objFiles | Where-Object { $_.FullName -match '\\manifests\\' } | Sort-Object Length -Descending | Select-Object -First 1
+    $chunkCount = @($objFiles | Where-Object { $_.FullName -match '\\chunks\\' }).Count
+    if (-not $manifest -or $chunkCount -eq 0) {
+      Rec "SAFE12" "gc with corrupt reachable manifest" "SKIP" ("no loose manifest/chunk files found (manifest={0} chunks={1}); layout changed or objects packed" -f [bool]$manifest, $chunkCount)
+    } else {
+      [IO.File]::WriteAllBytes($manifest.FullName, [byte[]](0xFF, 0xFE, 0xFD, 0xFC, 0x00, 0x01, 0x02, 0x03, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF))
+      $gc = Invoke-QaGcHarsh $repo $Phase
+      $chunksAfter = @(Get-ChildItem (Join-Path $repo ".mediagit\objects") -Recurse -File -EA SilentlyContinue |
+        Where-Object { $_.FullName -match '\\chunks\\' }).Count
+      # non-zero for the RIGHT reason: an unrelated early failure must not pass this gate.
+      $pass = ($gc.Exit -ne 0) -and ($gc.Out -match "cannot read reachable chunk manifest") -and ($chunksAfter -eq $chunkCount)
+      Rec "SAFE12" "gc with corrupt reachable manifest" $pass ("gc-exit={0} (must be non-zero) chunks before={1} after={2} (must be equal)" -f $gc.Exit, $chunkCount, $chunksAfter)
+    }
+  } catch {
+    Rec "SAFE12" "gc with corrupt reachable manifest" $false "unexpected error: $_"
+  }
+}
+
+# SAFE13: delta-base retention. v2's chunks are stored as deltas against chunks that
+# exist ONLY through v1. v1's commit is then made unreachable, so those base chunks
+# are reachable from nothing except the delta chain of a chunk v2 needs. gc must keep
+# them: v2 must still check out byte-exact and fsck must stay clean.
+#   c0 (base.txt) <- c1 (v1.psd, dropped by reset) ; c0 <- c2 (v2 = edited copy of v1)
+#
+# NON-VACUITY. gc roots (crates\mediagit-cli\src\commands\gc.rs build_reachability_set):
+#   HEAD :341, local branches :353, tags :358, reflog :405 (off when
+#   MEDIAGIT_GC_REFLOG_HORIZON_DAYS=0), remotes/* :454, STASH_LIST :476 (stash_roots :528),
+#   in-progress state files :490 (in_progress_roots :559: rebase-apply\state.json,
+#   CHERRY_PICK_STATE, REVERT_STATE, BISECT_STATE, MERGE_HEAD, ORIG_HEAD), staged index :505;
+#   plus the prune grace window (:758, MEDIAGIT_GC_GRACE_SECS=0 disables).
+# reset.rs writes only the reflog (:204-215) and never ORIG_HEAD; this test has no tags,
+# remotes, stash or v1 index entries, and deletes the state files anyway. Proof that c1
+# really became unreachable is behavioural: at least one object file that c1 added to the
+# store must be GONE after gc. If none was deleted, a root still held c1 (or gc deleted
+# nothing) and the gate FAILS as vacuous instead of passing.
+if (ShouldRun "SAFE13") {
+  try {
+    $psd = Get-ChildItem (Join-Path $QA.TestFiles "psd") -Filter *.psd -File -EA SilentlyContinue |
+      Sort-Object Length | Select-Object -First 1
+    if (-not $psd) {
+      Rec "SAFE13" "gc keeps chunk-delta bases of reachable chunks" "SKIP" "no psd fixture under test-files\psd"
+    } else {
+      $repo = New-SandboxRepo "safety-SAFE13" $Phase
+      $asset = Join-Path $repo "asset.psd"
+      Set-Content -LiteralPath (Join-Path $repo "base.txt") -Value "base" -NoNewline
+      Invoke-MG $repo @("add", "base.txt") $Phase | Out-Null
+      $c0 = Invoke-MG $repo @("commit", "-m", "c0") $Phase
+      $oid0 = if ($c0.Out -match "Created commit ([0-9a-fA-F]{8,})") { $Matches[1] } else { $null }
+      $objRoot = Join-Path $repo ".mediagit\objects"
+      $snap = { @(Get-ChildItem $objRoot -Recurse -File -EA SilentlyContinue | ForEach-Object { $_.FullName.Substring($objRoot.Length) }) }
+      $snap0 = & $snap
+
+      Copy-Item -LiteralPath $psd.FullName -Destination $asset -Force
+      Invoke-MG $repo @("add", "asset.psd") $Phase -TimeoutSec 3600 | Out-Null
+      $c1 = Invoke-MG $repo @("commit", "-m", "c1 v1") $Phase -TimeoutSec 3600
+      $oid1 = if ($c1.Out -match "Created commit ([0-9a-fA-F]{8,})") { $Matches[1] } else { $null }
+      $c1Only = @(Compare-Object $snap0 (& $snap) | Where-Object { $_.SideIndicator -eq "=>" } | ForEach-Object { $_.InputObject })
+
+      # drop c1 from every ref: only c0 is reachable again.
+      $rs = Invoke-MG $repo @("reset", "--hard", $oid0) $Phase -TimeoutSec 3600
+      $bytes = [IO.File]::ReadAllBytes($psd.FullName)
+      $r2 = New-Object System.Random(130013)
+      $start = [int](($bytes.Length - 4096) / 2)
+      for ($i = 0; $i -lt 4096; $i++) { $bytes[$start + $i] = [byte]$r2.Next(0, 256) }
+      [IO.File]::WriteAllBytes($asset, $bytes)
+      $v2Hash = Get-QaHash $asset
+      Invoke-MG $repo @("add", "asset.psd") $Phase -TimeoutSec 3600 | Out-Null
+      Invoke-MG $repo @("commit", "-m", "c2 v2") $Phase -TimeoutSec 3600 | Out-Null
+
+      # belt and braces: clear every state-file root so none can hold c1.
+      foreach ($f in @("ORIG_HEAD", "MERGE_HEAD", "CHERRY_PICK_STATE", "REVERT_STATE", "BISECT_STATE", "STASH_LIST")) {
+        Remove-Item -LiteralPath (Join-Path $repo ".mediagit\$f") -Force -EA SilentlyContinue
+      }
+      Remove-Item -LiteralPath (Join-Path $repo ".mediagit\rebase-apply") -Recurse -Force -EA SilentlyContinue
+
+      $chain = Get-QaChainStats $repo
+      if (-not $oid0 -or -not $oid1 -or $rs.Exit -ne 0 -or $c1Only.Count -eq 0) {
+        Rec "SAFE13" "gc keeps chunk-delta bases of reachable chunks" $false ("setup failed: oid0={0} oid1={1} reset-exit={2} c1-added-files={3}" -f $oid0, $oid1, $rs.Exit, $c1Only.Count)
+      } elseif ($chain.ChainCount -eq 0) {
+        Rec "SAFE13" "gc keeps chunk-delta bases of reachable chunks" "SKIP" "v2 produced no chunk-delta sidecars - base retention not exercised"
+      } else {
+        $gc = Invoke-QaGcHarsh $repo $Phase
+        $after = & $snap
+        $deleted = @($c1Only | Where-Object { $after -notcontains $_ }).Count
+        $nonVacuous = ($gc.Exit -eq 0) -and ($deleted -gt 0)
+        Rec "SAFE13" "gc actually collected c1 (non-vacuity)" $nonVacuous ("gc-exit={0} c1-added-files={1} of-which-deleted={2} (must be >0, else a root still holds c1)" -f $gc.Exit, $c1Only.Count, $deleted)
+
+        Remove-Item -LiteralPath $asset -Force
+        $co = Invoke-MG $repo @("reset", "--hard", "HEAD") $Phase -TimeoutSec 3600
+        $exact = (Test-Path $asset) -and ((Get-QaHash $asset) -eq $v2Hash)
+        $fsck = Invoke-MG $repo @("fsck", "--full") $Phase -TimeoutSec 3600
+        $fsckClean = ($fsck.Exit -eq 0) -and ($fsck.Out -notmatch "(?i)corrupt|missing|failed")
+        Rec "SAFE13" "gc keeps chunk-delta bases of reachable chunks" ($nonVacuous -and $exact -and $fsckClean) `
+          ("delta-chunks={0} non-vacuous={1} checkout-exit={2} v2-byte-exact={3} fsck-exit={4}" -f $chain.ChainCount, $nonVacuous, $co.Exit, $exact, $fsck.Exit)
+      }
+    }
+  } catch {
+    Rec "SAFE13" "gc keeps chunk-delta bases of reachable chunks" $false "unexpected error: $_"
+  }
+}
+
 # --- summary -----------------------------------------------------------------
 
 # Exit-QaPhase, not a hand-rolled exit. This was the ONLY phase script in the

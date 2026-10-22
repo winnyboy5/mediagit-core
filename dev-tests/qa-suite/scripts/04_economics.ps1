@@ -201,6 +201,132 @@ if ($statsGated.Count -eq 0) {
   if (-not $statsPassOverall) { $gateFailCount++ }
 }
 
+# ---- container-savings gates (stream-boundary cuts, .ai zstd) ----
+#
+# MEDIAGIT_STREAM_CUTS (default ON for pdf/ai/fig/sketch/xd/idml; =0 turns it off):
+# the product claim is that cutting at stream boundaries never COSTS storage and
+# never changes content. Checked on a real .fig chain (default vs knob off) and on
+# PSD, which stream cuts do not touch, so its store must not move. Fixtures:
+# test-files\figma\UI-Kit-Italia (1..3).fig, test-files\psd (smallest psd + an edited copy),
+# the smallest top-level test-files\*.ai >= 1MB (test-label-org.ai). The CDC seed is
+# pinned above, so default vs off differs only by the knob.
+function Get-QaDirBytes([string]$Path) {
+  [long](Get-ChildItem $Path -Recurse -File -EA SilentlyContinue | Measure-Object Length -Sum).Sum
+}
+
+function Edit-QaBytes([string]$Path, [int]$Seed, [int]$SliceLen = 4096) {
+  $bytes = [IO.File]::ReadAllBytes($Path)
+  if ($bytes.Length -eq 0) { return }
+  $rnd = New-Object Random($Seed)
+  $len = [Math]::Min($SliceLen, $bytes.Length)
+  $start = if ($bytes.Length -gt $len) { [int](($bytes.Length - $len) / 2) } else { 0 }
+  for ($i = 0; $i -lt $len; $i++) { $bytes[$start + $i] = [byte]$rnd.Next(0, 256) }
+  [IO.File]::WriteAllBytes($Path, $bytes)
+}
+
+# Build a v1..vN chain of $Files in a fresh repo. $StreamCuts "0" sets the off-switch,
+# "" leaves the knob unset (product default). Returns Repo, Ext, Oids, Bytes (store size).
+function New-QaChainRepo([string]$Name, [string[]]$Files, [string]$StreamCuts) {
+  $rp = Join-Path $EC $Name
+  $init = Invoke-MG $null @("init", $rp) $Phase
+  if ($init.Exit -ne 0) { throw "init failed for $Name : $($init.Out)" }
+  $ext = [IO.Path]::GetExtension($Files[0])
+  $oids = @()
+  $saved = $env:MEDIAGIT_STREAM_CUTS
+  try {
+    if ($StreamCuts) { $env:MEDIAGIT_STREAM_CUTS = $StreamCuts } else { Remove-Item Env:\MEDIAGIT_STREAM_CUTS -EA SilentlyContinue }
+    $i = 0
+    foreach ($f in $Files) {
+      $i++
+      Copy-Item $f (Join-Path $rp "asset$ext") -Force
+      Invoke-MG $rp @("add", "asset$ext") $Phase -TimeoutSec 3600 | Out-Null
+      $c = Invoke-MG $rp @("commit", "-m", "v$i") $Phase -TimeoutSec 3600
+      $oids += $(if ($c.Out -match "Created commit ([0-9a-fA-F]{8,})") { $Matches[1] } else { $null })
+    }
+  } finally {
+    if ($null -ne $saved) { $env:MEDIAGIT_STREAM_CUTS = $saved } else { Remove-Item Env:\MEDIAGIT_STREAM_CUTS -EA SilentlyContinue }
+  }
+  return @{ Repo = $rp; Ext = $ext; Oids = $oids; Bytes = (Get-QaDirBytes (Join-Path $rp ".mediagit")) }
+}
+
+# reset --hard to each oid and compare the materialized asset to the source file.
+function Test-QaChainExact($Chain, [string[]]$Sources) {
+  $bad = @()
+  $asset = Join-Path $Chain.Repo ("asset" + $Chain.Ext)
+  for ($v = 0; $v -lt $Sources.Count; $v++) {
+    if (-not $Chain.Oids[$v]) { $bad += "v$($v + 1):no-oid"; continue }
+    # Delete first: checkout skips a file that already matches, so without this the
+    # last (or only) version would be hashed against itself and never read from the store.
+    Remove-Item -LiteralPath $asset -Force -EA SilentlyContinue
+    $rs = Invoke-MG $Chain.Repo @("reset", "--hard", $Chain.Oids[$v]) $Phase -TimeoutSec 3600
+    $ok = ($rs.Exit -eq 0) -and (Test-Path $asset) -and ((Get-QaHash $asset) -eq (Get-QaHash $Sources[$v]))
+    if (-not $ok) { $bad += "v$($v + 1):exit=$($rs.Exit)" }
+  }
+  return $bad
+}
+
+$figFiles = @(Select-TierFiles @(Get-ChildItem (Join-Path $QA.TestFiles "figma") -Filter "UI-Kit-Italia (*).fig" -File -EA SilentlyContinue |
+  Sort-Object Name | Select-Object -First 3 | ForEach-Object { $_.FullName }))
+if ($figFiles.Count -lt 3) {
+  foreach ($g in @("stream-cuts-fig-checkout-exact", "stream-cuts-fig-store-not-larger", "stream-cuts-fig-fsck")) {
+    Write-QaGate $Phase $g "SKIP" "fewer than 3 UI-Kit-Italia (N).fig fixtures within tier under test-files\figma"
+  }
+} else {
+  $figOn  = New-QaChainRepo "streamcuts-fig-on"  $figFiles ""
+  $figOff = New-QaChainRepo "streamcuts-fig-off" $figFiles "0"
+  $bad = @(Test-QaChainExact $figOn $figFiles)
+  Write-QaGate $Phase "stream-cuts-fig-checkout-exact" ($bad.Count -eq 0) ("versions=3 bad=" + ($bad -join ","))
+  if ($bad.Count -gt 0) { $gateFailCount++ }
+  # Strictly smaller (measured -19% on 6 versions): equal would also mean the knob never
+  # reached the child process or the cuts did nothing.
+  $le = $figOn.Bytes -lt $figOff.Bytes
+  Write-QaGate $Phase "stream-cuts-fig-store-not-larger" $le "default=$($figOn.Bytes) off=$($figOff.Bytes) (default must be < off)"
+  if (-not $le) { $gateFailCount++ }
+  $ff = Invoke-MG $figOn.Repo @("fsck", "--full") $Phase -TimeoutSec 3600
+  $ffOk = ($ff.Exit -eq 0) -and ($ff.Out -notmatch "corrupt|missing|failed")
+  Write-QaGate $Phase "stream-cuts-fig-fsck" $ffOk "exit=$($ff.Exit)"
+  if (-not $ffOk) { $gateFailCount++ }
+}
+
+# PSD is not a stream-cut format: v2 is an edited copy of v1, so delta still runs, and
+# the store must be the same with the knob on or off (0.5% allowance for commit-object
+# timestamps; a real regression is whole percents).
+$psdSrc = Get-ChildItem (Join-Path $QA.TestFiles "psd") -Filter *.psd -File -EA SilentlyContinue |
+  Sort-Object Length | Select-Object -First 1
+if (-not $psdSrc -or $psdSrc.Length -gt ($QA.MaxFixtureMB * 1MB)) {
+  Write-QaGate $Phase "stream-cuts-psd-unchanged" "SKIP" "no psd fixture within tier under test-files\psd"
+} else {
+  $psdV2 = Join-Path $EC "streamcuts-psd-v2.psd"
+  Copy-Item $psdSrc.FullName $psdV2 -Force
+  Edit-QaBytes $psdV2 9101
+  $psdChain = @($psdSrc.FullName, $psdV2)
+  $psdOn  = New-QaChainRepo "streamcuts-psd-on"  $psdChain ""
+  $psdOff = New-QaChainRepo "streamcuts-psd-off" $psdChain "0"
+  $diffPct = if ($psdOff.Bytes -gt 0) { [math]::Abs($psdOn.Bytes - $psdOff.Bytes) / $psdOff.Bytes * 100 } else { 100 }
+  $same = $diffPct -le 0.5
+  Write-QaGate $Phase "stream-cuts-psd-unchanged" $same ("default=$($psdOn.Bytes) off=$($psdOff.Bytes) diffPct=$([math]::Round($diffPct, 3)) allowance=0.5%")
+  if (-not $same) { $gateFailCount++ }
+}
+
+# .ai is compressed with zstd instead of Store: a lone .ai must occupy less than its
+# raw bytes and still round-trip byte-exact. Single file, so no dedup can explain it.
+$aiSrc = Get-ChildItem $QA.TestFiles -Filter *.ai -File -EA SilentlyContinue |
+  Where-Object { $_.Length -ge 1MB -and $_.Length -le ($QA.MaxFixtureMB * 1MB) } |
+  Sort-Object Length | Select-Object -First 1
+if (-not $aiSrc) {
+  foreach ($g in @("ai-zstd-store-smaller-than-raw", "ai-zstd-roundtrip")) {
+    Write-QaGate $Phase $g "SKIP" "no top-level test-files\*.ai between 1MB and the tier cap"
+  }
+} else {
+  $aiChain = New-QaChainRepo "ai-zstd" @($aiSrc.FullName) ""
+  $smaller = $aiChain.Bytes -lt $aiSrc.Length
+  Write-QaGate $Phase "ai-zstd-store-smaller-than-raw" $smaller "file=$($aiSrc.Name) raw=$($aiSrc.Length) stored=$($aiChain.Bytes)"
+  if (-not $smaller) { $gateFailCount++ }
+  $badAi = @(Test-QaChainExact $aiChain @($aiSrc.FullName))
+  Write-QaGate $Phase "ai-zstd-roundtrip" ($badAi.Count -eq 0) ("file=$($aiSrc.Name) bad=" + ($badAi -join ","))
+  if ($badAi.Count -gt 0) { $gateFailCount++ }
+}
+
 # ---- existing dedup regression gate (unchanged script, invoked as-is) ----
 $compareScript = Join-Path $QA.RepoRoot "dev-tests\compare_dedup.ps1"
 $baseline = Join-Path $QA.RepoRoot "dev-tests\dedup-baseline.json"

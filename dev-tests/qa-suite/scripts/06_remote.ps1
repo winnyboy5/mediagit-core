@@ -159,9 +159,12 @@ foreach ($backend in $QA.Backends) {
     Rec $backend "pull" 4 $r.Sec (($r.Exit -eq 0) -and $pullFileOk) "exit=$($r.Exit) file-hash-ok=$pullFileOk"
 
     # -- download single file without clone --
+    # Full URL, not a bare path: inside a repo a bare path is served from LOCAL history
+    # and never reaches the server. Run from the clone so the matching remote's
+    # credentials are attached.
     $dl = Join-Path $QA.Work "remote-dl-$backend.bin"
     if (Test-Path $dl) { Remove-Item -Force $dl }
-    $r = Invoke-MG $CL @("download", "gen/blob_c.bin", "-o", $dl) $Phase -TimeoutSec 1200
+    $r = Invoke-MG $CL @("download", "$($srv.Url)/gen/blob_c.bin", "-o", $dl) $Phase -TimeoutSec 1200
     $dlOk = (Test-Path $dl) -and ((Get-QaHash $dl) -eq (Get-QaHash (Join-Path $SRC "gen\blob_c.bin")))
     Rec $backend "download" 8 $r.Sec (($r.Exit -eq 0) -and $dlOk) "exit=$($r.Exit) hash-ok=$dlOk"
 
@@ -211,6 +214,67 @@ foreach ($backend in $QA.Backends) {
   } finally {
     Stop-QaServer $srv
   }
+}
+
+# ---------------------------------------------------------------------------
+# Browse download integrity. `download <full URL>` is a plain GET of the server's browse
+# endpoint (GET /{repo}/files/{path}); the server reassembles the blob from its stored chunks.
+# Always pass the full URL: inside a repo, a bare path is served from LOCAL history and never
+# reaches the server, which would make this gate unable to fail.
+# If a stored chunk is corrupt the server must fail the response (non-zero exit on the
+# client), never stream wrong bytes as a 200. Needs a filesystem-visible store, so it
+# always runs against a `local` backend server regardless of $QA.Backends. The server is
+# restarted after the corruption so its in-memory ODB cache cannot serve pre-corruption
+# bytes (same reason as 05_branching CHK20).
+# ---------------------------------------------------------------------------
+$bsrv = $null
+try {
+  $bsrv = Start-QaServer -Backend "local" -Phase $Phase
+  $bsrc = Join-Path $QA.Work "remote-browse-src"
+  if (Test-Path $bsrc) { Remove-Item -Recurse -Force $bsrc }
+  New-Item -ItemType Directory -Path $bsrc -Force | Out-Null
+  Invoke-MG $null @("init", $bsrc) $Phase | Out-Null
+  New-QaBinaryFixture (Join-Path $bsrc "gen\browse.bin") 8 61020
+  $bOrig = Get-QaHash (Join-Path $bsrc "gen\browse.bin")
+  Invoke-MG $bsrc @("add", ".") $Phase | Out-Null
+  Invoke-MG $bsrc @("commit", "-m", "browse integrity") $Phase | Out-Null
+  Invoke-MG $bsrc @("remote", "add", "origin", $bsrv.Url) $Phase | Out-Null
+  $bp = Invoke-MG $bsrc @("push", "origin") $Phase -TimeoutSec 1200
+
+  # Control: the same download before any corruption must be byte-exact, or the
+  # corrupted-case result below could be a download that never worked.
+  $dl0 = Join-Path $QA.Work "remote-browse-ok.bin"
+  if (Test-Path $dl0) { Remove-Item -Force $dl0 }
+  $bUrl = "$($bsrv.Url)/gen/browse.bin"
+  $c0 = Invoke-MG $bsrc @("download", $bUrl, "-o", $dl0) $Phase -TimeoutSec 1200
+  $ctlOk = ($bp.Exit -eq 0) -and ($c0.Exit -eq 0) -and (Test-Path $dl0) -and ((Get-QaHash $dl0) -eq $bOrig)
+  Rec "local" "browse-download-control" 8 $c0.Sec $ctlOk "push-exit=$($bp.Exit) exit=$($c0.Exit)"
+
+  if ($ctlOk) {
+    $victim = Get-ChildItem (Join-Path $bsrv.DataDir "storage") -Recurse -File -ErrorAction SilentlyContinue |
+      Sort-Object Length -Descending | Select-Object -First 1
+    if (-not $victim) {
+      Rec "local" "browse-download-corrupt-chunk" "" "" "SKIP" "no stored object under $($bsrv.DataDir)\storage to corrupt"
+    } else {
+      $vb = [IO.File]::ReadAllBytes($victim.FullName)
+      $vb[[int]($vb.Length / 2)] = $vb[[int]($vb.Length / 2)] -bxor 0xFF
+      [IO.File]::WriteAllBytes($victim.FullName, $vb)
+      Restart-QaServer $bsrv $Phase
+
+      $dl1 = Join-Path $QA.Work "remote-browse-corrupt.bin"
+      if (Test-Path $dl1) { Remove-Item -Force $dl1 }
+      $c1 = Invoke-MG $bsrc @("download", $bUrl, "-o", $dl1) $Phase -TimeoutSec 1200
+      $wrongBytes = ($c1.Exit -eq 0) -and (Test-Path $dl1) -and ((Get-QaHash $dl1) -ne $bOrig)
+      # Pass = the download failed. Exit 0 with right bytes means the corrupted object was
+      # not on this file's read path (inconclusive, recorded as a failure so it is looked at).
+      Rec "local" "browse-download-corrupt-chunk" 8 $c1.Sec ($c1.Exit -ne 0) ("exit={0} wrong-bytes-returned-as-success={1} corrupted={2}" -f $c1.Exit, $wrongBytes, $victim.Name)
+    }
+  }
+} catch {
+  if ("$_" -match "^SKIP:") { Rec "local" "browse-download-corrupt-chunk" "" "" "SKIP" "$_" }
+  else { Rec "local" "browse-download-corrupt-chunk" "" "" $false "unexpected error: $_" }
+} finally {
+  Stop-QaServer $bsrv
 }
 
 Write-QaLog $Phase "=== 06_remote done: overall=$(if ($script:AllPass) { 'PASS' } else { 'FAIL' }) ==="
