@@ -126,7 +126,7 @@ sequenceDiagram
 |-----------|---------------|------------|--------------|
 | Add 1GB file | ~2-3 seconds | ~15-20 seconds | Delta encoding for updates |
 | Commit | <100ms | ~200-500ms | Metadata-only operation |
-| Checkout | ~3-5 seconds | ~20-30 seconds | Parallel object fetch |
+| Checkout | ~3-5 seconds | ~20-30 seconds | Parallel object fetch; delta apply and chunk hash checks run in parallel on the blocking pool (v0.6.0-rc.1) |
 | Merge | ~1-2 seconds | ~5-10 seconds | Media-aware strategies |
 
 ## Security Model

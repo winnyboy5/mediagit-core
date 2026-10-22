@@ -7,9 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Container and model-weight savings cycle (2026-10-20/21, branch
+## [v0.6.0-rc.1] - Unreleased (QA campaign pending; date set when tagged)
+
+Container and model-weight savings cycle (2026-10-20/22, branch
 `feat/container-savings`). These changes postdate the 0.5.0-rc.1 GA
-clearance, so the release binary needs a new QA campaign before it ships.
+clearance and ship as their own release: they add an on-disk delta
+format older binaries cannot read (opt-in) and change default chunking
+for PDF/Illustrator/Figma, so v0.5.0-rc.1 is tagged as cleared and this
+release needs its own QA campaign before it ships. Repositories made
+with v0.6.0-rc.1 and `MEDIAGIT_TENSOR_DELTA=1` cannot be read by older
+binaries; re-create pre-release test repositories after upgrading.
 All numbers below are from real repositories (`add` + `commit` + `branch
 switch`, release build, two interleaved rounds, every checkout byte-exact).
 
@@ -32,8 +39,9 @@ switch`, release build, two interleaved rounds, every checkout byte-exact).
   base→instruct −12% with `add` ~4x faster, a 12-version training chain −49%
   with `add` 5–10x faster; peak `add` memory drops ~35% (551 → ~365 MB).
   Checkout of the newest version costs up to ~1 s more (each delta hop is one
-  more decode pass); off by default for that reason. Repository format note: binaries older than this one cannot
-  read XP deltas (they stop with "missing ZD magic", they never misread data).
+  more decode pass); off by default for that reason. Repository format note:
+  binaries older than v0.6.0-rc.1 cannot read XP deltas (they stop with
+  "missing ZD magic", they never misread data).
 
 ### Fixed
 
@@ -2226,7 +2234,9 @@ throughput improvements, pack negotiation fixes, and several cloud-backend bug f
 - Dependency security audits in CI
 - Encryption at rest with Argon2 key derivation
 
-[Unreleased]: https://github.com/winnyboy5/mediagit-core/compare/v0.4.0-rc.1...HEAD
+[Unreleased]: https://github.com/winnyboy5/mediagit-core/compare/v0.6.0-rc.1...HEAD
+[v0.6.0-rc.1]: https://github.com/winnyboy5/mediagit-core/compare/v0.5.0-rc.1...v0.6.0-rc.1
+[v0.5.0-rc.1]: https://github.com/winnyboy5/mediagit-core/compare/v0.4.0-rc.1...v0.5.0-rc.1
 [v0.4.0-rc.1]: https://github.com/winnyboy5/mediagit-core/compare/v0.3.0-rc.5...v0.4.0-rc.1
 [v0.3.0-rc.5]: https://github.com/winnyboy5/mediagit-core/compare/v0.3.0-rc.4...v0.3.0-rc.5
 [v0.3.0-rc.4]: https://github.com/winnyboy5/mediagit-core/compare/v0.2.8-beta.1...v0.3.0-rc.4

@@ -123,7 +123,7 @@ The manifest contains:
 - `total_size` — total size of the reconstructed object
 - `filename` — original filename, optional (used for type detection, not a full path)
 
-Whether a given chunk is stored full or as a delta is not recorded in the manifest itself — deltas live as separate sidecar objects keyed by chunk hash (`chunk-deltas/<hash>[.meta]`, see [Storage Layout v2](#storage-layout-v2-namespace--true-hash-fanout) above).
+Whether a given chunk is stored full or as a delta is not recorded in the manifest itself — deltas live as separate sidecar objects keyed by chunk hash (`chunk-deltas/<hash>[.meta]`, see [Storage Layout v2](#storage-layout-v2-namespace--true-hash-fanout) above). Chunk deltas are zstd-dictionary deltas (magic `ZD`). Tensor deltas (experimental, opt-in with `MEDIAGIT_TENSOR_DELTA=1`, since v0.6.0-rc.1) use a second delta format, magic `XP` (`0x58 0x50`): the XOR of float byte-planes against the previous version's chunk, zstd-compressed. Binaries older than v0.6.0-rc.1 stop with an error on an XP delta; they never misread it.
 
 ---
 

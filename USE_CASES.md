@@ -210,6 +210,8 @@ chain), **NPZ 76.7%** (v1→v3 checkpoint chain) — see
 [BENCHMARKS.md](BENCHMARKS.md#summary-per-format-and-mixed-corpus-savings).
 Mixed-corpus aggregate across a realistic project is **~26.5%**.
 
+Experimental, opt-in (v0.6.0-rc.1): `MEDIAGIT_TENSOR_DELTA=1` stores each 1 MiB safetensors chunk as an XOR-of-float-planes delta against the previous version, measured at -12% to -49% stored on checkpoint chains. Binaries older than v0.6.0-rc.1 cannot read these deltas.
+
 ---
 
 ## Virtual Production: 20TB HDRI Library

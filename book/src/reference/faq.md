@@ -71,6 +71,8 @@ Similarity thresholds vary by file type:
 - Text/code files (txt, py, rs, js, ...): 85% similarity required
 - Unknown/general files: 30% similarity required
 
+For `.safetensors` checkpoints there is an experimental opt-in mode, `MEDIAGIT_TENSOR_DELTA=1` (v0.6.0-rc.1): each 1 MiB chunk is stored as the XOR of its float byte-planes against the previous version. Measured -12% to -49% stored; checkout of the newest version can be up to about 1 s slower on deep chains. Older binaries cannot read these deltas.
+
 Delta chains are capped at depth 10 to prevent slow reads.
 
 ---

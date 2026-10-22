@@ -26,12 +26,14 @@ boundaries instead of the generic size tiers above:
 | GLB / glTF / OBJ / STL / PLY / FBX | 3D-model structure-aware |
 | Blender (`.blend`) | BHEAD block walker |
 | PSD / AI / PDF / EPS / INDD | Generic FastCDC, but with small creative-container params (1 MB avg / 512 KB–4 MB) so re-sync after an embedded-stream shift stays quick |
+| PDF / AI / Figma (`.fig`) / Sketch / XD / IDML | Stream-boundary cuts: forced cuts at embedded-stream boundaries (PDF `stream`/`endstream`, ZIP local headers), FastCDC inside each segment. On by default; `MEDIAGIT_STREAM_CUTS=0` disables it (v0.6.0-rc.1) |
 
 The MP4/MOV family is not subject to the size cap; malformed or fragmented
 (`moof`) files fall back to the previous path, and
 `MEDIAGIT_VIDEO_CHUNKER=cdc` restores plain content-defined chunking. The other
 structure-aware parsers fall back to plain FastCDC above
 `MEDIAGIT_CONTAINER_CHUNK_CAP_MB` (default 100 MB) or if parsing fails.
+Stream-boundary cuts follow the same cap, and files under 5 MiB (stored whole) are not cut.
 
 No configuration is required. MediaGit detects file size and type automatically.
 
@@ -210,7 +212,7 @@ mediagit verify --path /path/to/large-file.mov
 | **TIFF (uncompressed)** | Zstd compresses well. Large but effective delta encoding. |
 | **EXR** | Typically compressed. Stored as-is. |
 | **WAV / AIFF** | Audio-aware chunking. Zstd compresses ~40–60% on uncompressed audio. |
-| **PDF / AI / InDesign** | PDF containers with internal compression; PDF and AI get zstd (Default), InDesign is stored as-is. |
+| **PDF / AI / InDesign** | PDF containers with internal compression; PDF and AI get zstd (Default; raw if output is larger), InDesign is stored as-is. |
 | **ZIP / DOCX / XLSX** | ZIP containers; stored as-is. |
 | **3D (OBJ, FBX, GLB, STL)** | Binary 3D data; Zstd Best compression applied. |
 

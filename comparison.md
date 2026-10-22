@@ -50,7 +50,7 @@ Test corpus: 459 automated tests, 23–26 media files per backend, ~252–261 MB
 | Format Group | Files | Strategy | Expected Savings |
 |---|---|---|---|
 | Images (JPG/PNG/GIF/WebP) | photo.jpg, model.png, sperry.gif, workstation.webp | Store (pre-compressed) | ~0% |
-| Vector/Design (AI/EPS/SVG) | label.ai, vector.eps, cave.svg | Brotli Default | 65–81% |
+| Vector/Design (AI/EPS/SVG) | label.ai, vector.eps, cave.svg | Zstd Default | 65–81% |
 | 3D Mesh (STL/GLTF) | phone.stl, model.gltf | Zstd Default | 70–73% |
 | 3D Binary (GLB/USDZ) | cobra.glb, cobra.usdz, buildings.glb | Zstd + parse | ~50% |
 | Audio (WAV/FLAC/OGG) | opera.wav, music.flac, ocean.ogg | Zstd (WAV), Store (FLAC/OGG) | 54% WAV, ~0% others |

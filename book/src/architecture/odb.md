@@ -420,7 +420,9 @@ graph LR
 4. **Verify**: Check repository integrity
 
 ### Safety Mechanisms
-- Grace period (14 days default)
+- gc aborts, deleting nothing, if a reachable chunk manifest is unreadable or vanished
+- gc keeps every base on the delta chain of every reachable chunk (cycle-guarded)
+- Grace period (`MEDIAGIT_GC_GRACE_SECS`, default 3600 s; local backends only)
 - Reflog preservation
 - Dry-run mode
 - Backup recommendations

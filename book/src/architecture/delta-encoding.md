@@ -35,6 +35,14 @@ MediaGit uses **zstd dictionary compression** for chunk-level delta encoding:
 3. Compress target chunk against the dictionary
 4. Store as wire format v2: `[0x5A, 0x44]` magic + varint(base_size) + varint(result_size) + zstd bytes
 
+The base chunk is hash-checked before a delta is encoded against it.
+
+### Tensor XOR-Planes Mode (experimental)
+
+With `MEDIAGIT_TENSOR_DELTA=1` (off by default, since v0.6.0-rc.1), `.safetensors` files are split into a header chunk plus fixed 1 MiB data chunks. Each data chunk is stored as the XOR of its float byte-planes against the previous version's chunk at the same offset (magic `[0x58, 0x50]`, "XP"). If XP does not win, the chunk falls back to the zstd-dictionary delta above, then to a full chunk.
+
+Measured: -12% to -49% stored, add 4-10x faster, add peak RSS about 35% lower. Checkout of the newest version can be up to about 1 s slower on deep chains. Binaries older than v0.6.0-rc.1 stop with an error on an XP delta; they never misread it.
+
 ## Delta Chain Management
 
 ### Chain Depth
@@ -224,6 +232,9 @@ Choose base to minimize average reconstruction time:
 - Chains need no reoptimization command: `MAX_DELTA_DEPTH` (10) is enforced on write, so a chain that would exceed it gets a fresh base instead
 
 ## Garbage Collection Integration
+
+### Safety
+`mediagit gc` aborts without deleting anything if a reachable chunk manifest is unreadable or has vanished. It keeps every base on the delta chain of every reachable chunk (cycle-guarded).
 
 ### Recompression
 `mediagit gc` optimizes delta chains:

@@ -84,7 +84,9 @@ EBML-aware), AVI (RIFF-aware), GLB/glTF/OBJ/STL/PLY/FBX (3D-model
 structure-aware), and Blender (`.blend`, BHEAD block walker). PSD does not
 have a dedicated chunker — it uses generic FastCDC with small
 creative-container params (1 MB avg / 512 KB–4 MB) for faster re-sync after
-an embedded-stream shift.
+an embedded-stream shift. PDF, AI, Figma, Sketch, XD and IDML files also get
+forced cuts at embedded-stream boundaries (on by default since v0.6.0-rc.1;
+`MEDIAGIT_STREAM_CUTS=0` disables it).
 
 **Deduplication**: Identical chunks across files or versions are stored only once. For a 6 GB CSV dataset, this yielded 83% storage savings in testing.
 
@@ -177,6 +179,10 @@ Details worth knowing:
   before. To start over, delete the directory.
 
 ## Repository Maintenance
+
+### Checkout
+
+Since v0.6.0-rc.1, delta apply and chunk hash checks during checkout run in parallel on the blocking thread pool. On a mixed creative repo checkout was 23-31% faster, with about 11 MB more peak RSS.
 
 ### Garbage Collection
 

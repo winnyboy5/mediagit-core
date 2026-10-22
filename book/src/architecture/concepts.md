@@ -268,10 +268,12 @@ Over time, unreachable objects accumulate (orphaned by branch deletion, rebases,
 ### Safety
 - Dry-run mode to preview deletions (`mediagit gc --dry-run`)
 - Backup recommended before aggressive GC
-- No time-based prune grace period is implemented — `gc` has no way to tell
-  how recently an object was written, so it relies entirely on reachability
-  from refs/reflog rather than object age. Deleting an object still being
-  written by a concurrent `add`/`push`/rebase is a known, unmitigated race.
+- gc aborts, deleting nothing, if a reachable chunk manifest is unreadable or
+  vanished, and keeps every base on the delta chain of every reachable chunk.
+- Prune grace period: `gc` skips anything written within
+  `MEDIAGIT_GC_GRACE_SECS` (default 3600). Only the local backend reports
+  object age; on cloud backends a concurrent `add`/`push`/rebase can still
+  race with gc.
 
 ## Repository Structure
 
