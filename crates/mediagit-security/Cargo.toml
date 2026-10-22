@@ -18,12 +18,13 @@ publish = false
 
 [dependencies]
 # Encryption
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 # Raw AES-256 block cipher, for the XAES-256-GCM key/nonce derivation
 # (envelope v2) — NOT a new crypto primitive, it's the same block cipher
-# aes-gcm 0.10 already pulls in at this exact version; used directly rather
+# aes-gcm 0.11 already pulls in at this exact version; used directly rather
 # than adding a dependency on the (unmaintained) `xaes-256-gcm` crate.
-aes = "0.8"
+# Bump the two together: tests::golden_* pin byte-exact at-rest ciphertext.
+aes = "0.9"
 
 # Key derivation
 argon2 = { version = "0.5", features = ["std"] }
