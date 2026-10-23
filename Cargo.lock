@@ -3382,7 +3382,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-cli"
-version = "0.5.0-rc.1"
+version = "0.6.0-rc.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3430,7 +3430,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-compression"
-version = "0.5.0-rc.1"
+version = "0.6.0-rc.1"
 dependencies = [
  "anyhow",
  "brotli",
@@ -3448,7 +3448,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-config"
-version = "0.5.0-rc.1"
+version = "0.6.0-rc.1"
 dependencies = [
  "anyhow",
  "serde",
@@ -3463,7 +3463,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-media"
-version = "0.5.0-rc.1"
+version = "0.6.0-rc.1"
 dependencies = [
  "flate2",
  "image",
@@ -3483,7 +3483,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-metrics"
-version = "0.5.0-rc.1"
+version = "0.6.0-rc.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3498,7 +3498,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-observability"
-version = "0.5.0-rc.1"
+version = "0.6.0-rc.1"
 dependencies = [
  "anyhow",
  "thiserror 2.0.19",
@@ -3509,7 +3509,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-protocol"
-version = "0.5.0-rc.1"
+version = "0.6.0-rc.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3534,7 +3534,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-security"
-version = "0.5.0-rc.1"
+version = "0.6.0-rc.1"
 dependencies = [
  "aes 0.9.3",
  "aes-gcm",
@@ -3568,7 +3568,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-server"
-version = "0.5.0-rc.1"
+version = "0.6.0-rc.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3609,7 +3609,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-storage"
-version = "0.5.0-rc.1"
+version = "0.6.0-rc.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3643,7 +3643,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-test-utils"
-version = "0.5.0-rc.1"
+version = "0.6.0-rc.1"
 dependencies = [
  "assert_cmd",
  "dunce",
@@ -3654,7 +3654,7 @@ dependencies = [
 
 [[package]]
 name = "mediagit-versioning"
-version = "0.5.0-rc.1"
+version = "0.6.0-rc.1"
 dependencies = [
  "anyhow",
  "async-channel",

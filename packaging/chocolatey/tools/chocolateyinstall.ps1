@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 
 $packageName = 'mediagit'
 $toolsDir = "$(Split-Path -parent $MyInvocation.MyCommand.Definition)"
-$version = '0.1.0'
+$version = '0.6.0-rc.1'
 
 # Detect architecture
 $arch = if ([Environment]::GetEnvironmentVariable("PROCESSOR_ARCHITECTURE") -eq "ARM64") {

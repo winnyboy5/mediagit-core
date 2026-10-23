@@ -4,7 +4,7 @@
 class Mediagit < Formula
   desc "Git-based version control system optimized for large media files"
   homepage "https://mediagit.dev"
-  version "0.1.0"
+  version "0.6.0-rc.1"
   license :cannot_represent # BUSL-1.1 (Business Source License 1.1)
 
   on_macos do

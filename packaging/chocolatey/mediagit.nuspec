@@ -2,7 +2,7 @@
 <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
   <metadata>
     <id>mediagit</id>
-    <version>0.1.0</version>
+    <version>0.6.0-rc.1</version>
     <packageSourceUrl>https://github.com/winnyboy5/mediagit-core</packageSourceUrl>
     <owners>MediaGit Contributors</owners>
 
