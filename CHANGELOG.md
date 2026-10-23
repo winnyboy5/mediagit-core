@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [v0.6.0-rc.1] - Unreleased (GA-cleared 2026-10-23; date set when tagged)
+## [v0.6.0-rc.1] - Released (GA-cleared 2026-10-23; date set when tagged)
 
 GA clearance at `ebe61e4`, SCALE tier, all backends (local, MinIO, AWS S3,
 Azure Blob, GCS): campaign `20261022-ga-060rc1-1` 278 pass / 0 fail / 1 skip
