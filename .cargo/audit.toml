@@ -58,11 +58,23 @@
 #   member with zero dependents that was never wired to the CLI; removing it
 #   also removed openssl-sys (git2's vendored-openssl) from the graph.
 #
-# Review date: 2026-07-29
+# RUSTSEC-2026-0370, -0371, -0372: zvariant, zbus_names, zvariant_derive
+#   (unmaintained). All three standalone crates have been absorbed into zbus 6.0.
+#   They enter our tree via: keyring 4.x → zbus-secret-service-keyring-store 1.x
+#   → zbus ^5 → zvariant / zbus_names / zvariant_derive.
+#   zbus-secret-service-keyring-store 1.0.1 still requires zbus ^5; no upstream
+#   release using zbus 6 exists yet. On Windows and macOS keyring uses native
+#   backends (Credential Manager / Keychain) and never loads zbus at runtime.
+#   Recheck when keyring 5.x or zbus-secret-service-keyring-store 2.x ships.
+#
+# Review date: 2026-10-23
 ignore = [
     "RUSTSEC-2023-0071",
     "RUSTSEC-2023-0089",
     "RUSTSEC-2026-0097",
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0372",
 ]
