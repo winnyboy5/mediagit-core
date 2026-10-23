@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [v0.6.0-rc.1] - Released (GA-cleared 2026-10-23; date set when tagged)
+## [v0.6.0-rc.1] - 2026-10-23
 
 GA clearance at `ebe61e4`, SCALE tier, all backends (local, MinIO, AWS S3,
 Azure Blob, GCS): campaign `20261022-ga-060rc1-1` 278 pass / 0 fail / 1 skip
@@ -108,7 +108,7 @@ and the project memory.
   cap cost storage and the fold did not help a real checkout; the parallel
   reader above fixed the actual bottleneck.
 
-## [v0.5.0-rc.1] - Unreleased (GA-cleared 2026-10-19; date set when tagged)
+## [v0.5.0-rc.1] - 2026-10-19
 
 ### Licence
 
