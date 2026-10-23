@@ -9,7 +9,7 @@
 
 ## 🎯 Status
 
-**Version**: v0.5.0-rc.1 (next: **v0.6.0-rc.1**, in QA — stream-boundary chunking for PDF/Illustrator/Figma, opt-in model-weight deltas, faster checkout, gc data-safety fixes; see [CHANGELOG](CHANGELOG.md))
+**Version**: v0.5.0-rc.1 (next: **v0.6.0-rc.1**, GA-cleared 2026-10-23, not yet tagged — stream-boundary chunking for PDF/Illustrator/Figma, opt-in model-weight deltas, faster checkout, gc data-safety fixes; see [CHANGELOG](CHANGELOG.md))
 **Status**: 🚧 **RELEASE CANDIDATE**
 **Features**: 100% complete (all P0–P3 items from the rc.3 feature-completeness sprint implemented — a closed batch, distinct from the forward-looking backlog in [FUTURE_TODOS.md](FUTURE_TODOS.md), which reuses the same P0–P3 labels as effort/impact tiers for planned work)
 **Last Validated**: October 20, 2026 (v0.5.0-rc.1, final build) — two SCALE QA campaigns (`ga-050rc1-3`, `ga-050rc1-4`), **262 gates each: 261 pass, 0 failures, 1 skip, all 17 phases**, on byte-identical binaries, across MinIO, AWS S3, Azure Blob, GCS and local. The skip is the same gate in both runs — `A8-disk-full`, which needs an elevated shell to attach a size-capped volume. It was then run on its own under elevation against this same build (2026-10-20) and passes: `add` onto a full volume fails cleanly with `os error 112` and leaves the repository fsck-PERFECT
