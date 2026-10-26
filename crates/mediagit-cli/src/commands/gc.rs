@@ -730,8 +730,18 @@ impl GarbageCollector {
         Ok(objects)
     }
 
-    /// Identify unreferenced objects
-    async fn find_unreachable_objects(&self, reachable: &HashSet<Oid>) -> Result<Vec<(Oid, u64)>> {
+    /// Identify unreferenced objects.
+    ///
+    /// Objects the grace period keeps become extra roots: everything they
+    /// name is added to `reachable`, so a writer that dedups against an old
+    /// unreachable object (a fresh tree naming an old blob, a fresh commit
+    /// naming an old tree) does not lose it. The later manifest, chunk and
+    /// delta passes read the same `reachable`, so a chunked blob named by a
+    /// young tree keeps its manifest and chunks too.
+    async fn find_unreachable_objects(
+        &self,
+        reachable: &mut HashSet<Oid>,
+    ) -> Result<Vec<(Oid, u64)>> {
         let all_objects = self.list_all_objects().await?;
 
         let candidates: Vec<(Oid, u64, String)> = all_objects
@@ -739,15 +749,75 @@ impl GarbageCollector {
             .filter(|(oid, _, _)| !reachable.contains(oid))
             .collect();
 
-        let unreachable: Vec<(Oid, u64)> = self
-            .past_grace(candidates, |(_, _, key)| key, "object")
-            .await
+        let old: Vec<(Oid, u64, String)> = self
+            .past_grace(candidates.clone(), |(_, _, key)| key, "object")
+            .await;
+        if old.len() < candidates.len() {
+            let old_oids: HashSet<Oid> = old.iter().map(|(oid, _, _)| *oid).collect();
+            for (oid, size, _) in &candidates {
+                if !old_oids.contains(oid) {
+                    self.walk_grace_kept(oid, *size, reachable).await?;
+                }
+            }
+        }
+
+        let unreachable: Vec<(Oid, u64)> = old
             .into_iter()
+            .filter(|(oid, _, _)| !reachable.contains(oid))
             .map(|(oid, size, _)| (oid, size))
             .collect();
 
         info!("Found {} unreachable objects", unreachable.len());
         Ok(unreachable)
+    }
+
+    /// Add everything a grace-kept object names to `reachable` (#37).
+    ///
+    /// The store does not record an object's type, and postcard ignores
+    /// trailing bytes, so one successful parse proves nothing: try every
+    /// shape and keep the union. A blob that happens to parse only adds
+    /// unknown oids, which keeps more, never less.
+    async fn walk_grace_kept(
+        &self,
+        oid: &Oid,
+        size: u64,
+        reachable: &mut HashSet<Oid>,
+    ) -> Result<()> {
+        // ponytail: commits, trees and tags are small, but loose blobs can be
+        // hundreds of MB, and reading one just to learn it is a blob is
+        // waste. Objects above this stored size are treated as leaves. A tree
+        // that big would hold millions of entries; raise the cap if one exists.
+        const MAX_WALK_BYTES: u64 = 64 * 1024 * 1024;
+        if size > MAX_WALK_BYTES {
+            return Ok(());
+        }
+        let Ok(data) = self.odb.read(oid).await else {
+            return Ok(());
+        };
+        if let Ok(commit) = mediagit_versioning::format::deserialize::<Commit>(&data) {
+            self.traverse_tree(&commit.tree, reachable).await?;
+            for parent in &commit.parents {
+                self.traverse_commit_chain(parent, reachable).await?;
+            }
+        }
+        if let Ok(tree) = mediagit_versioning::format::deserialize::<Tree>(&data) {
+            for entry in tree.entries.values() {
+                if entry.mode == FileMode::Directory {
+                    self.traverse_tree(&entry.oid, reachable).await?;
+                } else {
+                    reachable.insert(entry.oid);
+                }
+            }
+        }
+        if let Ok(tag) = Tag::deserialize(&data) {
+            reachable.insert(tag.target);
+            match tag.target_type {
+                ObjectType::Commit => self.traverse_commit_chain(&tag.target, reachable).await?,
+                ObjectType::Tree => self.traverse_tree(&tag.target, reachable).await?,
+                ObjectType::Blob | ObjectType::Tag => {}
+            }
+        }
+        Ok(())
     }
 
     /// VC-2: prune grace period. Keeps only the candidates whose age is
@@ -1444,7 +1514,7 @@ pub async fn run_gc(opts: &GcOptions) -> Result<()> {
             style("→").cyan()
         );
     }
-    let reachable = gc.build_reachability_set(&repo_root).await?;
+    let mut reachable = gc.build_reachability_set(&repo_root).await?;
     stats.reachable_objects = reachable.len() as u64;
 
     // Step 2: List all objects
@@ -1458,7 +1528,7 @@ pub async fn run_gc(opts: &GcOptions) -> Result<()> {
     if !opts.quiet {
         println!("{} Identifying unreachable objects...", style("→").cyan());
     }
-    let unreachable = gc.find_unreachable_objects(&reachable).await?;
+    let unreachable = gc.find_unreachable_objects(&mut reachable).await?;
     stats.unreachable_objects = unreachable.len() as u64;
 
     // Even if no unreachable loose objects, still check chunks/manifests
@@ -1824,10 +1894,84 @@ mod tests {
         let oid = Oid::hash(b"object a push just uploaded");
         mock.put(&oid.to_hex(), b"x").await.unwrap();
         let gc = GarbageCollector::new(Arc::new(mock), tmp.path());
-        let doomed = gc.find_unreachable_objects(&HashSet::new()).await.unwrap();
+        let doomed = gc
+            .find_unreachable_objects(&mut HashSet::new())
+            .await
+            .unwrap();
         assert!(
             doomed.is_empty(),
             "deleted objects of unknown age: {doomed:?}"
+        );
+    }
+
+    /// #37: a writer that dedups against an OLD unreachable object (a fresh
+    /// tree naming an old blob, a fresh commit naming an old tree) must not
+    /// lose it: the young object is kept by the grace period, so everything it
+    /// names is kept too. An old object nothing names is still collected.
+    #[tokio::test]
+    async fn fresh_objects_keep_the_old_objects_they_reference() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let objects = tmp.path().join("objects");
+        let local = mediagit_storage::LocalBackend::new(&objects).await.unwrap();
+        let gc = GarbageCollector::new(Arc::new(local), tmp.path());
+
+        let old_blob = gc
+            .odb
+            .write(ObjectType::Blob, b"old blob a fresh tree reuses")
+            .await
+            .unwrap();
+        let old_leaf = gc
+            .odb
+            .write(ObjectType::Blob, b"old blob under an old tree")
+            .await
+            .unwrap();
+        let mut old_tree = Tree::new();
+        old_tree.add_entry(mediagit_versioning::TreeEntry::new(
+            "leaf".into(),
+            FileMode::Regular,
+            old_leaf,
+        ));
+        let old_tree = gc
+            .odb
+            .write(ObjectType::Tree, &old_tree.serialize().unwrap())
+            .await
+            .unwrap();
+        let garbage = gc
+            .odb
+            .write(ObjectType::Blob, b"old blob nothing names")
+            .await
+            .unwrap();
+        for oid in [old_blob, old_leaf, old_tree, garbage] {
+            age_files(&objects, &oid.to_hex());
+        }
+
+        let mut fresh_tree = Tree::new();
+        fresh_tree.add_entry(mediagit_versioning::TreeEntry::new(
+            "a".into(),
+            FileMode::Regular,
+            old_blob,
+        ));
+        gc.odb
+            .write(ObjectType::Tree, &fresh_tree.serialize().unwrap())
+            .await
+            .unwrap();
+        let sig = mediagit_versioning::Signature::new(
+            "t".into(),
+            "t@example.com".into(),
+            chrono::Utc::now(),
+        );
+        let fresh_commit = Commit::new(old_tree, sig.clone(), sig, "fresh".into());
+        gc.odb
+            .write(ObjectType::Commit, &fresh_commit.serialize().unwrap())
+            .await
+            .unwrap();
+
+        let mut reachable = HashSet::new();
+        let doomed = gc.find_unreachable_objects(&mut reachable).await.unwrap();
+        assert_eq!(
+            doomed.iter().map(|(oid, _)| *oid).collect::<Vec<_>>(),
+            vec![garbage],
+            "only the old object nothing names may be collected"
         );
     }
 
