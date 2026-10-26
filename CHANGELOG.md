@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   period, a recent manifest keeps alive every chunk it names (a push may
   reuse an old unreferenced chunk instead of uploading it), unknown age keeps
   the object, and every cloud backend reports object age.
+- **gc could delete an old object that a new commit or tree reused.** A writer
+  that dedups against an existing unreachable object (a new tree naming an old
+  blob, a new commit naming an old tree) only writes the new object. gc kept
+  the new one under the grace period but deleted the old one it named, so the
+  commit could not be checked out. Objects kept by the grace period now act as
+  roots: everything they name is kept, including chunked files' manifests and
+  chunks.
 
 ## [v0.6.0-rc.1] - 2026-10-23
 

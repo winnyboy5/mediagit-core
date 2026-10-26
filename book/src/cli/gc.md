@@ -37,7 +37,8 @@ So gc refuses to delete anything unreachable that was written within the last
 `MEDIAGIT_GC_GRACE_SECS` seconds (default `3600`): loose objects, chunks, chunk
 manifests, and blob and chunk deltas. A recent manifest also keeps alive every
 chunk it names, so a push that reuses an old unreferenced chunk instead of
-re-uploading it is safe. Set the variable to `0` to restore the previous
+re-uploading it is safe. In the same way, a recent commit or tree keeps
+alive every object it names, even an old one. Set the variable to `0` to restore the previous
 behaviour — a deliberate data-loss risk on any repository with concurrent
 writers.
 
