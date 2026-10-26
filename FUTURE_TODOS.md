@@ -5,7 +5,7 @@ known limitations for MediaGit. Items are sourced from documentation and source 
 each entry cites the file it was verified against.
 
 > Last updated: 2026-10-26 | v0.6.0-rc.1 | Every open item re-verified against code on this date.
-> Closed items (16, 21-24, 26, 27, 29, 32, 33, 34, 37) were removed; their record is in CHANGELOG.md and git history.
+> Closed items (16, 21-24, 26, 27, 29, 32, 33, 34, 37, 41) were removed; their record is in CHANGELOG.md and git history.
 
 **Priority levels:**
 - **P0** — Quick win or active blocker — ≤1 day effort, implement immediately
