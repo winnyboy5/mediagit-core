@@ -428,8 +428,13 @@ impl GarbageCollector {
                             continue;
                         }
                         // Skip oids the ODB no longer has (pruned by a
-                        // prior gc) without erroring.
-                        if self.odb.read(&oid).await.is_err() {
+                        // prior gc) without erroring. A failed check is not
+                        // "absent": it aborts, or the root's objects would go.
+                        if !self.odb.exists(&oid).await.map_err(|e| {
+                            anyhow::anyhow!(
+                                "cannot check reflog root {oid}: {e}; aborting gc without deleting anything"
+                            )
+                        })? {
                             continue;
                         }
                         if !reachable.contains(&oid) {
@@ -609,6 +614,32 @@ impl GarbageCollector {
         out
     }
 
+    /// Read an object the reachability walk must descend into.
+    ///
+    /// `None` only when the object is genuinely absent (a stale root, or a
+    /// lazily-fetched clone that never had it); the walk skips it as before.
+    /// An object that is present but cannot be read right now (a transient
+    /// backend error) is an error: skipping it would leave everything below
+    /// it looking unreachable, and gc would delete it.
+    async fn read_for_walk(&self, oid: &Oid) -> Result<Option<Vec<u8>>> {
+        let read_err = match self.odb.read(oid).await {
+            Ok(data) => return Ok(Some(data)),
+            Err(e) => e,
+        };
+        match self.odb.exists(oid).await {
+            Ok(false) => {
+                debug!("Object {} not found; nothing below it to protect", oid);
+                Ok(None)
+            }
+            Ok(true) => Err(anyhow::anyhow!(
+                "cannot read reachable object {oid}: {read_err}; aborting gc without deleting anything"
+            )),
+            Err(e) => Err(anyhow::anyhow!(
+                "cannot read reachable object {oid}: {read_err} (existence check also failed: {e}); aborting gc without deleting anything"
+            )),
+        }
+    }
+
     /// Traverse commit → tree → blob chains
     fn traverse_commit_chain<'a>(
         &'a self,
@@ -624,12 +655,8 @@ impl GarbageCollector {
             reachable.insert(*start_oid);
 
             // Try to read commit (will check both loose objects and pack files)
-            let data = match self.odb.read(start_oid).await {
-                Ok(d) => d,
-                Err(_) => {
-                    debug!("Object {} not found or not a commit", start_oid);
-                    return Ok(());
-                }
+            let Some(data) = self.read_for_walk(start_oid).await? else {
+                return Ok(());
             };
 
             // Try to deserialize as commit
@@ -663,10 +690,9 @@ impl GarbageCollector {
             reachable.insert(*tree_oid);
 
             // Read tree object (will check both loose objects and pack files)
-            let data = match self.odb.read(tree_oid).await {
-                Ok(d) => d,
-                Err(_) => {
-                    debug!("Tree object {} not found", tree_oid);
+            let data = match self.read_for_walk(tree_oid).await? {
+                Some(d) => d,
+                None => {
                     return Ok(());
                 }
             };
@@ -869,7 +895,7 @@ impl GarbageCollector {
         if size > MAX_WALK_BYTES {
             return Ok(());
         }
-        let Ok(data) = self.odb.read(oid).await else {
+        let Some(data) = self.read_for_walk(oid).await? else {
             return Ok(());
         };
         if let Ok(commit) = mediagit_versioning::format::deserialize::<Commit>(&data) {
@@ -1969,9 +1995,11 @@ mod tests {
     async fn unknown_age_object_is_kept() {
         let tmp = tempfile::TempDir::new().unwrap();
         let mock = mediagit_storage::mock::MockBackend::new();
-        let oid = Oid::hash(b"object a push just uploaded");
-        mock.put(&oid.to_hex(), b"x").await.unwrap();
         let gc = GarbageCollector::new(Arc::new(mock), tmp.path());
+        gc.odb
+            .write(ObjectType::Blob, b"object a push just uploaded")
+            .await
+            .unwrap();
         let doomed = gc
             .find_unreachable_objects(&mut HashSet::new())
             .await
@@ -1979,6 +2007,90 @@ mod tests {
         assert!(
             doomed.is_empty(),
             "deleted objects of unknown age: {doomed:?}"
+        );
+    }
+
+    /// Storage whose `get` fails for one key while the object is present:
+    /// a transient read error (network blip, throttling) on a cloud backend.
+    #[derive(Debug)]
+    struct FailingGet {
+        inner: Arc<dyn StorageBackend>,
+        fail_key: String,
+    }
+
+    #[async_trait::async_trait]
+    impl StorageBackend for FailingGet {
+        async fn get(&self, key: &str) -> anyhow::Result<Vec<u8>> {
+            if key == self.fail_key {
+                anyhow::bail!("simulated transient read failure");
+            }
+            self.inner.get(key).await
+        }
+        async fn put(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
+            self.inner.put(key, data).await
+        }
+        async fn exists(&self, key: &str) -> anyhow::Result<bool> {
+            self.inner.exists(key).await
+        }
+        async fn delete(&self, key: &str) -> anyhow::Result<()> {
+            self.inner.delete(key).await
+        }
+        async fn list_objects(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
+            self.inner.list_objects(prefix).await
+        }
+        async fn head(&self, key: &str) -> anyhow::Result<Option<u64>> {
+            self.inner.head(key).await
+        }
+    }
+
+    /// A reachable tree that is present but cannot be read right now must
+    /// abort gc. Skipping it leaves every blob under it looking unreachable,
+    /// i.e. deletable, on the strength of a transient error.
+    #[tokio::test]
+    async fn unreadable_reachable_tree_aborts_gc() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let local: Arc<dyn StorageBackend> = Arc::new(
+            mediagit_storage::LocalBackend::new(tmp.path().join("objects"))
+                .await
+                .unwrap(),
+        );
+        let writer = GarbageCollector::new(local.clone(), tmp.path());
+        let blob = writer
+            .odb
+            .write(ObjectType::Blob, b"file content")
+            .await
+            .unwrap();
+        let mut tree = Tree::new();
+        tree.add_entry(mediagit_versioning::TreeEntry::new(
+            "f".into(),
+            FileMode::Regular,
+            blob,
+        ));
+        let tree = writer
+            .odb
+            .write(ObjectType::Tree, &tree.serialize().unwrap())
+            .await
+            .unwrap();
+        let sig =
+            mediagit_versioning::Signature::new("t".into(), "t@e.com".into(), chrono::Utc::now());
+        let commit = Commit::new(tree, sig.clone(), sig, "c".into());
+        let commit = writer
+            .odb
+            .write(ObjectType::Commit, &commit.serialize().unwrap())
+            .await
+            .unwrap();
+
+        let flaky: Arc<dyn StorageBackend> = Arc::new(FailingGet {
+            inner: local,
+            fail_key: tree.to_hex(),
+        });
+        let gc = GarbageCollector::new(flaky, tmp.path());
+        let mut reachable = HashSet::new();
+        let walked = gc.traverse_commit_chain(&commit, &mut reachable).await;
+        assert!(
+            walked.is_err(),
+            "walk succeeded without reading tree {tree}; blob {blob} protected: {}",
+            reachable.contains(&blob)
         );
     }
 
