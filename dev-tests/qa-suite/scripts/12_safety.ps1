@@ -302,7 +302,7 @@ if (ShouldRun "SAFE12") {
 #   MEDIAGIT_GC_REFLOG_HORIZON_DAYS=0), remotes/* :454, STASH_LIST :476 (stash_roots :528),
 #   in-progress state files :490 (in_progress_roots :559: rebase-apply\state.json,
 #   CHERRY_PICK_STATE, REVERT_STATE, BISECT_STATE, MERGE_HEAD, ORIG_HEAD), staged index :505;
-#   plus the prune grace window (:758, MEDIAGIT_GC_GRACE_SECS=0 disables).
+#   plus the prune grace window (past_grace, MEDIAGIT_GC_GRACE_SECS=0 disables).
 # reset.rs writes only the reflog (:204-215) and never ORIG_HEAD; this test has no tags,
 # remotes, stash or v1 index entries, and deletes the state files anyway. Proof that c1
 # really became unreachable is behavioural: at least one object file that c1 added to the

@@ -4,7 +4,8 @@ Consolidated and **priority-ordered** registry of planned features, code-level T
 known limitations for MediaGit. Items are sourced from documentation and source code;
 each entry cites the file it was verified against.
 
-> Last updated: 2026-09-11 (items 21-24 and 26 closed; 25 partially closed) | v0.4.0-rc.1 | Completed work is recorded in CHANGELOG.md and git history
+> Last updated: 2026-10-26 | v0.6.0-rc.1 | Every open item re-verified against code on this date.
+> Closed items (16, 21-24, 26, 27, 29, 32, 33, 34) were removed; their record is in CHANGELOG.md and git history.
 
 **Priority levels:**
 - **P0** — Quick win or active blocker — ≤1 day effort, implement immediately
@@ -16,7 +17,7 @@ each entry cites the file it was verified against.
 > don't conflate them.** The section immediately below is a closed, dated
 > incident-response sprint (2026-07-18, leaked secrets) with its own 3-item P0
 > checklist. The **Quick Reference — Priority Matrix** further down is the
-> forward-looking product backlog (19 items, P1–P3, no P0s in it) that a
+> forward-looking product backlog (P1–P3, no P0s in it) that a
 > "100% of P0–P3 implemented" claim would actually be about. Both reuse
 > P0/P1/P2/P3 as effort/urgency labels; neither implies the other is done.
 
@@ -29,17 +30,17 @@ scrubbed from git history and force-pushed on all branches; a fresh-clone verifi
 confirmed the remote is clean. Both API keys were revoked regardless of the cleanup.
 
 - [ ] Close/regenerate dependabot PRs (all branch hashes changed by the history rewrite) —
-      **unverified 2026-08-25**: no `gh` CLI / GitHub API access in this environment to check
-      PR state, and no related commits in `git log`. Status unknown, not confirmed done.
+      **checked 2026-10-26 with `gh pr list`:** #56, #57 and #58 (GitHub Actions bumps, opened
+      2026-03-30, before the rewrite) are still open and need closing. The cargo PRs #87–#91
+      were opened after the rewrite and are unaffected.
 - [ ] Request cached-view purge via GitHub Support — public repo: old commits (e.g. `82295e8`,
       `7177269`) may remain servable by direct SHA URL until purged — **unverified 2026-08-25**,
       same reason (no GitHub API access; this is an external support request, not something
-      `git log` would show either way).
+      `git log` would show either way). Still unverified 2026-10-26.
 - [ ] Delete the backup mirror `D:\own\saas\mediagit-core-backup-20260718.git` — it is now the
       **only remaining copy of the secrets on disk**; remote verified clean 2026-07-18 so its
-      rollback purpose is served. **CONFIRMED STILL PRESENT 2026-08-25** — the directory still
-      exists on disk (`D:\own\saas\mediagit-core-backup-20260718.git\config` etc., last
-      modified 2026-07-18). Still open, not a false positive.
+      rollback purpose is served. **CONFIRMED STILL PRESENT 2026-10-26** — the directory still
+      exists on disk. Still open, not a false positive.
 
 ---
 
@@ -48,7 +49,7 @@ confirmed the remote is clean. Both API keys were revoked regardless of the clea
 | # | Item | Priority | Effort | Blocks / Enables |
 |---|------|----------|--------|-----------------|
 | 2 | HTTP/3 via reqwest feature flag | **P3** | 1 day | When reqwest `http3` stabilizes (~2026 Q4) |
-| 3 | Git migration tooling (rewrite filter/install/track) | **P3** | 2-3 wk | Crate deleted in `c5d0a23`; rewrite, not re-integration |
+| 3 | Git migration tooling (rewrite filter/install/track) | **P3** | 2-3 wk | Crate deleted in `c5d0a23`; rewrite, not re-integration. `docs/next-set/SAAS-readiness.md` §8 ranks a Git LFS importer as roadmap Phase 1: re-prioritize when started |
 | 4 | `mediagit://` URL scheme | **P3** | 1 day | Post-HTTP/3 adoption |
 | 5 | Differential checkout (only changed files) | **P3** | 1-2 wk | 70% branch switch latency reduction |
 | 6 | Incremental status scan (inode/mtime cache) | **P3** | 1-2 wk | Repeated `status` performance |
@@ -61,17 +62,11 @@ confirmed the remote is clean. Both API keys were revoked regardless of the clea
 | 13 | SSO integration, multi-region, Web UI (v1.0.0) | **P3** | — | Enterprise features |
 | 14 | FBX Objects-descending walker (or delete walker at GA) | **P3** | 1-2 wk | Fair trial closed 2026-07-07: top-level cuts ≈ CDC (+0.003pp) |
 | 15 | EXR structure-aware chunking | **P3** | 3-5 days | Needs real EXR fixtures first (creating them requires the `exr` crate) |
-| 16 | .sketch/.fig ZIP-entry-aware chunking | **P3** | 3-5 days | No fixtures in corpus yet |
 | 17 | Video pHash (keyframe extract + image_hasher) | **P3** | 1-2 wk | No viable video-phash crate (verified 2026-07-07) |
 | 18 | Cross-process chunk-delta write lock | **P3** | 2-3 days | In-process race fixed 2026-07-07; multi-process writers to one local repo could still race (CLI never does this) |
 | 19 | phash.idx compaction | **P3** | 0.5 day | Append-only today; only matters >1M entries (~16 MB) |
 | 20 | PSD spot-color channel parse failure | **P3** | Unscoped (needs upstream fix or crate swap) | `psd` crate 0.3.5 errors "invalid channel id 3" on PSDs with a spot-color channel; found 2026-07-10, M5b |
-| ~~21~~ | ~~`remote add` accepts URL schemes with no transport~~ | **DONE** v0.4.0 | — | Both gates narrowed to HTTP(S): `validate_url` and, the one that mattered, `Config::resolve_remote_url` (9 callers). Tests red-verified |
-| ~~22~~ | ~~Wire `load_with_overrides` into the real config path (or delete it)~~ | **DONE** v0.4.0 | — | Deleted, with `apply_env_overrides`. 14 inert `MEDIAGIT_*` names retired; `MEDIAGIT_API_KEY` and `MEDIAGIT_CHUNK_WRITE_CONCURRENCY` stay live via their own read sites |
-| ~~23~~ | ~~Dead config keys: decide wire-up vs removal~~ | **DONE** v0.4.0 | — | Removed: `[compression]`, `max_concurrency`, `chunk_write_concurrency` (TOML key only), `[performance.connection_pool]`, `[performance.timeouts]`. Breaking change recorded in CHANGELOG |
-| ~~24~~ | ~~`s3.rs` module doc describes a credential chain that does not exist~~ | **DONE** v0.4.0 | — | Now documents both paths: plain-AWS uses the SDK chain, custom-endpoint (MinIO) uses explicit `S3Config` creds only |
-| 25 | Truth-up the prose in `book/src/cli/` (39 pages, not 29) | **P3** (partial) | 1-2 days | Mechanical claims swept v0.4.0: all 12 cited `MEDIAGIT_*` vars verified live in code, config-section and path claims checked, one stale `[compression]` claim fixed in `init.md`. **Narrative behavioural prose across the 39 pages is still unswept.** |
-| ~~26~~ | ~~Re-verify `CHANGELOG.md:314`~~ | **DONE** v0.4.0 | — | Rewritten as reported-at-the-time and unverifiable; the run's `summary.json` is gone, and neighbouring artifacts record 234 gates, not 237 |
+| 25 | Truth-up the prose in `book/src/cli/` (39 pages) | **P3** (partial) | 1-2 days | Mechanical claims swept v0.4.0. **Narrative behavioural prose across the 39 pages is still unswept.** See the Known Limitations row |
 
 ---
 
@@ -119,7 +114,9 @@ instead of pre-broken. Re-adding a git2-based importer re-opens all of that.
 Git/git-LFS import is currently documented as **unsupported**, which is a decision rather
 than an omission — MediaGit is a standalone VCS for media.
 
-Trigger: user requests for git/git-LFS → MediaGit migration tooling. Effort: **2-3 weeks**
+Trigger: user requests for git/git-LFS → MediaGit migration tooling. **Update 2026-10-26:**
+`docs/next-set/SAAS-readiness.md` §8 makes a one-way Git LFS importer roadmap Phase 1 (the
+on-ramp for LFS users), so this trigger is effectively met once that phase starts. Effort: **2-3 weeks**
 (rewrite + a dependency path that does not reintroduce openssl).
 
 ---
@@ -137,7 +134,7 @@ A native `mediagit://` URL scheme for brand identity, post-HTTP/3 adoption. Maps
 
 **Partly done already.** Earlier revisions said branch switching "rewrites all files even
 if only a subset changed" — it does not. `checkout_entry_differential`
-(`checkout.rs:161`) stats the on-disk file, compares size against
+(`checkout.rs:152`) stats the on-disk file, compares size against
 `odb.get_object_size`, then compares a full `Oid::from_file` hash, and skips the write when
 they match. `branch.rs:650` reaches it via `checkout_commit` → `checkout_tree_optimized`
 → `checkout.rs:577`, so an ordinary branch switch already avoids rewriting unchanged files.
@@ -154,7 +151,7 @@ Requires a tree diff engine in `mediagit-versioning`. Effort: **1-2 weeks**.
 
 ### 6. Incremental Status Scan (inode / mtime Cache)
 *Source: `crates/mediagit-cli/src/commands/status.rs` (`scan_working_directory`, called at
-`status.rs:383`)*
+`status.rs:373`)*
 
 Full-tree scan on every `status` invocation. An inode cache / mtime-based incremental scan
 (similar to git's index) would reduce repeated-status overhead significantly for repos with
@@ -165,10 +162,12 @@ Effort: **1-2 weeks**.
 ---
 
 ### 7. Pack File Format Documentation
-*Source: `book/src/reference/file-formats.md:15`*
+*Source: `book/src/reference/file-formats.md`, `crates/mediagit-versioning/src/pack.rs` — verified 2026-10-26*
 
-`.mediagit/objects/pack/` is reserved for future pack-file storage. The directory layout
-and on-disk format are not documented in the book. Effort: **0.5 day**.
+Packs are live: pack format v3 with a chunk index and trailing BLAKE3 checksum
+(`pack.rs`), stored at `packs/<p0:2>/<pack_oid>`. The book lists that path in the storage
+layout but does not document the pack's internal format (header, entries, index,
+trailer). Effort: **0.5 day**.
 
 ---
 
@@ -228,12 +227,14 @@ implementation plan yet. Effort: **2-3 weeks** (research + implementation).
 
 ## Release Milestones
 
-### v0.3.0 — Developer Experience and Ecosystem
+### Unscheduled — carried over from the old v0.3.0 plan
+None of these shipped in v0.3.0–v0.6.0. Checked 2026-10-26.
 - `mediagit diff` with media-aware visual diffing (image pixel diff, audio waveform)
 - Conflict markers for PSD/Blend/FBX with editor integrations
-- Shallow clone (`--depth N`) for large repositories
+- Shallow clone (`--depth N`) for large repositories (no `--depth` flag on `clone`)
 - `mediagit migrate` — import from Git-LFS repositories *(see item 3)*
-- Chocolatey and Homebrew package managers
+- Chocolatey and Homebrew: manifests exist in `packaging/chocolatey` and
+  `packaging/homebrew`; publication to the public feeds is not verified
 - Official VS Code extension (file status, staging UI)
 
 ### v1.0.0 — Production-Grade Enterprise Features
@@ -245,8 +246,6 @@ implementation plan yet. Effort: **2-3 weeks** (research + implementation).
 - Web UI for repository browsing and review workflows
 - Commercial support tiers
 
-> See [FUTURE_TODOS.md](./FUTURE_TODOS.md) for individual item details (this file).
-
 ---
 
 ## Known Limitations
@@ -256,31 +255,36 @@ implementation plan yet. Effort: **2-3 weeks** (research + implementation).
 | 2 | P3 | **HTTP/3** | reqwest `http3` feature not yet stable | R&D 2026-03 |
 | 3 | P3 | **Git migration CLI** | `mediagit-git` deleted in `c5d0a23` (its clean filter destroyed file content); git/git-LFS import documented unsupported | `c5d0a23` |
 | 4 | P3 | **`mediagit://` scheme** | No native URL scheme; uses `http://` | R&D 2026-03 |
-| 5 | P3 | **Differential checkout** | Unchanged files already skipped by hash; every path still visited + hashed, no tree diff | `checkout.rs:161` |
-| 6 | P3 | **Incremental status** | Full-tree scan on every `status` invocation | `status.rs:383` |
-| 7 | P3 | **Pack file docs** | `.mediagit/objects/pack/` format not documented | `file-formats.md` |
-| 8 | P3 | **Similarity thresholds** | Hardcoded in `similarity.rs` (27 arms) + `odb/mod.rs` (`delta_ratio_threshold`), not configurable via `config.toml` | `similarity.rs` |
+| 5 | P3 | **Differential checkout** | Unchanged files already skipped by hash; every path still visited + hashed, no tree diff | `checkout.rs:152` |
+| 6 | P3 | **Incremental status** | Full-tree scan on every `status` invocation | `status.rs:373` |
+| 7 | P3 | **Pack file docs** | Pack v3 internal format (header, entries, index, trailer) not documented; only the `packs/` path is | `file-formats.md`, `pack.rs` |
+| 8 | P3 | **Similarity thresholds** | Hardcoded in `similarity.rs` (19 arms) + `odb/mod.rs` (`delta_ratio_threshold`), not configurable via `config.toml` | `similarity.rs` |
 | 9 | P3 | **Windows ARM64** | No native pre-built binary; x64 emulation works but slower | `windows-arm64.md` |
 | 10 | P3 | **Metal GPU** | No GPU-accelerated image processing on Apple Silicon | `macos-arm64.md:88` |
 | 11 | P3 | **SIEM / audit** | No Splunk/ELK connectors; SOC 2/GDPR export is v1.0.0 | `audit.rs` |
 | 14 | P3 | **FBX structure chunking** | Top-level EndOffset walker ≈ CDC (Objects node holds ~98% of bytes); beating CDC needs an Objects-descending walker | fair trial 2026-07-07 |
 | 15 | P3 | **EXR chunking** | No structure-aware chunking; blocked on real EXR fixtures | plan 2026-07-07 |
-| 16 | DONE | **.sketch/.fig chunking** | Shipped in v0.6.0-rc.1 as stream-boundary cuts (`MEDIAGIT_STREAM_CUTS`, on by default): forced cuts at ZIP local headers and PDF `stream`/`endstream`, FastCDC inside each segment. Figma 6-version chain -19% stored. | v0.6.0-rc.1 |
 | 17 | P3 | **Video pHash** | No perceptual delta-base nomination for video; no viable crate | R&D 2026-07-07 |
 | 18 | P3 | **Cross-process delta lock** | Chunk-delta cycle guard is per-process; concurrent multi-process writers to one local repo could still race | fix 2026-07-07 |
 | 20 | P3 | **PSD spot-color channels** | `psd` crate 0.3.5 errors `"invalid channel id 3"` on PSDs with a spot-color channel; falls back to generic chunking, no crash/data-loss | found 2026-07-10, M5b |
-| 28 | P1 | **Loopback stall (S0) unexplained; strongest candidate refuted** | Campaign ga49 stalled on `GET /info/refs` with the server reporting `accepted` 4->9 while `routed` stayed frozen at 13 and `idle_s` reached 699 — five TCP connections arrived, none reached the router. **Worker starvation by `get_refs` is REFUTED by measurement** (v0.4.0 P0.5): a single `/info/refs` costs ~908ms over 4000 refs, yet `/health` is served promptly with six of them in flight on a 2-worker runtime. `refdb.read(..).await` sits inside the walk loop, so the handler yields on every ref — the blocking is real but too fine-grained to starve anything. Guard test: `crates/mediagit-server/tests/info_refs_does_not_block_runtime.rs`; do NOT "fix" that walk with `spawn_blocking` expecting a stall to vanish, the test passes either way. Also eliminated by inspection: stale pooled connections — `axum::serve` has no HTTP builder config and no timeout layer, so the server has no idle keep-alive timeout. Still open: Windows ephemeral-port/TIME_WAIT pressure (untested), hyper connection-task scheduling, and the CLI single-worker runtime (`mediagit-cli/src/main.rs:431`) as a CLIENT-side cause — the refutation is server-side only and says nothing about ga47's 65 client `send()` failures. | parked to v0.4.0 P5 |
+| 28 | P1 | **Loopback stall (S0) unexplained; strongest candidate refuted** | Campaign ga49 stalled on `GET /info/refs` with the server reporting `accepted` 4->9 while `routed` stayed frozen at 13 and `idle_s` reached 699 — five TCP connections arrived, none reached the router. **Worker starvation by `get_refs` is REFUTED by measurement** (v0.4.0 P0.5): a single `/info/refs` costs ~908ms over 4000 refs, yet `/health` is served promptly with six of them in flight on a 2-worker runtime. `refdb.read(..).await` sits inside the walk loop, so the handler yields on every ref — the blocking is real but too fine-grained to starve anything. Guard test: `crates/mediagit-server/tests/info_refs_does_not_block_runtime.rs`; do NOT "fix" that walk with `spawn_blocking` expecting a stall to vanish, the test passes either way. Also eliminated by inspection: stale pooled connections — `axum::serve` has no HTTP builder config and no timeout layer, so the server has no idle keep-alive timeout. Still open: Windows ephemeral-port/TIME_WAIT pressure (untested), hyper connection-task scheduling, and the CLI single-worker runtime (`mediagit-cli/src/main.rs:440`) as a CLIENT-side cause — the refutation is server-side only and says nothing about ga47's 65 client `send()` failures. **Status 2026-10-26:** not seen in any campaign since 2026-10-15 (ga-video1, ga-050rc1-1..4, ga-060rc1-1..2). Absence of evidence, not a fix; no change aimed at it has landed. | open, intermittent |
 | 31 | P3 | **A8 disk-full passes, but a normal campaign still skips it** | **Run and passing as of 2026-09-11** — the first execution in the project's history. Under an elevated shell, `mediagit add` of a 55MB incompressible fixture into a repo on a 100MB NTFS volume fails with `Store chunk: There is not enough space on the disk. (os error 112)`, exit 1 and no panic; `fsck` immediately after reports PERFECT with the pre-existing commit intact, and a subsequent add + commit + fsck is PERFECT. Three setup faults had to be cleared to get there, each invisible until the drill actually ran: a 150MB fixture on a 100MB volume (fixed to 55MB with the invariant `fixtureMB < usable AND 2*fixtureMB > usable` documented in place); an absolute path passed to `New-SandboxRepo`, which resolves names under `work/`, so `Join-Path` threw before diskpart's volume was used; and a clean-`fsck` assertion on a repo with no commits, where `mediagit init` leaves HEAD pointing at a `refs/heads/main` that does not exist yet and `Test-QaFsckClean` substring-matches the resulting warning on "missing". **What remains a limitation:** `diskpart attach vdisk` needs admin and there is no non-elevated equivalent on Windows, so the drill still SKIPs in any campaign started from a normal shell — the coverage exists but is not automatic. To exercise it: `Start-Process powershell -Verb RunAs`, then `$env:MG_QA_DRILLS='A8'; .\07_abuse.ps1`. | v0.4.0, run under elevation |
 | 30 | P2 | **R-SEND2: transport retry for `send_with_rate_limit_retry` — audited, NOT implemented** | `send_with_rate_limit_retry` (`client/mod.rs:835`) retries ONLY 429; `let resp = make().await?` propagates a transport error on the first attempt across all **46** call sites. The mechanism already exists and is proven — `send_idempotent_pack_request` (`pack_builder.rs:86`), which wraps it with a wall-clock budget and whose doc comment already states the safety rule. So the work is CLASSIFICATION, not construction. Audit by HTTP verb: **GET x8** (browse:68, pull:451/573/729/749/885/1242/1341) — inherently idempotent, zero classification risk. **PUT x11** (escrow:109, push:675/703/1326/1397/1500/1549/2220/2292/2378/2424) — content-addressed keys, so a re-PUT of the same bytes is idempotent by construction. **POST x19 — CONTAINS UNSAFE MEMBERS, do not blanket-retry**: `mod.rs:1010` is `POST /refs/update`, an `old_oid` compare-and-swap where a transport error cannot distinguish "never arrived" from "applied, response lost" — retrying fails the CAS and reports a spurious conflict; `locks.rs:45` `POST /locks` is an acquire. Others in that group ARE safe (`mpu/abort` is idempotent, `chunks/check` is a read-only query despite the verb) but each needs individual judgement. **8 more** call sites are indirect (generic wrappers in `mod.rs`, `push.rs:379`) and need tracing to their real verb. **Not implemented because QA phase A7 asserts a CLEAN FAILURE on some of these paths and A7 cannot be run outside the campaign harness.** One misclassification is a correctness bug that appears only under transport failure — invisible in normal testing, surfacing in a campaign. Suggested order when picked up: GET subset first (provably safe), then PUT, then POST individually, running A7 between each. | v0.4.0, needs A7 |
-| 29 | DONE | **GCS presigned MPU — implemented and verified 2026-09-14** | Was: only `s3` and `minio` implemented `create_presigned_mpu`, so every GCS pack upload was one all-or-nothing PUT (the ga42 failure class). Now implemented over the S3-compatible **XML API**, which is what `SignedUrlBuilder` already signs. **Measured on a real 10.03 GB push: client peak working set 1,075.7 MB → 288.9 MB (3.7×), now BELOW S3’s 365.2 MB; `packs/mpu/start` 501 → 200 across 154 responses.** Feasibility was probed against the live bucket BEFORE writing Rust, including the non-obvious half: the signer runs every query param through `form_urlencoded::append_pair`, so a V4-signed initiate emits `?uploads=` and cannot express bare `?uploads` — both forms were confirmed to return an UploadId. Initiate/complete/abort are themselves presigned then called unauthenticated, so credentials become requests in one place. Every initiate failure returns `Ok(None)` so the caller falls back to single PUT rather than failing a push that had a working path. Verified: 6 unit tests, workspace suite 2,268/0, and S5 on gcs with **parity=True** on a clone back. | done, `17266ec` |
-| 33 | DONE | **Single-PUT pack upload held a whole 64 MiB pack in RAM — fixed by giving the backends multipart, not by streaming** | Measured 1,075.2 MB (Azure) and 1,075.7 MB (GCS) peak client working set on a 10.03 GB push, against 365.2 MB on S3 — within 0.5 MB of each other because it was structural: neither implemented a multipart path, so every pack took the whole-pack-in-RAM branch. **Both are now fixed and measured: GCS 288.9 MB (`17266ec`, XML-API multipart), Azure 293.0 MB (`7886318`, Put Block / Put Block List). All three cloud backends now sit in one band (365 / 289 / 293 MB).** Each round-trips: S5 `parity=True` on a clone back, 7/7 gates, on both. **Streaming the single-PUT body was implemented and REVERTED and must not be re-attempted**: with a streamed body a server can answer before the client finishes writing, so reqwest reports a TRANSPORT error rather than the HTTP response, and transport errors are retried — `tests/pack_put_retry.rs` went 6/6 clean to 3/6 failing, `a_permanent_pack_put_error_is_not_retried` among them. A permanent 403 retried is up to 24 re-uploads of a doomed request. | done, `17266ec` + `7886318` |
-| 34 | P1 | **No cloud backend has been READ BACK at 16 GB — only pushed** | All three were pushed with the 15.53 GB corpus (`test-files/archive (1)/dataset`, 10.03 GB ODB) and all three succeeded: `exit=0`, 155/155 packs, `packs/mpu/start` = 200 with zero 501. **Clone-back hash parity exists only at 2 GB** (S5, GCS and Azure) and **not at all for AWS at any size**. That is the gap that matters for two brand-new upload paths: a multipart commit which assembles parts or blocks OUT OF ORDER uploads perfectly and is silently wrong, and 16 GB is ~155 packs × 4 parts against 2 GB’s 32 packs — far more ordering opportunities. `exit=0` on a new upload path is not evidence the bytes read back. **To close: per backend, push the corpus → clone it back and assert parity → pull incrementally after a second commit.** S5’s payload is fixed at ~2 GB, so it cannot be reused as-is; clone while the pushing server is still up, or recreate the repo namespace (its name embeds run id + PID, so capture it at push time). Scripts and traps are in the session handover memory. **Caution when reading results: this link measured 1.52× run-to-run variance on identical bytes (two S3 pushes at 8.59 and 5.64 MB/s), so backends cannot be ranked on throughput from single samples — a “GCS is 23% slower” claim was made and retracted on exactly that.** | v0.4.0, next session |
-| 35 | P3 | **Re-encoded video dedups at ~0%, and that is inherent — do not file it as a chunking bug** | Established by code read 2026-09-14. MediaGit dedups **byte-identical and byte-shifted** content: a re-commit is 100%, and a trim, append or mid-file edit is handled well because that is what CDC exists for. A **re-encode is none of those**. Different quantisation decisions from the first frame mean every subsequent byte differs, so no CDC cut point lands in the same place with the same content and no chunk hash matches. No chunking strategy recovers this — the bytes genuinely are not the same. **Two mechanisms that look like they should help, and do not:** (1) delta encoding runs, but its similarity detector hashes a handful of fixed-size byte samples (`similarity.rs:246`), and two encodes of the same footage share no byte-level samples, so no base is ever selected — and a delta between two encodes would be as large as the content anyway; (2) **`perceptual_hash` is declared on `ContentChunk` (`chunking/mod.rs:84`) and is NEVER SET AND NEVER READ** — a dead field that makes the product look like it does perceptual matching when it does not. Either wire it or delete it; leaving it invites exactly this misreading. **Real re-encode dedup is a different feature**: frame- or GOP-level content addressing, decoding both sides to compare, format-specific and large. Consistent with [[G0]]: ~26.5% is the measured pipeline ceiling and the 46.4% figure in the planning docs is an optimistic synthetic number (real creative-save corpora land 5-25%). | documented limitation, not scheduled |
-| 36 | P2 | **Format-aware container chunking is skipped for most real video (>100 MB)** | `chunker.rs:248`: files with a structure parser (`mp4/mov/mkv/webm/avi`, plus the 3D formats) only get the atom-aware walker when they are **≤ `MEDIAGIT_CONTAINER_CHUNK_CAP_MB`, default 100 MB**. Above that they fall back to plain `StreamCDC` with no structural awareness at all — so a 4 GB master, which is the normal case for this product, never gets `ftyp`/`moov`/`mdat` split onto their own boundaries. **The cap is deliberate, not an oversight**, and the reason is documented in place (`chunking/mod.rs:262-276`): the walkers accumulate every `ContentChunk` — each owning a `Vec<u8>` copy of its bytes — into one `Vec` before forwarding any of them, and `fill_coverage_gaps` re-sorts that whole `Vec`, so peak heap scales with file size. **The upgrade path is already written down there**: make `fill_coverage_gaps` track a running cursor instead of re-scanning, then thread a channel sender through the walkers so chunks stream out as found, which removes the cap entirely. **Measure before assuming it pays**: CDC already handles shifted content, so the win is limited to metadata-only edits and container re-wraps where atom alignment matters — quantify that on a real corpus before spending the refactor. Note this is NOT a fix for item 35; re-encodes stay at ~0% either way. | v0.5.0 candidate |
-| 27 | P2 | **gc prune grace period covers local backends only** | VC-2 landed in v0.4.0: `StorageBackend::modified_at` supplies an object age and `gc` refuses to collect anything written inside `MEDIAGIT_GC_GRACE_SECS` (default 3600). Only `LocalBackend` implements it; `NamespacedBackend` forwards it. `s3`, `minio`, `gcs`, `azure` and `b2_spaces` inherit the `Ok(None)` default, meaning "age unknown", so cloud-backed repos keep the pre-existing racy behaviour — a chunk uploaded but not yet referenced is still collectible there. gc counts those and emits a `warn!` naming the cause, so the gap is self-reporting rather than silent. All five backends CAN report mtime (S3 `HeadObject` has `last_modified`; `minio.rs` is the shared S3 driver covering AWS too), so this is mechanical follow-up, not a design problem. | v0.4.0 |
-| 32 | P3 | **`MEDIAGIT_PACK_UPLOAD_CONCURRENCY` stays at 8 — measured, not assumed** | The default was 8 against a limit of 64 because pack upload held a whole 64 MiB pack per in-flight upload (~512 MB floor, confirmed at 539 MB peak WS). X2 plus the `Bytes` fix brought that to **15.7 MB per in-flight pack**, removing the memory reason for the cap. **2026-09-14: measured on a real 10.03 GB push to S3 `ap-south-1`, and the answer is DO NOT RAISE IT.** conc 8 → 1195.9 s at 8.59 MB/s, `util_pct=27%`; conc 32 → 1099.6 s at 9.34 MB/s, `util_pct=100%` (`active_sum/wall` = 32.2, so it really ran 32 wide). **+8.7% for 4× the concurrency and 3.5× the memory** — the pipeline stopped being the constraint at both settings; the link is. Third independent confirmation of the same curve (2026-05-17: 1→32 bought 1.63×; T1 2026-09-11: 1→8 bought 1.67×). **S3 Transfer Acceleration was also measured and rejected**: four alternating 1 GB `aws s3 cp` runs gave standard 10.28 MB/s vs accelerate 10.15 MB/s (0.99×, inside the within-arm spread) — it optimises long-haul routing and cannot help when the client UPLINK (~80 Mbps here) is the ceiling. Bucket left `Suspended`. **Blocker if anyone retries acceleration:** `force_path_style(true)` is unconditional (`s3.rs:459`, also `:311`) and the accelerate endpoint does not support path-style — it would need `.accelerate(true)` on the SDK config, not an endpoint override. | measured 2026-09-14, closed unless a fatter link appears |
-| 25 | P3 | **`book/src/cli/` prose — mechanically swept, narrative still unswept** | Four mechanical axes now verified across all 39 pages: (1) all 12 cited `MEDIAGIT_*` variables exist in code; (2) config-section and repo-path claims; (3) claimed output lines checked against string literals in `crates/`; (4) every documented subcommand maps to a clap variant (10 pages with a synopsis, 0 missing). **Two real fabrications found and fixed, both the same root cause — git's behaviour documented as mediagit's:** `add.md`/`quickstart.md` showed `On branch main` where the binary prints `On branch: main` (`status.rs:343`), and `bisect.md` claimed state lived in `.mediagit/BISECT_HEAD`, `BISECT_LOG` and `BISECT_TERMS` — git's files, none of which exists here; mediagit uses a single JSON `.mediagit/BISECT_STATE` (`bisect.rs:595`) deleted on reset (`bisect.rs:320`). **What remains is narrative behavioural prose** — descriptions of what a command *does* — which no mechanical check reaches and which `13_docs` cannot gate, since it compares flag tokens against the binary's own help output only. Known outstanding: `stats.md` documents a "Storage Backend Statistics" block the binary does not produce (tracked separately in todo.md). | partial, v0.4.0 |
+| 35 | P3 | **Re-encoded video dedups at ~0%, and that is inherent — do not file it as a chunking bug** | Established by code read 2026-09-14. MediaGit dedups **byte-identical and byte-shifted** content: a re-commit is 100%, and a trim, append or mid-file edit is handled well because that is what CDC exists for. A **re-encode is none of those**. Different quantisation decisions from the first frame mean every subsequent byte differs, so no CDC cut point lands in the same place with the same content and no chunk hash matches. No chunking strategy recovers this — the bytes genuinely are not the same. **Two mechanisms that look like they should help, and do not:** (1) delta encoding runs, but its similarity detector hashes a handful of fixed-size byte samples (`similarity.rs:246`), and two encodes of the same footage share no byte-level samples, so no base is ever selected — and a delta between two encodes would be as large as the content anyway; (2) a `perceptual_hash` field on `ContentChunk` that was never set or read has since been deleted (verified 2026-10-26); perceptual hashes exist only for still images in `mediagit-media` (`image.rs`). **Real re-encode dedup is a different feature**: frame- or GOP-level content addressing, decoding both sides to compare, format-specific and large. Consistent with [[G0]]: ~26.5% is the measured pipeline ceiling and the 46.4% figure in the planning docs is an optimistic synthetic number (real creative-save corpora land 5-25%). | documented limitation, not scheduled |
+| 36 | P2 | **Format-aware container chunking is skipped above 100 MB for MKV/WebM/AVI and 3D formats** | **MP4/MOV are no longer affected:** since 0.5.0-rc.1 they are chunked on frame boundaries at any size by a streaming planner (`mp4_stream::Mp4Plan`, `chunker.rs:277-281`), checked before the cap. The rest of this row applies to the other structure-parsed formats: files with a structure parser (`mkv/webm/avi`, plus the 3D formats) only get the walker when they are **≤ `MEDIAGIT_CONTAINER_CHUNK_CAP_MB`, default 100 MB** (`chunker.rs:479`). Above that they fall back to plain `StreamCDC` with no structural awareness at all — so a 4 GB master, which is the normal case for this product, never gets `ftyp`/`moov`/`mdat` split onto their own boundaries. **The cap is deliberate, not an oversight**, and the reason is documented in place (`chunking/mod.rs:292-301`): the walkers accumulate every `ContentChunk` — each owning a `Vec<u8>` copy of its bytes — into one `Vec` before forwarding any of them, and `fill_coverage_gaps` re-sorts that whole `Vec`, so peak heap scales with file size. **The upgrade path is already written down there**: make `fill_coverage_gaps` track a running cursor instead of re-scanning, then thread a channel sender through the walkers so chunks stream out as found, which removes the cap entirely. **Measure before assuming it pays**: CDC already handles shifted content, so the win is limited to metadata-only edits and container re-wraps where atom alignment matters — quantify that on a real corpus before spending the refactor. Note this is NOT a fix for item 35; re-encodes stay at ~0% either way. | open |
+| 37 | P2 | **gc grace does not protect an old blob reused by a fresh tree** | Left over from the 2026-10-26 gc fix (`ee70cc9`), which closed item 27. A grace-kept manifest now keeps its chunks alive, but loose objects have no equivalent: if a writer stores a new tree or commit that points at an OLD unreachable blob (dedup instead of re-write), gc keeps the young tree and deletes the old blob. Pre-existing, not a regression. Fix: walk trees and commits from grace-kept loose objects and add what they reach to the live set before deleting. | open |
+| 38 | P3 | **Delta `result_size` is trusted from the wire up to 16 GiB** | `delta.rs` caps the declared result size at `MAX_DELTA_RESULT_SIZE` and decompresses with that capacity, so a hostile delta can force a huge allocation. Out-of-memory only, never corruption: output is hash-checked. Fix: cap by the target chunk's maximum size, not a global 16 GiB. | open, from the 0.6.0 final review |
+| 39 | P3 | **Stream cuts on pathological PDF/ZIP layouts** | `chunking/stream_cuts.rs`: a file with thousands of tiny streams yields tiny segments. Segments under 64 KiB are merged; confirm the merge bound holds for adversarial layouts. Index size and speed only. | open, from the 0.6.0 final review |
+| 40 | P3 | **safetensors header held in memory up to 100 MB** | `chunking/safetensors_stream.rs` (`MAX_HEADER`). Memory only. | open, from the 0.6.0 final review |
+| 25 | P3 | **`book/src/cli/` prose — mechanically swept, narrative still unswept** | Four mechanical axes now verified across all 39 pages: (1) all 12 cited `MEDIAGIT_*` variables exist in code; (2) config-section and repo-path claims; (3) claimed output lines checked against string literals in `crates/`; (4) every documented subcommand maps to a clap variant (10 pages with a synopsis, 0 missing). **Two real fabrications found and fixed, both the same root cause — git's behaviour documented as mediagit's:** `add.md`/`quickstart.md` showed `On branch main` where the binary prints `On branch: main` (`status.rs:343`), and `bisect.md` claimed state lived in `.mediagit/BISECT_HEAD`, `BISECT_LOG` and `BISECT_TERMS` — git's files, none of which exists here; mediagit uses a single JSON `.mediagit/BISECT_STATE` (`bisect.rs:595`) deleted on reset (`bisect.rs:320`). **What remains is narrative behavioural prose** — descriptions of what a command *does* — which no mechanical check reaches and which `13_docs` cannot gate, since it compares flag tokens against the binary's own help output only. The `stats.md` "Storage Backend Statistics" block noted here earlier is gone (verified 2026-10-26). | partial, v0.4.0 |
 
+
+## Parked: QUIC/UDP relay transfer (2026-10-26)
+
+A Signiant-class data plane: central control plane plus QUIC relay nodes near the studio.
+Parked behind a gate: it must beat the current presigned HTTPS path by at least 1.5x on a
+real fat-WAN link before any build. Resume when a trial studio reports transfer pain on a
+long-haul link. Relates to item 2 (HTTP/3), which is a much smaller change.
 
 ## Container savings: parked (2026-10-22)
 
