@@ -64,6 +64,29 @@ mod minio_docker_tests {
         assert_eq!(retrieved, data);
     }
 
+    /// gc's prune grace period needs a real age. Inheriting the trait's
+    /// `Ok(None)` makes gc keep every candidate forever.
+    #[tokio::test]
+    #[ignore] // Requires MinIO
+    async fn test_minio_modified_at() {
+        let backend = create_test_backend().await;
+        let key = "test/mtime.txt";
+        let before = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+        backend.put(key, b"age").await.expect("put");
+        let mtime = backend
+            .modified_at(key)
+            .await
+            .expect("modified_at")
+            .expect("MinIO must report an mtime");
+        let after = std::time::SystemTime::now() + std::time::Duration::from_secs(120);
+        assert!(
+            mtime > before && mtime < after,
+            "mtime {mtime:?} not near now"
+        );
+        backend.delete(key).await.expect("delete");
+        assert!(backend.modified_at(key).await.expect("absent").is_none());
+    }
+
     /// Test EXISTS operation
     #[tokio::test]
     #[ignore] // Requires MinIO

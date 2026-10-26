@@ -422,7 +422,7 @@ graph LR
 ### Safety Mechanisms
 - gc aborts, deleting nothing, if a reachable chunk manifest is unreadable or vanished
 - gc keeps every base on the delta chain of every reachable chunk (cycle-guarded)
-- Grace period (`MEDIAGIT_GC_GRACE_SECS`, default 3600 s; local backends only)
+- Grace period (`MEDIAGIT_GC_GRACE_SECS`, default 3600 s; all backends; unknown age is kept)
 - Reflog preservation
 - Dry-run mode
 - Backup recommendations

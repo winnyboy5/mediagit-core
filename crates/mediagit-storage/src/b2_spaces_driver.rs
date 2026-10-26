@@ -1040,6 +1040,31 @@ impl StorageBackend for B2SpacesDriver {
         .await
     }
 
+    /// `LastModified` from `HeadObject`, for gc's prune grace period.
+    ///
+    /// Not retried: gc treats an error as "unknown age" and keeps the object.
+    async fn modified_at(&self, key: &str) -> anyhow::Result<Option<std::time::SystemTime>> {
+        Self::validate_key(key)?;
+        let resp = self
+            .client
+            .head_object()
+            .bucket(&self.config.bucket)
+            .key(crate::prefixed_key(&self.config.prefix, key))
+            .send()
+            .await;
+        match resp {
+            Ok(r) => Ok(r
+                .last_modified()
+                .and_then(|t| std::time::SystemTime::try_from(*t).ok())),
+            Err(e) if e.as_service_error().is_some_and(|s| s.is_not_found()) => Ok(None),
+            Err(e) => Err(anyhow!(
+                "head_object mtime {}: {}",
+                self.endpoint_label(),
+                e
+            )),
+        }
+    }
+
     /// Delete an object from S3
     ///
     /// This operation is idempotent: deleting a non-existent object succeeds.

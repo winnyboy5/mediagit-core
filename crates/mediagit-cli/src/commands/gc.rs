@@ -739,88 +739,94 @@ impl GarbageCollector {
             .filter(|(oid, _, _)| !reachable.contains(oid))
             .collect();
 
-        // VC-2: prune grace period.
-        //
-        // Rooting is inherently racy against a concurrent writer. A chunk
-        // uploaded by one client but not yet referenced by any ref is
-        // unreachable, and therefore collectible, in the window before its
-        // manifest commit lands. The victim cannot recover: push dedups
-        // unconditionally and never re-verifies, so the loss only surfaces
-        // later as a terminal 404 on clone. Refusing to delete objects written
-        // in the last few minutes is the standard defence, and it is now
-        // possible because `StorageBackend::modified_at` exists.
-        //
-        // Age is queried only for unreachable candidates, never for the whole
-        // corpus: this scan runs on every add and commit via auto-gc, and
-        // statting everything is what pegged the CPU before (see
-        // `list_all_objects`). Unreachable objects are normally a small
-        // fraction, so this adds one stat per candidate rather than per object.
+        let unreachable: Vec<(Oid, u64)> = self
+            .past_grace(candidates, |(_, _, key)| key, "object")
+            .await
+            .into_iter()
+            .map(|(oid, size, _)| (oid, size))
+            .collect();
+
+        info!("Found {} unreachable objects", unreachable.len());
+        Ok(unreachable)
+    }
+
+    /// VC-2: prune grace period. Keeps only the candidates whose age is
+    /// proven to be at least `grace_period()`; everything else is spared.
+    ///
+    /// Rooting is inherently racy against a concurrent writer. A push or an
+    /// `add` writes chunks, deltas and manifests before the ref that reaches
+    /// them, so in that window they are orphans and look collectible. The
+    /// victim cannot recover: push dedups unconditionally and never
+    /// re-verifies, so the loss only surfaces later as a terminal 404 on
+    /// clone. Every delete list goes through here, not only loose objects.
+    ///
+    /// Unknown age (`modified_at` returns `None` or fails) is NOT old: the
+    /// object is kept and counted in a warning. A future mtime (clock skew) is
+    /// kept too. `MEDIAGIT_GC_GRACE_SECS=0` skips the check entirely.
+    ///
+    /// Age is queried only for candidates, never for the whole corpus: this
+    /// scan runs on every add and commit via auto-gc, and statting everything
+    /// is what pegged the CPU before (see `list_all_objects`).
+    async fn past_grace<T>(
+        &self,
+        candidates: Vec<T>,
+        key: impl Fn(&T) -> &str,
+        what: &str,
+    ) -> Vec<T> {
         let grace = grace_period();
+        if grace.is_zero() {
+            return candidates;
+        }
         let now = std::time::SystemTime::now();
         let mut protected = 0usize;
         let mut unknown_age = 0usize;
-        let mut unreachable: Vec<(Oid, u64)> = Vec::with_capacity(candidates.len());
+        let mut old = Vec::with_capacity(candidates.len());
 
-        for (oid, size, key) in candidates {
-            match self.storage.modified_at(&key).await {
-                Ok(Some(mtime)) => {
-                    match now.duration_since(mtime) {
-                        // Inside the window: too young to prove garbage.
-                        Ok(age) if age < grace => {
-                            protected += 1;
-                            debug!(
-                                "gc: protecting {} (age {}s < grace {}s)",
-                                oid.to_hex(),
-                                age.as_secs(),
-                                grace.as_secs()
-                            );
-                        }
-                        // Older than the window: safe to collect.
-                        Ok(_) => unreachable.push((oid, size)),
-                        // mtime in the future (clock skew, or a backend with a
-                        // different clock). Unprovable age, so treat it as
-                        // young rather than assume it is old.
-                        Err(_) => {
-                            protected += 1;
-                            debug!("gc: protecting {} (mtime in the future)", oid.to_hex());
-                        }
+        for c in candidates {
+            match self.storage.modified_at(key(&c)).await {
+                Ok(Some(mtime)) => match now.duration_since(mtime) {
+                    Ok(age) if age >= grace => old.push(c),
+                    Ok(age) => {
+                        protected += 1;
+                        debug!(
+                            "gc: protecting {} (age {}s < grace {}s)",
+                            key(&c),
+                            age.as_secs(),
+                            grace.as_secs()
+                        );
                     }
-                }
-                // Unknown age. This is NOT "old" -- it means the backend cannot
-                // tell us. Today only LocalBackend implements `modified_at`, so
-                // cloud-backed repos land here and keep the pre-existing racy
-                // behaviour rather than silently having gc become a no-op.
-                // Counted and reported so the gap is visible rather than
-                // assumed closed.
-                Ok(None) => {
-                    unknown_age += 1;
-                    unreachable.push((oid, size));
-                }
+                    Err(_) => {
+                        protected += 1;
+                        debug!("gc: protecting {} (mtime in the future)", key(&c));
+                    }
+                },
+                Ok(None) => unknown_age += 1,
                 Err(e) => {
                     unknown_age += 1;
-                    debug!("gc: mtime lookup failed for {}: {}", oid.to_hex(), e);
-                    unreachable.push((oid, size));
+                    debug!("gc: mtime lookup failed for {}: {}", key(&c), e);
                 }
             }
         }
 
         if protected > 0 {
             info!(
-                "Protected {} recently-written object(s) from collection (grace {}s)",
+                "Protected {} recently-written {}(s) from collection (grace {}s)",
                 protected,
+                what,
                 grace.as_secs()
             );
         }
         if unknown_age > 0 {
             warn!(
-                "{} unreachable object(s) had no reportable age; the {}s prune grace                  period could NOT be applied to them. This backend does not implement                  StorageBackend::modified_at.",
+                "Kept {} unreachable {}(s) whose age could not be read: the {}s prune \
+                 grace period cannot prove them old. Set MEDIAGIT_GC_GRACE_SECS=0 to \
+                 collect them anyway (unsafe with concurrent writers).",
                 unknown_age,
+                what,
                 grace.as_secs()
             );
         }
-
-        info!("Found {} unreachable objects", unreachable.len());
-        Ok(unreachable)
+        old
     }
 
     /// Delete unreachable objects with safety checks
@@ -991,58 +997,80 @@ impl GarbageCollector {
     /// Find orphaned manifests and chunks using the reachability set.
     ///
     /// Algorithm:
-    /// 1. List all manifests → mark those whose blob OID is NOT reachable as orphan
-    /// 2. Read all REACHABLE manifests → collect referenced chunk IDs
-    /// 3. List all chunks → any chunk NOT referenced by a reachable manifest is orphan
+    /// 1. List all manifests → those whose blob OID is NOT reachable are orphan
+    /// 2. Orphans younger than the grace period are kept, and stay LIVE
+    /// 3. Read all live manifests → collect referenced chunk IDs (+ delta bases)
+    /// 4. List all chunks → any chunk NOT live and past grace is orphan
     ///
-    /// Returns (orphan_manifest_keys, orphan_chunk_keys_with_sizes)
+    /// Step 2 matters for dedup: a push writing a new manifest can reuse an
+    /// old orphan chunk instead of uploading it. Only the new manifest is
+    /// young, so the chunk is protected only by being live through it.
+    ///
+    /// Returns (orphan_manifest_keys, orphan_chunk_keys_with_sizes,
+    /// live_chunk_ids); the live set feeds `find_orphan_chunk_deltas`.
     async fn find_orphan_chunks_and_manifests(
         &self,
         reachable: &HashSet<Oid>,
-    ) -> Result<(Vec<String>, Vec<(String, u64)>)> {
+    ) -> Result<(Vec<String>, Vec<(String, u64)>, HashSet<Oid>)> {
         // Step 1: Classify manifests as reachable or orphan
         let all_manifests = self.list_all_manifests().await?;
-        let mut orphan_manifest_keys = Vec::new();
-        let mut reachable_manifest_oids = Vec::new();
+        let mut orphan_manifests = Vec::new();
+        let mut live_manifest_oids = Vec::new();
 
-        for (oid, key) in &all_manifests {
-            if reachable.contains(oid) {
-                reachable_manifest_oids.push(*oid);
+        for (oid, key) in all_manifests {
+            if reachable.contains(&oid) {
+                live_manifest_oids.push(oid);
             } else {
-                orphan_manifest_keys.push(key.clone());
+                orphan_manifests.push((oid, key));
             }
         }
 
         debug!(
             "Manifests: {} reachable, {} orphaned",
-            reachable_manifest_oids.len(),
-            orphan_manifest_keys.len()
+            live_manifest_oids.len(),
+            orphan_manifests.len()
         );
 
-        // Step 2: Collect chunk IDs reachable data needs (manifest chunks
-        // plus their chunk-delta bases).
-        let reachable_chunk_keys: HashSet<String> = self
-            .reachable_chunk_ids(&reachable_manifest_oids)
-            .await?
+        // Step 2: grace. Kept orphans are live for chunk accounting.
+        let orphan_count = orphan_manifests.len();
+        let old_orphans = self
+            .past_grace(orphan_manifests.clone(), |(_, key)| key, "manifest")
+            .await;
+        if old_orphans.len() < orphan_count {
+            let old: HashSet<Oid> = old_orphans.iter().map(|(oid, _)| *oid).collect();
+            live_manifest_oids.extend(
+                orphan_manifests
+                    .iter()
+                    .map(|(oid, _)| *oid)
+                    .filter(|oid| !old.contains(oid)),
+            );
+        }
+        let orphan_manifest_keys: Vec<String> =
+            old_orphans.into_iter().map(|(_, key)| key).collect();
+
+        // Step 3: Collect chunk IDs live data needs (manifest chunks plus
+        // their chunk-delta bases).
+        let live_chunk_ids = self.reachable_chunk_ids(&live_manifest_oids).await?;
+        let live_chunk_keys: HashSet<String> = live_chunk_ids
             .iter()
             .map(|id| format!("chunks/{}", id.to_hex()))
             .collect();
 
-        debug!(
-            "Found {} reachable chunk references",
-            reachable_chunk_keys.len()
-        );
+        debug!("Found {} live chunk references", live_chunk_keys.len());
 
-        // Step 3: Find orphan chunks
+        // Step 4: Find orphan chunks
         let all_chunks = self.list_all_chunks().await?;
         let orphan_chunks: Vec<(String, u64)> = all_chunks
             .into_iter()
-            .filter(|(key, _)| !reachable_chunk_keys.contains(key))
+            .filter(|(key, _)| !live_chunk_keys.contains(key))
             .collect();
+        let orphan_chunks = self
+            .past_grace(orphan_chunks, |(key, _)| key, "chunk")
+            .await;
 
         debug!("Found {} orphan chunks", orphan_chunks.len());
 
-        Ok((orphan_manifest_keys, orphan_chunks))
+        Ok((orphan_manifest_keys, orphan_chunks, live_chunk_ids))
     }
 
     /// List all blob-level delta keys in storage
@@ -1123,6 +1151,9 @@ impl GarbageCollector {
             .filter(|(oid, _, _, _)| !reachable.contains(oid))
             .map(|(_, delta_key, meta_key, size)| (delta_key, meta_key, size))
             .collect();
+        let orphans = self
+            .past_grace(orphans, |(key, _, _)| key, "blob delta")
+            .await;
 
         info!("Found {} orphan blob-level deltas", orphans.len());
         Ok(orphans)
@@ -1130,26 +1161,16 @@ impl GarbageCollector {
 
     /// Find orphaned chunk-level deltas.
     ///
-    /// A chunk delta is orphaned if its chunk ID is NOT referenced by any
-    /// reachable manifest. We collect reachable chunk IDs from reachable
-    /// manifests and check against all chunk-deltas.
+    /// A chunk delta is orphaned if its chunk ID is not live: not referenced
+    /// by a reachable or grace-protected manifest, nor a delta base of one.
+    /// `live_chunk_ids` comes from `find_orphan_chunks_and_manifests`, so both
+    /// passes judge chunks against the same set.
     async fn find_orphan_chunk_deltas(
         &self,
-        reachable: &HashSet<Oid>,
+        live_chunk_ids: &HashSet<Oid>,
     ) -> Result<Vec<(String, String, u64)>> {
-        let reachable_manifest_oids: Vec<Oid> = self
-            .list_all_manifests()
-            .await?
-            .into_iter()
-            .map(|(oid, _)| oid)
-            .filter(|oid| reachable.contains(oid))
-            .collect();
-        let reachable_chunk_ids: HashSet<String> = self
-            .reachable_chunk_ids(&reachable_manifest_oids)
-            .await?
-            .iter()
-            .map(|id| id.to_hex())
-            .collect();
+        let reachable_chunk_ids: HashSet<String> =
+            live_chunk_ids.iter().map(|id| id.to_hex()).collect();
 
         // Find chunk-deltas whose chunk ID is NOT in reachable set
         let all_chunk_deltas = self.list_all_chunk_delta_keys().await?;
@@ -1164,6 +1185,9 @@ impl GarbageCollector {
                 }
             })
             .collect();
+        let orphans = self
+            .past_grace(orphans, |(key, _, _)| key, "chunk delta")
+            .await;
 
         info!("Found {} orphan chunk-level deltas", orphans.len());
         Ok(orphans)
@@ -1446,13 +1470,14 @@ pub async fn run_gc(opts: &GcOptions) -> Result<()> {
     // Pre-scan orphan chunks/manifests/deltas for both auto-gating and the
     // normal flow below. We do this once so auto mode can decide whether
     // to proceed without paying the cost twice.
-    let (orphan_manifests, orphan_chunks) = gc.find_orphan_chunks_and_manifests(&reachable).await?;
+    let (orphan_manifests, orphan_chunks, live_chunk_ids) =
+        gc.find_orphan_chunks_and_manifests(&reachable).await?;
     let chunk_total_size: u64 = orphan_chunks.iter().map(|(_, size)| size).sum();
 
     let orphan_blob_deltas = gc.find_orphan_blob_deltas(&reachable).await?;
     let blob_delta_total_size: u64 = orphan_blob_deltas.iter().map(|(_, _, s)| s).sum();
 
-    let orphan_chunk_deltas = gc.find_orphan_chunk_deltas(&reachable).await?;
+    let orphan_chunk_deltas = gc.find_orphan_chunk_deltas(&live_chunk_ids).await?;
     let chunk_delta_total_size: u64 = orphan_chunk_deltas.iter().map(|(_, _, s)| s).sum();
 
     // Auto-mode threshold check: if reclaimable work is below threshold, exit
@@ -1788,5 +1813,104 @@ mod tests {
         let missing = Oid::hash(b"manifest that vanished");
         let err = gc.reachable_chunk_ids(&[missing]).await.unwrap_err();
         assert!(err.to_string().contains("aborting gc"), "{err}");
+    }
+
+    /// A backend that cannot report age (every cloud backend before 0.6.1)
+    /// must not have its unreachable objects deleted: unknown age is not old.
+    #[tokio::test]
+    async fn unknown_age_object_is_kept() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mock = mediagit_storage::mock::MockBackend::new();
+        let oid = Oid::hash(b"object a push just uploaded");
+        mock.put(&oid.to_hex(), b"x").await.unwrap();
+        let gc = GarbageCollector::new(Arc::new(mock), tmp.path());
+        let doomed = gc.find_unreachable_objects(&HashSet::new()).await.unwrap();
+        assert!(
+            doomed.is_empty(),
+            "deleted objects of unknown age: {doomed:?}"
+        );
+    }
+
+    /// Push the mtime of every stored file whose name contains `needle` two
+    /// hours into the past, so it is older than the default grace period.
+    fn age_files(dir: &Path, needle: &str) {
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                age_files(&p, needle);
+            } else if p.to_string_lossy().contains(needle) {
+                let f = std::fs::File::options().write(true).open(&p).unwrap();
+                f.set_modified(old).unwrap();
+            }
+        }
+    }
+
+    /// A push uploads chunks and deltas before the manifest and ref that
+    /// reach them. Freshly written orphans must survive the grace period on
+    /// every path, not only loose objects. And a fresh manifest that dedups
+    /// against an OLD orphan chunk must keep that chunk and its chunk delta
+    /// alive, while an old chunk nothing names is still collected.
+    #[tokio::test]
+    async fn fresh_orphans_are_kept_and_keep_what_they_reference() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let objects = tmp.path().join("objects");
+        let local = mediagit_storage::LocalBackend::new(&objects).await.unwrap();
+        let fresh = Oid::hash(b"fresh").to_hex();
+        let reused = Oid::hash(b"old chunk a new manifest reuses");
+        let garbage = Oid::hash(b"old chunk nothing names").to_hex();
+        let manifest = mediagit_versioning::ChunkManifest {
+            chunks: vec![mediagit_versioning::ChunkRef {
+                id: reused,
+                offset: 0,
+                size: 1,
+                chunk_type: mediagit_versioning::ChunkType::Generic,
+                codec_hint: Default::default(),
+            }],
+            total_size: 1,
+            filename: None,
+        };
+        local
+            .put(&format!("manifests/{fresh}"), &manifest.to_bytes().unwrap())
+            .await
+            .unwrap();
+        let reused = reused.to_hex();
+        for key in [
+            format!("chunks/{fresh}"),
+            format!("chunks/{reused}"),
+            format!("chunks/{garbage}"),
+            format!("deltas/{fresh}"),
+            format!("deltas/{fresh}.meta"),
+            format!("chunk-deltas/{fresh}"),
+            format!("chunk-deltas/{fresh}.meta"),
+            format!("chunk-deltas/{reused}"),
+        ] {
+            local.put(&key, b"x").await.unwrap();
+        }
+        age_files(&objects, &reused);
+        age_files(&objects, &garbage);
+
+        let gc = GarbageCollector::new(Arc::new(local), tmp.path());
+        let none = HashSet::new();
+        let (manifests, chunks, live) = gc.find_orphan_chunks_and_manifests(&none).await.unwrap();
+        assert!(
+            manifests.is_empty(),
+            "fresh manifests deleted: {manifests:?}"
+        );
+        assert_eq!(
+            chunks,
+            vec![(format!("chunks/{garbage}"), 1)],
+            "only the old unnamed chunk may be collected"
+        );
+        let blob_deltas = gc.find_orphan_blob_deltas(&none).await.unwrap();
+        assert!(
+            blob_deltas.is_empty(),
+            "fresh blob deltas deleted: {blob_deltas:?}"
+        );
+        let chunk_deltas = gc.find_orphan_chunk_deltas(&live).await.unwrap();
+        assert!(
+            chunk_deltas.is_empty(),
+            "live or fresh chunk deltas deleted: {chunk_deltas:?}"
+        );
     }
 }

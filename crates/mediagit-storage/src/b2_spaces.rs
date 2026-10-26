@@ -608,6 +608,15 @@ impl StorageBackend for B2SpacesBackend {
         })
     }
 
+    /// Forwarded, not defaulted: inheriting `Ok(None)` would leave gc's prune
+    /// grace period unable to protect anything on B2 or Spaces.
+    async fn modified_at(&self, key: &str) -> anyhow::Result<Option<std::time::SystemTime>> {
+        self.inner
+            .modified_at(key)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to read mtime in {}: {}", self.provider.name(), e))
+    }
+
     async fn presign_put(
         &self,
         key: &str,

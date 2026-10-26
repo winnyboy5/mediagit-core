@@ -38,6 +38,26 @@ fn b64_crc32c(data: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(crc32c::crc32c(data).to_be_bytes())
 }
 
+/// gc's prune grace period reads object age through `modified_at`. A backend
+/// that inherits the trait's `Ok(None)` makes gc keep every candidate forever.
+async fn assert_mtime_near_now(be: &dyn StorageBackend, key: &str) {
+    let slack = std::time::Duration::from_secs(300);
+    let before = std::time::SystemTime::now() - slack;
+    be.put(key, b"age").await.expect("put");
+    let mtime = be
+        .modified_at(key)
+        .await
+        .expect("modified_at")
+        .expect("backend must report an mtime");
+    let after = std::time::SystemTime::now() + slack;
+    be.delete(key).await.expect("delete");
+    assert!(
+        mtime > before && mtime < after,
+        "mtime {mtime:?} not near now"
+    );
+    assert!(be.modified_at(key).await.expect("absent").is_none());
+}
+
 // ---------------------------------------------------------------- GCS -----
 
 #[cfg(feature = "gcs")]
@@ -299,6 +319,13 @@ mod gcs {
              production"
         );
     }
+    #[tokio::test]
+    #[ignore = "needs real GCS: set GCS_BUCKET_NAME + GCS_PROJECT_ID + GOOGLE_APPLICATION_CREDENTIALS"]
+    async fn gcs_reports_object_age() {
+        ensure_tls();
+        let be = backend().await.expect("build GCS backend");
+        assert_mtime_near_now(&be, &format!("gcs-mtime-{}", std::process::id())).await;
+    }
 }
 
 // -------------------------------------------------------------- Azure -----
@@ -399,5 +426,13 @@ mod azure {
             "Azure claimed an attestation it has no way to substantiate; the \
              server would skip the pack read-back on the strength of nothing"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs real Azure: set AZURE_STORAGE_ACCOUNT + AZURE_STORAGE_KEY + MG_QA_AZURE_CONTAINER"]
+    async fn azure_reports_object_age() {
+        ensure_tls();
+        let be = backend().await.expect("build Azure backend");
+        assert_mtime_near_now(&be, &format!("azure-mtime-{}", std::process::id())).await;
     }
 }

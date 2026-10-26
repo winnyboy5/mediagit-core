@@ -334,3 +334,31 @@ async fn an_unattested_complete_still_succeeds() {
         "Complete succeeded but the object is not there at full size"
     );
 }
+
+/// gc's prune grace period reads object age through `modified_at`; on AWS
+/// that is `LastModified` from `HeadObject`.
+#[tokio::test]
+#[ignore = "needs real AWS S3: set MG_S3_ATTEST_BUCKET"]
+async fn s3_reports_object_age() {
+    let Some(bkt) = bucket() else {
+        panic!("MG_S3_ATTEST_BUCKET not set");
+    };
+    ensure_tls();
+    let be = backend(&bkt).await;
+    let key = format!("mtime-{}", std::process::id());
+    let slack = std::time::Duration::from_secs(300);
+    let before = std::time::SystemTime::now() - slack;
+    be.put(&key, b"age").await.expect("put");
+    let mtime = be
+        .modified_at(&key)
+        .await
+        .expect("modified_at")
+        .expect("S3 must report an mtime");
+    let after = std::time::SystemTime::now() + slack;
+    be.delete(&key).await.expect("delete");
+    assert!(
+        mtime > before && mtime < after,
+        "mtime {mtime:?} not near now"
+    );
+    assert!(be.modified_at(&key).await.expect("absent").is_none());
+}

@@ -1293,6 +1293,32 @@ impl StorageBackend for MinIOBackend {
         }
     }
 
+    /// `LastModified` from `HeadObject`, for gc's prune grace period.
+    ///
+    /// Not retried: gc treats an error as "unknown age" and keeps the object,
+    /// so a blip spares garbage for one run rather than losing data.
+    async fn modified_at(&self, key: &str) -> anyhow::Result<Option<std::time::SystemTime>> {
+        Self::validate_key(key)?;
+        let resp = self
+            .client
+            .head_object()
+            .bucket(&self.config.bucket)
+            .key(self.full_key(key))
+            .send()
+            .await;
+        match resp {
+            Ok(r) => Ok(r
+                .last_modified()
+                .and_then(|t| std::time::SystemTime::try_from(*t).ok())),
+            Err(e) if e.as_service_error().is_some_and(|s| s.is_not_found()) => Ok(None),
+            Err(e) => Err(anyhow!(
+                "head_object mtime {}: {}",
+                self.endpoint_label(),
+                e
+            )),
+        }
+    }
+
     /// Delete an object from MinIO
     async fn delete(&self, key: &str) -> anyhow::Result<()> {
         Self::validate_key(key)?;

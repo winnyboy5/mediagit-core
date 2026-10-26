@@ -271,9 +271,9 @@ Over time, unreachable objects accumulate (orphaned by branch deletion, rebases,
 - gc aborts, deleting nothing, if a reachable chunk manifest is unreadable or
   vanished, and keeps every base on the delta chain of every reachable chunk.
 - Prune grace period: `gc` skips anything written within
-  `MEDIAGIT_GC_GRACE_SECS` (default 3600). Only the local backend reports
-  object age; on cloud backends a concurrent `add`/`push`/rebase can still
-  race with gc.
+  `MEDIAGIT_GC_GRACE_SECS` (default 3600) — objects, chunks, manifests and
+  deltas, on every backend — and a recent manifest keeps its chunks alive.
+  An object whose age cannot be read is kept.
 
 ## Repository Structure
 

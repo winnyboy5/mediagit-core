@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **gc could delete data a concurrent push or `add` was still writing.** The
+  prune grace period (`MEDIAGIT_GC_GRACE_SECS`, default 3600 s) covered only
+  loose objects, and only on the local backend. Orphan chunks, chunk
+  manifests and blob/chunk deltas were deleted the moment they looked
+  unreachable on every backend, and on S3, MinIO, B2/Spaces, GCS and Azure
+  objects of unknown age were deleted too. A push writes chunks before the
+  commit that reaches them, so gc running at that moment could leave the
+  commit pointing at missing chunks. Now every delete list honours the grace
+  period, a recent manifest keeps alive every chunk it names (a push may
+  reuse an old unreferenced chunk instead of uploading it), unknown age keeps
+  the object, and every cloud backend reports object age.
+
 ## [v0.6.0-rc.1] - 2026-10-23
 
 GA clearance at `ebe61e4`, SCALE tier, all backends (local, MinIO, AWS S3,
