@@ -36,6 +36,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of every live file, and of every delta written within the grace period (an
   `add` still in progress), and aborts without deleting anything if a delta's
   metadata cannot be read.
+- **A temporary read error during gc could delete files.** While walking
+  history, gc treated any commit or tree it failed to read as absent and went
+  on, so everything under it looked unreachable. On a cloud backend one
+  network blip during gc was enough. gc now tells a missing object (skipped,
+  as before) from one that is present but unreadable, and aborts without
+  deleting anything in the second case.
+- **Two `gc --repack` runs in the same second could lose objects.** Packs of
+  loose objects were named by a unix-second timestamp, so the second repack
+  overwrote the first pack after the first had already deleted its loose
+  copies. Packs are now named by their content hash.
 
 ## [v0.6.0-rc.1] - 2026-10-23
 

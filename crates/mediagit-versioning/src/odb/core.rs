@@ -916,8 +916,11 @@ impl ObjectDatabase {
             stats.pack_size += pack_data.len() as u64;
             stats.bytes_saved += total_original_size.saturating_sub(pack_data.len() as u64);
 
-            // Generate pack file name with timestamp
-            let pack_id = format!("pack-{}", chrono::Utc::now().timestamp());
+            // Named by content hash, not by time: a unix-second timestamp let
+            // two repacks in the same second write the same key, and the loose
+            // copies of the overwritten pack's objects are deleted below.
+            // Identical bytes reuse the key harmlessly.
+            let pack_id = format!("pack-{}", Oid::hash(&pack_data).to_hex());
             let pack_key = format!("packs/{}.pack", pack_id);
 
             // Store pack file

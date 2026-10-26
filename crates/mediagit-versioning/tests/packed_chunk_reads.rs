@@ -405,3 +405,37 @@ async fn duplicate_oid_in_two_packs_falls_back_to_intact_copy() {
         "expected a hash error, got: {err}"
     );
 }
+
+/// Two repacks in the same second must not overwrite each other's pack.
+/// Each repack deletes the loose copies it packed, so a pack lost to a name
+/// collision takes its objects with it. Packs were named by a unix-second
+/// timestamp; they are now named by their content hash.
+#[tokio::test]
+async fn back_to_back_repacks_keep_both_packs() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let fx = Fixture::new();
+    let odb = fx.odb();
+    let first = odb
+        .write(ObjectType::Blob, b"object packed by the first repack")
+        .await
+        .unwrap();
+    odb.repack(0, true).await.expect("first repack");
+    let second = odb
+        .write(ObjectType::Blob, b"object packed by the second repack")
+        .await
+        .unwrap();
+    odb.repack(0, true).await.expect("second repack");
+
+    let fresh = fx.odb();
+    assert_eq!(
+        fresh
+            .read(&first)
+            .await
+            .expect("first object lost after second repack"),
+        b"object packed by the first repack"
+    );
+    assert_eq!(
+        fresh.read(&second).await.expect("second object lost"),
+        b"object packed by the second repack"
+    );
+}

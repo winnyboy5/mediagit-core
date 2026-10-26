@@ -82,6 +82,7 @@ assert_cmd = "2.1"
 predicates = "3.1"
 tempfile.workspace = true
 axum.workspace = true
+async-trait.workspace = true
 ssh-key = { version = "0.6.7", features = ["ed25519"] }
 
 [lints.rust]
