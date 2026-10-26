@@ -806,6 +806,17 @@ impl StorageBackend for AzureBackend {
         }
     }
 
+    /// Blob `Last-Modified`, for gc's prune grace period.
+    async fn modified_at(&self, key: &str) -> anyhow::Result<Option<std::time::SystemTime>> {
+        Self::validate_key(key)?;
+        let full = self.full_key(key);
+        match self.op.stat(&full).await {
+            Ok(meta) => Ok(meta.last_modified().map(std::time::SystemTime::from)),
+            Err(e) if e.kind() == opendal::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(map_error(&e, &format!("mtime {key}")).into()),
+        }
+    }
+
     async fn delete(&self, key: &str) -> anyhow::Result<()> {
         Self::validate_key(key)?;
         let full = self.full_key(key);

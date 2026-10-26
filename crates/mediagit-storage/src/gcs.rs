@@ -997,6 +997,43 @@ impl StorageBackend for GcsBackend {
         }
     }
 
+    /// Object `create_time`, for gc's prune grace period.
+    ///
+    /// GCS objects are immutable: a rewrite is a new generation with a new
+    /// `create_time`, so this is the time the current bytes were written.
+    /// `update_time` also moves on metadata-only edits.
+    async fn modified_at(&self, key: &str) -> anyhow::Result<Option<std::time::SystemTime>> {
+        if key.is_empty() {
+            return Err(anyhow::anyhow!("key cannot be empty"));
+        }
+
+        let key = crate::prefixed_key(&self.config.prefix, key);
+        let key = key.as_str();
+        let bucket_path = self.bucket_path();
+
+        match with_io_deadline(
+            gcs_control_deadline(),
+            "get_object (mtime)",
+            self.control
+                .get_object()
+                .set_bucket(&bucket_path)
+                .set_object(key)
+                .send(),
+        )
+        .await?
+        {
+            Ok(obj) => Ok(obj
+                .create_time
+                .and_then(|t| std::time::SystemTime::try_from(t).ok())),
+            Err(e) if Self::is_not_found(&e) => Ok(None),
+            Err(e) => Err(anyhow::anyhow!(
+                "GCS get_object error for key '{}': {}",
+                key,
+                e
+            )),
+        }
+    }
+
     /// Delete an object from GCS (idempotent: 404 is treated as success).
     async fn delete(&self, key: &str) -> anyhow::Result<()> {
         if key.is_empty() {

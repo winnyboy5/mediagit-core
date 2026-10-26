@@ -33,15 +33,19 @@ unreachable and would be collected. The loss is unrecoverable for the other
 writer: push deduplicates without re-verifying, so nothing notices until a later
 clone hits a 404 that cannot be satisfied.
 
-So gc refuses to delete an unreachable object written within the last
-`MEDIAGIT_GC_GRACE_SECS` seconds (default `3600`). Set it to `0` to restore the
-previous behaviour — a deliberate data-loss risk on any repository with
-concurrent writers.
+So gc refuses to delete anything unreachable that was written within the last
+`MEDIAGIT_GC_GRACE_SECS` seconds (default `3600`): loose objects, chunks, chunk
+manifests, and blob and chunk deltas. A recent manifest also keeps alive every
+chunk it names, so a push that reuses an old unreferenced chunk instead of
+re-uploading it is safe. Set the variable to `0` to restore the previous
+behaviour — a deliberate data-loss risk on any repository with concurrent
+writers.
 
-This needs an object's age, which the storage backend has to report. Only the
-local backend does so today, so a **cloud-backed repository cannot apply the
-grace period**; gc counts those objects and warns, naming the reason, rather
-than pretending they were protected.
+Every backend reports object age: the local filesystem mtime, `LastModified`
+on S3, MinIO, Backblaze B2 and DigitalOcean Spaces, `create_time` on GCS, and
+`Last-Modified` on Azure. If the age cannot be read (for example a failed
+metadata request), gc **keeps** the object and warns; it is collected on a
+later run.
 
 ## Options
 
