@@ -750,8 +750,8 @@ pub trait StorageBackend: Send + Sync + Debug {
     ///
     /// Defaults to `Ok(None)` so a backend opts in rather than being forced to
     /// invent a timestamp. Callers must decide explicitly what unknown means
-    /// for them; see `gc`, which treats it as "cannot protect this object" and
-    /// says so in its output rather than silently choosing either way.
+    /// for them; see `gc`, which treats it as "cannot prove this object old",
+    /// keeps it, and says so in its output.
     async fn modified_at(&self, _key: &str) -> anyhow::Result<Option<std::time::SystemTime>> {
         Ok(None)
     }
