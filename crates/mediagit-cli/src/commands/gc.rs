@@ -752,14 +752,17 @@ impl GarbageCollector {
         let old: Vec<(Oid, u64, String)> = self
             .past_grace(candidates.clone(), |(_, _, key)| key, "object")
             .await;
+        let mut kept: Vec<Oid> = Vec::new();
         if old.len() < candidates.len() {
             let old_oids: HashSet<Oid> = old.iter().map(|(oid, _, _)| *oid).collect();
             for (oid, size, _) in &candidates {
                 if !old_oids.contains(oid) {
+                    kept.push(*oid);
                     self.walk_grace_kept(oid, *size, reachable).await?;
                 }
             }
         }
+        self.add_blob_delta_bases(reachable, &kept).await?;
 
         let unreachable: Vec<(Oid, u64)> = old
             .into_iter()
@@ -769,6 +772,81 @@ impl GarbageCollector {
 
         info!("Found {} unreachable objects", unreachable.len());
         Ok(unreachable)
+    }
+
+    /// Add the base of every live blob-level delta to `reachable`, following
+    /// each chain to its end (#41). A blob stored as `deltas/<oid>` is
+    /// unreadable without its base, and the base is named only by
+    /// `deltas/<oid>.meta` (`base:<oid>[:depth:<n>]`), so once the version
+    /// that introduced it is unreachable no ref keeps it alive. Same rule as
+    /// `reachable_chunk_ids`: any unreadable `.meta` aborts gc rather than
+    /// risk deleting a base it could not account for.
+    ///
+    /// Chains start at every reachable delta, at `kept` (loose objects the
+    /// grace period keeps), and at unreachable deltas the grace period keeps:
+    /// a concurrent `add` writes its delta before any ref names it, and the
+    /// delta is useless without its base. `kept` themselves are not added to
+    /// `reachable`, which also drives bitmap pruning; recent deltas are, so
+    /// the blob-delta pass does not age-check them a second time.
+    async fn add_blob_delta_bases(&self, reachable: &mut HashSet<Oid>, kept: &[Oid]) -> Result<()> {
+        // One listing tells which objects are deltas; only those have a
+        // `.meta` to follow. Keyed on `.meta` so a delta whose sidecar is not
+        // written yet is skipped, not misread.
+        let delta_ids: HashSet<Oid> = self
+            .storage
+            .list_objects("deltas/")
+            .await?
+            .iter()
+            .filter_map(|k| k.strip_prefix("deltas/")?.strip_suffix(".meta"))
+            .filter_map(|hex| Oid::from_hex(hex).ok())
+            .collect();
+        if delta_ids.is_empty() {
+            return Ok(());
+        }
+        let unreachable_deltas: Vec<(Oid, String)> = delta_ids
+            .iter()
+            .filter(|oid| !reachable.contains(*oid))
+            .map(|oid| (*oid, format!("deltas/{}", oid.to_hex())))
+            .collect();
+        let old_deltas: HashSet<Oid> = self
+            .past_grace(unreachable_deltas.clone(), |(_, key)| key, "blob delta")
+            .await
+            .into_iter()
+            .map(|(oid, _)| oid)
+            .collect();
+        for (oid, _) in &unreachable_deltas {
+            if !old_deltas.contains(oid) {
+                reachable.insert(*oid);
+            }
+        }
+        // `reachable.insert` doubles as the cycle guard.
+        let mut stack: Vec<Oid> = reachable.intersection(&delta_ids).copied().collect();
+        stack.extend(kept.iter().filter(|oid| delta_ids.contains(oid)));
+        while let Some(oid) = stack.pop() {
+            let meta = self
+                .storage
+                .get(&format!("deltas/{}.meta", oid.to_hex()))
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "cannot read delta metadata of live object {oid}: {e}; aborting gc without deleting anything"
+                    )
+                })?;
+            let base = std::str::from_utf8(&meta)
+                .ok()
+                .and_then(|s| s.trim().strip_prefix("base:"))
+                .map(|rest| rest.split(":depth:").next().unwrap_or(rest).trim())
+                .and_then(|hex| Oid::from_hex(hex).ok())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "unparseable delta metadata for live object {oid}; aborting gc without deleting anything"
+                    )
+                })?;
+            if reachable.insert(base) && delta_ids.contains(&base) {
+                stack.push(base);
+            }
+        }
+        Ok(())
     }
 
     /// Add everything a grace-kept object names to `reachable` (#37).
@@ -1901,6 +1979,91 @@ mod tests {
         assert!(
             doomed.is_empty(),
             "deleted objects of unknown age: {doomed:?}"
+        );
+    }
+
+    /// #41: a reachable blob stored as a blob-level delta (`deltas/<oid>` +
+    /// `.meta` naming its base) needs every base on its chain. When those
+    /// bases are unreachable and old (earlier versions replaced before commit,
+    /// or history rewritten), gc must still keep them, and keep the deltas
+    /// along the chain. An old blob nothing needs is still collected.
+    #[tokio::test]
+    async fn blob_delta_base_of_reachable_blob_is_kept() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let objects = tmp.path().join("objects");
+        let local = mediagit_storage::LocalBackend::new(&objects).await.unwrap();
+        let gc = GarbageCollector::new(Arc::new(local), tmp.path());
+
+        let v1: Vec<u8> = (0..200_000u32)
+            .flat_map(|i| format!("line {i}\n").into_bytes())
+            .collect();
+        let mut v2 = v1.clone();
+        v2[1000..1010].copy_from_slice(b"XXXXXXXXXX");
+        let mut v3 = v2.clone();
+        v3[5000..5010].copy_from_slice(b"YYYYYYYYYY");
+        let base = gc.odb.write(ObjectType::Blob, &v1).await.unwrap();
+        let mid = gc
+            .odb
+            .write_delta_against_base(ObjectType::Blob, &v2, "a.txt", base)
+            .await
+            .unwrap()
+            .expect("v2 must be stored as a delta against v1 for this test to mean anything");
+        let tip = gc
+            .odb
+            .write_delta_against_base(ObjectType::Blob, &v3, "a.txt", mid)
+            .await
+            .unwrap()
+            .expect("v3 must be stored as a delta against v2 for this test to mean anything");
+        for oid in [mid, tip] {
+            assert!(
+                gc.storage
+                    .exists(&format!("deltas/{}.meta", oid.to_hex()))
+                    .await
+                    .unwrap(),
+                "no delta written for {oid}; the test would prove nothing"
+            );
+        }
+        // A concurrent `add`: a fresh delta no ref names yet, on an old base.
+        let mut other = v1.clone();
+        other[0..4].copy_from_slice(b"LINE");
+        let other_base = gc.odb.write(ObjectType::Blob, &other).await.unwrap();
+        let mut in_flight = other.clone();
+        in_flight[9000..9010].copy_from_slice(b"ZZZZZZZZZZ");
+        gc.odb
+            .write_delta_against_base(ObjectType::Blob, &in_flight, "b.txt", other_base)
+            .await
+            .unwrap()
+            .expect("in-flight version must be stored as a delta");
+        let garbage = gc
+            .odb
+            .write(ObjectType::Blob, b"old blob nothing needs")
+            .await
+            .unwrap();
+        for oid in [base, mid, other_base, garbage] {
+            age_files(&objects, &oid.to_hex());
+        }
+
+        let mut reachable: HashSet<Oid> = [tip].into_iter().collect();
+        let doomed = gc.find_unreachable_objects(&mut reachable).await.unwrap();
+        assert_eq!(
+            doomed.iter().map(|(oid, _)| *oid).collect::<Vec<_>>(),
+            vec![garbage],
+            "only the old blob nothing needs may be collected (chain: {tip} -> {mid} -> {base})"
+        );
+        let doomed_deltas = gc.find_orphan_blob_deltas(&reachable).await.unwrap();
+        assert!(
+            doomed_deltas.is_empty(),
+            "deltas on a live chain would be deleted: {doomed_deltas:?}"
+        );
+
+        for (oid, _) in &doomed {
+            gc.storage.delete(&oid.to_hex()).await.unwrap();
+        }
+        let fresh = GarbageCollector::new(gc.storage.clone(), tmp.path());
+        let intact = fresh.odb.read(&tip).await.ok().as_deref() == Some(v3.as_slice());
+        assert!(
+            intact,
+            "reachable blob unreadable after gc deleted {doomed:?}"
         );
     }
 

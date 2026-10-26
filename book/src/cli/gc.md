@@ -38,7 +38,8 @@ So gc refuses to delete anything unreachable that was written within the last
 manifests, and blob and chunk deltas. A recent manifest also keeps alive every
 chunk it names, so a push that reuses an old unreferenced chunk instead of
 re-uploading it is safe. In the same way, a recent commit or tree keeps
-alive every object it names, even an old one. Set the variable to `0` to restore the previous
+alive every object it names, even an old one, and a file stored as a delta
+keeps every earlier version its delta chain is built on. Set the variable to `0` to restore the previous
 behaviour — a deliberate data-loss risk on any repository with concurrent
 writers.
 

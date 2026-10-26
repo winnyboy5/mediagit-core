@@ -27,6 +27,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   commit could not be checked out. Objects kept by the grace period now act as
   roots: everything they name is kept, including chunked files' manifests and
   chunks.
+- **gc could delete the base of a file stored as a delta.** `add` stores a new
+  version of a file as a delta against an earlier version, and that earlier
+  version is named only by the delta's metadata. Once the earlier version was
+  no longer reachable (it was replaced before commit, or history was
+  rewritten) and older than the grace period, gc deleted it, and the newer
+  version could no longer be read. gc now keeps every base on the delta chain
+  of every live file, and of every delta written within the grace period (an
+  `add` still in progress), and aborts without deleting anything if a delta's
+  metadata cannot be read.
 
 ## [v0.6.0-rc.1] - 2026-10-23
 
