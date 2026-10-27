@@ -80,15 +80,15 @@ test.describe('Sync: transfers', () => {
     await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeEnabled()
   })
 
-  test('get latest (pull) shows progress but offers no Cancel anywhere (issue 93)', async ({ page }) => {
+  test('get latest (pull) shows progress and can be cancelled (issues 93, 95)', async ({ page }) => {
     await boot(page, {}, { repo_pull: [{ progress: { id: 1, msg: 'Downloading media', pos: 10, len: 100, unit: 'bytes', done: false } }, { hold: true }, { resolve: { remote: 'origin', result: 'up_to_date', objects_received: 0, bytes_downloaded: 0 } }] })
     await page.getByRole('button', { name: 'Get latest', exact: true }).click()
     await expect(run(page)).toContainText('Downloading media')
-    await expect(run(page).getByRole('button', { name: 'Cancel' })).toHaveCount(0)
-    await bar(page).getByRole('button', { name: 'Activity' }).click()
-    await expect(page.getByTestId('activity-drawer').getByRole('button', { name: /Cancel/ })).toHaveCount(0)
-    await expect(bar(page).locator('button', { hasText: 'Cancel' })).toHaveCount(0)
-    await ipcRelease(page)
+    await run(page).getByRole('button', { name: 'Cancel' }).click()
+    await expect(run(page)).toHaveCount(0)
+    await expect(page.getByRole('alert')).toHaveCount(0) // cancelling is not an error
+    expect(await ipcCalls(page, 'cancel_op')).toHaveLength(1)
+    await expect(page.getByRole('button', { name: 'Get latest', exact: true })).toBeEnabled()
   })
 
   test('send to completion toasts a summary and stamps last synced', async ({ page }) => {

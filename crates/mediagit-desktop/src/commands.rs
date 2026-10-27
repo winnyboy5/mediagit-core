@@ -644,9 +644,8 @@ pub async fn repo_fetch(
     .await
 }
 
-/// Get the latest work from a remote and apply it (`pull`). Not cancellable: a killed
-/// pull leaves remote-tracking refs pointing at missing commits (issue 93), so it is
-/// never registered and `cancel_op` answers false for it.
+/// Get the latest work from a remote and apply it (`pull`); cancellable. A killed pull
+/// is safe to retry since issues 93 and 95 (kill-safety gate G3).
 #[tauri::command]
 pub async fn repo_pull(
     engine: tauri::State<'_, Engine>,
@@ -666,7 +665,7 @@ pub async fn repo_pull(
         &repo,
         &argv,
         &op_id,
-        false,
+        true,
         &on_progress,
     )
     .await
