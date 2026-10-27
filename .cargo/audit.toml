@@ -67,8 +67,19 @@
 #   backends (Credential Manager / Keychain) and never loads zbus at runtime.
 #   Recheck when keyring 5.x or zbus-secret-service-keyring-store 2.x ships.
 #
+# RUSTSEC-2026-0387: crypto-bigint 0.5.5, timing variability. Ignored 2026-10-28.
+#   jsonwebtoken 10.4 (rust_crypto) -> p256/p384 0.13 -> elliptic-curve 0.13
+#   -> crypto-bigint 0.5. The fix is crypto-bigint >= 0.7.6, which needs a new
+#   elliptic-curve/p256 line; jsonwebtoken 11.1.0 (latest) still requires
+#   p256 ^0.13 and p384 ^0.13, so no upgrade path exists yet. Exposure is nil
+#   in practice: mediagit-security only uses HS256 (auth/jwt.rs:199), so no
+#   ECDSA key is parsed and no p256/p384 arithmetic runs; the crates are
+#   linked but unreachable. The auth feature is optional.
+#   REVISIT 2026-12-01: recheck jsonwebtoken / p256 for a crypto-bigint 0.7 line.
+#
 # Review date: 2026-10-23
 ignore = [
+    "RUSTSEC-2026-0387",
     "RUSTSEC-2023-0071",
     "RUSTSEC-2023-0089",
     "RUSTSEC-2026-0097",
