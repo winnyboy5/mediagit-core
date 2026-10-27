@@ -21,6 +21,8 @@
 #   desktop_ui_typecheck     pnpm --dir ui typecheck
 #   desktop_ui_unit          pnpm --dir ui test
 #   desktop_ui_e2e_mocked    pnpm --dir ui e2e   (Playwright vs Vite, mocked IPC, light+dark)
+#   desktop_ui_e2e_real      pnpm --dir ui e2e:real (G4: Playwright over CDP vs the real Tauri app, real
+#                            repo/server/CLI). Only when MG_QA_DESKTOP_E2E_REAL=1, else SKIP.
 #   desktop_spawn_overhead   p95 wall time of `mediagit --machine version` <= MG_QA_DESKTOP_SPAWN_P95_MS:
 #                            the per-operation cost the child-process engine adds (plan gate G1)
 #   desktop_status_latency   p95 wall time of `mediagit -C repo --machine status` on a committed
@@ -91,7 +93,7 @@ if (-not (Test-Path $QA.MG)) {
 Write-QaGate $Phase "desktop_exe_machine" $machineOk $detail
 
 # --- cargo gates ---------------------------------------------------------------
-$buildGates = @("desktop_cli_contract", "desktop_engine", "desktop_ui_typecheck", "desktop_ui_unit", "desktop_ui_e2e_mocked")
+$buildGates = @("desktop_cli_contract", "desktop_engine", "desktop_ui_typecheck", "desktop_ui_unit", "desktop_ui_e2e_mocked", "desktop_ui_e2e_real")
 if ($latencyOnly) {
   foreach ($g in $buildGates) { Write-QaGate $Phase $g "SKIP" "not run (MG_QA_DESKTOP_LATENCY_ONLY=1)" }
 } else {
@@ -114,6 +116,17 @@ foreach ($g in @(@("desktop_ui_typecheck", "typecheck"), @("desktop_ui_unit", "t
   }
   $u = Invoke-DesktopStep $g[1] "pnpm" @("--dir", "ui", $g[1])
   Write-QaGate $Phase $g[0] ($u -eq 0) "exit=$u"
+}
+
+# Real-app suite (G4): drives the real Tauri app over CDP; needs debug builds and a free port,
+# so it is opt-in.
+if ((_Env "MG_QA_DESKTOP_E2E_REAL" "0") -ne "1") {
+  Write-QaGate $Phase "desktop_ui_e2e_real" "SKIP" "opt-in: set MG_QA_DESKTOP_E2E_REAL=1 (needs debug cli, server, desktop builds)"
+} elseif ($uiReason) {
+  Write-QaGate $Phase "desktop_ui_e2e_real" "SKIP" $uiReason
+} else {
+  $r = Invoke-DesktopStep "e2e_real" "pnpm" @("--dir", "ui", "e2e:real")
+  Write-QaGate $Phase "desktop_ui_e2e_real" ($r -eq 0) "exit=$r (log: 17_desktop_build.log)"
 }
 }
 

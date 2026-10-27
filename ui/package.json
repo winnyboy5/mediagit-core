@@ -9,6 +9,7 @@
     "typecheck": "vue-tsc --noEmit",
     "test": "vitest run",
     "e2e": "playwright test",
+    "e2e:real": "playwright test -c playwright.real.config.ts",
     "tauri": "tauri"
   },
   "dependencies": {
