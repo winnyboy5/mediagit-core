@@ -24,6 +24,13 @@ Shows the state of the working directory and staging area:
 upstream's remote-tracking ref has never been fetched, the upstream name is shown without counts rather
 than fetching to find out.
 
+To find modified files, `status` compares each tracked file's content hash with the committed one. It keeps
+a local stat cache (`.mediagit/stat-cache`) of each file's size, modification time, file id, change time and
+hash, and re-reads a file only when one of those changed, so a repeat `status` on a large media tree reads
+almost nothing. A file modified less than 2 seconds before it was last cached is always re-read. Set
+`MEDIAGIT_STAT_CACHE=0` to re-hash every file; on Windows, an in-place rewrite that keeps both size and
+modification time is the known case the cache cannot see (the same limit as Git).
+
 ## Options
 
 ### `--tracked`
@@ -111,7 +118,7 @@ A  path    staged, and the path is new (not in HEAD)
 ```
 
 Porcelain output has no header, no colors, and respects `--tracked`/`--untracked` the same way the
-human format does.
+human format does. Within each group, paths are sorted.
 
 ## Branch Tracking
 
