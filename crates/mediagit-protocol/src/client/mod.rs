@@ -866,6 +866,7 @@ pub(crate) mod pull;
 pub(crate) mod push;
 pub(crate) mod transfer;
 
+pub use browse::{TreeListEntry, TreeListing};
 pub use locks::LockInfo;
 
 impl ProtocolClient {

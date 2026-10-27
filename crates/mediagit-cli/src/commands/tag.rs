@@ -30,6 +30,21 @@ pub struct TagReport {
     pub message: Option<String>,
 }
 
+/// `--machine` data for `tag create` and `tag delete`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct TagActionReport {
+    /// `create` or `delete`.
+    pub action: String,
+    /// `create`: the new tag.
+    pub created: Option<TagReport>,
+    /// `delete`: tags removed.
+    pub deleted: Vec<String>,
+    /// `delete`: requested names that did not exist.
+    pub missing: Vec<String>,
+}
+
 /// Manage tags
 #[derive(Parser, Debug)]
 pub struct TagCmd {
@@ -161,8 +176,11 @@ pub struct VerifyOpts {
 impl TagCmd {
     /// Execute tag command
     pub async fn execute(&self, repo_path: PathBuf) -> Result<()> {
-        if !matches!(self.subcommand, TagSubcommand::List(_)) {
-            crate::output::ensure_machine_supported("tag (only `tag list`)")?;
+        if !matches!(
+            self.subcommand,
+            TagSubcommand::List(_) | TagSubcommand::Create(_) | TagSubcommand::Delete(_)
+        ) {
+            crate::output::ensure_machine_supported("tag (only list|create|delete)")?;
         }
         match &self.subcommand {
             TagSubcommand::Create(opts) => self.create(repo_path, opts).await,
@@ -228,6 +246,23 @@ impl TagCmd {
             // Lightweight tag
             self.create_lightweight_tag(&refdb, &opts.name, target_oid)
                 .await?;
+        }
+
+        if crate::output::machine_mode() {
+            return crate::output::emit_ok(&TagActionReport {
+                action: "create".into(),
+                created: Some(TagReport {
+                    name: opts.name.clone(),
+                    oid: target_oid.to_hex(),
+                    annotated: is_annotated,
+                    message: opts
+                        .message
+                        .as_ref()
+                        .map(|m| m.lines().next().unwrap_or("").to_string()),
+                }),
+                deleted: Vec::new(),
+                missing: Vec::new(),
+            });
         }
 
         if !opts.quiet {
@@ -518,12 +553,15 @@ impl TagCmd {
         let mediagit_dir = repo_path.join(".mediagit");
         let refdb = RefDatabase::new(&mediagit_dir);
 
+        let mut deleted = Vec::new();
+        let mut missing = Vec::new();
         for name in &opts.names {
             let tag_ref = format!("refs/tags/{}", name);
 
             // Check if tag exists
             if !refdb.exists(&tag_ref).await? {
-                if !opts.quiet {
+                missing.push(name.clone());
+                if !opts.quiet && !crate::output::machine_mode() {
                     eprintln!("Warning: Tag '{}' does not exist", name);
                 }
                 continue;
@@ -537,9 +575,19 @@ impl TagCmd {
                 .await
                 .context(format!("Failed to delete tag '{}'", name))?;
 
-            if !opts.quiet {
+            deleted.push(name.clone());
+            if !opts.quiet && !crate::output::machine_mode() {
                 println!("Deleted tag '{}'", name);
             }
+        }
+
+        if crate::output::machine_mode() {
+            return crate::output::emit_ok(&TagActionReport {
+                action: "delete".into(),
+                created: None,
+                deleted,
+                missing,
+            });
         }
 
         Ok(())

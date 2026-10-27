@@ -246,25 +246,7 @@ impl DownloadCmd {
     /// unsupported/empty) — some server-side repo really might have an
     /// explicit HEAD file in that case.
     async fn default_ref(&self, client: &mediagit_protocol::ProtocolClient) -> Result<String> {
-        let refs = client
-            .get_refs()
-            .await
-            .context("Failed to fetch remote refs to determine the default branch")?;
-        let has_branch = |name: &str| {
-            refs.refs
-                .iter()
-                .any(|r| r.name == format!("refs/heads/{name}"))
-        };
-        if has_branch("main") {
-            return Ok("refs/heads/main".to_string());
-        }
-        if has_branch("master") {
-            return Ok("refs/heads/master".to_string());
-        }
-        if let Some(first) = refs.refs.iter().find(|r| r.name.starts_with("refs/heads/")) {
-            return Ok(first.name.clone());
-        }
-        Ok("HEAD".to_string())
+        default_remote_ref(client).await
     }
 
     /// Resolve the server base URL, the repo-relative file path, a config +
@@ -357,6 +339,31 @@ impl DownloadCmd {
     }
 }
 
+/// The server's default ref (see `DownloadCmd::default_ref`); shared with `remote ls-tree`.
+pub(super) async fn default_remote_ref(
+    client: &mediagit_protocol::ProtocolClient,
+) -> Result<String> {
+    let refs = client
+        .get_refs()
+        .await
+        .context("Failed to fetch remote refs to determine the default branch")?;
+    let has_branch = |name: &str| {
+        refs.refs
+            .iter()
+            .any(|r| r.name == format!("refs/heads/{name}"))
+    };
+    if has_branch("main") {
+        return Ok("refs/heads/main".to_string());
+    }
+    if has_branch("master") {
+        return Ok("refs/heads/master".to_string());
+    }
+    if let Some(first) = refs.refs.iter().find(|r| r.name.starts_with("refs/heads/")) {
+        return Ok(first.name.clone());
+    }
+    Ok("HEAD".to_string())
+}
+
 /// Split a full remote URL into `(base_url_including_repo, file_path)`.
 /// The repo name is exactly the first path segment (matching the server's
 /// `/{repo}/files/{*path}` route); everything after it is the file path.
@@ -395,7 +402,7 @@ fn split_repo_url(url_str: &str) -> Result<(String, String)> {
 /// Reject `..` path-traversal components client-side, in addition to
 /// whatever the server validates. Backslashes are rejected too since a
 /// server on a Windows host could otherwise reinterpret them as separators.
-fn validate_no_path_traversal(file_path: &str) -> Result<()> {
+pub(super) fn validate_no_path_traversal(file_path: &str) -> Result<()> {
     if file_path.is_empty() {
         anyhow::bail!("Empty remote file path");
     }

@@ -26,6 +26,35 @@ pub struct RemoteReport {
     pub url: String,
 }
 
+/// `--machine` data for `remote ls-tree`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct LsTreeReport {
+    pub remote: String,
+    /// The ref that was listed (the server default when `--ref` is omitted).
+    #[serde(rename = "ref")]
+    pub ref_name: String,
+    /// Directory listed; empty for the repository root.
+    pub path: String,
+    pub entries: Vec<LsTreeEntryReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct LsTreeEntryReport {
+    pub name: String,
+    /// Repository-relative path (`path` + `name`).
+    pub path: String,
+    /// `file` or `dir`.
+    pub kind: String,
+    /// Blob size; `None` for directories or when the server cannot tell.
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub size: Option<u64>,
+    pub oid: String,
+}
+
 fn emit_remotes(config: &Config) -> Result<()> {
     let mut remotes: Vec<RemoteReport> = config
         .remotes
@@ -102,6 +131,21 @@ pub enum RemoteSubcommand {
         name: String,
     },
 
+    /// List a directory of a remote repository without cloning
+    LsTree {
+        /// Remote name
+        #[arg(value_name = "REMOTE")]
+        remote: String,
+
+        /// Directory to list (default: repository root)
+        #[arg(value_name = "PATH")]
+        path: Option<String>,
+
+        /// Ref to list (branch, tag or commit; default: the server's default branch)
+        #[arg(long, value_name = "REF")]
+        r#ref: Option<String>,
+    },
+
     /// Set URL for a remote
     SetUrl {
         /// Remote name
@@ -141,6 +185,14 @@ impl RemoteCmd {
                 self.rename_remote(old_name, new_name).await
             }
             RemoteSubcommand::Show { name } => self.show_remote(name).await,
+            RemoteSubcommand::LsTree {
+                remote,
+                path,
+                r#ref,
+            } => {
+                self.ls_tree(remote, path.as_deref().unwrap_or(""), r#ref.as_deref())
+                    .await
+            }
             RemoteSubcommand::SetUrl { name, url, push } => self.set_url(name, url, *push).await,
         }
     }
@@ -395,6 +447,84 @@ impl RemoteCmd {
             }
         }
 
+        Ok(())
+    }
+
+    async fn ls_tree(&self, remote: &str, path: &str, ref_name: Option<&str>) -> Result<()> {
+        let path = path.trim_matches('/');
+        if !path.is_empty() {
+            super::download::validate_no_path_traversal(path)?;
+        }
+        let repo_root = find_repo_root()?;
+        let config = Config::load(&repo_root).await?;
+        let remote_url = config
+            .resolve_remote_url(remote)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        // Same credential handling as fetch: tiered resolve, retry once on a
+        // 401 that came from a stale keychain entry, remember what worked.
+        let (mut credentials, cred_source) =
+            crate::repo::resolve_credentials_tiered(&repo_root, &config, remote);
+        let list = |creds: mediagit_protocol::Credentials| {
+            let remote_url = remote_url.clone();
+            async move {
+                let client =
+                    mediagit_protocol::ProtocolClient::new(remote_url).with_credentials(creds);
+                let ref_name = match ref_name {
+                    Some(r) => r.to_string(),
+                    None => super::download::default_remote_ref(&client).await?,
+                };
+                let listing = client.list_tree(path, &ref_name).await?;
+                anyhow::Ok((ref_name, listing))
+            }
+        };
+        let (ref_name, listing) = match list(credentials.clone()).await {
+            Ok(r) => r,
+            Err(e) if crate::repo::invalidate_on_unauthorized(&config, remote, cred_source, &e) => {
+                credentials = crate::repo::resolve_credentials(&repo_root, &config, remote);
+                list(credentials.clone()).await?
+            }
+            Err(e) => return Err(e),
+        };
+        crate::repo::remember_credentials(&config, remote, &credentials);
+
+        let entries: Vec<LsTreeEntryReport> = listing
+            .entries
+            .iter()
+            .map(|e| LsTreeEntryReport {
+                name: e.name.clone(),
+                path: if path.is_empty() {
+                    e.name.clone()
+                } else {
+                    format!("{path}/{}", e.name)
+                },
+                kind: if e.entry_type == "tree" {
+                    "dir"
+                } else {
+                    "file"
+                }
+                .into(),
+                size: e.size,
+                oid: e.oid.clone(),
+            })
+            .collect();
+
+        if output::machine_mode() {
+            return output::emit_ok(&LsTreeReport {
+                remote: remote.to_string(),
+                ref_name,
+                path: path.to_string(),
+                entries,
+            });
+        }
+        for (e, raw) in entries.iter().zip(&listing.entries) {
+            println!(
+                "{}\t{}\t{}",
+                raw.entry_type,
+                e.size.map_or("-".to_string(), |s| s.to_string()),
+                e.path
+            );
+        }
         Ok(())
     }
 

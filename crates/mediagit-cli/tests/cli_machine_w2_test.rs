@@ -342,3 +342,155 @@ fn download_machine_local_file_and_errors() {
 
     assert_eq!(err(dir, &["download", "../etc/passwd"]), "error");
 }
+
+#[test]
+fn tag_machine_create_and_delete() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_repo(dir);
+    commit_file(dir, "a.txt", b"x", "c1");
+    let head = head_oid(dir);
+
+    let d = ok(dir, &["tag", "create", "v1"]);
+    assert_eq!(d["action"], "create");
+    assert_eq!(d["created"]["name"], "v1");
+    assert_eq!(d["created"]["oid"], head);
+    assert_eq!(d["created"]["annotated"], false);
+
+    let d = ok(dir, &["tag", "create", "v2", "-m", "release notes"]);
+    assert_eq!(d["created"]["annotated"], true);
+    assert_eq!(d["created"]["message"], "release notes");
+
+    // Duplicate without --force, and an invalid name, are clean errors.
+    assert_eq!(err(dir, &["tag", "create", "v1"]), "error");
+    assert_eq!(err(dir, &["tag", "create", "bad name"]), "error");
+
+    let d = ok(dir, &["tag", "delete", "v1", "nope"]);
+    assert_eq!(d["action"], "delete");
+    assert_eq!(d["deleted"], serde_json::json!(["v1"]));
+    assert_eq!(d["missing"], serde_json::json!(["nope"]));
+    assert_eq!(
+        ok(dir, &["tag", "list"])["tags"].as_array().unwrap().len(),
+        1
+    );
+}
+
+// ---------------------------------------------------------------------------
+// remote ls-tree (in-process mediagit-server)
+// ---------------------------------------------------------------------------
+
+async fn serve(state: mediagit_server::AppState) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let app = mediagit_server::create_router(std::sync::Arc::new(state));
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    base
+}
+
+/// Source repo with `a.txt` and `sub/b.txt`, pushed to a server at `repo`.
+async fn pushed_source(server: &Path, base: &str, repo: &str) -> TempDir {
+    fs::create_dir_all(server.join(repo)).unwrap();
+    let src = TempDir::new().unwrap();
+    init_repo(src.path());
+    fs::create_dir_all(src.path().join("sub")).unwrap();
+    fs::write(src.path().join("sub/b.txt"), "bbbb").unwrap();
+    commit_file(src.path(), "a.txt", b"hello", "c1");
+    human(src.path(), &["add", "sub/b.txt"]);
+    human(src.path(), &["commit", "-m", "c2"]);
+    human(
+        src.path(),
+        &["remote", "add", "origin", &format!("{base}/{repo}")],
+    );
+    human(src.path(), &["push", "-u", "origin"]);
+    src
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_ls_tree_machine_root_subfolder_and_errors() {
+    let server_dir = TempDir::new().unwrap();
+    let base = serve(mediagit_server::AppState::new(
+        server_dir.path().to_path_buf(),
+    ))
+    .await;
+    let src = pushed_source(server_dir.path(), &base, "w2-tree").await;
+    let dir = src.path();
+
+    let d = ok(dir, &["remote", "ls-tree", "origin"]);
+    assert_eq!(d["remote"], "origin");
+    assert_eq!(d["ref"], "refs/heads/main");
+    assert_eq!(d["path"], "");
+    let entries = d["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    let a = entries.iter().find(|e| e["name"] == "a.txt").unwrap();
+    assert_eq!(a["kind"], "file");
+    assert_eq!(a["path"], "a.txt");
+    assert_eq!(a["size"], 5);
+    assert_eq!(a["oid"].as_str().unwrap().len(), 64);
+    let sub = entries.iter().find(|e| e["name"] == "sub").unwrap();
+    assert_eq!(sub["kind"], "dir");
+    assert!(sub["size"].is_null());
+
+    let d = ok(
+        dir,
+        &["remote", "ls-tree", "origin", "sub", "--ref", "main"],
+    );
+    assert_eq!(d["path"], "sub");
+    assert_eq!(d["entries"][0]["path"], "sub/b.txt");
+    assert_eq!(d["entries"][0]["size"], 4);
+
+    // Human output: <type>\t<size>\t<path>.
+    let out = mediagit()
+        .args(["remote", "ls-tree", "origin", "sub"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap().trim(),
+        "blob\t4\tsub/b.txt"
+    );
+
+    assert_eq!(
+        err(dir, &["remote", "ls-tree", "origin", "no/such/dir"]),
+        "error"
+    );
+    assert_eq!(err(dir, &["remote", "ls-tree", "origin", "../x"]), "error");
+    assert_eq!(err(dir, &["remote", "ls-tree", "nope"]), "error");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_ls_tree_machine_auth_required_is_a_clean_error() {
+    let server_dir = TempDir::new().unwrap();
+    let api_keys = std::sync::Arc::new(mediagit_security::auth::ApiKeyAuth::new());
+    let base = serve(mediagit_server::AppState::new_with_auth(
+        server_dir.path().to_path_buf(),
+        "test-secret-0123456789-0123456789-abcdef",
+        api_keys,
+    ))
+    .await;
+    let tmp = TempDir::new().unwrap();
+    init_repo(tmp.path());
+    commit_file(tmp.path(), "a.txt", b"a", "c1");
+    human(
+        tmp.path(),
+        &["remote", "add", "origin", &format!("{base}/locked")],
+    );
+
+    let out = mediagit()
+        .env_remove("MEDIAGIT_TOKEN")
+        .env_remove("MEDIAGIT_API_KEY")
+        .args(["--machine", "remote", "ls-tree", "origin", "--ref", "main"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(stdout.lines().count(), 1, "{stdout:?}");
+    let v: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["ok"], false);
+    assert!(
+        v["error"]["message"].as_str().unwrap().contains("401"),
+        "{v}"
+    );
+}

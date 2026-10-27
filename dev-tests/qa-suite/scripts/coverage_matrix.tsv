@@ -72,6 +72,8 @@ remote set-url	-(bare invocation)	no	OK
 remote set-url	--push	no	OK
 remote show	-(bare invocation)	no	OK
 remote rename	-(bare invocation)	no	OK
+remote ls-tree	-(bare invocation)	no	ERROR
+remote ls-tree	--ref	yes	ERROR
 branch	-(bare invocation)	no	OK
 branch list	-(bare invocation)	no	OK
 branch list	-r,--remote	no	OK

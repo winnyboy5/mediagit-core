@@ -87,7 +87,7 @@ Invoke-MG $TPL @("remote", "add", "origin", $DEAD_URL) $Phase | Out-Null
 # ---- positional-arg / value maps (same intent as v11's run_matrix.ps1) ----
 # Commands that need a server. They are still invoked; they just have a different
 # success contract (see EXPECTED-ERR above).
-$remoteCmds = "^(clone|push|pull|fetch|download|auth)"
+$remoteCmds = "^(clone|push|pull|fetch|download|auth|remote ls-tree)"
 $posMap = @{
   "add" = @("f1.svg"); "commit" = @(); "diff" = @(); "log" = @(); "show" = @("HEAD"); "status" = @()
   "branch create" = @("nb1"); "branch delete" = @("feat"); "branch switch" = @("feat"); "branch rename" = @("feat", "feat2")
@@ -113,6 +113,7 @@ $posMap = @{
   "remote add" = @("mx-extra", $DEAD_URL); "remote remove" = @("mx-extra"); "remote list" = @()
   "remote rename" = @("origin", "origin2"); "remote set-url" = @("origin", $DEAD_URL)
   "remote show" = @("origin"); "remote" = @()
+  "remote ls-tree" = @("origin")
   # auth: every subcommand is server-bound; --server keeps it from needing a repo remote.
   "auth login" = @("--server", $DEAD_URL); "auth register" = @("--server", $DEAD_URL)
   "auth status" = @("--server", $DEAD_URL); "auth logout" = @("--server", $DEAD_URL)

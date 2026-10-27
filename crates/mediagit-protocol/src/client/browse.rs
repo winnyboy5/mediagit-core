@@ -11,7 +11,73 @@
 
 use super::*;
 
+/// Response of `GET /{repo}/tree[/{path}]?ref=`.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct TreeListing {
+    #[serde(rename = "ref")]
+    pub ref_name: String,
+    pub commit: String,
+    pub path: String,
+    pub entries: Vec<TreeListEntry>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct TreeListEntry {
+    pub name: String,
+    pub oid: String,
+    /// `blob` or `tree`.
+    #[serde(rename = "type")]
+    pub entry_type: String,
+    /// Absent from servers that predate sizes.
+    #[serde(default)]
+    pub size: Option<u64>,
+}
+
 impl ProtocolClient {
+    /// List one directory of committed state (`dir_path` empty = repo root).
+    pub async fn list_tree(&self, dir_path: &str, ref_name: &str) -> Result<TreeListing> {
+        let mut url = reqwest::Url::parse(&self.base_url).context("Invalid remote URL")?;
+        {
+            let mut segments = url
+                .path_segments_mut()
+                .map_err(|_| anyhow::anyhow!("Remote URL cannot be a tree listing base"))?;
+            segments.push("tree");
+            for part in dir_path.split('/').filter(|s| !s.is_empty()) {
+                segments.push(part);
+            }
+        }
+        url.query_pairs_mut().append_pair("ref", ref_name);
+
+        crate::client::with_pull_deadline("tree listing", async move {
+            let response =
+                crate::client::send_with_rate_limit_retry(|| self.client.get(url.clone()).send())
+                    .await
+                    .context("Failed to GET tree")?;
+            let status = response.status();
+            if status == reqwest::StatusCode::NOT_FOUND {
+                anyhow::bail!("Path '{}' not found at ref '{}'", dir_path, ref_name);
+            }
+            if !status.is_success() {
+                let hint = match status.as_u16() {
+                    401 => "\n  Not authenticated. Run `mediagit auth login <server>`.",
+                    403 => "\n  Authenticated, but this account cannot read this repository.",
+                    _ => "",
+                };
+                anyhow::bail!(
+                    "GET tree '{}' failed with status: {}{}",
+                    dir_path,
+                    status,
+                    hint
+                );
+            }
+            response
+                .json::<TreeListing>()
+                .await
+                .context("Invalid tree listing response")
+        })
+        .await
+    }
+
     /// Download a single file from committed state by its repo-relative
     /// path, streaming the response body into `out`. No local repo or ODB
     /// is required — this hits the server directly by path, which is the

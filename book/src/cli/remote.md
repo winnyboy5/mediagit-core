@@ -11,6 +11,7 @@ mediagit remote list [--verbose]
 mediagit remote rename <OLD> <NEW>
 mediagit remote set-url <NAME> <URL>
 mediagit remote show <NAME>
+mediagit remote ls-tree <REMOTE> [PATH] [--ref <REF>]
 ```
 
 ## Description
@@ -75,6 +76,21 @@ Show detailed information about a remote.
 ```bash
 mediagit remote show <NAME>
 ```
+
+### `ls-tree`
+
+List one directory of a remote repository without cloning it. Uses the same
+credentials as `fetch`.
+
+```bash
+mediagit remote ls-tree <REMOTE> [PATH] [--ref <REF>]
+```
+
+Options:
+- `--ref <REF>` — Branch, tag or commit to list (default: the server's default branch)
+
+Prints one line per entry: `<type>\t<size>\t<path>`, where `type` is `blob` or
+`tree` and `size` is `-` for directories.
 
 ## Examples
 

@@ -1174,9 +1174,15 @@ async fn list_tree_impl(
 
     let (commit_oid, tree) = resolve_path_to_tree(&odb, &refdb, &ref_name, &dir_path).await?;
 
-    let entries = tree
-        .iter()
-        .map(|entry| TreeEntryResponse {
+    // ponytail: sequential size lookups; buffer them if huge flat directories are slow.
+    let mut entries = Vec::new();
+    for entry in tree.iter() {
+        let size = if entry.is_tree() {
+            None
+        } else {
+            odb.get_object_size(&entry.oid).await.ok().map(|s| s as u64)
+        };
+        entries.push(TreeEntryResponse {
             name: entry.name.clone(),
             mode: entry.mode.to_string(),
             oid: entry.oid.to_hex(),
@@ -1185,8 +1191,9 @@ async fn list_tree_impl(
             } else {
                 "blob".to_string()
             },
-        })
-        .collect();
+            size,
+        });
+    }
 
     Ok(Json(TreeListResponse {
         ref_name,

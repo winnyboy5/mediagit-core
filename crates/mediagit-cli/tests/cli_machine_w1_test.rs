@@ -366,7 +366,7 @@ fn tag_list_machine() {
     assert_eq!(v2["message"].as_str().unwrap().trim(), "release notes");
     assert_eq!(v1["oid"].as_str().unwrap().len(), 64);
 
-    assert_eq!(err(dir, &["tag", "create", "v3"]), "json_unsupported");
+    assert_eq!(err(dir, &["tag", "show", "v1"]), "json_unsupported");
 }
 
 #[test]

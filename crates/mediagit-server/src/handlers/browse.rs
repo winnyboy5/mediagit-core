@@ -22,6 +22,8 @@ pub struct TreeEntryResponse {
     pub(super) oid: String,
     #[serde(rename = "type")]
     pub(super) entry_type: String,
+    /// Blob size in bytes; `None` for directories or an unreadable blob.
+    pub(super) size: Option<u64>,
 }
 
 /// JSON response body for `GET /{repo}/tree[/{path}]`

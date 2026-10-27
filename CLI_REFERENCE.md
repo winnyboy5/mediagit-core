@@ -111,6 +111,10 @@ lines that are not `type:"progress"`.
 writes a blob to a file. Every other command prints a `json_unsupported`
 envelope and exits 2 without running.
 
+`tag` supports `list`, `create` and `delete`. `remote ls-tree <remote> [path] [--ref <ref>]` lists one remote directory
+(`{remote, ref, path, entries:[{name, path, kind: file|dir, size|null, oid}]}`);
+human output is `<type>\t<size>\t<path>` per entry. See `book/src/cli/remote.md`.
+
 Report types are generated for TypeScript into `ui/src/api/generated/` by
 `cargo test -p mediagit-cli`.
 

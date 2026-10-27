@@ -270,7 +270,9 @@ fn preprocess_args(args: Vec<String>) -> Vec<String> {
             )),
             "remote" => Some((
                 "remote",
-                &["list", "add", "remove", "rename", "show", "set-url", "help"][..],
+                &[
+                    "list", "add", "remove", "rename", "show", "set-url", "ls-tree", "help",
+                ][..],
                 "list",
             )),
             "lock" => Some(("lock", &["create", "unlock", "list", "help"][..], "create")),
