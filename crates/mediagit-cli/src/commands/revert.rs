@@ -6,6 +6,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
@@ -58,6 +59,43 @@ pub struct RevertCmd {
 
 const REVERT_STATE_FILE: &str = "REVERT_STATE";
 
+/// `--machine` data for `revert`, `--continue`, `--abort` and `--skip`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct RevertReport {
+    /// `revert`, `continue`, `abort` or `skip`.
+    pub action: String,
+    /// `reverted`, `not_committed`, `conflict` (the command then also exits 1),
+    /// `aborted`, `skipped` or `completed`.
+    pub status: String,
+    /// New revert commits created by this run.
+    pub commits: Vec<String>,
+    /// `conflict`: paths left unresolved.
+    pub conflicts: Vec<String>,
+}
+
+fn revert_report(action: &str, status: &str, commits: Vec<String>) -> RevertReport {
+    RevertReport {
+        action: action.into(),
+        status: status.into(),
+        commits,
+        conflicts: Vec::new(),
+    }
+}
+
+/// A revert stopped on conflicts; carries the paths for the machine report.
+#[derive(Debug)]
+struct ConflictStop(Vec<String>);
+
+impl std::fmt::Display for ConflictStop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Revert resulted in conflict - resolve and continue")
+    }
+}
+
+impl std::error::Error for ConflictStop {}
+
 #[derive(Debug)]
 struct RevertState {
     commits: Vec<String>,
@@ -93,6 +131,10 @@ impl RevertState {
 }
 
 impl RevertCmd {
+    fn quiet(&self) -> bool {
+        self.quiet || output::machine_mode()
+    }
+
     pub async fn execute(&self) -> Result<()> {
         let repo_root = find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
@@ -136,39 +178,65 @@ impl RevertCmd {
         }
 
         // Process each commit
+        let mut new_commits = Vec::new();
         for (i, commit_oid) in resolved_commits.iter().enumerate() {
             let result = self
                 .revert_single_commit(&repo_root, &storage_path, &odb, &refs, commit_oid)
                 .await;
 
-            if let Err(e) = result {
-                if e.to_string().contains("conflict") {
-                    let state = RevertState {
-                        commits: resolved_commits.iter().map(|o| o.to_hex()).collect(),
-                        current_index: i,
-                        original_head,
-                    };
-                    fs::write(&state_file, state.to_string()).await?;
+            match result {
+                Ok(Some(oid)) => new_commits.push(oid.to_hex()),
+                Ok(None) => {}
+                Err(e) => {
+                    if e.to_string().contains("conflict") {
+                        let state = RevertState {
+                            commits: resolved_commits.iter().map(|o| o.to_hex()).collect(),
+                            current_index: i,
+                            original_head,
+                        };
+                        fs::write(&state_file, state.to_string()).await?;
 
-                    println!(
-                        "{} Revert stopped due to conflicts.",
-                        style("⚠").yellow().bold()
-                    );
-                    println!("  Resolve conflicts and run 'mediagit revert --continue'");
-                    // Non-zero exit so CI can detect a conflict-stop instead of
-                    // silently reporting success (AUD-1).
-                    anyhow::bail!("Revert stopped due to conflicts");
+                        if output::machine_mode() {
+                            let conflicts = e
+                                .downcast_ref::<ConflictStop>()
+                                .map(|c| c.0.clone())
+                                .unwrap_or_default();
+                            output::emit_ok(&RevertReport {
+                                conflicts,
+                                ..revert_report("revert", "conflict", new_commits)
+                            })?;
+                            std::process::exit(1);
+                        }
+
+                        println!(
+                            "{} Revert stopped due to conflicts.",
+                            style("⚠").yellow().bold()
+                        );
+                        println!("  Resolve conflicts and run 'mediagit revert --continue'");
+                        // Non-zero exit so CI can detect a conflict-stop instead of
+                        // silently reporting success (AUD-1).
+                        anyhow::bail!("Revert stopped due to conflicts");
+                    }
+                    return Err(e);
                 }
-                return Err(e);
             }
         }
 
-        if !self.quiet {
+        if !self.quiet() {
             println!(
                 "\n{} Successfully reverted {} commit(s)",
                 style("✓").green().bold(),
                 resolved_commits.len()
             );
+        }
+
+        if output::machine_mode() {
+            let status = if self.no_commit {
+                "not_committed"
+            } else {
+                "reverted"
+            };
+            return output::emit_ok(&revert_report("revert", status, new_commits));
         }
 
         Ok(())
@@ -181,7 +249,7 @@ impl RevertCmd {
         odb: &Arc<ObjectDatabase>,
         refs: &RefDatabase,
         commit_oid: &Oid,
-    ) -> Result<()> {
+    ) -> Result<Option<Oid>> {
         let commit = Commit::read(odb, commit_oid)
             .await
             .with_context(|| "Failed to read commit to revert")?;
@@ -205,7 +273,7 @@ impl RevertCmd {
         // WT-1: bound what the checkouts below may delete.
         let tracked = crate::worktree_guard::tracked_paths(repo_root, odb, Some(&head_oid)).await?;
 
-        if !self.quiet {
+        if !self.quiet() {
             output::progress(&format!(
                 "Reverting {} \"{}\"",
                 &commit_oid.to_hex()[..7],
@@ -259,7 +327,7 @@ impl RevertCmd {
 
             index.save(repo_root)?;
 
-            if !self.quiet {
+            if !self.quiet() {
                 println!(
                     "{} Revert stopped: conflict in {} file(s):",
                     console::style("⚠").yellow().bold(),
@@ -275,13 +343,21 @@ impl RevertCmd {
                 );
             }
 
-            anyhow::bail!("Revert resulted in conflict - resolve and continue");
+            return Err(ConflictStop(
+                merge_result
+                    .conflicts
+                    .iter()
+                    .map(|c| c.path.clone())
+                    .collect(),
+            )
+            .into());
         }
 
         let new_tree_oid = merge_result
             .tree_oid
             .context("Merge did not produce a tree")?;
 
+        let mut created = None;
         if !self.no_commit {
             let message = self.message.clone().unwrap_or_else(|| {
                 format!(
@@ -300,6 +376,7 @@ impl RevertCmd {
             );
 
             let new_commit_oid = revert_commit.write(odb).await?;
+            created = Some(new_commit_oid);
 
             // Update refs
             let current_branch = self.get_current_branch(storage_path).await?;
@@ -334,7 +411,7 @@ impl RevertCmd {
                 .await
                 .context("Failed to update working directory after revert")?;
 
-            if !self.quiet {
+            if !self.quiet() {
                 println!(
                     "{} Created revert commit: {}",
                     style("✓").green(),
@@ -362,7 +439,7 @@ impl RevertCmd {
                 .await
                 .context("Failed to update working directory after revert")?;
 
-            if !self.quiet {
+            if !self.quiet() {
                 println!(
                     "{} Reverted {} (not committed)",
                     style("✓").green(),
@@ -371,7 +448,7 @@ impl RevertCmd {
             }
         }
 
-        Ok(())
+        Ok(created)
     }
 
     fn save_tree_to_index(&self, repo_root: &Path, tree: &Tree) -> Result<()> {
@@ -472,6 +549,13 @@ impl RevertCmd {
             refs.update("HEAD", new_commit_oid, true).await?;
         }
 
+        if output::machine_mode() {
+            return output::emit_ok(&revert_report(
+                "continue",
+                "reverted",
+                vec![new_commit_oid.to_hex()],
+            ));
+        }
         println!(
             "{} Revert continued: {}",
             style("✓").green().bold(),
@@ -523,6 +607,9 @@ impl RevertCmd {
 
         fs::remove_file(&state_file).await?;
 
+        if output::machine_mode() {
+            return output::emit_ok(&revert_report("abort", "aborted", Vec::new()));
+        }
         println!(
             "{} Revert aborted, HEAD reset to {}",
             style("✓").green().bold(),
@@ -543,6 +630,17 @@ impl RevertCmd {
         let mut state = RevertState::from_string(&state_content)?;
 
         state.current_index += 1;
+
+        if output::machine_mode() {
+            let status = if state.current_index >= state.commits.len() {
+                fs::remove_file(&state_file).await?;
+                "completed"
+            } else {
+                fs::write(&state_file, state.to_string()).await?;
+                "skipped"
+            };
+            return output::emit_ok(&revert_report("skip", status, Vec::new()));
+        }
 
         if state.current_index >= state.commits.len() {
             fs::remove_file(&state_file).await?;

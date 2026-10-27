@@ -466,6 +466,12 @@ fn main() {
                 | "pull"
                 | "push"
                 | "clone"
+                | "merge"
+                | "diff"
+                | "stash"
+                | "reset"
+                | "revert"
+                | "download"
         ) {
             output::emit_err(
                 "json_unsupported",

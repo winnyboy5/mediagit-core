@@ -13,7 +13,23 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use mediagit_versioning::{Commit, ObjectDatabase, RefDatabase};
+use serde::Serialize;
 use std::path::{Path, PathBuf};
+
+/// `--machine` data for `download`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct DownloadReport {
+    /// File path inside the repository.
+    pub path: String,
+    /// File the bytes were written to.
+    pub output: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bytes: u64,
+    /// `local` (read from this repository's history) or `remote` (server).
+    pub source: String,
+}
 
 /// Download a single file from a remote repository by path
 ///
@@ -90,6 +106,14 @@ impl DownloadCmd {
                             len,
                             out_path.display()
                         ));
+                    }
+                    if output::machine_mode() {
+                        return output::emit_ok(&DownloadReport {
+                            path: self.remote_path.clone(),
+                            output: out_path.display().to_string(),
+                            bytes: len,
+                            source: "local".into(),
+                        });
                     }
                     return Ok(());
                 }
@@ -201,6 +225,15 @@ impl DownloadCmd {
                 bytes,
                 out_path.display()
             ));
+        }
+
+        if output::machine_mode() {
+            return output::emit_ok(&DownloadReport {
+                path: file_path,
+                output: out_path.display().to_string(),
+                bytes: bytes as u64,
+                source: "remote".into(),
+            });
         }
 
         Ok(())

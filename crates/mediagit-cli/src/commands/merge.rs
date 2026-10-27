@@ -1,15 +1,62 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
+use super::super::output;
 use super::super::repo::{create_storage_backend, find_repo_root};
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use mediagit_versioning::{
-    CheckoutManager, Commit, Index, MergeEngine, MergeStrategy, ObjectDatabase, ObjectType, Oid,
-    Ref, RefDatabase, Reflog, ReflogEntry, Signature, apply_merge_to_workdir, resolve_revision,
+    CheckoutManager, Commit, ConflictType, Index, MergeEngine, MergeStrategy, ObjectDatabase,
+    ObjectType, Oid, Ref, RefDatabase, Reflog, ReflogEntry, Signature, apply_merge_to_workdir,
+    resolve_revision,
 };
+use serde::Serialize;
 use std::sync::Arc;
+
+/// `--machine` data for `merge`, `merge --continue` and `merge --abort`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct MergeReport {
+    /// `merge`, `continue` or `abort`.
+    pub action: String,
+    /// `fast_forward`, `merged`, `squashed`, `not_committed`, `aborted` or
+    /// `conflict` (the command then also exits 1; `conflicts` lists the paths).
+    pub status: String,
+    /// New HEAD commit; `None` for `conflict`, `not_committed` and `aborted`.
+    pub oid: Option<String>,
+    pub conflicts: Vec<MergeConflictReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct MergeConflictReport {
+    pub path: String,
+    /// `unresolved` until the path is staged with `add`.
+    pub state: String,
+    /// `modify_modify`, `add_add`, `delete_modify` or `modify_delete`.
+    pub kind: String,
+}
+
+fn conflict_kind(t: &ConflictType) -> &'static str {
+    match t {
+        ConflictType::ModifyModify => "modify_modify",
+        ConflictType::AddAdd => "add_add",
+        ConflictType::DeleteModify => "delete_modify",
+        ConflictType::ModifyDelete => "modify_delete",
+    }
+}
+
+fn merge_report(action: &str, status: &str, oid: Option<Oid>) -> MergeReport {
+    MergeReport {
+        action: action.into(),
+        status: status.into(),
+        oid: oid.map(|o| o.to_hex()),
+        conflicts: Vec::new(),
+    }
+}
 
 /// Merge branches
 ///
@@ -91,6 +138,10 @@ pub struct MergeCmd {
 }
 
 impl MergeCmd {
+    fn quiet(&self) -> bool {
+        self.quiet || output::machine_mode()
+    }
+
     pub async fn execute(&self) -> Result<()> {
         // Validate that branch and --continue are mutually exclusive
         if self.continue_merge && self.branch.is_some() {
@@ -169,7 +220,7 @@ impl MergeCmd {
             Some(s) => anyhow::bail!("Unknown merge strategy: {}", s),
         };
 
-        if !self.quiet {
+        if !self.quiet() {
             println!(
                 "{} Merging {} into {}...",
                 style("🔀").cyan().bold(),
@@ -182,7 +233,7 @@ impl MergeCmd {
         // Create merge engine and perform merge
         let engine = MergeEngine::new(odb.clone());
 
-        if !self.quiet {
+        if !self.quiet() {
             println!("{} Computing merge...", style("⚙️ ").cyan());
         }
 
@@ -246,19 +297,22 @@ impl MergeCmd {
                     &format!("merge {}: squash merge (ff)", branch),
                 );
                 let _ = reflog.append("HEAD", &entry).await;
-                if !self.quiet {
+                if !self.quiet() {
                     println!(
                         "{} Squash merge committed: {}",
                         style("✓").green().bold(),
                         &commit_oid.to_string()[..7]
                     );
                 }
+                if output::machine_mode() {
+                    return output::emit_ok(&merge_report("merge", "squashed", Some(commit_oid)));
+                }
                 return Ok(());
             }
             if ff_info.is_fast_forward {
                 if self.ff_only || !self.no_ff {
                     // Fast-forward merge
-                    if !self.quiet {
+                    if !self.quiet() {
                         println!(
                             "{} Fast-forwarding {} -> {}",
                             style("✓").green(),
@@ -291,6 +345,13 @@ impl MergeCmd {
                         ReflogEntry::now(our_oid, their_oid, "user", "user@mediagit", &reflog_msg);
                     let _ = reflog.append("HEAD", &entry).await;
 
+                    if output::machine_mode() {
+                        return output::emit_ok(&merge_report(
+                            "merge",
+                            "fast_forward",
+                            Some(their_oid),
+                        ));
+                    }
                     return Ok(());
                 } else if self.ff_only {
                     anyhow::bail!("Fast-forward only requested but not possible");
@@ -323,6 +384,20 @@ impl MergeCmd {
 
             index.save(&repo_root)?;
 
+            if output::machine_mode() {
+                let mut report = merge_report("merge", "conflict", None);
+                report.conflicts = result
+                    .conflicts
+                    .iter()
+                    .map(|c| MergeConflictReport {
+                        path: c.path.clone(),
+                        state: "unresolved".into(),
+                        kind: conflict_kind(&c.conflict_type).into(),
+                    })
+                    .collect();
+                output::emit_ok(&report)?;
+                std::process::exit(1);
+            }
             println!(
                 "{} Merge conflicts detected in {} file(s):",
                 style("⚠").yellow().bold(),
@@ -342,6 +417,7 @@ impl MergeCmd {
         }
 
         // No conflicts - create merge commit
+        let mut merged_oid = None;
         if !self.no_commit {
             let tree_oid = result.tree_oid.context("No merged tree created")?;
 
@@ -428,8 +504,9 @@ impl MergeCmd {
             };
             let entry = ReflogEntry::now(our_oid, commit_oid, "user", "user@mediagit", &reflog_msg);
             let _ = reflog.append("HEAD", &entry).await;
+            merged_oid = Some(commit_oid);
 
-            if !self.quiet {
+            if !self.quiet() {
                 let label = if self.squash {
                     "Squash merge committed"
                 } else {
@@ -442,15 +519,24 @@ impl MergeCmd {
                     &commit_oid.to_string()[..7]
                 );
             }
-        } else if !self.quiet {
+        } else if !self.quiet() {
             println!("{} Merge successful (not committed)", style("✓").green());
+        }
+
+        if output::machine_mode() {
+            let status = match (merged_oid, self.squash) {
+                (None, _) => "not_committed",
+                (Some(_), true) => "squashed",
+                (Some(_), false) => "merged",
+            };
+            return output::emit_ok(&merge_report("merge", status, merged_oid));
         }
 
         Ok(())
     }
 
     async fn abort_merge(&self) -> Result<()> {
-        if !self.quiet {
+        if !self.quiet() {
             println!("{} Aborting merge...", style("✗").red());
         }
 
@@ -534,7 +620,7 @@ impl MergeCmd {
             }
         }
 
-        if !self.quiet {
+        if !self.quiet() {
             println!(
                 "{} Merge aborted. Cleaned up {} state file(s).",
                 style("✓").green(),
@@ -542,11 +628,15 @@ impl MergeCmd {
             );
         }
 
+        if output::machine_mode() {
+            return output::emit_ok(&merge_report("abort", "aborted", None));
+        }
+
         Ok(())
     }
 
     async fn continue_merge_process(&self) -> Result<()> {
-        if !self.quiet {
+        if !self.quiet() {
             println!("{} Continuing merge...", style("→").cyan());
         }
 
@@ -573,7 +663,7 @@ impl MergeCmd {
         };
 
         // Create commit with resolved changes
-        if !self.quiet {
+        if !self.quiet() {
             println!("{} Creating merge commit...", style("→").cyan());
         }
 
@@ -675,9 +765,13 @@ impl MergeCmd {
             std::fs::remove_file(&merge_mode).ok();
         }
 
-        if !self.quiet {
+        if !self.quiet() {
             println!("{} Merge continued successfully", style("✓").green());
             println!("  Created merge commit: {}", commit_oid.to_hex());
+        }
+
+        if output::machine_mode() {
+            return output::emit_ok(&merge_report("continue", "merged", Some(commit_oid)));
         }
 
         Ok(())

@@ -6,6 +6,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
@@ -62,7 +63,35 @@ enum ResetMode {
     Hard,
 }
 
+impl ResetMode {
+    fn name(self) -> &'static str {
+        match self {
+            ResetMode::Soft => "soft",
+            ResetMode::Mixed => "mixed",
+            ResetMode::Hard => "hard",
+        }
+    }
+}
+
+/// `--machine` data for `reset`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct ResetReport {
+    /// `soft`, `mixed`, `hard`, or `paths` (unstage only; HEAD unchanged).
+    pub mode: String,
+    /// New HEAD; `None` for `paths` and for a reset on an unborn HEAD.
+    pub oid: Option<String>,
+    /// `paths`: how many index entries were removed.
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub unstaged: Option<u64>,
+}
+
 impl ResetCmd {
+    fn quiet(&self) -> bool {
+        self.quiet || output::machine_mode()
+    }
+
     pub async fn execute(&self) -> Result<()> {
         let repo_root = find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
@@ -159,7 +188,7 @@ impl ResetCmd {
             .await
             .with_context(|| "Invalid commit reference")?;
 
-        if !self.quiet {
+        if !self.quiet() {
             let mode_str = match mode {
                 ResetMode::Soft => "soft",
                 ResetMode::Mixed => "mixed",
@@ -242,7 +271,7 @@ impl ResetCmd {
             Index::new().save(repo_root)?;
         }
 
-        if !self.quiet {
+        if !self.quiet() {
             let short_oid = &target_oid.to_hex()[..7];
             match mode {
                 ResetMode::Soft => {
@@ -271,6 +300,14 @@ impl ResetCmd {
             println!("  {} {}", style("→").dim(), summary);
         }
 
+        if output::machine_mode() {
+            return output::emit_ok(&ResetReport {
+                mode: mode.name().into(),
+                oid: Some(target_oid.to_hex()),
+                unstaged: None,
+            });
+        }
+
         Ok(())
     }
 
@@ -282,7 +319,7 @@ impl ResetCmd {
     fn reset_unborn(&self, repo_root: &Path, mode: ResetMode) -> Result<()> {
         Index::new().save(repo_root)?;
 
-        if !self.quiet {
+        if !self.quiet() {
             match mode {
                 ResetMode::Hard => println!(
                     "{} unborn HEAD: index cleared, working tree untouched",
@@ -292,6 +329,14 @@ impl ResetCmd {
                     println!("{} No commits yet; index cleared", style("✓").green())
                 }
             }
+        }
+
+        if output::machine_mode() {
+            return output::emit_ok(&ResetReport {
+                mode: mode.name().into(),
+                oid: None,
+                unstaged: None,
+            });
         }
 
         Ok(())
@@ -305,17 +350,17 @@ impl ResetCmd {
             if path == "." {
                 index.clear();
                 unstaged_count = 1;
-                if !self.quiet {
+                if !self.quiet() {
                     println!("{} Unstaged all files", style("✓").green());
                 }
             } else {
                 let path_buf = PathBuf::from(path.replace('\\', "/"));
                 if index.remove_entry(&path_buf).is_some() {
                     unstaged_count += 1;
-                    if !self.quiet {
+                    if !self.quiet() {
                         println!("{} Unstaged: {}", style("✓").green(), path);
                     }
-                } else if !self.quiet {
+                } else if !self.quiet() {
                     println!("{} Not staged: {}", style("ℹ").cyan(), path);
                 }
             }
@@ -323,12 +368,20 @@ impl ResetCmd {
 
         index.save(repo_root)?;
 
-        if !self.quiet && unstaged_count > 0 {
+        if !self.quiet() && unstaged_count > 0 {
             println!(
                 "\n{} Unstaged {} file(s)",
                 style("✓").green().bold(),
                 unstaged_count
             );
+        }
+
+        if output::machine_mode() {
+            return output::emit_ok(&ResetReport {
+                mode: "paths".into(),
+                oid: None,
+                unstaged: Some(unstaged_count),
+            });
         }
 
         Ok(())

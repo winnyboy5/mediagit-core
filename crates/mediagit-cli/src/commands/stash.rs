@@ -8,8 +8,69 @@ use console::style;
 use mediagit_versioning::{
     CheckoutManager, Commit, Index, ObjectDatabase, ObjectType, Oid, RefDatabase, Tree,
 };
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+
+use crate::output;
+
+/// `--machine` data for every `stash` subcommand.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct StashReport {
+    /// `save`, `apply`, `pop`, `drop`, `clear`, `list` or `show`.
+    pub action: String,
+    /// Stash entry acted on (`apply`, `pop`, `drop`, `show`).
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub index: Option<u64>,
+    /// Stash commit; `None` for `list`/`clear`, and for a `save` with nothing to stash.
+    pub oid: Option<String>,
+    pub message: Option<String>,
+    /// `apply`/`pop`: working-tree files updated.
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub files_updated: Option<u64>,
+    /// `list` (all entries, newest first) and `show` (the one entry).
+    pub stashes: Vec<StashEntryReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct StashEntryReport {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub index: u64,
+    pub oid: String,
+    pub message: String,
+    pub branch: Option<String>,
+    /// RFC 3339.
+    pub timestamp: String,
+}
+
+fn stash_report(action: &str) -> StashReport {
+    StashReport {
+        action: action.into(),
+        index: None,
+        oid: None,
+        message: None,
+        files_updated: None,
+        stashes: Vec::new(),
+    }
+}
+
+fn entry_report(index: usize, e: &StashEntry) -> StashEntryReport {
+    StashEntryReport {
+        index: index as u64,
+        oid: e.commit_oid.clone(),
+        message: e.message.clone(),
+        branch: e.branch.clone(),
+        timestamp: e.timestamp.clone(),
+    }
+}
+
+fn quiet(flag: bool) -> bool {
+    flag || output::machine_mode()
+}
 
 /// Stash changes in working directory
 #[derive(Parser, Debug)]
@@ -241,8 +302,11 @@ impl StashCmd {
 
         // BUG-3 fix: Check index, working-tree changes, AND untracked files
         if index.is_empty() && working_tree_changes.is_empty() && untracked_changes.is_empty() {
-            if !opts.quiet {
+            if !quiet(opts.quiet) {
                 println!("{} No changes to stash", style("ℹ").blue());
+            }
+            if output::machine_mode() {
+                return output::emit_ok(&stash_report("save"));
             }
             return Ok(());
         }
@@ -344,7 +408,7 @@ impl StashCmd {
         let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
         checkout_mgr.checkout_commit(&current_oid).await?;
 
-        if !opts.quiet {
+        if !quiet(opts.quiet) {
             println!(
                 "{} Saved working directory and index state",
                 style("✓").green()
@@ -352,10 +416,34 @@ impl StashCmd {
             println!("  WIP on: {}", message);
         }
 
+        if output::machine_mode() {
+            return output::emit_ok(&StashReport {
+                index: Some(0),
+                oid: Some(commit_oid.to_hex()),
+                message: Some(message),
+                ..stash_report("save")
+            });
+        }
+
         Ok(())
     }
 
     async fn apply(&self, opts: &ApplyOpts) -> Result<()> {
+        let (index, files_updated, entry) = self.apply_inner(opts).await?;
+        if output::machine_mode() {
+            return output::emit_ok(&StashReport {
+                index: Some(index as u64),
+                oid: Some(entry.commit_oid),
+                message: Some(entry.message),
+                files_updated: Some(files_updated as u64),
+                ..stash_report("apply")
+            });
+        }
+        Ok(())
+    }
+
+    /// Apply without emitting, so `pop` can report once for apply+drop.
+    async fn apply_inner(&self, opts: &ApplyOpts) -> Result<(usize, usize, StashEntry)> {
         let repo_root = find_repo_root()?;
         let mediagit_dir = repo_root.join(".mediagit");
         let storage = create_storage_backend(&repo_root).await?;
@@ -398,14 +486,14 @@ impl StashCmd {
         let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
         let files_updated = checkout_mgr.apply_tree_overlay(&stash_oid).await?;
 
-        if !opts.quiet {
+        if !quiet(opts.quiet) {
             println!("{} Applied stash entry {}", style("✓").green(), stash_index);
             if files_updated > 0 {
                 println!("  Updated {} file(s)", files_updated);
             }
         }
 
-        Ok(())
+        Ok((stash_index, files_updated as usize, stash_entry))
     }
 
     /// WT-7: stashed paths whose working copy holds unsaved work that the
@@ -467,6 +555,17 @@ impl StashCmd {
 
         let stash_list = self.load_all_stashes(&mediagit_dir)?;
 
+        if output::machine_mode() {
+            return output::emit_ok(&StashReport {
+                stashes: stash_list
+                    .iter()
+                    .enumerate()
+                    .map(|(i, e)| entry_report(i, e))
+                    .collect(),
+                ..stash_report("list")
+            });
+        }
+
         if stash_list.is_empty() {
             println!("No stashes found");
             return Ok(());
@@ -502,6 +601,16 @@ impl StashCmd {
         let stash_index = opts.stash.unwrap_or(0);
         let stash_entry = self.load_stash_entry(&mediagit_dir, stash_index)?;
 
+        if output::machine_mode() {
+            return output::emit_ok(&StashReport {
+                index: Some(stash_index as u64),
+                oid: Some(stash_entry.commit_oid.clone()),
+                message: Some(stash_entry.message.clone()),
+                stashes: vec![entry_report(stash_index, &stash_entry)],
+                ..stash_report("show")
+            });
+        }
+
         println!(
             "{}",
             style(format!("stash@{{{}}}", stash_index)).yellow().bold()
@@ -523,6 +632,20 @@ impl StashCmd {
     }
 
     async fn drop(&self, opts: &DropOpts) -> Result<()> {
+        let (index, removed) = self.drop_inner(opts).await?;
+        if output::machine_mode() {
+            return output::emit_ok(&StashReport {
+                index: Some(index as u64),
+                oid: Some(removed.commit_oid),
+                message: Some(removed.message),
+                ..stash_report("drop")
+            });
+        }
+        Ok(())
+    }
+
+    /// Drop without emitting, so `pop` can report once for apply+drop.
+    async fn drop_inner(&self, opts: &DropOpts) -> Result<(usize, StashEntry)> {
         let repo_root = find_repo_root()?;
         let mediagit_dir = repo_root.join(".mediagit");
 
@@ -541,7 +664,7 @@ impl StashCmd {
         // Save updated list
         self.save_all_stashes(&mediagit_dir, &stash_list)?;
 
-        if !opts.quiet {
+        if !quiet(opts.quiet) {
             println!(
                 "{} Dropped stash@{{{}}} ({})",
                 style("✓").green(),
@@ -550,7 +673,7 @@ impl StashCmd {
             );
         }
 
-        Ok(())
+        Ok((stash_index, removed))
     }
 
     async fn pop(&self, opts: &PopOpts) -> Result<()> {
@@ -563,14 +686,24 @@ impl StashCmd {
             force: opts.force,
             quiet: opts.quiet,
         };
-        self.apply(&apply_opts).await?;
+        let (index, files_updated, entry) = self.apply_inner(&apply_opts).await?;
 
         // Drop stash after successful apply
         let drop_opts = DropOpts {
             stash: opts.stash,
             quiet: opts.quiet,
         };
-        self.drop(&drop_opts).await?;
+        self.drop_inner(&drop_opts).await?;
+
+        if output::machine_mode() {
+            return output::emit_ok(&StashReport {
+                index: Some(index as u64),
+                oid: Some(entry.commit_oid),
+                message: Some(entry.message),
+                files_updated: Some(files_updated as u64),
+                ..stash_report("pop")
+            });
+        }
 
         Ok(())
     }
@@ -609,6 +742,9 @@ impl StashCmd {
             std::fs::remove_file(&stash_path)?;
         }
 
+        if output::machine_mode() {
+            return output::emit_ok(&stash_report("clear"));
+        }
         println!("{} Cleared all stash entries", style("✓").green());
 
         Ok(())

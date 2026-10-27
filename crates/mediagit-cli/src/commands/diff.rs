@@ -8,11 +8,97 @@ use console::style;
 use mediagit_versioning::{
     Commit, Index, ObjectDatabase, Oid, RefDatabase, Tag, Tree, TreeDiffer, resolve_revision,
 };
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::ignore_rules::IgnoreMatcher;
+use crate::output;
+
+/// `--machine` data for `diff`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct DiffReport {
+    /// `commits` (`diff <a> <b>`), `working` (`diff`, working tree vs HEAD) or
+    /// `cached` (`diff --cached`, index vs HEAD).
+    pub mode: String,
+    /// Source commit; `None` only when there is no left-hand commit to name.
+    pub from: Option<String>,
+    /// Target commit; `None` for `working` and `cached`.
+    pub to: Option<String>,
+    pub files: Vec<DiffFileReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct DiffFileReport {
+    pub path: String,
+    /// `added`, `modified` or `deleted`.
+    pub status: String,
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub old_size: Option<u64>,
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub new_size: Option<u64>,
+    /// Either side looks binary (NUL byte in the first 8000 bytes, or too
+    /// large to sniff). No text hunks are produced.
+    pub binary: bool,
+}
+
+const BINARY_SNIFF: usize = 8000;
+/// Blobs above this are reported binary without being read.
+// ponytail: size cutoff instead of streaming a prefix; add a ranged read if text files >8 MiB matter.
+const BINARY_READ_LIMIT: u64 = 8 * 1024 * 1024;
+
+/// (size, binary) of a stored blob; `(None, false)` when absent.
+async fn oid_side(odb: &ObjectDatabase, oid: Option<&Oid>) -> (Option<u64>, bool) {
+    let Some(oid) = oid else {
+        return (None, false);
+    };
+    let size = odb.get_object_size(oid).await.ok().map(|s| s as u64);
+    let binary = match size {
+        Some(s) if s <= BINARY_READ_LIMIT => match odb.read(oid).await {
+            Ok(b) => b.iter().take(BINARY_SNIFF).any(|&c| c == 0),
+            Err(_) => false,
+        },
+        Some(_) => true,
+        None => false,
+    };
+    (size, binary)
+}
+
+/// (size, binary) of a working-tree file; `(None, false)` when unreadable.
+fn file_side(path: &Path) -> (Option<u64>, bool) {
+    use std::io::Read;
+    let size = std::fs::metadata(path).ok().map(|m| m.len());
+    let mut buf = [0u8; BINARY_SNIFF];
+    let binary = match std::fs::File::open(path).and_then(|mut f| f.read(&mut buf)) {
+        Ok(n) => buf[..n].contains(&0),
+        Err(_) => false,
+    };
+    (size, binary)
+}
+
+/// A stored `old`/`new` pair becomes one report row.
+async fn stored_file(
+    odb: &ObjectDatabase,
+    path: String,
+    status: &str,
+    old: Option<&Oid>,
+    new: Option<&Oid>,
+) -> DiffFileReport {
+    let (old_size, old_bin) = oid_side(odb, old).await;
+    let (new_size, new_bin) = oid_side(odb, new).await;
+    DiffFileReport {
+        path,
+        status: status.into(),
+        old_size,
+        new_size,
+        binary: old_bin || new_bin,
+    }
+}
 
 /// Show changes between commits
 ///
@@ -85,7 +171,8 @@ impl DiffCmd {
         if self.word_diff {
             anyhow::bail!("--word-diff is not yet implemented.");
         }
-        if self.quiet {
+        // --machine always answers: quiet would leave stdout empty.
+        if self.quiet && !output::machine_mode() {
             return Ok(());
         }
 
@@ -119,6 +206,44 @@ impl DiffCmd {
         let to_data = odb.read(&to_oid).await?;
         let to_commit = Commit::deserialize(&to_data)
             .context(format!("Failed to deserialize commit {}", to_oid))?;
+
+        if output::machine_mode() {
+            let mut files = Vec::new();
+            if from_commit.tree != to_commit.tree {
+                let diff = TreeDiffer::new(odb.clone())
+                    .diff_trees(&from_commit.tree, &to_commit.tree)
+                    .await
+                    .context("Failed to diff trees")?;
+                for e in &diff.added {
+                    files
+                        .push(stored_file(&odb, e.name.clone(), "added", None, Some(&e.oid)).await);
+                }
+                for e in &diff.modified {
+                    files.push(
+                        stored_file(
+                            &odb,
+                            e.path.clone(),
+                            "modified",
+                            Some(&e.source.oid),
+                            Some(&e.target.oid),
+                        )
+                        .await,
+                    );
+                }
+                for e in &diff.deleted {
+                    files.push(
+                        stored_file(&odb, e.name.clone(), "deleted", Some(&e.oid), None).await,
+                    );
+                }
+                files.sort_by(|a, b| a.path.cmp(&b.path));
+            }
+            return output::emit_ok(&DiffReport {
+                mode: "commits".into(),
+                from: Some(from_oid.to_hex()),
+                to: Some(to_oid.to_hex()),
+                files,
+            });
+        }
 
         // Display diff header
         println!("{} Comparing commits:", style("📊").cyan().bold());
@@ -249,6 +374,51 @@ impl DiffCmd {
             }
         }
 
+        if output::machine_mode() {
+            let mut files = Vec::new();
+            for path in &modified {
+                let name = path.to_string_lossy().replace('\\', "/");
+                let (new_size, new_bin) = file_side(&repo_root.join(path));
+                let (old_size, old_bin) = oid_side(odb, head_files.get(path)).await;
+                files.push(DiffFileReport {
+                    path: name,
+                    status: "modified".into(),
+                    old_size,
+                    new_size,
+                    binary: old_bin || new_bin,
+                });
+            }
+            for path in &added {
+                let (new_size, binary) = file_side(&repo_root.join(path));
+                files.push(DiffFileReport {
+                    path: path.to_string_lossy().replace('\\', "/"),
+                    status: "added".into(),
+                    old_size: None,
+                    new_size,
+                    binary,
+                });
+            }
+            for path in &deleted {
+                files.push(
+                    stored_file(
+                        odb,
+                        path.to_string_lossy().replace('\\', "/"),
+                        "deleted",
+                        head_files.get(path),
+                        None,
+                    )
+                    .await,
+                );
+            }
+            files.sort_by(|a, b| a.path.cmp(&b.path));
+            return output::emit_ok(&DiffReport {
+                mode: "working".into(),
+                from: Some(head_oid.to_hex()),
+                to: None,
+                files,
+            });
+        }
+
         // Display results
         let short_head = &head_oid.to_hex()[..7];
         println!(
@@ -326,18 +496,21 @@ impl DiffCmd {
         // Load index
         let index = Index::load(repo_root)?;
 
-        if index.is_empty() {
+        let machine = output::machine_mode();
+        if index.is_empty() && !machine {
             println!("{} No staged changes (index is empty)", style("ℹ").blue());
             return Ok(());
         }
 
         let short_head = &head_oid.to_hex()[..7];
-        println!(
-            "{} Diff: index vs HEAD ({})",
-            style("📊").cyan().bold(),
-            style(short_head).yellow()
-        );
-        println!();
+        if !machine {
+            println!(
+                "{} Diff: index vs HEAD ({})",
+                style("📊").cyan().bold(),
+                style(short_head).yellow()
+            );
+            println!();
+        }
 
         let mut staged_new = Vec::new();
         let mut staged_modified = Vec::new();
@@ -350,6 +523,33 @@ impl DiffCmd {
             } else {
                 staged_new.push(entry.path.clone());
             }
+        }
+
+        if machine {
+            let staged: HashMap<&PathBuf, &Oid> =
+                index.entries().map(|e| (&e.path, &e.oid)).collect();
+            let mut files = Vec::new();
+            for (paths, status) in [(&staged_modified, "modified"), (&staged_new, "added")] {
+                for path in paths {
+                    files.push(
+                        stored_file(
+                            odb,
+                            path.to_string_lossy().replace('\\', "/"),
+                            status,
+                            head_files.get(path),
+                            staged.get(path).copied(),
+                        )
+                        .await,
+                    );
+                }
+            }
+            files.sort_by(|a, b| a.path.cmp(&b.path));
+            return output::emit_ok(&DiffReport {
+                mode: "cached".into(),
+                from: Some(head_oid.to_hex()),
+                to: None,
+                files,
+            });
         }
 
         if staged_new.is_empty() && staged_modified.is_empty() {

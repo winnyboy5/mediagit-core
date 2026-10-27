@@ -105,7 +105,9 @@ lines that are not `type:"progress"`.
 
 **Supported commands:** `status`, `version`, `log`, `show`, `branch`, `tag`,
 `add`, `commit`, `init`, `media`, `remote`, `lock`, `fetch`, `pull`, `push`,
-`clone`. `show <rev> --tree` lists a commit's files; `show <rev>:<path> --output <file>`
+`clone`, `merge`, `diff`, `stash`, `reset`, `revert`, `download`. A `merge` or
+`revert` that stops on conflicts prints an `ok:true` envelope with
+`status:"conflict"` and a `conflicts` list, and exits 1. `show <rev> --tree` lists a commit's files; `show <rev>:<path> --output <file>`
 writes a blob to a file. Every other command prints a `json_unsupported`
 envelope and exits 2 without running.
 
