@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Cleared the six `cargo audit` advisories blocking the release (#92).**
+  `zstd` 0.13 to 0.14.3 (with zstd-safe 8.2.0 and zstd-sys 2.1.2) fixes
+  RUSTSEC-2026-0391, -0398, -0403 and -0410; `ctutils` 0.4.2 to 0.4.6 fixes
+  RUSTSEC-2026-0385. The zstd frame format is unchanged, so existing objects
+  still decode. RUSTSEC-2026-0387 (`crypto-bigint` 0.5, timing) is ignored
+  until 2026-12-01: no `jsonwebtoken` release moves off it yet, and we only
+  use HS256, so the affected p256/p384 code never runs.
+
 ### Fixed
 
 - **gc could delete data a concurrent push or `add` was still writing.** The
