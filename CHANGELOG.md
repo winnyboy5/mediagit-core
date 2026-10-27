@@ -46,6 +46,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loose objects were named by a unix-second timestamp, so the second repack
   overwrote the first pack after the first had already deleted its loose
   copies. Packs are now named by their content hash.
+- **An interrupted `pull` left a ref to a missing commit** (#93). `pull`
+  wrote `refs/remotes/<remote>/<branch>` before downloading the commit it
+  named, so a crash, power loss or cancel in between left `fsck` reporting a
+  ref to a missing commit until the next successful pull. The tracking ref of
+  the branch being pulled is now written only after its objects are stored.
+- **An interrupted `pull` could make every later pull fail** (#95). A pull
+  stopped after the commit and tree were stored but before a large file's
+  manifest was written left the repository unable to pull: on retry the
+  client told the server it already had that commit, the server sent no
+  large files, and checkout failed with "object not found" every time. The
+  tracking ref is no longer written early on retry either, so the next pull
+  downloads what is missing.
+- **On a server without auth, nobody could release their own lock.** `lock
+  create` recorded the owner name the client sent, but `lock unlock` had no
+  identity to compare, so every unlock without `--force` was refused (403),
+  including the desktop app's Unlock button. `unlock` now sends the same
+  identity `create` uses, and a no-auth server compares it with the lock's
+  owner. Servers with auth still use the authenticated user and ignore the
+  supplied name, so a writer cannot release someone else's lock by naming
+  them.
+- **`status` printed modified, deleted and untracked paths in a random order**
+  on every run. All lists are now sorted by path, so `--porcelain` output is
+  stable for scripts.
+
+### Changed
+
+- **`status` no longer re-reads unchanged files** (#94). It used to hash every
+  committed file on every run, so its cost grew with the size of the working
+  tree (a 500 GB repository re-read 500 GB per `status`). A stat cache
+  (`.mediagit/stat-cache`, local only, never transferred) remembers each
+  tracked file's size, modification time, file id, change time and content
+  hash, and `status` re-hashes a file only when one of those changed or the
+  entry is too recent to trust. Measured on a release build: a second
+  `status` over 4 x 1 GB files takes 25 ms instead of 706 ms; building the
+  cache costs under 3% on the first run. Only `status` uses the cache; the
+  checks that stop switch, merge, rebase, reset and pull from overwriting
+  local edits still hash every file. Known limit, as in Git: on Windows an
+  in-place rewrite that keeps both size and modification time is not seen.
+  `MEDIAGIT_STAT_CACHE=0` turns the cache off.
 
 ## [v0.6.0-rc.1] - 2026-10-23
 

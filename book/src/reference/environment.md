@@ -97,6 +97,12 @@ MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurre
 | `MEDIAGIT_DECOMPRESS_BLOCKING` | Offload decompression to `spawn_blocking` for chunks ≥ threshold. | `1` (ON) |
 | `MEDIAGIT_DECOMPRESS_BLOCKING_THRESHOLD` | Byte size above which decompression is offloaded. | `262144` (256 KiB) |
 
+### Status
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MEDIAGIT_STAT_CACHE` | `0` turns off the `status` stat cache (`.mediagit/stat-cache`), so every tracked file is re-hashed on each run. Use it if a file edit is ever not reported: on Windows an in-place rewrite that keeps both size and modification time is the known limit. | `1` (ON) |
+
 ### Add / Chunking / Delta
 
 | Variable | Description | Default |
