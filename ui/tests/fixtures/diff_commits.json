@@ -1,0 +1,35 @@
+{
+  "mode": "commits",
+  "from": "0001000100010001000100010001000100010001",
+  "to": "0000000000000000000000000000000000000000",
+  "files": [
+    {
+      "path": "art/hero_preview.png",
+      "status": "modified",
+      "old_size": 1153433,
+      "new_size": 1363148,
+      "binary": true
+    },
+    {
+      "path": "art/new_concept.png",
+      "status": "added",
+      "old_size": null,
+      "new_size": 884736,
+      "binary": true
+    },
+    {
+      "path": "audio/vo_take1.wav",
+      "status": "deleted",
+      "old_size": 5242880,
+      "new_size": null,
+      "binary": true
+    },
+    {
+      "path": "notes/shot_list.txt",
+      "status": "modified",
+      "old_size": 2048,
+      "new_size": 2210,
+      "binary": false
+    }
+  ]
+}

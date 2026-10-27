@@ -1,0 +1,8 @@
+{
+  "action": "revert",
+  "status": "conflict",
+  "commits": [],
+  "conflicts": [
+    "art/hero_preview.png"
+  ]
+}

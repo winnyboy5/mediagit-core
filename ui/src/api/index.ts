@@ -6,18 +6,25 @@ import type {
   ApiError,
   BranchActionReport,
   BranchListReport,
+  DiffReport,
+  DownloadReport,
   EngineInfo,
   Extracted,
   FetchReport,
   LocksReport,
   LockReport,
   LogReport,
+  MergeReport,
   MediaInfo,
   Progress,
   PullReport,
   PushReport,
   RemotesReport,
+  ResetReport,
+  RevertReport,
   ShowCommitReport,
+  StashReport,
+  TagActionReport,
   StatusReport,
   TagListReport,
 } from './types'
@@ -42,6 +49,9 @@ function channel(onProgress?: (p: Progress) => void): Channel<Progress> {
 }
 
 type Report = (p: Progress) => void
+
+/** `recursive` asks per file; `ours`/`theirs` settle every conflict the same way. */
+export type MergeStrategy = 'recursive' | 'ours' | 'theirs'
 
 export const api = {
   engineInfo: () => invoke<EngineInfo>('engine_info'),
@@ -76,6 +86,10 @@ export const api = {
   branchDelete: (repo: string, name: string, force = false) => invoke<unknown>('branch_delete', { repo, name, force }),
   branchRename: (repo: string, from: string, to: string) => invoke<BranchActionReport>('branch_rename', { repo, from, to }),
   tagList: (repo: string) => invoke<TagListReport>('tag_list', { repo }),
+  /** Name a version (`commit` null = the latest); a message makes the tag annotated. */
+  tagCreate: (repo: string, name: string, commit: string | null, message: string | null) =>
+    invoke<TagActionReport>('tag_create', { repo, name, commit, message }),
+  tagDelete: (repo: string, name: string) => invoke<TagActionReport>('tag_delete', { repo, name }),
 
   lockList: (repo: string) => invoke<LocksReport>('lock_list', { repo }),
   lockCreate: (repo: string, path: string) => invoke<LockReport>('lock_create', { repo, path }),
@@ -90,4 +104,39 @@ export const api = {
     invoke<PullReport>('repo_pull', { repo, remote, opId, onProgress: channel(onProgress) }),
   push: (repo: string, remote: string | null, opId: string, onProgress: Report) =>
     invoke<PushReport>('repo_push', { repo, remote, opId, onProgress: channel(onProgress) }),
+
+  merge: (repo: string, branch: string, strategy: MergeStrategy, noFf: boolean, onProgress: Report) =>
+    invoke<MergeReport>('repo_merge', { repo, branch, strategy, noFf, onProgress: channel(onProgress) }),
+  mergeControl: (repo: string, action: 'continue' | 'abort', onProgress: Report) =>
+    invoke<MergeReport>('repo_merge_control', { repo, action, onProgress: channel(onProgress) }),
+  /** Take our version (`ours`) or `theirs` (a commit id) of one conflicted file, and stage it. */
+  mergeResolve: (repo: string, path: string, side: 'ours' | 'theirs', theirs: string) =>
+    invoke<unknown>('merge_resolve', { repo, path, side, theirs }),
+
+  /** Two versions, or (both null) the working folder against the latest version. */
+  diff: (repo: string, from: string | null, to: string | null) => invoke<DiffReport>('repo_diff', { repo, from, to }),
+
+  stashList: (repo: string) => invoke<StashReport>('stash_list', { repo }),
+  stashShow: (repo: string, index: number) => invoke<StashReport>('stash_show', { repo, index }),
+  stashSave: (repo: string, message: string | null, includeUntracked: boolean, onProgress: Report) =>
+    invoke<StashReport>('stash_save', { repo, message, includeUntracked, onProgress: channel(onProgress) }),
+  stashApply: (repo: string, index: number, onProgress: Report) =>
+    invoke<StashReport>('stash_apply', { repo, index, onProgress: channel(onProgress) }),
+  stashPop: (repo: string, index: number, onProgress: Report) =>
+    invoke<StashReport>('stash_pop', { repo, index, onProgress: channel(onProgress) }),
+  stashDrop: (repo: string, index: number) => invoke<StashReport>('stash_drop', { repo, index }),
+  stashClear: (repo: string) => invoke<StashReport>('stash_clear', { repo }),
+
+  /** Move the current branch to `rev`, keeping every file as it is. Never touches files. */
+  reset: (repo: string, rev: string, mode: 'soft' | 'mixed') => invoke<ResetReport>('repo_reset', { repo, rev, mode }),
+  /** Move the branch to `rev` and overwrite the working folder. Unsaved work is lost. */
+  resetHard: (repo: string, rev: string, onProgress: Report) =>
+    invoke<ResetReport>('repo_reset_hard', { repo, rev, onProgress: channel(onProgress) }),
+  revert: (repo: string, rev: string) => invoke<RevertReport>('repo_revert', { repo, rev }),
+  revertControl: (repo: string, action: 'continue' | 'abort' | 'skip') =>
+    invoke<RevertReport>('repo_revert_control', { repo, action }),
+  /** Overwrite one working file with its content at `rev`. */
+  restoreFile: (repo: string, rev: string, path: string) => invoke<unknown>('repo_restore_file', { repo, rev, path }),
+  download: (repo: string, remotePath: string, gitRef: string | null, output: string, opId: string, onProgress: Report) =>
+    invoke<DownloadReport>('repo_download', { repo, remotePath, gitRef, output, opId, onProgress: channel(onProgress) }),
 }

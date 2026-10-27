@@ -1,0 +1,36 @@
+[
+  {
+    "progress": {
+      "id": 1,
+      "msg": "Updating files",
+      "pos": 0,
+      "len": 40,
+      "unit": "items",
+      "done": false
+    }
+  },
+  {
+    "hold": true
+  },
+  {
+    "progress": {
+      "id": 1,
+      "msg": "Updating files",
+      "pos": 18,
+      "len": 40,
+      "unit": "items",
+      "done": false
+    }
+  },
+  {
+    "hold": true
+  },
+  {
+    "resolve": {
+      "action": "merge",
+      "status": "merged",
+      "oid": "00aa00aa00aa00aa00aa00aa00aa00aa00aa00aa",
+      "conflicts": []
+    }
+  }
+]

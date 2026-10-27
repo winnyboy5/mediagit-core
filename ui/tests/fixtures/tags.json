@@ -1,0 +1,22 @@
+{
+  "tags": [
+    {
+      "name": "v0.3",
+      "oid": "0000000000000000000000000000000000000000",
+      "annotated": true,
+      "message": "Rig v2 export"
+    },
+    {
+      "name": "v0.2",
+      "oid": "0001000100010001000100010001000100010001",
+      "annotated": false,
+      "message": null
+    },
+    {
+      "name": "v0.1",
+      "oid": "0002000200020002000200020002000200020002",
+      "annotated": true,
+      "message": "Initial import"
+    }
+  ]
+}

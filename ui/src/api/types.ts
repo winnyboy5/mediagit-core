@@ -22,6 +22,16 @@ export type { RemoteReport } from './generated/RemoteReport'
 export type { FetchReport } from './generated/FetchReport'
 export type { PullReport } from './generated/PullReport'
 export type { PushReport } from './generated/PushReport'
+export type { MergeReport } from './generated/MergeReport'
+export type { MergeConflictReport } from './generated/MergeConflictReport'
+export type { DiffReport } from './generated/DiffReport'
+export type { DiffFileReport } from './generated/DiffFileReport'
+export type { StashReport } from './generated/StashReport'
+export type { StashEntryReport } from './generated/StashEntryReport'
+export type { ResetReport } from './generated/ResetReport'
+export type { RevertReport } from './generated/RevertReport'
+export type { TagActionReport } from './generated/TagActionReport'
+export type { DownloadReport } from './generated/DownloadReport'
 
 export interface ApiError {
   code: string

@@ -1,0 +1,23 @@
+{
+  "action": "list",
+  "index": null,
+  "oid": null,
+  "message": null,
+  "files_updated": null,
+  "stashes": [
+    {
+      "index": 0,
+      "oid": "1111111111111111111111111111111111111111",
+      "message": "WIP lighting",
+      "branch": "main",
+      "timestamp": "2026-10-28T09:00:00Z"
+    },
+    {
+      "index": 1,
+      "oid": "2222222222222222222222222222222222222222",
+      "message": "Audio experiment",
+      "branch": "feature/grade",
+      "timestamp": "2026-10-24T09:00:00Z"
+    }
+  ]
+}

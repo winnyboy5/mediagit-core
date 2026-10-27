@@ -22,7 +22,8 @@ const emit = defineEmits<{ select: [id: string] }>()
 </script>
 
 <template>
-  <DropdownMenuRoot>
+  <!-- Non-modal: a modal menu aria-hides the whole app while focusable controls remain in it (axe aria-hidden-focus). -->
+  <DropdownMenuRoot :modal="false">
     <DropdownMenuTrigger as-child><slot /></DropdownMenuTrigger>
     <DropdownMenuPortal>
       <DropdownMenuContent class="menu" :side-offset="6" align="end">

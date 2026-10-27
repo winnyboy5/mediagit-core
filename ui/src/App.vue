@@ -26,7 +26,7 @@ function closeOverlays() {
   shell.overlayOpen = false
 }
 
-const VIEWS =['/changes', '/history', '/branches', '/locks', '/sync']
+const VIEWS = ['/changes', '/history', '/branches', '/locks', '/sync', '/merge', '/compare', '/tags']
 function onKey(e: KeyboardEvent) {
   if (e.key === 'Escape' && shell.narrow && shell.overlayOpen && !shell.activityOpen) shell.overlayOpen = false
   if (!e.ctrlKey || e.altKey || e.shiftKey || !repo.path) return

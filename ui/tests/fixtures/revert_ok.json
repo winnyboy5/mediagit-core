@@ -1,0 +1,8 @@
+{
+  "action": "revert",
+  "status": "reverted",
+  "commits": [
+    "00bb00bb00bb00bb00bb00bb00bb00bb00bb00bb"
+  ],
+  "conflicts": []
+}

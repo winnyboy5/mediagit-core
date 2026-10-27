@@ -16,11 +16,16 @@ import { formatWhen, shortOid } from '@/lib/history'
 import { useBranchesStore } from '@/stores/branches'
 import { useHistoryStore } from '@/stores/history'
 import { useRepoStore } from '@/stores/repo'
+import Button from '@/components/Button.vue'
+import { useUndoStore } from '@/stores/undo'
+import UndoDialogs from './UndoDialogs.vue'
+import UndoMenu from './UndoMenu.vue'
 import VersionFiles from './VersionFiles.vue'
 
 const history = useHistoryStore()
 const branches = useBranchesStore()
 const repo = useRepoStore()
+const undo = useUndoStore()
 
 const commit = computed(() => history.selected)
 const rest = computed(() => {
@@ -71,6 +76,15 @@ function askSwitch(name: string) {
           <span class="mono">{{ shortOid(commit.oid) }}</span>
           <span v-if="commit.parents.length > 1" class="merge"><GitMerge :size="14" aria-hidden="true" /> Merge of {{ commit.parents.length }} versions</span>
         </p>
+        <div class="acts">
+          <UndoMenu :rev="commit.oid" :summary="commit.summary" />
+        </div>
+        <div v-if="history.file" class="picked" data-testid="picked-file">
+          <span class="mono pf">{{ history.file.path }}</span>
+          <Button size="sm" :disabled="history.file.deleted || undo.busy" @click="undo.ask({ kind: 'restore', rev: commit.oid, path: history.file.path })">
+            Restore this file…
+          </Button>
+        </div>
         <ul v-if="pills.length" class="pills" aria-label="Names pointing at this version">
           <li v-for="p in pills" :key="p.kind + p.name">
             <TagPill v-if="p.kind === 'tag'" :name="p.name" />
@@ -81,6 +95,7 @@ function askSwitch(name: string) {
           </li>
         </ul>
         <pre v-if="rest" class="body">{{ rest }}</pre>
+        <UndoDialogs />
       </header>
 
       <Tabs v-model="tab" class="tabs" label="Version contents" :items="TABS">
@@ -116,6 +131,22 @@ function askSwitch(name: string) {
 </template>
 
 <style scoped>
+.acts {
+  display: flex;
+  gap: var(--space-2);
+}
+.picked {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-2);
+}
+.pf {
+  overflow-wrap: anywhere;
+  font-size: var(--fs-sm);
+}
 .detail {
   display: grid;
   grid-template-columns: minmax(220px, 34%) minmax(0, 1fr);

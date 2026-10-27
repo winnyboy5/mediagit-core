@@ -1,0 +1,27 @@
+{
+  "action": "merge",
+  "status": "conflict",
+  "oid": null,
+  "conflicts": [
+    {
+      "path": "art/hero.psd",
+      "state": "unresolved",
+      "kind": "modify_modify"
+    },
+    {
+      "path": "scenes/opening.blend",
+      "state": "unresolved",
+      "kind": "modify_modify"
+    },
+    {
+      "path": "char/rig.fbx",
+      "state": "unresolved",
+      "kind": "modify_delete"
+    },
+    {
+      "path": "audio/vo_take3.wav",
+      "state": "unresolved",
+      "kind": "delete_modify"
+    }
+  ]
+}

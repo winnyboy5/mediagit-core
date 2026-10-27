@@ -32,7 +32,7 @@ const id = useId()
         <ChevronDown :size="16" aria-hidden="true" />
       </SelectTrigger>
       <SelectPortal>
-        <SelectContent class="content" position="popper" :side-offset="4">
+        <SelectContent class="mg-select-content" position="popper" :side-offset="4">
           <SelectViewport class="viewport">
             <SelectItem v-for="o in options" :key="o.value" :value="o.value" class="item">
               <SelectItemText>{{ o.label }}</SelectItemText>
@@ -75,7 +75,11 @@ label {
   opacity: 0.55;
   cursor: not-allowed;
 }
-.content {
+:global(.mg-select-content) {
+  /* Global: reka renders this element without this component's scope id, so a scoped
+     rule never matched and the list was unstyled. Positioned so the popper wrapper copies
+     the z-index, which keeps it above an open dialog's scrim. */
+  position: relative;
   z-index: 60;
   min-width: var(--reka-select-trigger-width);
   border: 1px solid var(--border);

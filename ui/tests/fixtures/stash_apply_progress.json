@@ -1,0 +1,38 @@
+[
+  {
+    "progress": {
+      "id": 1,
+      "msg": "Applying stash",
+      "pos": 0,
+      "len": 3,
+      "unit": "items",
+      "done": false
+    }
+  },
+  {
+    "hold": true
+  },
+  {
+    "progress": {
+      "id": 1,
+      "msg": "Applying stash",
+      "pos": 2,
+      "len": 3,
+      "unit": "items",
+      "done": false
+    }
+  },
+  {
+    "hold": true
+  },
+  {
+    "resolve": {
+      "action": "apply",
+      "index": 0,
+      "oid": "1111111111111111111111111111111111111111",
+      "message": "WIP lighting",
+      "files_updated": 3,
+      "stashes": []
+    }
+  }
+]

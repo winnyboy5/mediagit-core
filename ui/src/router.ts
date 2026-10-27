@@ -25,6 +25,9 @@ export const router = createRouter({
     { path: '/branches', component: () => import('./views/BranchesView.vue'), meta: { needsRepo: true, title: 'Branches' } },
     { path: '/locks', component: () => import('./views/LocksView.vue'), meta: { needsRepo: true, title: 'Locks' } },
     { path: '/sync', component: () => import('./views/SyncView.vue'), meta: { needsRepo: true, title: 'Sync' } },
+    { path: '/merge', component: () => import('./views/MergeView.vue'), meta: { needsRepo: true, title: 'Merge & conflicts' } },
+    { path: '/compare', component: () => import('./views/CompareView.vue'), meta: { needsRepo: true, title: 'Compare' } },
+    { path: '/tags', component: () => import('./views/TagsStashView.vue'), meta: { needsRepo: true, title: 'Tags & Stash' } },
     { path: '/kit', component: () => import('./kit/KitView.vue'), meta: { bare: true } },
   ],
 })

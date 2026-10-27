@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
-//! Typed commands for the History, Inspector, Branches, Locks and Sync views.
+//! Typed commands for the History, Inspector, Branches, Locks, Sync, Merge, Compare,
+//! Stash and undo views.
 //!
 //! Each command builds its argv here (never forwarded from the webview),
 //! validates every user-controlled piece, and runs the CLI through the
@@ -232,6 +233,192 @@ fn transfer_argv(verb: &str, remote: Option<&str>) -> Result<Vec<String>, Engine
         argv.push("--".into());
         argv.push(r.into());
     }
+    Ok(argv)
+}
+
+/// `merge --strategy=<s> [--no-ff] -- <branch>`. Strategy is the only merge-wide
+/// conflict knob the CLI honours; per-file choices go through [`file_at_argv`].
+fn merge_argv(branch: &str, strategy: &str, no_ff: bool) -> Result<Vec<String>, EngineError> {
+    ref_name_ok("branch name", branch)?;
+    if !matches!(strategy, "recursive" | "ours" | "theirs") {
+        return Err(invalid("merge strategy", strategy));
+    }
+    let mut argv = vec!["merge".to_owned(), format!("--strategy={strategy}")];
+    if no_ff {
+        argv.push("--no-ff".into());
+    }
+    argv.extend(["--".into(), branch.into()]);
+    Ok(argv)
+}
+
+/// `merge --continue` or `merge --abort`.
+fn merge_control_argv(action: &str) -> Result<Vec<String>, EngineError> {
+    match action {
+        "continue" | "abort" => Ok(vec!["merge".into(), format!("--{action}")]),
+        _ => Err(invalid("merge action", action)),
+    }
+}
+
+/// `show <rev>:<path> --output <repo>/<path>`: put a file as it was at `rev` into the
+/// working folder. Returns the repo-relative path too, for the follow-up `add`.
+fn file_at_argv(repo: &Path, rev: &str, path: &str) -> Result<(String, Vec<String>), EngineError> {
+    rev_ok(rev)?;
+    let rel = repo_relative(repo, path)?;
+    if rel == "." {
+        return Err(invalid("path", path));
+    }
+    let out = repo.join(&rel);
+    let argv = vec![
+        "show".into(),
+        format!("{rev}:{rel}"),
+        "--output".into(),
+        out.to_string_lossy().into_owned(),
+    ];
+    Ok((rel, argv))
+}
+
+/// Resolve one conflicted file: take our (`HEAD`) or their version of it, then stage it.
+fn merge_resolve_argvs(
+    repo: &Path,
+    path: &str,
+    side: &str,
+    theirs: &str,
+) -> Result<[Vec<String>; 2], EngineError> {
+    let rev = match side {
+        "ours" => "HEAD",
+        "theirs" => theirs,
+        _ => return Err(invalid("side", side)),
+    };
+    let (rel, show) = file_at_argv(repo, rev, path)?;
+    Ok([show, vec!["add".into(), "--".into(), rel]])
+}
+
+/// `diff` (working folder against HEAD) or `diff <from> <to>`; never half of each.
+fn diff_argv(from: Option<&str>, to: Option<&str>) -> Result<Vec<String>, EngineError> {
+    match (from, to) {
+        (None, None) => Ok(vec!["diff".into()]),
+        (Some(a), Some(b)) => {
+            rev_ok(a)?;
+            rev_ok(b)?;
+            Ok(vec!["diff".into(), a.into(), b.into()])
+        }
+        _ => Err(invalid("comparison", "needs two versions or none")),
+    }
+}
+
+fn stash_save_argv(
+    message: Option<&str>,
+    include_untracked: bool,
+) -> Result<Vec<String>, EngineError> {
+    let mut argv = vec!["stash".to_owned(), "save".into()];
+    if let Some(m) = message.map(str::trim).filter(|m| !m.is_empty()) {
+        if m.contains('\0') {
+            return Err(invalid("stash message", m));
+        }
+        argv.push(format!("--message={m}"));
+    }
+    if include_untracked {
+        argv.push("--include-untracked".into());
+    }
+    Ok(argv)
+}
+
+/// `stash <show|apply|pop|drop> <index>`.
+fn stash_entry_argv(sub: &str, index: u32) -> Result<Vec<String>, EngineError> {
+    if !matches!(sub, "show" | "apply" | "pop" | "drop") {
+        return Err(invalid("stash action", sub));
+    }
+    Ok(vec!["stash".into(), sub.into(), index.to_string()])
+}
+
+/// `reset --soft|--mixed|--hard -- <rev>`. The mode is always spelled out.
+fn reset_argv(mode: &str, rev: &str) -> Result<Vec<String>, EngineError> {
+    rev_ok(rev)?;
+    if !matches!(mode, "soft" | "mixed" | "hard") {
+        return Err(invalid("reset mode", mode));
+    }
+    Ok(vec![
+        "reset".into(),
+        format!("--{mode}"),
+        "--".into(),
+        rev.into(),
+    ])
+}
+
+/// `tag create [-a --message=<m>] -- <name> [<commit>]`; a message makes the tag annotated.
+fn tag_create_argv(
+    name: &str,
+    commit: Option<&str>,
+    message: Option<&str>,
+) -> Result<Vec<String>, EngineError> {
+    ref_name_ok("tag name", name)?;
+    let mut argv = vec!["tag".to_owned(), "create".into()];
+    if let Some(m) = message.map(str::trim).filter(|m| !m.is_empty()) {
+        if m.contains(' ') {
+            return Err(invalid("tag message", m));
+        }
+        argv.extend(["--annotated".into(), format!("--message={m}")]);
+    }
+    argv.extend(["--".into(), name.into()]);
+    if let Some(c) = commit {
+        rev_ok(c)?;
+        argv.push(c.into());
+    }
+    Ok(argv)
+}
+
+fn tag_delete_argv(name: &str) -> Result<Vec<String>, EngineError> {
+    ref_name_ok("tag name", name)?;
+    Ok(vec![
+        "tag".into(),
+        "delete".into(),
+        "--".into(),
+        name.into(),
+    ])
+}
+
+fn revert_argv(rev: &str) -> Result<Vec<String>, EngineError> {
+    rev_ok(rev)?;
+    Ok(vec!["revert".into(), "--".into(), rev.into()])
+}
+
+fn revert_control_argv(action: &str) -> Result<Vec<String>, EngineError> {
+    match action {
+        "continue" | "abort" | "skip" => Ok(vec!["revert".into(), format!("--{action}")]),
+        _ => Err(invalid("revert action", action)),
+    }
+}
+
+/// A full http(s) URL, or a path relative to the repository root (no `..`).
+fn remote_path_ok(p: &str) -> bool {
+    if plain_arg("remote path", p).is_err() || p.chars().any(char::is_control) {
+        return false;
+    }
+    if p.starts_with("http://") || p.starts_with("https://") {
+        return clone_source_ok(p);
+    }
+    !Path::new(p).is_absolute()
+        && !p.contains('\\')
+        && p.split('/').all(|s| !s.is_empty() && s != "..")
+}
+
+/// `download [--ref=<r>] --output=<file> -- <remote path>`.
+fn download_argv(
+    remote_path: &str,
+    git_ref: Option<&str>,
+    output: &str,
+) -> Result<Vec<String>, EngineError> {
+    if !remote_path_ok(remote_path) {
+        return Err(invalid("remote path", remote_path));
+    }
+    crate::abs_dest(output)?;
+    let mut argv = vec!["download".to_owned()];
+    if let Some(r) = git_ref {
+        ref_name_ok("ref", r)?;
+        argv.push(format!("--ref={r}"));
+    }
+    argv.push(format!("--output={output}"));
+    argv.extend(["--".into(), remote_path.into()]);
     Ok(argv)
 }
 
@@ -563,6 +750,33 @@ pub async fn tag_list(
     read(&engine, &repo, &["tag".to_owned(), "list".into()]).await
 }
 
+/// Name a version. `commit` defaults to HEAD; a message makes the tag annotated.
+#[tauri::command]
+pub async fn tag_create(
+    engine: tauri::State<'_, Engine>,
+    queues: tauri::State<'_, RepoQueues>,
+    repo: String,
+    name: String,
+    commit: Option<String>,
+    message: Option<String>,
+) -> Result<Value, EngineError> {
+    let repo = repo_path(&repo)?;
+    let argv = tag_create_argv(&name, commit.as_deref(), message.as_deref())?;
+    write(&engine, &queues, &repo, &argv).await
+}
+
+/// Remove a tag name; the version it named stays.
+#[tauri::command]
+pub async fn tag_delete(
+    engine: tauri::State<'_, Engine>,
+    queues: tauri::State<'_, RepoQueues>,
+    repo: String,
+    name: String,
+) -> Result<Value, EngineError> {
+    let repo = repo_path(&repo)?;
+    write(&engine, &queues, &repo, &tag_delete_argv(&name)?).await
+}
+
 /// All file locks on the default remote.
 #[tauri::command]
 pub async fn lock_list(
@@ -699,6 +913,332 @@ pub async fn repo_push(
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
     let argv = transfer_argv("push", remote.as_deref())?;
+    stream(
+        &engine,
+        &ops,
+        &queues,
+        &repo,
+        &argv,
+        &op_id,
+        true,
+        &on_progress,
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// W2: merge, compare, stash, undo, download
+// ---------------------------------------------------------------------------
+
+/// Start a merge; streams checkout progress. A conflict is a normal result
+/// (`status: "conflict"`, with the paths), not an error.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn repo_merge(
+    engine: tauri::State<'_, Engine>,
+    ops: tauri::State<'_, Ops>,
+    queues: tauri::State<'_, RepoQueues>,
+    repo: String,
+    branch: String,
+    strategy: String,
+    no_ff: bool,
+    on_progress: Channel<Progress>,
+) -> Result<Value, EngineError> {
+    let repo = repo_path(&repo)?;
+    let argv = merge_argv(&branch, &strategy, no_ff)?;
+    stream(
+        &engine,
+        &ops,
+        &queues,
+        &repo,
+        &argv,
+        "",
+        false,
+        &on_progress,
+    )
+    .await
+}
+
+/// Finish (`continue`) or give up on (`abort`) the merge in progress.
+#[tauri::command]
+pub async fn repo_merge_control(
+    engine: tauri::State<'_, Engine>,
+    ops: tauri::State<'_, Ops>,
+    queues: tauri::State<'_, RepoQueues>,
+    repo: String,
+    action: String,
+    on_progress: Channel<Progress>,
+) -> Result<Value, EngineError> {
+    let repo = repo_path(&repo)?;
+    let argv = merge_control_argv(&action)?;
+    stream(
+        &engine,
+        &ops,
+        &queues,
+        &repo,
+        &argv,
+        "",
+        false,
+        &on_progress,
+    )
+    .await
+}
+
+/// Resolve one conflicted file with our version (`ours`) or `theirs` (a commit id), and stage it.
+#[tauri::command]
+pub async fn merge_resolve(
+    engine: tauri::State<'_, Engine>,
+    queues: tauri::State<'_, RepoQueues>,
+    repo: String,
+    path: String,
+    side: String,
+    theirs: String,
+) -> Result<Value, EngineError> {
+    let repo = repo_path(&repo)?;
+    let [show, add] = merge_resolve_argvs(&repo, &path, &side, &theirs)?;
+    queues
+        .write(&repo, async {
+            read(&engine, &repo, &show).await?;
+            read(&engine, &repo, &add).await
+        })
+        .await
+}
+
+/// Changed files between two versions, or the working folder against HEAD when both are absent.
+#[tauri::command]
+pub async fn repo_diff(
+    engine: tauri::State<'_, Engine>,
+    repo: String,
+    from: Option<String>,
+    to: Option<String>,
+) -> Result<Value, EngineError> {
+    let repo = repo_path(&repo)?;
+    read(&engine, &repo, &diff_argv(from.as_deref(), to.as_deref())?).await
+}
+
+/// All stash entries, newest first.
+#[tauri::command]
+pub async fn stash_list(
+    engine: tauri::State<'_, Engine>,
+    repo: String,
+) -> Result<Value, EngineError> {
+    let repo = repo_path(&repo)?;
+    read(&engine, &repo, &["stash".to_owned(), "list".into()]).await
+}
+
+/// One stash entry.
+#[tauri::command]
+pub async fn stash_show(
+    engine: tauri::State<'_, Engine>,
+    repo: String,
+    index: u32,
+) -> Result<Value, EngineError> {
+    let repo = repo_path(&repo)?;
+    read(&engine, &repo, &stash_entry_argv("show", index)?).await
+}
+
+/// Park the unsaved changes; streams progress.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn stash_save(
+    engine: tauri::State<'_, Engine>,
+    ops: tauri::State<'_, Ops>,
+    queues: tauri::State<'_, RepoQueues>,
+    repo: String,
+    message: Option<String>,
+    include_untracked: bool,
+    on_progress: Channel<Progress>,
+) -> Result<Value, EngineError> {
+    let repo = repo_path(&repo)?;
+    let argv = stash_save_argv(message.as_deref(), include_untracked)?;
+    stream(
+        &engine,
+        &ops,
+        &queues,
+        &repo,
+        &argv,
+        "",
+        false,
+        &on_progress,
+    )
+    .await
+}
+
+/// Bring a stash back, keeping the entry; streams files-written progress.
+#[tauri::command]
+pub async fn stash_apply(
+    engine: tauri::State<'_, Engine>,
+    ops: tauri::State<'_, Ops>,
+    queues: tauri::State<'_, RepoQueues>,
+    repo: String,
+    index: u32,
+    on_progress: Channel<Progress>,
+) -> Result<Value, EngineError> {
+    let repo = repo_path(&repo)?;
+    let argv = stash_entry_argv("apply", index)?;
+    stream(
+        &engine,
+        &ops,
+        &queues,
+        &repo,
+        &argv,
+        "",
+        false,
+        &on_progress,
+    )
+    .await
+}
+
+/// Bring a stash back and remove the entry.
+#[tauri::command]
+pub async fn stash_pop(
+    engine: tauri::State<'_, Engine>,
+    ops: tauri::State<'_, Ops>,
+    queues: tauri::State<'_, RepoQueues>,
+    repo: String,
+    index: u32,
+    on_progress: Channel<Progress>,
+) -> Result<Value, EngineError> {
+    let repo = repo_path(&repo)?;
+    let argv = stash_entry_argv("pop", index)?;
+    stream(
+        &engine,
+        &ops,
+        &queues,
+        &repo,
+        &argv,
+        "",
+        false,
+        &on_progress,
+    )
+    .await
+}
+
+/// Throw one stash entry away.
+#[tauri::command]
+pub async fn stash_drop(
+    engine: tauri::State<'_, Engine>,
+    queues: tauri::State<'_, RepoQueues>,
+    repo: String,
+    index: u32,
+) -> Result<Value, EngineError> {
+    let repo = repo_path(&repo)?;
+    write(&engine, &queues, &repo, &stash_entry_argv("drop", index)?).await
+}
+
+/// Throw every stash entry away.
+#[tauri::command]
+pub async fn stash_clear(
+    engine: tauri::State<'_, Engine>,
+    queues: tauri::State<'_, RepoQueues>,
+    repo: String,
+) -> Result<Value, EngineError> {
+    let repo = repo_path(&repo)?;
+    write(
+        &engine,
+        &queues,
+        &repo,
+        &["stash".to_owned(), "clear".into()],
+    )
+    .await
+}
+
+/// Move HEAD to `rev`, keeping files (`soft`: staged too; `mixed`: unstaged). Never touches
+/// working files; `reset --hard` is its own command.
+#[tauri::command]
+pub async fn repo_reset(
+    engine: tauri::State<'_, Engine>,
+    queues: tauri::State<'_, RepoQueues>,
+    repo: String,
+    rev: String,
+    mode: String,
+) -> Result<Value, EngineError> {
+    let repo = repo_path(&repo)?;
+    if mode == "hard" {
+        return Err(invalid("reset mode", &mode));
+    }
+    write(&engine, &queues, &repo, &reset_argv(&mode, &rev)?).await
+}
+
+/// Move HEAD to `rev` and overwrite the working folder with it. Unsaved work is lost.
+#[tauri::command]
+pub async fn repo_reset_hard(
+    engine: tauri::State<'_, Engine>,
+    ops: tauri::State<'_, Ops>,
+    queues: tauri::State<'_, RepoQueues>,
+    repo: String,
+    rev: String,
+    on_progress: Channel<Progress>,
+) -> Result<Value, EngineError> {
+    let repo = repo_path(&repo)?;
+    let argv = reset_argv("hard", &rev)?;
+    stream(
+        &engine,
+        &ops,
+        &queues,
+        &repo,
+        &argv,
+        "",
+        false,
+        &on_progress,
+    )
+    .await
+}
+
+/// Undo a version by adding a new one that reverses it.
+#[tauri::command]
+pub async fn repo_revert(
+    engine: tauri::State<'_, Engine>,
+    queues: tauri::State<'_, RepoQueues>,
+    repo: String,
+    rev: String,
+) -> Result<Value, EngineError> {
+    let repo = repo_path(&repo)?;
+    write(&engine, &queues, &repo, &revert_argv(&rev)?).await
+}
+
+/// `continue`, `abort` or `skip` a revert that stopped on a conflict.
+#[tauri::command]
+pub async fn repo_revert_control(
+    engine: tauri::State<'_, Engine>,
+    queues: tauri::State<'_, RepoQueues>,
+    repo: String,
+    action: String,
+) -> Result<Value, EngineError> {
+    let repo = repo_path(&repo)?;
+    write(&engine, &queues, &repo, &revert_control_argv(&action)?).await
+}
+
+/// Overwrite one working file with its content at `rev`. The file's unsaved edits are lost.
+#[tauri::command]
+pub async fn repo_restore_file(
+    engine: tauri::State<'_, Engine>,
+    queues: tauri::State<'_, RepoQueues>,
+    repo: String,
+    rev: String,
+    path: String,
+) -> Result<Value, EngineError> {
+    let repo = repo_path(&repo)?;
+    let (_, argv) = file_at_argv(&repo, &rev, &path)?;
+    write(&engine, &queues, &repo, &argv).await
+}
+
+/// Download one file from the remote without cloning; cancellable.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn repo_download(
+    engine: tauri::State<'_, Engine>,
+    ops: tauri::State<'_, Ops>,
+    queues: tauri::State<'_, RepoQueues>,
+    repo: String,
+    remote_path: String,
+    git_ref: Option<String>,
+    output: String,
+    op_id: String,
+    on_progress: Channel<Progress>,
+) -> Result<Value, EngineError> {
+    let repo = repo_path(&repo)?;
+    let argv = download_argv(&remote_path, git_ref.as_deref(), &output)?;
     stream(
         &engine,
         &ops,
@@ -854,6 +1394,211 @@ mod tests {
         );
         assert!(bad(transfer_argv("push", Some("--force"))));
         assert!(bad(transfer_argv("fetch", Some("a b"))));
+    }
+
+    #[test]
+    fn merge_argv_spells_out_strategy_and_guards_the_branch() {
+        assert_eq!(
+            merge_argv("feature/fx", "recursive", false).unwrap(),
+            ["merge", "--strategy=recursive", "--", "feature/fx"]
+        );
+        assert_eq!(
+            merge_argv("fx", "theirs", true).unwrap(),
+            ["merge", "--strategy=theirs", "--no-ff", "--", "fx"]
+        );
+        assert!(bad(merge_argv("--abort", "ours", false)));
+        assert!(bad(merge_argv("a b", "ours", false)));
+        assert!(bad(merge_argv("fx", "octopus", false)));
+        assert!(bad(merge_argv("fx", "--strategy=ours", false)));
+        assert_eq!(
+            merge_control_argv("continue").unwrap(),
+            ["merge", "--continue"]
+        );
+        assert_eq!(merge_control_argv("abort").unwrap(), ["merge", "--abort"]);
+        assert!(bad(merge_control_argv("--abort")));
+        assert!(bad(merge_control_argv("")));
+    }
+
+    #[test]
+    fn merge_resolve_extracts_one_side_then_stages_the_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        let theirs = "0123456789abcdef0123456789abcdef";
+        let out = repo.join("art/hero.psd").to_string_lossy().into_owned();
+        let [show, add] = merge_resolve_argvs(repo, "art/hero.psd", "ours", theirs).unwrap();
+        assert_eq!(
+            show,
+            ["show", "HEAD:art/hero.psd", "--output", out.as_str()]
+        );
+        assert_eq!(add, ["add", "--", "art/hero.psd"]);
+        let [show, _] = merge_resolve_argvs(repo, "art/hero.psd", "theirs", theirs).unwrap();
+        assert_eq!(show[1], format!("{theirs}:art/hero.psd"));
+        assert!(bad_pair(merge_resolve_argvs(repo, "../x", "ours", theirs)));
+        assert!(bad_pair(merge_resolve_argvs(repo, "-x", "ours", theirs)));
+        assert!(bad_pair(merge_resolve_argvs(repo, ".", "ours", theirs)));
+        assert!(bad_pair(merge_resolve_argvs(repo, "a.psd", "both", theirs)));
+        assert!(bad_pair(merge_resolve_argvs(
+            repo, "a.psd", "theirs", "main"
+        )));
+        assert!(bad_pair(merge_resolve_argvs(repo, "a.psd", "theirs", "")));
+    }
+
+    #[allow(clippy::needless_pass_by_value)] // call sites pass temporaries
+    fn bad_pair(r: Result<[Vec<String>; 2], EngineError>) -> bool {
+        matches!(r, Err(EngineError::InvalidArgument(_)))
+    }
+
+    #[test]
+    fn diff_needs_two_versions_or_none() {
+        let a = "0123456789abcdef";
+        let b = "fedcba9876543210";
+        assert_eq!(diff_argv(None, None).unwrap(), ["diff"]);
+        assert_eq!(diff_argv(Some(a), Some(b)).unwrap(), ["diff", a, b]);
+        assert_eq!(
+            diff_argv(Some("HEAD"), Some(a)).unwrap(),
+            ["diff", "HEAD", a]
+        );
+        assert!(bad(diff_argv(Some(a), None)));
+        assert!(bad(diff_argv(None, Some(a))));
+        assert!(bad(diff_argv(Some("--cached"), Some(a))));
+        assert!(bad(diff_argv(Some("main"), Some(a))));
+    }
+
+    #[test]
+    fn stash_argv_keeps_messages_as_values_and_indexes_numeric() {
+        assert_eq!(stash_save_argv(None, false).unwrap(), ["stash", "save"]);
+        assert_eq!(
+            stash_save_argv(Some("  WIP --lighting "), true).unwrap(),
+            [
+                "stash",
+                "save",
+                "--message=WIP --lighting",
+                "--include-untracked"
+            ]
+        );
+        assert_eq!(
+            stash_save_argv(Some("   "), false).unwrap(),
+            ["stash", "save"]
+        );
+        assert!(bad(stash_save_argv(Some("a\0b"), false)));
+        assert_eq!(stash_entry_argv("pop", 2).unwrap(), ["stash", "pop", "2"]);
+        for sub in ["show", "apply", "pop", "drop"] {
+            assert!(stash_entry_argv(sub, 0).is_ok(), "{sub}");
+        }
+        assert!(bad(stash_entry_argv("clear", 0)));
+        assert!(bad(stash_entry_argv("--index", 0)));
+    }
+
+    #[test]
+    fn reset_always_names_its_mode_and_revert_guards_the_revision() {
+        let oid = "0123456789abcdef";
+        assert_eq!(
+            reset_argv("soft", oid).unwrap(),
+            ["reset", "--soft", "--", oid]
+        );
+        assert_eq!(
+            reset_argv("mixed", "HEAD").unwrap(),
+            ["reset", "--mixed", "--", "HEAD"]
+        );
+        assert_eq!(
+            reset_argv("hard", oid).unwrap(),
+            ["reset", "--hard", "--", oid]
+        );
+        assert!(bad(reset_argv("", oid)));
+        assert!(bad(reset_argv("--hard", oid)));
+        assert!(bad(reset_argv("hard", "main")));
+        assert!(bad(reset_argv("hard", "--soft")));
+        assert_eq!(revert_argv(oid).unwrap(), ["revert", "--", oid]);
+        assert!(bad(revert_argv("--no-commit")));
+        for a in ["continue", "abort", "skip"] {
+            assert_eq!(
+                revert_control_argv(a).unwrap(),
+                ["revert", format!("--{a}").as_str()]
+            );
+        }
+        assert!(bad(revert_control_argv("--abort")));
+    }
+
+    #[test]
+    fn restoring_a_file_writes_it_inside_the_repo_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        let oid = "0123456789abcdef";
+        let (rel, argv) = file_at_argv(repo, oid, "a/b.png").unwrap();
+        assert_eq!(rel, "a/b.png");
+        assert_eq!(argv[..2], ["show".to_owned(), format!("{oid}:a/b.png")]);
+        assert_eq!(argv[2], "--output");
+        assert_eq!(argv[3], repo.join("a/b.png").to_string_lossy());
+        for p in ["../x", "-x", ".", "a/../../x"] {
+            assert!(file_at_argv(repo, oid, p).is_err(), "{p}");
+        }
+        assert!(file_at_argv(repo, "main", "a.png").is_err());
+    }
+
+    #[test]
+    fn download_argv_takes_urls_or_repo_relative_paths_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("logo.png");
+        let out = out.to_str().unwrap();
+        assert_eq!(
+            download_argv("assets/logo.png", Some("v1.0"), out).unwrap(),
+            [
+                "download".to_owned(),
+                "--ref=v1.0".into(),
+                format!("--output={out}"),
+                "--".into(),
+                "assets/logo.png".into()
+            ]
+        );
+        assert!(download_argv("http://s:3000/proj/assets/logo.png", None, out).is_ok());
+        for p in [
+            "--output=x",
+            "../x",
+            "a/../b",
+            "/etc/passwd",
+            "a//b",
+            "a\\b",
+            "ftp://h/x",
+            "",
+            "a\u{7}b",
+        ] {
+            assert!(bad(download_argv(p, None, out)), "{p:?}");
+        }
+        assert!(bad(download_argv("a.png", Some("--ref"), out)));
+        assert!(bad(download_argv("a.png", Some("a b"), out)));
+        assert!(bad(download_argv("a.png", None, "relative.png")));
+        assert!(bad(download_argv("a.png", None, "-o")));
+    }
+
+    #[test]
+    fn tag_argv_guards_names_commits_and_messages() {
+        let oid = "0123456789abcdef";
+        assert_eq!(
+            tag_create_argv("v1.0", None, None).unwrap(),
+            ["tag", "create", "--", "v1.0"]
+        );
+        assert_eq!(
+            tag_create_argv("v1.0", Some(oid), Some(" Final ")).unwrap(),
+            [
+                "tag",
+                "create",
+                "--annotated",
+                "--message=Final",
+                "--",
+                "v1.0",
+                oid
+            ]
+        );
+        for n in ["--force", "a b", "x..y", ""] {
+            assert!(bad(tag_create_argv(n, None, None)), "{n:?}");
+            assert!(bad(tag_delete_argv(n)), "{n:?}");
+        }
+        assert!(bad(tag_create_argv("v1", Some("main"), None)));
+        assert!(bad(tag_create_argv("v1", None, Some("a b"))));
+        assert_eq!(
+            tag_delete_argv("v1.0").unwrap(),
+            ["tag", "delete", "--", "v1.0"]
+        );
     }
 
     #[test]

@@ -354,6 +354,8 @@ pub fn run() {
             commands::branch_delete,
             commands::branch_rename,
             commands::tag_list,
+            commands::tag_create,
+            commands::tag_delete,
             commands::lock_list,
             commands::lock_create,
             commands::lock_unlock,
@@ -362,7 +364,24 @@ pub fn run() {
             commands::remote_remove,
             commands::repo_fetch,
             commands::repo_pull,
-            commands::repo_push
+            commands::repo_push,
+            commands::repo_merge,
+            commands::repo_merge_control,
+            commands::merge_resolve,
+            commands::repo_diff,
+            commands::stash_list,
+            commands::stash_show,
+            commands::stash_save,
+            commands::stash_apply,
+            commands::stash_pop,
+            commands::stash_drop,
+            commands::stash_clear,
+            commands::repo_reset,
+            commands::repo_reset_hard,
+            commands::repo_revert,
+            commands::repo_revert_control,
+            commands::repo_restore_file,
+            commands::repo_download
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| panic!("failed to start MediaGit desktop: {e}"));

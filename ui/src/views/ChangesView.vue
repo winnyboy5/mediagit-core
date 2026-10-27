@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { CircleCheck, PanelRight, RefreshCw } from 'lucide-vue-next'
+import { CircleCheck, Ellipsis, PanelRight, RefreshCw } from 'lucide-vue-next'
 import Button from '@/components/Button.vue'
+import DropdownMenu from '@/components/DropdownMenu.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import ErrorState from '@/components/ErrorState.vue'
 import IconButton from '@/components/IconButton.vue'
@@ -14,11 +15,15 @@ import { primaryBar } from '@/stores/ops'
 import { useChangesStore } from '@/stores/changes'
 import { useRepoStore } from '@/stores/repo'
 import { useShellStore } from '@/stores/shell'
+import { useUndoStore } from '@/stores/undo'
+import UndoDialogs from './history/UndoDialogs.vue'
 import FileList from './changes/FileList.vue'
 
 const repo = useRepoStore()
 const changes = useChangesStore()
 const shell = useShellStore()
+const undo = useUndoStore()
+const MORE = [{ id: 'discard', label: 'Discard all unsaved changes…', danger: true }]
 
 const loadingFirst = computed(() => !repo.status && !repo.error)
 const empty = computed(() => !!repo.status && changes.counts.total === 0)
@@ -56,6 +61,9 @@ const MODES = [
         <IconButton label="Refresh changes" variant="secondary" :disabled="repo.loading" @click="repo.refresh()">
           <RefreshCw :size="18" />
         </IconButton>
+        <DropdownMenu :items="MORE" @select="undo.ask({ kind: 'reset', mode: 'hard', rev: 'HEAD' })">
+          <IconButton label="More actions" variant="secondary" :disabled="busy || undo.busy || !changes.counts.total"><Ellipsis :size="18" /></IconButton>
+        </DropdownMenu>
         <IconButton
           :label="shell.inspectorVisible ? 'Hide details panel' : 'Show details panel'"
           variant="secondary"
@@ -66,6 +74,8 @@ const MODES = [
         </IconButton>
       </div>
     </header>
+
+    <UndoDialogs />
 
     <div v-if="loadingFirst" class="pad"><SkeletonRows :count="8" /></div>
 

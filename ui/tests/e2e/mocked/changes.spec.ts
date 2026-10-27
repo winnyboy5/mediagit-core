@@ -184,7 +184,7 @@ test.describe('Changes: refresh and shell', () => {
     await expect(page).toHaveURL(/#\/history$/)
     await page.keyboard.press('Control+1')
     await expect(page).toHaveURL(/#\/changes$/)
-    await expect(page.getByRole('button', { name: 'Compare' })).toHaveAttribute('aria-disabled', 'true')
+    await expect(page.getByRole('button', { name: 'Remote Browser' })).toHaveAttribute('aria-disabled', 'true')
   })
 
   test('keyboard: list takes focus with a ring; arrows move, Space toggles', async ({ page }) => {
