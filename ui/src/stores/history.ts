@@ -95,6 +95,7 @@ export const useHistoryStore = defineStore('history', () => {
     if (!repo.path) return
     const mine = ++token
     loading.value = true
+    loadingMore.value = false // a superseded loadMore no longer clears it (token mismatch)
     error.value = null
     moreError.value = null
     try {

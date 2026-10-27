@@ -47,7 +47,7 @@ export const useBranchesStore = defineStore('branches', () => {
     busy.value = true
     actionError.value = null
     try {
-      await ops.track({ kind: 'other', label }, (report, id) => {
+      await ops.track({ kind: 'other', label, retry: () => void act(label, run, done, isSwitch) }, (report, id) => {
         if (isSwitch) switchOpId.value = id
         return run(root, report)
       }, () => done)

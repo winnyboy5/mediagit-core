@@ -96,3 +96,45 @@ fn status_without_machine_is_unchanged() {
     assert!(stdout.contains("Repository Status"), "{stdout}");
     assert!(serde_json::from_str::<Value>(&stdout).is_err());
 }
+
+#[test]
+fn bad_flag_under_machine_is_one_invalid_args_envelope() {
+    let tmp = TempDir::new().unwrap();
+    let (code, v) = run_machine(tmp.path(), &["status", "--no-such-flag"]);
+    assert_eq!(code, 2);
+    assert_eq!(v["v"], 1);
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["error"]["code"], "invalid_args");
+    assert!(!v["error"]["message"].as_str().unwrap().is_empty());
+}
+
+#[test]
+fn bad_flag_before_the_subcommand_is_also_an_envelope() {
+    let tmp = TempDir::new().unwrap();
+    let out = mediagit()
+        .args(["--bogus", "--machine", "status"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let v: Value = serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).unwrap();
+    assert_eq!(v["error"]["code"], "invalid_args");
+}
+
+#[test]
+fn help_and_version_under_machine_stay_plain_and_succeed() {
+    let tmp = TempDir::new().unwrap();
+    for flag in ["--help", "--version"] {
+        let out = mediagit()
+            .args(["--machine", flag])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{flag}");
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert!(
+            serde_json::from_str::<Value>(&stdout).is_err(),
+            "{flag}: {stdout}"
+        );
+    }
+}

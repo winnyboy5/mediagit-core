@@ -18,8 +18,27 @@ export interface SelectedFile {
   size: number | null
 }
 
-/** Paths per `add` call: keeps argv far below the Windows command-line limit. */
+/** Paths per `add` call, and UTF-16 units per call (separators included): well under the 32,767 Windows command-line limit. */
 const ADD_BATCH = 200
+const ADD_BUDGET = 24_000
+
+/** Split paths into `add` batches capped by count and cumulative length; an oversized path gets its own batch. */
+export function batchPaths(paths: string[]): string[][] {
+  const out: string[][] = []
+  let cur: string[] = []
+  let size = 0
+  for (const p of paths) {
+    if (cur.length && (cur.length >= ADD_BATCH || size + p.length + 1 > ADD_BUDGET)) {
+      out.push(cur)
+      cur = []
+      size = 0
+    }
+    cur.push(p)
+    size += p.length + 1
+  }
+  if (cur.length) out.push(cur)
+  return out
+}
 
 export const rowKey = (group: Group, path: string) => `${group}:${path}`
 
@@ -148,9 +167,9 @@ export const useChangesStore = defineStore('changes', () => {
     error.value = null
     try {
       await ops.track(
-        { kind: 'add', label },
+        { kind: 'add', label, retry: () => void stagePaths(paths, label) },
         async () => {
-          for (let i = 0; i < paths.length; i += ADD_BATCH) await api.add(root, paths.slice(i, i + ADD_BATCH))
+          for (const batch of batchPaths(paths)) await api.add(root, batch)
         },
         () => label.replace(/^Staging/, 'Staged'),
       )
@@ -190,8 +209,10 @@ export const useChangesStore = defineStore('changes', () => {
     busy.value = 'commit'
     error.value = null
     try {
-      await ops.track({ kind: 'commit', label: `Save version "${text.split('\n')[0]!.slice(0, 40)}"` }, () => api.commit(root, text), () =>
-        plural(counts.value.staged, 'file') + ' saved',
+      await ops.track(
+        { kind: 'commit', label: `Save version "${text.split('\n')[0]!.slice(0, 40)}"`, retry: () => void commit() },
+        () => api.commit(root, text),
+        () => plural(counts.value.staged, 'file') + ' saved',
       )
       message.value = ''
       clearSelection()

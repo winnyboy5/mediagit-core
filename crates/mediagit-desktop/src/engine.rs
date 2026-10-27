@@ -203,12 +203,20 @@ impl Engine {
         });
 
         let mut tail: Vec<String> = Vec::new();
-        let mut lines = BufReader::new(stderr).lines();
-        while let Some(line) = lines
-            .next_line()
-            .await
-            .map_err(|e| EngineError::Spawn(e.to_string()))?
-        {
+        // Raw bytes, not `lines()`: log text need not be UTF-8 (paths in the
+        // active code page), and that must not abort the run and kill the child.
+        let mut reader = BufReader::new(stderr);
+        let mut raw = Vec::new();
+        loop {
+            raw.clear();
+            let n = reader
+                .read_until(b'\n', &mut raw)
+                .await
+                .map_err(|e| EngineError::Spawn(e.to_string()))?;
+            if n == 0 {
+                break;
+            }
+            let line = lossy_line(&raw);
             match parse_progress(&line) {
                 Some(p) => on_progress(p),
                 None => {
@@ -235,6 +243,13 @@ impl Engine {
             other => other,
         })
     }
+}
+
+/// One stderr line as text: invalid UTF-8 is replaced, the line ending dropped.
+fn lossy_line(raw: &[u8]) -> String {
+    String::from_utf8_lossy(raw)
+        .trim_end_matches(['\r', '\n'])
+        .to_owned()
 }
 
 /// Parse an NDJSON progress line; anything else is ordinary log text.
@@ -315,6 +330,15 @@ mod tests {
             parse_envelope(r#"{"v":1,"ok":false}"#),
             Err(EngineError::Protocol(_))
         ));
+    }
+
+    #[test]
+    fn non_utf8_stderr_is_text_not_an_error() {
+        let line = lossy_line(b"WARN bad path caf\xe9.psd\r\n");
+        assert_eq!(line, "WARN bad path caf\u{fffd}.psd");
+        assert!(parse_progress(&line).is_none());
+        let p = lossy_line(b"{\"type\":\"progress\",\"id\":1,\"msg\":\"caf\xe9\",\"pos\":1,\"len\":2,\"unit\":\"items\",\"done\":false}\n");
+        assert_eq!(parse_progress(&p).unwrap().msg, "caf\u{fffd}");
     }
 
     #[test]

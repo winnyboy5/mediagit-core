@@ -415,6 +415,17 @@ mod tracing_env_tests {
     }
 }
 
+/// Exit on a clap error. Under `--machine` a usage error is still one stdout
+/// envelope (the flag is read from raw args: parsing failed); `--help` and
+/// `--version` are not errors and keep clap's plain output.
+fn usage_exit(e: clap::Error, args: &[String]) -> ! {
+    if e.use_stderr() && args.iter().any(|a| a == "--machine") {
+        output::emit_err("invalid_args", e.render().to_string().trim());
+        std::process::exit(2);
+    }
+    e.exit()
+}
+
 fn main() {
     // reqwest is built with `rustls-no-provider`, and google-cloud-auth still
     // links aws-lc-rs, so rustls 0.23 sees two providers and refuses to pick
@@ -427,8 +438,10 @@ fn main() {
     // Preprocess args to support git-style -N shorthand (e.g., log -5 → log -n 5)
     let args = preprocess_args(std::env::args().collect());
     // Parse CLI args on the main thread (lightweight, no async needed)
-    let matches = Cli::command().get_matches_from(args);
-    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    let matches = Cli::command()
+        .try_get_matches_from(&args)
+        .unwrap_or_else(|e| usage_exit(e, &args));
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| usage_exit(e, &args));
 
     if cli.machine {
         output::set_machine_mode(true);
@@ -497,6 +510,9 @@ fn main() {
             std::process::exit(1);
         }
         Err(_) => {
+            if output::machine_mode() {
+                output::emit_err("internal", "mediagit panicked");
+            }
             eprintln!("Fatal: mediagit panicked");
             std::process::exit(2);
         }

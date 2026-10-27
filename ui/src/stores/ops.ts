@@ -56,6 +56,8 @@ export interface OpSpec {
   label: string
   /** Backend cancel hook; only honoured for CANCELLABLE kinds. */
   cancel?: Op['cancel']
+  /** Store-level action Retry runs (keeps its busy guard and refresh); defaults to re-running `fn`. */
+  retry?: () => void
 }
 
 /** Bytes/s over the sample window, or null until two samples >= 1 s apart exist. */
@@ -218,9 +220,11 @@ export const useOpsStore = defineStore('ops', () => {
       fail(id, toApiError(e))
       const op = get(id)
       if (op && op.status === 'failed') {
-        op.retry = () => {
-          track(spec, fn, summarize).catch(() => {})
-        }
+        op.retry =
+          spec.retry ??
+          (() => {
+            track(spec, fn, summarize).catch(() => {})
+          })
       }
       throw e
     }

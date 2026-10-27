@@ -14,7 +14,16 @@ export const useRepoStore = defineStore('repo', () => {
   const loading = ref(false)
   const error = ref<ApiError | null>(null)
   let token = 0
-  const allowed = new Set<string>()
+  // The backend keeps one repo folder in the asset scope; opening another replaces it.
+  let allowed: string | null = null
+
+  function allow(p: string) {
+    if (allowed === p) return
+    allowed = p
+    api.allowRepo(p).catch(() => {
+      if (allowed === p) allowed = null
+    })
+  }
 
   async function refresh() {
     if (!path.value) return
@@ -26,10 +35,7 @@ export const useRepoStore = defineStore('repo', () => {
       if (mine !== token) return
       status.value = s
       // Previews load working files through the asset protocol, which needs the folder allowed.
-      if (!allowed.has(path.value)) {
-        allowed.add(path.value)
-        api.allowRepo(path.value).catch(() => allowed.delete(path.value!))
-      }
+      allow(path.value)
     } catch (e) {
       if (mine !== token) return
       status.value = null
@@ -41,17 +47,20 @@ export const useRepoStore = defineStore('repo', () => {
 
   /** Open a repository; returns false (and stays closed) when it cannot be read. */
   async function open(dir: string): Promise<boolean> {
-    const previous = { path: path.value, status: status.value }
-    path.value = dir
-    status.value = null
-    await refresh()
-    if (error.value) {
-      const failure = error.value
-      path.value = previous.path
-      status.value = previous.status
-      error.value = failure
+    // Validate before touching `path`: other stores watch it and reset on change.
+    let s: StatusReport
+    try {
+      s = await api.repoStatus(dir)
+    } catch (e) {
+      error.value = toApiError(e)
       return false
     }
+    token++ // supersede any refresh of the previous repo
+    path.value = dir
+    status.value = s
+    error.value = null
+    loading.value = false
+    allow(dir)
     save(KEY, dir)
     useRecentStore().add(dir, (status.value as StatusReport | null)?.branch.name)
     return true

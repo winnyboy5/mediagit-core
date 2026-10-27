@@ -35,6 +35,7 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+dunce = "1.0"  # canonical repo paths without the Windows \\?\ prefix
 
 [dev-dependencies]
 tempfile = { workspace = true }

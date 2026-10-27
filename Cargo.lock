@@ -4322,6 +4322,7 @@ dependencies = [
 name = "mediagit-desktop"
 version = "0.6.0-rc.1"
 dependencies = [
+ "dunce",
  "serde",
  "serde_json",
  "tauri",

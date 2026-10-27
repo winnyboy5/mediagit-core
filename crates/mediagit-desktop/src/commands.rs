@@ -311,14 +311,29 @@ async fn stream(
 // commands
 // ---------------------------------------------------------------------------
 
-/// Allow the webview to load files under an opened repository (previews).
+/// Only a folder that holds a `.mediagit` directory is a repository worth exposing.
+fn require_repo(dir: &Path) -> Result<(), EngineError> {
+    if dir.join(".mediagit").is_dir() {
+        Ok(())
+    } else {
+        Err(invalid("repository", &dir.to_string_lossy()))
+    }
+}
+
+/// Allow the webview to load files under an opened repository (previews), but never
+/// its `.mediagit` store. Tauri scopes cannot shrink (a forbid is permanent), so a
+/// previously opened repo stays allowed for the session.
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)] // tauri injects AppHandle by value
 pub fn repo_allow(app: tauri::AppHandle, repo: String) -> Result<(), EngineError> {
     let repo = repo_path(&repo)?;
-    app.asset_protocol_scope()
-        .allow_directory(&repo, true)
-        .map_err(|e| EngineError::Spawn(e.to_string()))
+    require_repo(&repo)?;
+    let scope = app.asset_protocol_scope();
+    let spawn = |e: tauri::Error| EngineError::Spawn(e.to_string());
+    scope
+        .forbid_directory(repo.join(".mediagit"), true)
+        .map_err(spawn)?;
+    scope.allow_directory(&repo, true).map_err(spawn)
 }
 
 /// Commit list page (`log`), newest first, plus all refs.
@@ -839,6 +854,17 @@ mod tests {
         );
         assert!(bad(transfer_argv("push", Some("--force"))));
         assert!(bad(transfer_argv("fetch", Some("a b"))));
+    }
+
+    #[test]
+    fn only_folders_with_a_store_may_be_exposed() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            require_repo(tmp.path()),
+            Err(EngineError::InvalidArgument(_))
+        ));
+        std::fs::create_dir(tmp.path().join(".mediagit")).unwrap();
+        assert!(require_repo(tmp.path()).is_ok());
     }
 
     #[test]

@@ -6,7 +6,7 @@
 mod commands;
 pub mod engine;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -14,14 +14,22 @@ use std::time::{Duration, Instant};
 use commands::RepoQueues;
 use engine::{Engine, EngineError, Progress};
 use serde_json::Value;
+use tauri::Manager;
 use tauri::ipc::Channel;
 use tokio::sync::Notify;
 
+/// How long exit waits for cancelled transfers to wind down.
+const EXIT_GRACE: Duration = Duration::from_secs(3);
+
 /// Reject anything but an existing absolute directory before it reaches argv.
+/// Returns the canonical path so every spelling of a repo shares one write lane.
 fn repo_path(repo: &str) -> Result<PathBuf, EngineError> {
     let p = PathBuf::from(repo);
-    if p.is_absolute() && p.is_dir() {
-        Ok(p)
+    if p.is_absolute()
+        && p.is_dir()
+        && let Ok(canon) = dunce::canonicalize(&p)
+    {
+        Ok(canon)
     } else {
         Err(EngineError::InvalidArgument(format!(
             "not a directory: {repo}"
@@ -43,10 +51,16 @@ fn repo_relative(repo: &Path, path: &str) -> Result<String, EngineError> {
     plain_arg("path", path)?;
     let p = Path::new(path);
     let rel = if p.is_absolute() {
-        p.strip_prefix(repo)
-            .map_err(|_| EngineError::InvalidArgument(format!("outside repository: {path}")))?
+        // `repo` is canonical; the caller may have built `path` from another spelling.
+        let canon = dunce::canonicalize(p).ok();
+        canon
+            .as_deref()
+            .and_then(|c| c.strip_prefix(repo).ok())
+            .or_else(|| p.strip_prefix(repo).ok())
+            .map(Path::to_path_buf)
+            .ok_or_else(|| EngineError::InvalidArgument(format!("outside repository: {path}")))?
     } else {
-        p
+        p.to_path_buf()
     };
     let mut parts = Vec::new();
     for c in rel.components() {
@@ -157,28 +171,64 @@ impl Throttle {
     }
 }
 
+#[derive(Default)]
+struct OpsState {
+    running: HashMap<String, Arc<Notify>>,
+    /// Cancels that arrived before their op registered; honoured at `register`.
+    early: HashSet<String>,
+}
+
 /// Running cancellable operations, by frontend-chosen op id.
 #[derive(Default)]
-struct Ops(Mutex<HashMap<String, Arc<Notify>>>);
+struct Ops(Mutex<OpsState>);
 
 impl Ops {
     fn register(&self, id: &str) -> Arc<Notify> {
         let n = Arc::new(Notify::new());
-        if let Ok(mut m) = self.0.lock() {
-            m.insert(id.to_owned(), Arc::clone(&n));
+        if let Ok(mut s) = self.0.lock() {
+            if s.early.remove(id) {
+                n.notify_one(); // stores a permit: `notified()` fires at once
+            }
+            s.running.insert(id.to_owned(), Arc::clone(&n));
         }
         n
     }
 
     fn finish(&self, id: &str) {
-        if let Ok(mut m) = self.0.lock() {
-            m.remove(id);
+        if let Ok(mut s) = self.0.lock() {
+            s.running.remove(id);
+            s.early.remove(id);
         }
     }
 
+    /// True when `id` was running; otherwise the cancel is remembered for its `register`.
     fn cancel(&self, id: &str) -> bool {
-        let n = self.0.lock().ok().and_then(|m| m.get(id).cloned());
-        n.map(|n| n.notify_one()).is_some()
+        let Ok(mut s) = self.0.lock() else {
+            return false;
+        };
+        if let Some(n) = s.running.get(id) {
+            n.notify_one();
+            true
+        } else {
+            s.early.insert(id.to_owned());
+            false
+        }
+    }
+
+    fn cancel_all(&self) {
+        if let Ok(s) = self.0.lock() {
+            s.running.values().for_each(|n| n.notify_one());
+        }
+    }
+
+    fn is_idle(&self) -> bool {
+        self.0.lock().is_ok_and(|s| s.running.is_empty())
+    }
+
+    async fn idle(&self) {
+        while !self.is_idle() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 }
 
@@ -280,7 +330,7 @@ pub fn run() {
     // Extracted previews are a per-session cache; start each session clean.
     let _ = std::fs::remove_dir_all(commands::preview_dir());
     let engine = Engine::locate().unwrap_or_else(|_| Engine::new(PathBuf::from("mediagit")));
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(engine)
         .manage(Ops::default())
@@ -314,8 +364,28 @@ pub fn run() {
             commands::repo_pull,
             commands::repo_push
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .unwrap_or_else(|e| panic!("failed to start MediaGit desktop: {e}"));
+    // Windows leaves children running when their parent exits, and `kill_on_drop`
+    // only fires if the runs are dropped: cancel transfers, wait briefly, then exit.
+    app.run(|app, event| {
+        if let tauri::RunEvent::ExitRequested {
+            api, code: None, ..
+        } = event
+        {
+            let ops = app.state::<Ops>();
+            if ops.is_idle() {
+                return;
+            }
+            api.prevent_exit();
+            ops.cancel_all();
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = tokio::time::timeout(EXIT_GRACE, app.state::<Ops>().idle()).await;
+                app.exit(0);
+            });
+        }
+    });
 }
 
 #[cfg(test)]
@@ -335,7 +405,40 @@ mod tests {
         assert!(repo_path("-C").is_err());
         let tmp = tempfile::tempdir().unwrap();
         assert!(repo_path(tmp.path().join("missing").to_str().unwrap()).is_err());
-        assert_eq!(repo_path(tmp.path().to_str().unwrap()).unwrap(), tmp.path());
+        assert_eq!(
+            repo_path(tmp.path().to_str().unwrap()).unwrap(),
+            dunce::canonicalize(tmp.path()).unwrap()
+        );
+    }
+
+    #[test]
+    fn repo_path_gives_every_spelling_of_a_dir_one_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let plain = repo_path(tmp.path().to_str().unwrap()).unwrap();
+        let dotted = repo_path(sub.join("..").to_str().unwrap()).unwrap();
+        let trailing = repo_path(&format!(
+            "{}{}",
+            tmp.path().display(),
+            std::path::MAIN_SEPARATOR
+        ))
+        .unwrap();
+        assert_eq!(plain, dotted);
+        assert_eq!(plain, trailing);
+    }
+
+    #[test]
+    fn repo_relative_accepts_a_noncanonical_spelling_of_an_inside_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = repo_path(tmp.path().to_str().unwrap()).unwrap();
+        std::fs::create_dir(repo.join("a")).unwrap();
+        std::fs::write(repo.join("a").join("f.psd"), b"x").unwrap();
+        let spelled = repo.join("a").join("..").join("a").join("f.psd");
+        assert_eq!(
+            repo_relative(&repo, spelled.to_str().unwrap()).unwrap(),
+            "a/f.psd"
+        );
     }
 
     #[test]
@@ -431,5 +534,34 @@ mod tests {
         assert!(ops.cancel("a"));
         ops.finish("a");
         assert!(!ops.cancel("a"));
+    }
+
+    #[tokio::test]
+    async fn a_cancel_that_beats_register_is_not_lost() {
+        let ops = Ops::default();
+        assert!(!ops.cancel("early"));
+        let n = ops.register("early");
+        tokio::time::timeout(Duration::from_millis(500), n.notified())
+            .await
+            .unwrap(); // an early cancel must fire at register
+        ops.finish("early");
+        // consumed once: a later op reusing the id is not pre-cancelled
+        let n = ops.register("early");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), n.notified())
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn cancel_all_wakes_every_running_op() {
+        let ops = Ops::default();
+        assert!(ops.is_idle());
+        let _a = ops.register("a");
+        assert!(!ops.is_idle());
+        ops.cancel_all();
+        ops.finish("a");
+        assert!(ops.is_idle());
     }
 }

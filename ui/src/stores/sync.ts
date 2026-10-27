@@ -82,7 +82,7 @@ export const useSyncStore = defineStore('sync', () => {
     const cancel = () => api.cancelOp(id)
     try {
       await ops.track<FetchReport | PullReport | PushReport>(
-        { kind, label: `${LABEL[kind]}${target ? ` ${target}` : ''}`, cancel },
+        { kind, label: `${LABEL[kind]}${target ? ` ${target}` : ''}`, cancel, retry: () => void run(kind) },
         (report, opId) => {
           id = opId
           return kind === 'fetch'
