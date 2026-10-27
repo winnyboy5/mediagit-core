@@ -28,6 +28,7 @@ export const router = createRouter({
     { path: '/merge', component: () => import('./views/MergeView.vue'), meta: { needsRepo: true, title: 'Merge & conflicts' } },
     { path: '/compare', component: () => import('./views/CompareView.vue'), meta: { needsRepo: true, title: 'Compare' } },
     { path: '/tags', component: () => import('./views/TagsStashView.vue'), meta: { needsRepo: true, title: 'Tags & Stash' } },
+    { path: '/remote', component: () => import('./views/RemoteView.vue'), meta: { needsRepo: true, title: 'Remote Browser' } },
     { path: '/kit', component: () => import('./kit/KitView.vue'), meta: { bare: true } },
   ],
 })

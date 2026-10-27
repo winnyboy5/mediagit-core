@@ -381,7 +381,9 @@ pub fn run() {
             commands::repo_revert,
             commands::repo_revert_control,
             commands::repo_restore_file,
-            commands::repo_download
+            commands::repo_download,
+            commands::repo_download_preview,
+            commands::remote_ls_tree
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| panic!("failed to start MediaGit desktop: {e}"));

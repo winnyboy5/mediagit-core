@@ -1,0 +1,36 @@
+[
+  {
+    "progress": {
+      "id": 1,
+      "msg": "Downloading",
+      "pos": 524288000,
+      "len": 2254857830,
+      "unit": "bytes",
+      "done": false
+    }
+  },
+  {
+    "hold": true
+  },
+  {
+    "progress": {
+      "id": 1,
+      "msg": "Downloading",
+      "pos": 1500000000,
+      "len": 2254857830,
+      "unit": "bytes",
+      "done": false
+    }
+  },
+  {
+    "hold": true
+  },
+  {
+    "resolve": {
+      "path": "video/shot_010.mp4",
+      "output": "/Users/Mira/Desktop/shot_010.mp4",
+      "bytes": 2254857830,
+      "source": "remote"
+    }
+  }
+]

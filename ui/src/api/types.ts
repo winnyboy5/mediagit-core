@@ -31,6 +31,8 @@ export type { StashEntryReport } from './generated/StashEntryReport'
 export type { ResetReport } from './generated/ResetReport'
 export type { RevertReport } from './generated/RevertReport'
 export type { TagActionReport } from './generated/TagActionReport'
+export type { LsTreeReport } from './generated/LsTreeReport'
+export type { LsTreeEntryReport } from './generated/LsTreeEntryReport'
 export type { DownloadReport } from './generated/DownloadReport'
 
 export interface ApiError {

@@ -1,0 +1,35 @@
+{
+  "remote": "origin",
+  "ref": "main",
+  "path": "",
+  "entries": [
+    {
+      "name": "video",
+      "path": "video",
+      "kind": "dir",
+      "size": null,
+      "oid": "abababababababababababababababababababab"
+    },
+    {
+      "name": "art",
+      "path": "art",
+      "kind": "dir",
+      "size": null,
+      "oid": "abababababababababababababababababababab"
+    },
+    {
+      "name": "README.md",
+      "path": "README.md",
+      "kind": "file",
+      "size": 2048,
+      "oid": "abababababababababababababababababababab"
+    },
+    {
+      "name": "hero.png",
+      "path": "hero.png",
+      "kind": "file",
+      "size": 1363148,
+      "oid": "abababababababababababababababababababab"
+    }
+  ]
+}

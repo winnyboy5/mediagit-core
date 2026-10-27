@@ -56,11 +56,11 @@ const nav = [
   { to: '/merge', label: 'Merge & conflicts', icon: GitMerge },
   { to: '/compare', label: 'Compare', icon: GitCompare },
   { to: '/tags', label: 'Tags & Stash', icon: Tag },
+  { to: '/remote', label: 'Remote Browser', icon: Cloud },
 ] as const
 
 // Views that ship in later waves: listed so the whole product is discoverable.
 const more = [
-  { label: 'Remote Browser', icon: Cloud },
   { label: 'Storage', icon: HardDrive },
   { label: 'Maintenance', icon: Wrench },
   { label: 'Security', icon: ShieldCheck },

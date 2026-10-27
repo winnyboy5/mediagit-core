@@ -354,7 +354,7 @@ fn tag_create_argv(
     ref_name_ok("tag name", name)?;
     let mut argv = vec!["tag".to_owned(), "create".into()];
     if let Some(m) = message.map(str::trim).filter(|m| !m.is_empty()) {
-        if m.contains(' ') {
+        if m.contains('\0') {
             return Err(invalid("tag message", m));
         }
         argv.extend(["--annotated".into(), format!("--message={m}")]);
@@ -419,6 +419,28 @@ fn download_argv(
     }
     argv.push(format!("--output={output}"));
     argv.extend(["--".into(), remote_path.into()]);
+    Ok(argv)
+}
+
+/// `remote ls-tree [--ref=<r>] -- <remote> [<dir>]`: one folder level of a remote repository.
+fn ls_tree_argv(
+    remote: &str,
+    dir: Option<&str>,
+    git_ref: Option<&str>,
+) -> Result<Vec<String>, EngineError> {
+    ref_name_ok("remote name", remote)?;
+    let mut argv = vec!["remote".to_owned(), "ls-tree".into()];
+    if let Some(r) = git_ref {
+        ref_name_ok("ref", r)?;
+        argv.push(format!("--ref={r}"));
+    }
+    argv.extend(["--".into(), remote.into()]);
+    if let Some(d) = dir.filter(|d| !d.is_empty()) {
+        if !remote_path_ok(d) || d.starts_with("http") {
+            return Err(invalid("folder", d));
+        }
+        argv.push(d.into());
+    }
     Ok(argv)
 }
 
@@ -1229,7 +1251,6 @@ pub async fn repo_restore_file(
 pub async fn repo_download(
     engine: tauri::State<'_, Engine>,
     ops: tauri::State<'_, Ops>,
-    queues: tauri::State<'_, RepoQueues>,
     repo: String,
     remote_path: String,
     git_ref: Option<String>,
@@ -1239,10 +1260,12 @@ pub async fn repo_download(
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
     let argv = download_argv(&remote_path, git_ref.as_deref(), &output)?;
+    // A download does not touch the repository, so it must not wait behind (or block)
+    // its writes: a private lane per call.
     stream(
         &engine,
         &ops,
-        &queues,
+        &RepoQueues::default(),
         &repo,
         &argv,
         &op_id,
@@ -1250,6 +1273,80 @@ pub async fn repo_download(
         &on_progress,
     )
     .await
+}
+
+/// One folder level of a remote repository at a ref (the server default when absent).
+#[tauri::command]
+pub async fn remote_ls_tree(
+    engine: tauri::State<'_, Engine>,
+    repo: String,
+    remote: String,
+    dir: Option<String>,
+    git_ref: Option<String>,
+) -> Result<Value, EngineError> {
+    let repo = repo_path(&repo)?;
+    read(
+        &engine,
+        &repo,
+        &ls_tree_argv(&remote, dir.as_deref(), git_ref.as_deref())?,
+    )
+    .await
+}
+
+/// Download one remote file into the preview folder (cached by ref + path) so the webview
+/// can show it; cancellable. Written under a private name and renamed on success.
+#[tauri::command]
+pub async fn repo_download_preview(
+    engine: tauri::State<'_, Engine>,
+    ops: tauri::State<'_, Ops>,
+    repo: String,
+    remote_path: String,
+    git_ref: Option<String>,
+    op_id: String,
+    on_progress: Channel<Progress>,
+) -> Result<Extracted, EngineError> {
+    let repo = repo_path(&repo)?;
+    let dir = preview_dir();
+    let key = format!("remote:{}", git_ref.as_deref().unwrap_or(""));
+    let dest = dir.join(preview_name(&key, &remote_path));
+    if let Some(m) = std::fs::metadata(&dest).ok().filter(|m| m.len() > 0) {
+        return Ok(Extracted {
+            path: dest.to_string_lossy().into_owned(),
+            size: m.len(),
+        });
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| EngineError::Spawn(e.to_string()))?;
+    let part = dir.join(format!(
+        "{}.{}.part",
+        std::process::id(),
+        PART_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let argv = download_argv(&remote_path, git_ref.as_deref(), &part.to_string_lossy())?;
+    let result = stream(
+        &engine,
+        &ops,
+        &RepoQueues::default(),
+        &repo,
+        &argv,
+        &op_id,
+        true,
+        &on_progress,
+    )
+    .await;
+    let finished = result.and_then(|_| {
+        std::fs::rename(&part, &dest).map_err(|e| EngineError::Spawn(e.to_string()))?;
+        std::fs::metadata(&dest).map_err(|e| EngineError::Spawn(e.to_string()))
+    });
+    match finished {
+        Ok(m) => Ok(Extracted {
+            path: dest.to_string_lossy().into_owned(),
+            size: m.len(),
+        }),
+        Err(e) => {
+            let _ = std::fs::remove_file(&part);
+            Err(e)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1594,11 +1691,39 @@ mod tests {
             assert!(bad(tag_delete_argv(n)), "{n:?}");
         }
         assert!(bad(tag_create_argv("v1", Some("main"), None)));
-        assert!(bad(tag_create_argv("v1", None, Some("a b"))));
+        assert!(bad(tag_create_argv("v1", None, Some("a\0b"))));
         assert_eq!(
             tag_delete_argv("v1.0").unwrap(),
             ["tag", "delete", "--", "v1.0"]
         );
+    }
+
+    #[test]
+    fn ls_tree_argv_guards_remote_ref_and_folder() {
+        assert_eq!(
+            ls_tree_argv("origin", None, None).unwrap(),
+            ["remote", "ls-tree", "--", "origin"]
+        );
+        assert_eq!(
+            ls_tree_argv("origin", Some("video/shots"), Some("v0.3")).unwrap(),
+            [
+                "remote",
+                "ls-tree",
+                "--ref=v0.3",
+                "--",
+                "origin",
+                "video/shots"
+            ]
+        );
+        assert_eq!(
+            ls_tree_argv("origin", Some(""), None).unwrap(),
+            ["remote", "ls-tree", "--", "origin"]
+        );
+        assert!(bad(ls_tree_argv("--all", None, None)));
+        assert!(bad(ls_tree_argv("origin", None, Some("--x"))));
+        for d in ["../x", "/abs", "-x", "a//b", "a\\b", "http://h/x"] {
+            assert!(bad(ls_tree_argv("origin", Some(d), None)), "{d}");
+        }
     }
 
     #[test]

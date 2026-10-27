@@ -1,0 +1,28 @@
+{
+  "remote": "origin",
+  "ref": "main",
+  "path": "video",
+  "entries": [
+    {
+      "name": "shot_010.mp4",
+      "path": "video/shot_010.mp4",
+      "kind": "file",
+      "size": 2254857830,
+      "oid": "abababababababababababababababababababab"
+    },
+    {
+      "name": "vo.wav",
+      "path": "video/vo.wav",
+      "kind": "file",
+      "size": 5242880,
+      "oid": "abababababababababababababababababababab"
+    },
+    {
+      "name": "shots",
+      "path": "video/shots",
+      "kind": "dir",
+      "size": null,
+      "oid": "abababababababababababababababababababab"
+    }
+  ]
+}

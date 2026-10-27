@@ -12,6 +12,7 @@ import type {
   Extracted,
   FetchReport,
   LocksReport,
+  LsTreeReport,
   LockReport,
   LogReport,
   MergeReport,
@@ -137,6 +138,12 @@ export const api = {
     invoke<RevertReport>('repo_revert_control', { repo, action }),
   /** Overwrite one working file with its content at `rev`. */
   restoreFile: (repo: string, rev: string, path: string) => invoke<unknown>('repo_restore_file', { repo, rev, path }),
+  /** One folder level of a remote repository; null ref = the server's default branch. */
+  remoteLsTree: (repo: string, remote: string, dir: string | null, gitRef: string | null) =>
+    invoke<LsTreeReport>('remote_ls_tree', { repo, remote, dir, gitRef }),
+  /** Download a remote file into the preview folder so the webview can show it. */
+  downloadPreview: (repo: string, remotePath: string, gitRef: string | null, opId: string, onProgress: Report) =>
+    invoke<Extracted>('repo_download_preview', { repo, remotePath, gitRef, opId, onProgress: channel(onProgress) }),
   download: (repo: string, remotePath: string, gitRef: string | null, output: string, opId: string, onProgress: Report) =>
     invoke<DownloadReport>('repo_download', { repo, remotePath, gitRef, output, opId, onProgress: channel(onProgress) }),
 }

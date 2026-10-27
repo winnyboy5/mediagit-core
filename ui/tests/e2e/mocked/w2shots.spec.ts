@@ -13,7 +13,8 @@ const SIZES = [
 ]
 const diffHandler = `(a) => a.from === null ? ${JSON.stringify(fixture('diff_working'))} : ${JSON.stringify(fixture('diff_commits'))}`
 const extractHandler = `(a) => ({ path: '/preview/' + a.rev.slice(0, 4) + '.png', size: a.expected ?? 1000 })`
-const infoHandler = `(a) => a.path.startsWith('/preview/') ? { format: 'png', width: 1280, height: 720, file_size: 1153433 } : { format: 'png', width: 1920, height: 1080, file_size: 1363148 }`
+const lsHandler = `(a) => a.dir === null ? ${JSON.stringify(fixture('ls_root'))} : a.dir === 'video' ? ${JSON.stringify(fixture('ls_video'))} : { ...${JSON.stringify(fixture('ls_empty'))}, path: a.dir }`
+const infoHandler =`(a) => a.path.startsWith('/preview/') ? { format: 'png', width: 1280, height: 720, file_size: 1153433 } : { format: 'png', width: 1920, height: 1080, file_size: 1363148 }`
 
 async function shot(page: Page, name: string, theme: string, w: number) {
   mkdirSync('.impeccable/review', { recursive: true })
@@ -42,6 +43,7 @@ async function open(page: Page, route: string, heading: string, b: Boot = {}) {
     }),
     handlers: { repo_show: showHandler(), repo_diff: diffHandler, ...b.handlers },
     scripts: b.scripts as never,
+    dialog: '/Users/Mira/Desktop',
     storage: REPO,
   })
   await page.goto(`/#${route}`, { waitUntil: 'domcontentloaded' })
@@ -194,6 +196,55 @@ for (const { w, h } of SIZES) {
       await page.getByRole('button', { name: 'Drop stash 1' }).click()
       await expect(page.getByRole('alertdialog')).toBeVisible()
       await shot(page, 'V10-tags-drop', t, w)
+    })
+
+    // V16 Remote Browser
+    const remote = (page: Page, b: Boot = {}) =>
+      open(page, '/remote', 'Remote Browser', {
+        ...b,
+        commands: { remote_list: fixture('remotes'), ...b.commands },
+        handlers: { remote_ls_tree: lsHandler, repo_download_preview: `(a) => ({ path: '/preview/' + a.remotePath.split('/').pop(), size: 1363148 })`, ...b.handlers },
+      })
+    T('V16 populated', async (page, t) => {
+      await remote(page)
+      await expect(page.locator('[data-entry="hero.png"]')).toBeVisible()
+      await shot(page, 'V16-remote-populated', t, w)
+    })
+    T('V16 preview', async (page, t) => {
+      await remote(page)
+      await page.locator('[data-entry="hero.png"]').click()
+      await expect(page.getByRole('img', { name: 'Preview of hero.png' })).toBeVisible()
+      await shot(page, 'V16-remote-preview', t, w)
+    })
+    T('V16 nested', async (page, t) => {
+      await remote(page)
+      await page.locator('[data-entry="video"]').click()
+      await expect(page.locator('[data-entry="video/shot_010.mp4"]')).toBeVisible()
+      await page.locator('[data-entry="video/vo.wav"]').click()
+      await shot(page, 'V16-remote-nested', t, w)
+    })
+    T('V16 loading', async (page, t) => {
+      await remote(page, { handlers: { remote_ls_tree: '' }, scripts: { remote_ls_tree: [{ hold: true }, { resolve: fixture('ls_root') }] } })
+      await expect(page.getByRole('status', { name: 'Loading' })).toBeVisible()
+      await shot(page, 'V16-remote-loading', t, w)
+    })
+    T('V16 empty', async (page, t) => {
+      await remote(page, { commands: { remote_list: { remotes: [] } } })
+      await expect(page.getByText('No remote configured')).toBeVisible()
+      await shot(page, 'V16-remote-empty', t, w)
+    })
+    T('V16 error', async (page, t) => {
+      await remote(page, { handlers: { remote_ls_tree: `() => { throw { code: 'error', message: 'The server did not return a folder listing.' } }` } })
+      await expect(page.getByRole('alert')).toBeVisible()
+      await shot(page, 'V16-remote-error', t, w)
+    })
+    T('V16 download busy', async (page, t) => {
+      await remote(page, { scripts: { repo_download: fixture('download_progress') } })
+      await page.locator('[data-entry="video"]').click()
+      await page.locator('[data-entry="video/shot_010.mp4"]').click()
+      await page.getByRole('button', { name: 'Download to…' }).click()
+      await expect(page.getByTestId('download-progress')).toBeVisible()
+      await shot(page, 'V16-remote-download', t, w)
     })
 
     // Undo actions
