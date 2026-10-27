@@ -15,6 +15,9 @@ rustflags = ["-C", "split-debuginfo=unpacked"]
 
 # ── Windows ──────────────────────────────────────────────────────────
 [target.x86_64-pc-windows-msvc]
+# rust-lld ships with the toolchain and links the ~120 test binaries much
+# faster than link.exe (measured 2026-10-27, see DEVELOPMENT_GUIDE.md).
+linker = "rust-lld.exe"
 # Disable incremental linking on Windows; the default /INCREMENTAL causes
 # link.exe to memory-map the entire previous binary, doubling peak RAM usage
 # for large binaries like mediagit-server and mediagit-cli.
