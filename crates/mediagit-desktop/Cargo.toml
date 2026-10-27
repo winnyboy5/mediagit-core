@@ -1,0 +1,43 @@
+[package]
+name = "mediagit-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "MediaGit desktop app (Tauri shell around the mediagit CLI)"
+# The desktop app ships through its own Tauri bundle workflow, not cargo-dist
+# or crates.io. No `[package.metadata.dist]` table: cargo-dist builds only the
+# crates that opt in with `dist = true` (mediagit-cli, mediagit-server).
+publish = false
+
+[lib]
+name = "mediagit_desktop"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mediagit-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.5", features = [] }
+
+[dependencies]
+# Deliberately no mediagit-* crates: the app drives the bundled `mediagit`
+# binary through `--machine`, so the process-global state in the core crates
+# (at-rest key OnceLock, cwd, prompts) stays inside a child process.
+tauri = { version = "2.12", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

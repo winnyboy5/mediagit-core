@@ -12,6 +12,7 @@ members = [
     "crates/mediagit-protocol",
     "crates/mediagit-server",
     "crates/mediagit-test-utils",
+    "crates/mediagit-desktop",
 ]
 resolver = "2"
 
