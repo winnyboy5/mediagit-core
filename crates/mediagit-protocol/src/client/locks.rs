@@ -103,13 +103,17 @@ impl ProtocolClient {
     /// DELETE /:repo/locks/:lock_id?force=1 — release a lock.
     ///
     /// `force` requires `repo:admin` on the server and bypasses the owner
-    /// check; a no-auth server has no identity to compare against and so
-    /// must always be called with `force = true`.
-    pub async fn delete_lock(&self, lock_id: &str, force: bool) -> Result<()> {
+    /// check. `owner` names who is releasing the lock; a no-auth server
+    /// compares it with the lock's recorded owner (an authenticated server
+    /// uses the credential and ignores it).
+    pub async fn delete_lock(&self, lock_id: &str, force: bool, owner: Option<&str>) -> Result<()> {
         let url = format!("{}/locks/{}", self.base_url, lock_id);
         let mut req = self.client.delete(&url);
         if force {
             req = req.query(&[("force", "1")]);
+        }
+        if let Some(owner) = owner {
+            req = req.query(&[("owner", owner)]);
         }
         let resp = req
             .send()

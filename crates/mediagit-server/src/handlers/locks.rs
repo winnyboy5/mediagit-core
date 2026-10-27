@@ -51,6 +51,10 @@ pub struct ListLocksResponse {
 pub struct DeleteLockQuery {
     #[serde(default)]
     pub force: Option<String>,
+    /// Who is releasing the lock. Trusted only when auth is off, the same way
+    /// `create_lock` trusts the client-supplied owner; ignored with auth on.
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 /// Resolve the identity to attribute a lock action to: the authenticated
@@ -140,9 +144,10 @@ pub async fn list_locks(
 
 /// DELETE /:repo/locks/:lock_id?force=1 — release a lock.
 ///
-/// Without `force`, the requester must be the lock's owner (compared against
-/// `AuthUser.user_id`; a no-auth server has no identity to compare and so
-/// must always pass `force=1`, which itself requires `repo:admin`).
+/// Without `force`, the requester must be the lock's owner: `AuthUser.user_id`
+/// with auth on, otherwise the client-supplied `owner` query parameter (the
+/// identity `create_lock` recorded). `force=1` bypasses the owner check and
+/// requires `repo:admin`.
 pub async fn delete_lock(
     Path((repo, lock_id)): Path<(String, String)>,
     State(state): State<Arc<AppState>>,
@@ -177,8 +182,14 @@ pub async fn delete_lock(
     let record = record.ok_or(StatusCode::NOT_FOUND)?;
 
     if !force {
-        let requester = auth_user.as_ref().map(|u| u.user_id.as_str());
-        let is_owner = requester.map(|id| id == record.owner).unwrap_or(false);
+        let requester = match auth_user.as_ref() {
+            Some(u) => Some(u.user_id.as_str()),
+            None if !state.is_auth_enabled() => {
+                query.owner.as_deref().filter(|s| !s.trim().is_empty())
+            }
+            None => None,
+        };
+        let is_owner = requester.is_some_and(|id| id == record.owner);
         if !is_owner {
             return Err(StatusCode::FORBIDDEN);
         }

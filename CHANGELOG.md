@@ -58,6 +58,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   large files, and checkout failed with "object not found" every time. The
   tracking ref is no longer written early on retry either, so the next pull
   downloads what is missing.
+- **On a server without auth, nobody could release their own lock.** `lock
+  create` recorded the owner name the client sent, but `lock unlock` had no
+  identity to compare, so every unlock without `--force` was refused (403),
+  including the desktop app's Unlock button. `unlock` now sends the same
+  identity `create` uses, and a no-auth server compares it with the lock's
+  owner. Servers with auth still use the authenticated user and ignore the
+  supplied name, so a writer cannot release someone else's lock by naming
+  them.
 - **`status` printed modified, deleted and untracked paths in a random order**
   on every run. All lists are now sorted by path, so `--porcelain` output is
   stable for scripts.
