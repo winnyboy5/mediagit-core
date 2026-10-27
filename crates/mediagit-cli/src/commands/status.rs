@@ -415,7 +415,14 @@ impl StatusCmd {
         // Convert to vector for parallel iteration
         let head_files_vec: Vec<_> = head_files.iter().collect();
 
-        let modified_files: Vec<PathBuf> = head_files_vec
+        // #94: a stat cache (size, mtime, file id, change time -> oid) lets an
+        // unchanged file skip the full re-read. Only `status` uses it; the
+        // worktree guard still hashes every file. MEDIAGIT_STAT_CACHE=0 disables.
+        let mut stat_cache = mediagit_versioning::StatCache::load(&repo_root);
+
+        // (path, modified vs HEAD, fresh stat to record when it was hashed)
+        type Hashed = (PathBuf, bool, Option<(std::fs::Metadata, Oid)>);
+        let hashed: Vec<Hashed> = head_files_vec
             .par_iter() // Parallel iterator for multi-core processing
             .filter_map(|(path, head_oid)| {
                 // Skip files not in working directory
@@ -429,9 +436,13 @@ impl StatusCmd {
                 }
 
                 let full_path = repo_root.join(path);
+                let rel = path.to_string_lossy();
 
                 // OPTIMIZATION 1: Size-based quick check and streaming for large files
-                if let Ok(metadata) = std::fs::metadata(&full_path) {
+                if let Ok(metadata) = std::fs::symlink_metadata(&full_path) {
+                    if let Some(oid) = stat_cache.lookup(&rel, &metadata) {
+                        return Some(((*path).clone(), oid != **head_oid, None));
+                    }
                     let file_size = metadata.len();
                     // Matches add.rs STREAMING_THRESHOLD — both commands must agree on the
                     // hash path for every file to avoid false "modified" reports.
@@ -453,15 +464,30 @@ impl StatusCmd {
                         }
                     };
 
-                    if working_oid != **head_oid {
-                        // File is modified
-                        return Some((*path).clone());
-                    }
+                    return Some((
+                        (*path).clone(),
+                        working_oid != **head_oid,
+                        Some((metadata, working_oid)),
+                    ));
                 }
 
                 None
             })
             .collect();
+
+        let mut modified_files = Vec::new();
+        for (path, modified, record) in hashed {
+            if let Some((metadata, oid)) = record {
+                stat_cache.record(&path.to_string_lossy(), &metadata, oid);
+            }
+            if modified {
+                modified_files.push(path);
+            }
+        }
+        stat_cache.retain(|p| head_files.contains_key(Path::new(p)));
+        if let Err(e) = stat_cache.save() {
+            tracing::debug!("stat cache not saved: {e}");
+        }
 
         // Detect deleted files (in HEAD, not in working dir, not staged for deletion).
         // Sparse-excluded paths are filtered out here: their absence is
@@ -498,6 +524,13 @@ impl StatusCmd {
                 untracked_files.push(path.clone());
             }
         }
+
+        // Path order: the lists above come from hash sets and a parallel walk,
+        // so sort them for stable output (porcelain, --json, the desktop app).
+        modified_files.sort();
+        deleted_files.sort();
+        staged_deletions.sort();
+        untracked_files.sort();
 
         // --tracked / --untracked filter which sections are shown (default: both).
         // Requesting one alone hides the other; requesting both (or neither) shows both.

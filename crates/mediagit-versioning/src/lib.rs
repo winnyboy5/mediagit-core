@@ -80,6 +80,7 @@ mod refs;
 mod revision;
 mod similarity;
 mod sparse;
+pub mod stat_cache;
 mod streaming_index;
 mod streaming_pack;
 mod tag_object;
@@ -126,6 +127,7 @@ pub use refs::{Ref, RefDatabase, RefType, normalize_ref_name};
 pub use revision::resolve_revision;
 pub use similarity::{ObjectMetadata, SimilarityDetector, SimilarityScore};
 pub use sparse::{SparseFilter, SparseMode};
+pub use stat_cache::StatCache;
 pub use streaming_index::StreamingPackIndex;
 pub use streaming_pack::{
     CloudChunkLoc, CloudPackResult, StreamingPackReader, StreamingPackWriter,
