@@ -274,14 +274,16 @@ impl PullCmd {
 
                 // Parse remote OID and update tracking ref
                 if let Ok(branch_oid) = mediagit_versioning::Oid::from_hex(&branch_ref.oid) {
-                    // #93: the branch being pulled gets its objects in STEP 2,
-                    // and its tracking ref is written after that download. Writing
-                    // it here, before the objects exist, meant an interrupted pull
-                    // left a ref to a missing commit (fsck: "points to missing
-                    // commit"). Write it now only if the commit is already local.
-                    if branch_ref.name == remote_ref
-                        && !odb.exists(&branch_oid).await.unwrap_or(false)
-                    {
+                    // #93/#95: the branch being pulled gets its objects in STEP 2,
+                    // and its tracking ref is written only after that download.
+                    // Writing it here, before the objects exist, left a ref to a
+                    // missing commit after an interrupted pull (#93). Writing it
+                    // when merely the commit is local is not enough either: an
+                    // interrupted pull can leave the commit and tree stored but a
+                    // large file's manifest missing; the early ref then made
+                    // `collect_local_have` advertise that commit, the server sent
+                    // nothing, and every later pull failed checkout (#95).
+                    if branch_ref.name == remote_ref {
                         continue;
                     }
                     // Create parent directories for nested branches (e.g., feature/auth)
@@ -320,26 +322,42 @@ impl PullCmd {
         }
 
         // Check if current branch is already synchronized (avoid redundant object download)
-        let remote_name = remote;
-        if let (Some(local), Some(remote)) = (
+        if let (Some(local), Some(remote_oid_hex)) = (
             local_ref.as_ref().and_then(|r| r.oid.as_ref()),
             remote_oid_check.as_ref(),
         ) {
             let local_oid_str = local.to_hex();
-            if &local_oid_str == remote {
+            if &local_oid_str == remote_oid_hex {
                 // BUG-008 guard: matching OIDs are insufficient if the object
                 // isn't actually in the local ODB (can happen when a branch
                 // was fetched into a tracking ref but its objects were never
                 // downloaded — clone ships only default-branch objects).
                 let have_object = odb.exists(local).await.unwrap_or(false);
                 if have_object {
+                    // STEP 1 leaves the pulled branch's tracking ref to the
+                    // post-download write (#95), which this early return skips.
+                    // The local branch already points here, so the tracking ref
+                    // can follow it.
+                    if !self.dry_run
+                        && let Some(branch_name) = remote_ref.strip_prefix("refs/heads/")
+                    {
+                        let tracking_ref = mediagit_versioning::Ref::new_direct(
+                            format!("refs/remotes/{}/{}", remote, branch_name),
+                            *local,
+                        );
+                        std::fs::create_dir_all(
+                            storage_path.join("refs").join("remotes").join(remote),
+                        )?;
+                        refdb.write(&tracking_ref).await?;
+                        tracking_refs_updated += 1;
+                    }
                     if !self.quiet() {
                         println!("{} Already up to date", style("✓").green());
-                        println!("  {} {}", style("→").cyan(), &remote[..8]);
+                        println!("  {} {}", style("→").cyan(), &remote_oid_hex[..8]);
                     }
                     if output::machine_mode() {
                         return output::emit_ok(&PullReport {
-                            remote: remote_name.to_string(),
+                            remote: remote.to_string(),
                             branch: remote_ref,
                             result: "up_to_date".to_string(),
                             old_head: Some(local_oid_str.clone()),
