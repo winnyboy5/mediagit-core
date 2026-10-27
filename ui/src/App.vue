@@ -19,7 +19,14 @@ shell.watchViewport()
 const hasChrome = computed(() => route.meta.chrome !== 'none')
 const showInspector = computed(() => !!route.meta.inspector && shell.inspectorVisible)
 
-const VIEWS = ['/changes', '/history', '/branches', '/locks', '/sync']
+// The overlay inspector and the activity drawer float over the view; a scrim dims it and a click dismisses.
+const scrimOn = computed(() => shell.activityOpen || (shell.narrow && showInspector.value))
+function closeOverlays() {
+  shell.activityOpen = false
+  shell.overlayOpen = false
+}
+
+const VIEWS =['/changes', '/history', '/branches', '/locks', '/sync']
 function onKey(e: KeyboardEvent) {
   if (e.key === 'Escape' && shell.narrow && shell.overlayOpen && !shell.activityOpen) shell.overlayOpen = false
   if (!e.ctrlKey || e.altKey || e.shiftKey || !repo.path) return
@@ -62,6 +69,7 @@ onBeforeUnmount(() => {
     <div class="body">
       <Sidebar v-if="hasChrome" />
       <main id="main" class="center"><RouterView /></main>
+      <div v-if="scrimOn" class="scrim" aria-hidden="true" data-testid="scrim" @click="closeOverlays" />
       <Inspector v-if="showInspector" :class="{ overlay: shell.narrow }" />
     </div>
     <ActivityBar />
@@ -88,6 +96,12 @@ onBeforeUnmount(() => {
   overflow: hidden;
   display: flex;
   flex-direction: column;
+}
+.scrim {
+  position: absolute;
+  z-index: 20;
+  inset: 0;
+  background: var(--scrim);
 }
 .overlay {
   position: absolute;

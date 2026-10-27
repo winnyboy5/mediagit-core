@@ -49,7 +49,7 @@ test.describe('Sync: states', () => {
 
   test('error: code + message and Retry', async ({ page }) => {
     await boot(page, { remote_list: { __error: { code: 'error', message: 'Cannot read remotes.' } } })
-    await expect(page.getByRole('alert')).toContainText('Cannot read remotes.')
+    await expect(page.getByRole('alert')).toContainText('Cannot read remotes')
     await expectNoAxeViolations(page)
     const before = (await ipcCalls(page, 'remote_list')).length
     await page.getByRole('button', { name: 'Retry' }).click()

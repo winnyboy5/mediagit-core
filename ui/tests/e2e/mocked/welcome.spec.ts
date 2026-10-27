@@ -59,11 +59,10 @@ test.describe('Welcome', () => {
     await page.keyboard.press('Control+o')
     const alert = page.getByRole('alert')
     await expect(alert).toContainText('Not a MediaGit repository')
-    await expect(alert).toContainText('error')
+    await expect(alert).not.toContainText('error')
     await expect(page).toHaveURL(/#\/welcome$/)
     await expectNoAxeViolations(page)
-    await alert.getByRole('button', { name: 'Retry' }).click()
-    await expect.poll(async () => (await ipcCalls(page, 'repo_status')).length).toBe(2)
+    await expect(alert.getByRole('button', { name: 'Retry' })).toHaveCount(0)
   })
 
   test('remove from recent', async ({ page }) => {
@@ -171,7 +170,7 @@ test.describe('Clone dialog', () => {
     await page.getByRole('dialog').getByRole('button', { name: 'Clone', exact: true }).click()
     const alert = page.getByRole('dialog').getByRole('alert')
     await expect(alert).toContainText('E_NET_TIMEOUT')
-    await expect(alert).toContainText('Server did not answer within 60 s.')
+    await expect(alert).toContainText('Server did not answer within 60 s')
     await expectNoAxeViolations(page)
   })
 

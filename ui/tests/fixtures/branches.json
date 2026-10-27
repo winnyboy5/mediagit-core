@@ -6,7 +6,7 @@
       "oid": "0000000000000000000000000000000000000000",
       "remote": false,
       "upstream": "origin/main",
-      "ahead": 2,
+      "ahead": 3,
       "behind": 0,
       "protected": true
     },

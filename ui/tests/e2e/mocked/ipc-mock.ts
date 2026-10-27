@@ -100,7 +100,10 @@ export async function mockIpc(page: Page, scenario: Scenario): Promise<void> {
       // Real asset URLs do not exist under Vite: images and audio resolve to tiny inline data.
       convertFileSrc: (p: string) =>
         /\.(png|jpe?g|webp|gif)$/i.test(p)
-          ? 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+          ? 'data:image/svg+xml,' +
+            encodeURIComponent(
+              '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180" viewBox="0 0 320 180"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5b7c99"/><stop offset="1" stop-color="#d9a066"/></linearGradient></defs><rect width="320" height="180" fill="url(#g)"/><circle cx="220" cy="70" r="28" fill="#f4e4c1" opacity="0.85"/><path d="M0 180 L90 100 L150 150 L220 90 L320 180 Z" fill="#2f3b47" opacity="0.8"/></svg>',
+            )
           : /\.wav$/i.test(p)
             ? 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA='
             : p,

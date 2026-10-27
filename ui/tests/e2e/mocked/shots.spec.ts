@@ -36,12 +36,15 @@ for (const { w, h } of SIZES) {
         ['V2-error', { repo_status: fixture('status_error') }],
       ]
       for (const [name, extra] of states) {
-        await mockIpc(page, { commands: healthy(extra), storage: REPO })
-        await page.goto('/#/changes')
-        await expect(page.getByRole('heading', { name: 'Changes', level: 1 })).toBeVisible()
-        if (name === 'V2-populated') await page.getByRole('treeitem', { name: /sky_hdri/ }).click()
-        await page.waitForTimeout(300)
-        await shot(page, name, info.project.name, w)
+        // A fresh page per state: a hash navigation on the old one would keep its mocked data.
+        const p = await page.context().newPage()
+        await mockIpc(p, { commands: healthy(extra), storage: REPO })
+        await p.goto('/#/changes')
+        await expect(p.getByRole('heading', { name: 'Changes', level: 1 })).toBeVisible()
+        if (name === 'V2-populated') await p.getByRole('treeitem', { name: /sky_hdri/ }).click()
+        await p.waitForTimeout(300)
+        await shot(p, name, info.project.name, w)
+        await p.close()
       }
     })
 

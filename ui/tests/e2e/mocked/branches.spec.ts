@@ -18,7 +18,7 @@ test.describe('Branches: states', () => {
     const main = row(page, 'main')
     await expect(main).toContainText('Current')
     await expect(main).toContainText('Protected')
-    await expect(main.getByLabel('2 ahead, 0 behind origin/main')).toBeVisible()
+    await expect(main.getByLabel('3 ahead, 0 behind origin/main')).toBeVisible()
     await expect(row(page, 'review/cut-2').getByLabel('0 ahead, 3 behind origin/review/cut-2')).toBeVisible()
     await expect(row(page, 'feature/grade')).toContainText('Not shared yet')
     await expect(main.getByRole('button', { name: 'Switch to', exact: true })).toHaveCount(0)
@@ -43,7 +43,7 @@ test.describe('Branches: states', () => {
 
   test('error: code + message and Retry', async ({ page }) => {
     await boot(page, { branch_list: { __error: { code: 'error', message: 'Cannot read branches.' } } })
-    await expect(page.getByRole('alert')).toContainText('Cannot read branches.')
+    await expect(page.getByRole('alert')).toContainText('Cannot read branches')
     await expectNoAxeViolations(page)
     const before = (await ipcCalls(page, 'branch_list')).length
     await page.getByRole('button', { name: 'Retry' }).click()

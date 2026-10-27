@@ -245,11 +245,8 @@ h1 {
 }
 h2 {
   margin: 0;
-  color: var(--text-muted);
-  font-size: var(--fs-xs);
+  font-size: var(--fs-lg);
   font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
 }
 .banner {
   display: flex;

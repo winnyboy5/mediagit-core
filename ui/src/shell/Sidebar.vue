@@ -93,6 +93,7 @@ const more = [
       </span>
     </div>
 
+    <div class="navscroll">
     <ul class="items">
       <li v-for="(n, i) in nav" :key="n.to">
         <RouterLink :to="n.to" class="item" :aria-keyshortcuts="`Control+${i + 1}`">
@@ -120,6 +121,7 @@ const more = [
         </Tooltip>
       </li>
     </ul>
+    </div>
   </nav>
 </template>
 
@@ -131,7 +133,7 @@ const more = [
   width: var(--sidebar-w);
   flex: none;
   padding: var(--space-4) var(--space-3);
-  overflow-y: auto;
+  overflow: hidden;
   border-right: 1px solid var(--border);
   background: var(--bg);
 }
@@ -196,6 +198,16 @@ button.switch:hover {
   margin-left: auto;
   color: var(--text-muted);
   font-size: var(--fs-sm);
+}
+.navscroll {
+  display: grid;
+  flex: 1;
+  align-content: start;
+  gap: var(--space-3);
+  min-height: 0;
+  padding: var(--space-2) 0 var(--space-4);
+  overflow-y: auto;
+  mask-image: linear-gradient(to bottom, transparent, #000 var(--space-2), #000 calc(100% - var(--space-4)), transparent);
 }
 .items {
   display: grid;

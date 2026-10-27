@@ -35,15 +35,14 @@ test.describe('Changes: states', () => {
     await expectNoAxeViolations(page)
   })
 
-  test('error: code + message, Retry re-reads status', async ({ page }) => {
+  test('error: names the problem and offers no Retry when retrying cannot help', async ({ page }) => {
     await mockIpc(page, { commands: healthy({ repo_status: fixture('status_error') }), storage: REPO })
     await page.goto('/#/changes')
     const alert = page.getByRole('alert')
-    await expect(alert).toContainText('Not a MediaGit repository')
+    await expect(alert.getByRole('heading')).toContainText('Not a MediaGit repository')
+    await expect(alert).not.toContainText('error')
+    await expect(alert.getByRole('button', { name: 'Retry' })).toHaveCount(0)
     await expectNoAxeViolations(page)
-    const before = (await ipcCalls(page, 'repo_status')).length
-    await page.getByRole('button', { name: 'Retry' }).click()
-    await expect.poll(async () => (await ipcCalls(page, 'repo_status')).length).toBeGreaterThan(before)
   })
 
   test('loading: skeleton while status is pending, then rows', async ({ page }) => {

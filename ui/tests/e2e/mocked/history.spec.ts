@@ -54,8 +54,8 @@ test.describe('History: states', () => {
   test('error: code + message and Retry that asks again', async ({ page }) => {
     await boot(page, { commands: { repo_log: { __error: { code: 'error', message: 'Could not read history.' } } } })
     const alert = page.getByRole('alert')
-    await expect(alert).toContainText('Could not read history.')
-    await expect(alert).toContainText('error')
+    await expect(alert).toContainText('Could not read history')
+    await expect(alert).not.toContainText('error')
     await expectNoAxeViolations(page)
     const before = (await ipcCalls(page, 'repo_log')).length
     await page.getByRole('button', { name: 'Retry' }).click()

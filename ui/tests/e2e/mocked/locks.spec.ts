@@ -40,11 +40,11 @@ test.describe('Locks: states', () => {
 
   test('error: code + message and Retry', async ({ page }) => {
     await boot(page, { lock_list: { __error: { code: 'error', message: 'No remote configured.' } } })
-    await expect(page.getByRole('alert')).toContainText('No remote configured.')
+    await expect(page.getByRole('alert')).toContainText('No remote configured')
     await expectNoAxeViolations(page)
-    const before = (await ipcCalls(page, 'lock_list')).length
-    await page.getByRole('button', { name: 'Retry' }).click()
-    await expect.poll(async () => (await ipcCalls(page, 'lock_list')).length).toBeGreaterThan(before)
+    await expect(page.getByRole('button', { name: 'Retry' })).toHaveCount(0)
+    await page.getByRole('button', { name: 'Add remote' }).click()
+    await expect(page).toHaveURL(/#\/sync$/)
   })
 })
 

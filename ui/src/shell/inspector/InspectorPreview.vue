@@ -95,7 +95,7 @@ p {
 img,
 video {
   display: block;
-  max-width: 100%;
+  width: 100%;
   max-height: 260px;
   border-radius: var(--radius-control);
   object-fit: contain;

@@ -11,6 +11,7 @@ import type { InspectFile } from '@/lib/inspect'
 import { shortOid } from '@/lib/history'
 import { useChangesStore } from '@/stores/changes'
 import { useHistoryStore } from '@/stores/history'
+import { fileKey, useInspectorStore } from '@/stores/inspector'
 import { useShellStore } from '@/stores/shell'
 import InspectorHistory from './inspector/InspectorHistory.vue'
 import InspectorLock from './inspector/InspectorLock.vue'
@@ -48,7 +49,16 @@ const knownSize = computed(() => {
   return sized.length ? sized.reduce((n, f) => n + (f.size ?? 0), 0) : null
 })
 
-const breakdown = computed(() => {
+// Fall back to the size media info reports when status/history did not carry one.
+const inspector = useInspectorStore()
+const fileSize = computed(() => {
+  if (!one.value) return null
+  if (one.value.size != null) return one.value.size
+  const v = inspector.infos.get(fileKey(one.value))?.value?.file_size
+  return typeof v === 'number' ? v : null
+})
+
+const breakdown =computed(() => {
   const by = new Map<MediaKind, { n: number; sample: string }>()
   for (const f of files.value) {
     const k = mediaKind(f.path).kind
@@ -90,12 +100,13 @@ const breakdown = computed(() => {
       <slot name="preview" :file="one"><InspectorPreview :file="one" /></slot>
 
       <section aria-labelledby="insp-details">
-        <h3 id="insp-details">Details</h3>
+        <h3 id="insp-details">File</h3>
         <dl>
           <dt>Type</dt>
           <dd>{{ KIND_LABEL[mediaKind(one.path).kind] }}<template v-if="extOf(one.path)"> · .{{ extOf(one.path) }}</template></dd>
           <dt>Size</dt>
-          <dd class="mono">{{ one.size != null ? formatBytes(one.size) : 'Not reported' }}</dd>
+          <dd v-if="fileSize != null" class="mono">{{ formatBytes(fileSize) }}</dd>
+          <dd v-else>Not reported</dd>
           <template v-if="one.status">
             <dt>Status</dt>
             <dd class="st"><StatusBadge :status="one.status" /> {{ STATUS_LABEL[one.status] }}</dd>

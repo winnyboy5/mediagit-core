@@ -249,7 +249,8 @@ h1 {
   list-style: none;
 }
 .row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) 112px 64px 176px;
   align-items: center;
   gap: var(--space-4);
   min-height: 56px;
@@ -295,7 +296,6 @@ h1 {
 .sync {
   display: flex;
   gap: var(--space-3);
-  min-width: 96px;
   color: var(--text-muted);
   font-size: var(--fs-sm);
 }
@@ -308,7 +308,6 @@ h1 {
   gap: 2px;
 }
 .oid {
-  min-width: 56px;
   color: var(--text-muted);
   font-size: var(--fs-sm);
 }
@@ -316,7 +315,6 @@ h1 {
   display: flex;
   align-items: center;
   gap: var(--space-1);
-  min-width: 140px;
   justify-content: flex-end;
 }
 .overlay {
