@@ -48,6 +48,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `17_desktop_killsafety` (kills push, fetch, pull and clone mid-run and
   checks the repository).
 
+### Security
+
+- **Cleared the six `cargo audit` advisories blocking the release (#92).**
+  `zstd` 0.13 to 0.14.3 (with zstd-safe 8.2.0 and zstd-sys 2.1.2) fixes
+  RUSTSEC-2026-0391, -0398, -0403 and -0410; `ctutils` 0.4.2 to 0.4.6 fixes
+  RUSTSEC-2026-0385. The zstd frame format is unchanged, so existing objects
+  still decode. RUSTSEC-2026-0387 (`crypto-bigint` 0.5, timing) is ignored
+  until 2026-12-01: no `jsonwebtoken` release moves off it yet, and we only
+  use HS256, so the affected p256/p384 code never runs.
+
 ### Fixed
 
 - **gc could delete data a concurrent push or `add` was still writing.** The
@@ -2266,6 +2276,7 @@ throughput improvements, pack negotiation fixes, and several cloud-backend bug f
   `on_progress: Option<Arc<dyn Fn(u64) + Send + Sync>>` callback for incremental byte
   reporting. Pass `None` to retain previous behaviour.
 
+
 ### Security
 - Upgraded `quinn-proto` from 0.11.13 → 0.11.14 (RUSTSEC-2026-0037, CVSS 8.7 — DoS in
   Quinn QUIC endpoints). Transitive dependency via `reqwest → quinn → quinn-proto`.
@@ -2356,6 +2367,7 @@ throughput improvements, pack negotiation fixes, and several cloud-backend bug f
 - Comprehensive test suite (960 tests, 80%+ coverage)
 - Documentation and user guide
 - Multi-platform binaries (Linux, macOS, Windows on x86_64 and ARM64)
+
 
 ### Security
 - AGPL-3.0 license enforcement
