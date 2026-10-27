@@ -243,6 +243,16 @@ impl PullCmd {
 
                 // Parse remote OID and update tracking ref
                 if let Ok(branch_oid) = mediagit_versioning::Oid::from_hex(&branch_ref.oid) {
+                    // #93: the branch being pulled gets its objects in STEP 2,
+                    // and its tracking ref is written after that download. Writing
+                    // it here, before the objects exist, meant an interrupted pull
+                    // left a ref to a missing commit (fsck: "points to missing
+                    // commit"). Write it now only if the commit is already local.
+                    if branch_ref.name == remote_ref
+                        && !odb.exists(&branch_oid).await.unwrap_or(false)
+                    {
+                        continue;
+                    }
                     // Create parent directories for nested branches (e.g., feature/auth)
                     let tracking_path = storage_path
                         .join("refs")
