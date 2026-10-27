@@ -82,6 +82,7 @@
 # User Guides
 
 - [Basic Workflow](./guides/basic-workflow.md)
+- [Desktop App](./guides/desktop-app.md)
 - [Branching Strategies](./guides/branching-strategies.md)
 - [Merging Media Files](./guides/merging-media.md)
 - [Working with Remote Repositories](./guides/remote-repos.md)

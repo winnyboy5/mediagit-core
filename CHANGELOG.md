@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Desktop app (preview, targets v0.8.0)
+
+- **New `mediagit-desktop` crate and `ui/` frontend.** A Tauri 2 + Vue 3 app
+  that drives the bundled `mediagit` CLI as a child process (one process per
+  operation, `-C <repo> --machine <cmd>`). No second implementation of
+  repository logic. Views in W1:
+  - **Welcome**: open a folder, create a repository (`init`), or clone a URL
+    with progress and cancel.
+  - **Changes**: working-tree status, stage files (`add`), save a version
+    (`commit`).
+  - **History**: commit list with a commit graph and ref pills; selecting a
+    version lists its changed files and, with `show --tree`, every file at
+    that commit.
+  - **Inspector previews**: image, video and audio preview of a selected
+    file or a file from any version (extracted to a per-session temp
+    folder), media metadata (`media info`), and per-file lock state.
+  - **Branches**: list with ahead/behind, create, switch, rename, delete,
+    plus tags.
+  - **Locks**: list, lock, and release (`--force` for someone else's lock).
+  - **Sync**: remotes (list, add, remove) and fetch, pull ("Get latest") and
+    push ("Send") with live progress and cancel.
+  - **Activity bar and drawer**: running and finished operations with their
+    progress bars.
+- **CLI `--machine` contract (version 1).** A global `--machine` flag makes a
+  command print exactly one JSON envelope on stdout
+  (`{"v":1,"ok":true,"data":...}` or `{"v":1,"ok":false,"error":{"code","message"}}`)
+  and stream progress as NDJSON lines on stderr. Supported commands: `status`,
+  `version`, `log`, `show`, `branch`, `tag`, `add`, `commit`, `init`, `media`,
+  `remote`, `lock`, `fetch`, `pull`, `push`, `clone`. Any other command exits
+  2 with error code `json_unsupported`; a prompt reached in machine mode
+  fails with `needs_input` instead of blocking. Report types are exported to
+  TypeScript (`ui/src/api/generated`) by `cargo test -p mediagit-cli`.
+- **`show <rev> --tree`** lists every file in a commit's tree (size and path,
+  sorted by path), and **`show <rev>:<path> --output <file>`** writes a blob
+  to a file; both have `--machine` reports.
+- **Tests and QA.** Vitest unit tests, mocked Playwright, real-app Playwright
+  over WebView2 (`pnpm --dir ui e2e:real`), and opt-in QA phases
+  `17_desktop` (contract, engine, UI, spawn and status latency gates) and
+  `17_desktop_killsafety` (kills push, fetch, pull and clone mid-run and
+  checks the repository).
+
 ### Fixed
 
 - **gc could delete data a concurrent push or `add` was still writing.** The

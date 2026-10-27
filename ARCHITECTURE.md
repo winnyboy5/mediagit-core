@@ -54,7 +54,7 @@ graph TD
 
 ---
 
-## Workspace Crates (12)
+## Workspace Crates (13)
 
 | Crate | Role | Key Modules |
 |-------|------|-------------|
@@ -70,6 +70,7 @@ graph TD
 | **mediagit-observability** | Logging/tracing | `full`/`pretty`/`compact`/`json` renderers behind one `init_tracing_with_config`; used by both binaries |
 | **mediagit-metrics** | Prometheus metrics | Operation stats, dedup ratios |
 | **mediagit-test-utils** | Test utilities | Shared test helpers |
+| **mediagit-desktop** | Desktop app shell (Tauri 2) | `engine.rs` (spawns `mediagit --machine`), `commands.rs` (typed IPC commands, write queue); depends on no other `mediagit-*` crate; see [Desktop App](#desktop-app) |
 
 ### Workspace Dependency Graph
 
@@ -1195,6 +1196,59 @@ url = "http://localhost:3000"
 remote = "origin"
 merge = "refs/heads/main"
 ```
+
+---
+
+## Desktop App
+
+**Crate**: `mediagit-desktop` · **Frontend**: `ui/` (Vue 3, Vite, Pinia, Reka UI) · **Key files**: `crates/mediagit-desktop/src/{lib,engine,commands}.rs`
+
+The desktop app is a thin shell. Every repository operation is one child
+process, `mediagit -C <repo> --machine <cmd>`, run by the Rust engine. The app
+links no other `mediagit-*` crate.
+
+```mermaid
+graph LR
+    UI["Vue UI<br/>(webview)"] -->|"Tauri IPC<br/>typed commands"| ENG["Rust engine<br/>(mediagit-desktop)"]
+    ENG -->|"spawn, stdin null"| CLI["mediagit --machine"]
+    CLI -->|"stdout: one JSON envelope"| ENG
+    CLI -.->|"stderr: NDJSON progress"| ENG
+    ENG -->|"Channel, 100 ms throttle"| UI
+```
+
+- **Contract.** stdout carries exactly one envelope (`{v, ok, data | error}`);
+  the engine rejects empty output, more than one line, or a `v` other than its
+  `CONTRACT_VERSION` (`contract_mismatch`). stderr lines that parse as
+  `{"type":"progress",...}` become progress events; everything else is kept
+  as a 20-line tail for error context. See `CLI_REFERENCE.md`.
+- **Typed commands only.** The webview never supplies argv. Each Tauri command
+  builds its own argument list, rejects flag-like or non-absolute values, and
+  puts paths after `--`.
+- **Single-writer queue.** `RepoQueues` holds one async mutex per repository
+  path. Mutating commands (`add`, `commit`, branch changes, locks, remotes,
+  fetch, pull, push) wait their turn; reads (`status`, `log`, `show`,
+  `branch list`) run concurrently and are not queued.
+- **Cancel.** Only push, fetch, pull and clone register an op id. `cancel_op`
+  wakes the waiting `tokio::select!`, which drops the run; the child is
+  spawned with `kill_on_drop`, so it is killed. The frontend sees error code
+  `cancelled`. A killed transfer must leave the repository intact and
+  retryable; that is what `17_desktop_killsafety` proves.
+- **Preview asset scope.** `repo_extract` writes `<rev>:<path>` blobs to
+  `$TEMP/mediagit-desktop-preview` (cached by rev and path, wiped at each app
+  start). The Tauri asset protocol is scoped to that directory, plus each
+  repository the user opens (`repo_allow`) so working files can be previewed.
+- **Why a subprocess, not an in-process ops crate.**
+  - One source of truth: the app runs the same binary the CLI test suites and
+    QA campaigns exercise, so GUI and CLI cannot drift.
+  - Crash isolation: the core crates keep process-global state (at-rest key,
+    working directory, prompts). Per-operation processes keep it out of the
+    UI process, and a panic or hang in an operation cannot take the window
+    down.
+  - Kill-safety: cancelling is killing a process, and
+    `dev-tests/qa-suite/scripts/17_desktop_killsafety.ps1` kills push, fetch,
+    pull and clone at random points and checks the repository afterwards.
+  - Cost: process start is gated by `desktop_spawn_overhead` (p95 of
+    `mediagit --machine version`, default ceiling 50 ms).
 
 ---
 

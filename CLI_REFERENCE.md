@@ -65,6 +65,53 @@ see [book/src/architecture/](book/src/architecture/README.md).
 | `config` | Get and set repository configuration | [book/src/cli/config.md](book/src/cli/config.md) |
 | `key` | Manage this repository's at-rest encryption key | [book/src/cli/key.md](book/src/cli/key.md) |
 
+## Machine-readable output (`--machine`)
+
+The global `--machine` flag is for programs (the desktop app, scripts): it turns
+off colour and human output and replaces them with one JSON envelope on stdout
+and NDJSON progress on stderr.
+
+```
+mediagit -C <repo> --machine status
+```
+
+**Envelope** (one line, contract version `v` = 1; bumped only on incompatible change):
+
+```json
+{"v":1,"ok":true,"data":{ }}
+{"v":1,"ok":false,"error":{"code":"error","message":"..."}}
+```
+
+**Error codes and exit codes**
+
+| `error.code` | Meaning | Exit |
+|--------------|---------|------|
+| `json_unsupported` | The subcommand has no machine output yet | 2 |
+| `needs_input` | A prompt (passphrase, confirmation) was reached; collect the input and re-run with it supplied | 1 |
+| `invalid_args` | Flags combined wrongly (currently `show`: `--output` without `<rev>:<path>`, `--tree` with `<rev>:<path>`) | 1 |
+| `error` | Any other failure; `message` is the full error chain | 1 |
+
+Success exits 0. A panic exits 2 with no envelope.
+
+**Progress** (stderr, one line per bar roughly every 200 ms, final line has `done:true`):
+
+```json
+{"type":"progress","id":3,"msg":"Pushing","pos":10,"len":100,"unit":"bytes","done":false}
+```
+
+`id` is stable for one run, `len` is `null` while the total is unknown, and
+`unit` is `bytes` or `items`. Other stderr text is ordinary log output; ignore
+lines that are not `type:"progress"`.
+
+**Supported commands:** `status`, `version`, `log`, `show`, `branch`, `tag`,
+`add`, `commit`, `init`, `media`, `remote`, `lock`, `fetch`, `pull`, `push`,
+`clone`. `show <rev> --tree` lists a commit's files; `show <rev>:<path> --output <file>`
+writes a blob to a file. Every other command prints a `json_unsupported`
+envelope and exits 2 without running.
+
+Report types are generated for TypeScript into `ui/src/api/generated/` by
+`cargo test -p mediagit-cli`.
+
 ## See Also
 
 - [Architecture](ARCHITECTURE.md)

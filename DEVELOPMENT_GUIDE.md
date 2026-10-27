@@ -22,10 +22,11 @@ debugging client-server flows, and where to look when something breaks in dev.
 7. [File Locking](#file-locking)
 8. [Auth State](#auth-state)
 9. [Testing](#testing)
-10. [Troubleshooting](#troubleshooting)
-11. [Performance Tuning](#performance-tuning)
-12. [Quick Reference](#quick-reference)
-13. [Project Maintenance](#project-maintenance)
+10. [Desktop App Development](#desktop-app-development)
+11. [Troubleshooting](#troubleshooting)
+12. [Performance Tuning](#performance-tuning)
+13. [Quick Reference](#quick-reference)
+14. [Project Maintenance](#project-maintenance)
 
 ---
 
@@ -293,7 +294,7 @@ If hooks fail to execute at all (`cannot exec '.husky/pre-commit'`), see
 
 ```
 mediagit-core/
-├── crates/                    # 12 workspace members (see below)
+├── crates/                    # 13 workspace members (see below)
 ├── dev-tests/                 # Manual/integration test harnesses (qa-suite, dev-server, deep-tests, compat-fixture)
 ├── docs/                      # gitignored, local-only working notes (not in a fresh clone)
 ├── book/                      # mdBook documentation source
@@ -323,6 +324,7 @@ and manual test harnesses live under `dev-tests/`, and each crate has its own
 | `mediagit-observability` | Structured logging and observability for MediaGit |
 | `mediagit-metrics` | Prometheus metrics and performance monitoring for MediaGit |
 | `mediagit-test-utils` | Shared test utilities for MediaGit crates |
+| `mediagit-desktop` | Tauri 2 desktop app shell that runs the `mediagit` CLI with `--machine` (frontend in `ui/`) |
 
 ---
 
@@ -504,6 +506,81 @@ cargo bench
 cargo bench --bench cache_bench
 cargo bench --bench odb_bench
 ```
+
+---
+
+## Desktop app development
+
+The desktop app is `crates/mediagit-desktop` (Tauri 2 shell) plus `ui/` (Vue 3,
+Vite, Pinia, Reka UI). Design and process model: [ARCHITECTURE.md](ARCHITECTURE.md#desktop-app).
+
+### Prerequisites
+
+- Node 22+ and pnpm (`ui/package.json` `engines.node` is `>=22`).
+- WebView2 runtime (Windows; preinstalled on Windows 11).
+- Rust as above. The bundle target is NSIS (`tauri.conf.json`).
+
+```powershell
+pnpm --dir ui install
+```
+
+### Run
+
+The app finds the CLI as `mediagit(.exe)` next to its own executable, or at
+`MEDIAGIT_DESKTOP_CLI` if set. A debug run needs a debug CLI built first:
+
+```powershell
+cargo build -p mediagit-cli
+pnpm --dir ui dev                      # frontend alone at http://localhost:5173
+pnpm --dir ui tauri dev                # full app; tauri.conf.json starts `pnpm dev` itself
+```
+
+`tauri dev` runs from `crates/mediagit-desktop`, where `tauri.conf.json` lives;
+if the `tauri` script cannot find it, run `cargo tauri dev` there instead.
+
+### Regenerate TypeScript types
+
+The `--machine` report structs derive `ts-rs`; `ui/src/api/generated/` is
+written by the CLI's tests. Commit the result with the Rust change:
+
+```powershell
+cargo test -p mediagit-cli
+```
+
+### Tests
+
+```powershell
+cargo test -p mediagit-desktop         # engine, argv validation, throttle, cancel registry
+pnpm --dir ui test                     # vitest unit tests
+pnpm --dir ui typecheck                # vue-tsc
+pnpm --dir ui e2e                      # Playwright against the dev server with a mocked backend
+pnpm --dir ui e2e:real                 # Playwright against the real app over WebView2 CDP
+```
+
+- `e2e` runs with 2 workers and 1 retry: more than two Chromium start-ups at
+  once stall on Windows.
+- `e2e:real` (1 worker, no retries) starts its own repo, server and app; build
+  `mediagit-cli`, `mediagit-server` and `mediagit-desktop` in debug first.
+
+### QA phases
+
+Opt-in phases under `dev-tests/qa-suite/scripts/`:
+
+| Phase | Covers |
+|-------|--------|
+| `17_desktop.ps1` | `--machine` contract, engine, UI gates, `desktop_spawn_overhead`, `desktop_status_latency` |
+| `17_desktop_killsafety.ps1` | kills push, fetch, pull and clone mid-run, then checks the repository |
+
+| Knob | Effect |
+|------|--------|
+| `MG_QA_DESKTOP_E2E_REAL=1` | also run the `desktop_ui_e2e_real` gate (otherwise SKIP) |
+| `MG_QA_DESKTOP_LATENCY_ONLY=1` | only `desktop_exe_machine` and the two timing gates; no cargo, no UI builds |
+| `MG_QA_DESKTOP_SPAWN_P95_MS` / `MG_QA_DESKTOP_STATUS_P95_MS` | timing ceilings (defaults 50 / 300) |
+| `MG_QA_DESKTOP_RUNS` | timed runs (default 20) |
+| `MG_QA_DESKTOP_KILL_OPS` | comma list of ops to kill-test (default `push,fetch,pull,clone`) |
+| `MG_QA_DESKTOP_KILLS`, `_KILL_BACKEND`, `_KILL_MB`, `_KILL_SEED` | kills per op (20), backend (`local`), payload MB (24), RNG seed |
+
+A missing pnpm or `node_modules` makes the UI gates SKIP with the reason.
 
 ---
 
