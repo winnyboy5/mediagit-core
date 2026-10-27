@@ -1185,6 +1185,36 @@ async fn deleting_a_user_releases_their_locks() {
     );
 }
 
+/// With auth on, unlock must compare the authenticated user, never the
+/// client-supplied `owner` query parameter (that is trusted only on a no-auth
+/// server). Otherwise any writer could release anyone's lock by naming them.
+#[tokio::test]
+async fn supplied_owner_is_ignored_with_auth() {
+    let (state, _admin, write) = test_state_with_tokens().await;
+    let repo_path = state.repos_dir.join("repoA");
+    let mediagit_server::locks::CreateLockOutcome::Created(record) =
+        mediagit_server::locks::create_lock(
+            &state,
+            "repoA",
+            &repo_path,
+            "art/hero.psd".to_string(),
+            "admin-user".to_string(),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("lock should be created");
+    };
+
+    let app = create_router(Arc::clone(&state));
+    let uri = format!("/repoA/locks/{}?owner=admin-user", record.lock_id);
+    let resp = app
+        .oneshot(delete_req(&uri, Some(&write), None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
 /// AU-16: `logout` must end the token, not just the client's copy of it.
 ///
 /// It previously returned 204 and did nothing, so a token captured before

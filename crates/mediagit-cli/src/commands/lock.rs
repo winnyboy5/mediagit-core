@@ -64,8 +64,10 @@ pub struct UnlockOpts {
     #[arg(long = "id", value_name = "LOCK_ID")]
     pub lock_id: Option<String>,
 
-    /// Force-release someone else's lock (requires repo:admin; required on
-    /// no-auth servers, which have no owner identity to match against)
+    /// Force-release someone else's lock (requires repo:admin). Not needed for
+    /// your own lock: on a no-auth server the owner is matched by the same
+    /// identity `lock create` used (MEDIAGIT_AUTHOR_NAME, then config.toml
+    /// [author].name, then $USER)
     #[arg(long)]
     pub force: bool,
 
@@ -237,7 +239,8 @@ impl LockCmd {
                 .with_context(|| format!("No active lock found for '{}'", path))?
         };
 
-        match client.delete_lock(&lock_id, opts.force).await {
+        let owner = self.resolve_owner(None).await?;
+        match client.delete_lock(&lock_id, opts.force, Some(&owner)).await {
             Ok(()) => {}
             Err(e) => match self.refresh_client_on_unauthorized(
                 &config,
@@ -249,7 +252,9 @@ impl LockCmd {
                 Some((new_client, new_creds)) => {
                     client = new_client;
                     credentials = new_creds;
-                    client.delete_lock(&lock_id, opts.force).await?
+                    client
+                        .delete_lock(&lock_id, opts.force, Some(&owner))
+                        .await?
                 }
                 None => return Err(e),
             },

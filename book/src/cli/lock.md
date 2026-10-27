@@ -151,8 +151,9 @@ Options:
 - `--id <LOCK_ID>` — Lock id to release directly, instead of resolving by
   path
 - `--force` — Force-release someone else's lock. Requires `repo:admin`.
-  Required on no-auth servers, which have no owner identity to match the
-  requester against.
+  Not needed for your own lock: on a no-auth server, `unlock` sends the
+  same identity `lock create` uses (see Owner Resolution) and the server
+  compares it with the lock's owner.
 - `--remote <REMOTE>` — Remote to talk to (default: `origin`)
 
 One of `PATH` or `--id` is required.
@@ -173,7 +174,8 @@ Options:
 
 ## Owner Resolution
 
-When `--owner` isn't given to `lock create`, it's resolved in this order:
+When `--owner` isn't given to `lock create`, and always for `lock unlock`,
+the owner is resolved in this order:
 
 1. `MEDIAGIT_AUTHOR_NAME` environment variable
 2. `[author].name` in `config.toml`
@@ -182,7 +184,8 @@ When `--owner` isn't given to `lock create`, it's resolved in this order:
 
 This only matters against no-auth servers — an authenticated server
 ignores the supplied owner and uses the authenticated user's identity
-instead.
+instead. A lock created with an explicit `--owner` that differs from this
+identity can only be released with `--force`.
 
 ## Examples
 
