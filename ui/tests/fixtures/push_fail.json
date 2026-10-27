@@ -1,0 +1,18 @@
+[
+  {
+    "progress": {
+      "id": 1,
+      "msg": "Preparing",
+      "pos": 0,
+      "len": null,
+      "unit": "items",
+      "done": false
+    }
+  },
+  {
+    "reject": {
+      "code": "error",
+      "message": "The server refused the push: main is protected."
+    }
+  }
+]

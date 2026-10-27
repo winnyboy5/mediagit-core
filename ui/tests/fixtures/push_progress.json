@@ -1,0 +1,67 @@
+[
+  {
+    "progress": {
+      "id": 1,
+      "msg": "Preparing",
+      "pos": 0,
+      "len": null,
+      "unit": "items",
+      "done": false
+    }
+  },
+  {
+    "hold": true
+  },
+  {
+    "progress": {
+      "id": 1,
+      "msg": "Preparing",
+      "pos": 4,
+      "len": 4,
+      "unit": "items",
+      "done": true
+    }
+  },
+  {
+    "progress": {
+      "id": 2,
+      "msg": "Uploading media",
+      "pos": 200000,
+      "len": 2000000,
+      "unit": "bytes",
+      "done": false
+    }
+  },
+  {
+    "hold": true
+  },
+  {
+    "progress": {
+      "id": 2,
+      "msg": "Uploading media",
+      "pos": 1500000,
+      "len": 2000000,
+      "unit": "bytes",
+      "done": false
+    }
+  },
+  {
+    "hold": true
+  },
+  {
+    "resolve": {
+      "remote": "origin",
+      "result": "pushed",
+      "ref_updates": [
+        {
+          "name": "refs/heads/main",
+          "old": "0003000300030003000300030003000300030003",
+          "new": "0000000000000000000000000000000000000000"
+        }
+      ],
+      "skipped_up_to_date": 0,
+      "bytes_uploaded": 2000000,
+      "objects_sent": 14
+    }
+  }
+]

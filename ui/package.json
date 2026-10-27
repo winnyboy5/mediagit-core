@@ -1,0 +1,42 @@
+{
+  "name": "mediagit-ui",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "typecheck": "vue-tsc --noEmit",
+    "test": "vitest run",
+    "e2e": "playwright test",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@fontsource/ibm-plex-mono": "^5.3.0",
+    "@fontsource/ibm-plex-sans": "^5.3.0",
+    "@tanstack/vue-virtual": "^3.13.49",
+    "@tauri-apps/api": "~2.12.4",
+    "@tauri-apps/plugin-dialog": "^2.8.3",
+    "lucide-vue-next": "^1.0.0",
+    "pinia": "^4.1.0",
+    "reka-ui": "^2.11.0",
+    "vue": "^3.5.44",
+    "vue-router": "^5.4.0"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.14.0",
+    "@playwright/test": "^1.64.1",
+    "@tauri-apps/cli": "~2.12.4",
+    "@types/node": "^26.6.5",
+    "@vitejs/plugin-vue": "^6.0.10",
+    "@vue/test-utils": "^2.5.1",
+    "happy-dom": "^21.0.4",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5",
+    "vue-tsc": "^3.3.13"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

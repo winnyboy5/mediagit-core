@@ -1,0 +1,4 @@
+[
+  { "progress": { "id": 1, "msg": "Downloading media", "pos": 1000, "len": 100000, "unit": "bytes", "done": false } },
+  { "hold": true }
+]

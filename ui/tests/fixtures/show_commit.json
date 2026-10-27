@@ -1,0 +1,39 @@
+{
+  "oid": "0000000000000000000000000000000000000000",
+  "parents": [
+    "0001000100010001000100010001000100010001",
+    "0002000200020002000200020002000200020002"
+  ],
+  "author": {
+    "name": "Mira Okafor",
+    "email": "mira@studio.example"
+  },
+  "time": 1792996400,
+  "message": "Merge grade pass into main\n\nBrings the approved grade onto main.\nShot 010 and 020 now match the reference.",
+  "files": [
+    {
+      "path": "video/shot_010.mp4",
+      "status": "modified",
+      "old_size": 398458880,
+      "new_size": 421527552
+    },
+    {
+      "path": "art/hero_preview.png",
+      "status": "modified",
+      "old_size": 1153433,
+      "new_size": 1363148
+    },
+    {
+      "path": "audio/vo_take1.wav",
+      "status": "deleted",
+      "old_size": 12582912,
+      "new_size": null
+    },
+    {
+      "path": "env/fog_vol.vdb",
+      "status": "added",
+      "old_size": null,
+      "new_size": 67108864
+    }
+  ]
+}

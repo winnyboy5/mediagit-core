@@ -1,0 +1,34 @@
+import { createRouter, createWebHashHistory } from 'vue-router'
+import { useRepoStore } from './stores/repo'
+
+declare module 'vue-router' {
+  interface RouteMeta {
+    /** `none` hides the sidebar (Welcome). */
+    chrome?: 'none'
+    /** Standalone page outside the app shell. */
+    bare?: boolean
+    /** File views show the inspector panel. */
+    inspector?: boolean
+    /** Redirect to Welcome when no repository is open. */
+    needsRepo?: boolean
+    title?: string
+  }
+}
+
+export const router = createRouter({
+  history: createWebHashHistory(),
+  routes: [
+    { path: '/', redirect: () => (useRepoStore().path ? '/changes' : '/welcome') },
+    { path: '/welcome', component: () => import('./views/WelcomeView.vue'), meta: { chrome: 'none', title: 'Welcome' } },
+    { path: '/changes', component: () => import('./views/ChangesView.vue'), meta: { needsRepo: true, inspector: true, title: 'Changes' } },
+    { path: '/history', component: () => import('./views/HistoryView.vue'), meta: { needsRepo: true, inspector: true, title: 'History' } },
+    { path: '/branches', component: () => import('./views/BranchesView.vue'), meta: { needsRepo: true, title: 'Branches' } },
+    { path: '/locks', component: () => import('./views/LocksView.vue'), meta: { needsRepo: true, title: 'Locks' } },
+    { path: '/sync', component: () => import('./views/SyncView.vue'), meta: { needsRepo: true, title: 'Sync' } },
+    { path: '/kit', component: () => import('./kit/KitView.vue'), meta: { bare: true } },
+  ],
+})
+
+router.beforeEach((to) => {
+  if (to.meta.needsRepo && !useRepoStore().path) return '/welcome'
+})

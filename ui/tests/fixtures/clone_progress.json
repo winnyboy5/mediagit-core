@@ -1,0 +1,12 @@
+[
+  { "progress": { "id": 1, "msg": "Connecting to server", "pos": 0, "len": null, "unit": "bytes", "done": false } },
+  { "hold": true },
+  { "progress": { "id": 1, "msg": "Connecting to server", "pos": 0, "len": null, "unit": "bytes", "done": true } },
+  { "progress": { "id": 2, "msg": "Downloading media", "pos": 100000, "len": 1000000, "unit": "bytes", "done": false } },
+  { "hold": true },
+  { "progress": { "id": 2, "msg": "Downloading media", "pos": 300000, "len": 1000000, "unit": "bytes", "done": false } },
+  { "hold": true },
+  { "progress": { "id": 2, "msg": "Downloading media", "pos": 900000, "len": 1000000, "unit": "bytes", "done": false } },
+  { "hold": true },
+  { "resolve": { "path": "/repos/hero-film" } }
+]

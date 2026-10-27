@@ -1,0 +1,8 @@
+[
+  {
+    "reject": {
+      "code": "error",
+      "message": "You have unsaved changes in 3 files. Save a version or discard them before switching branches."
+    }
+  }
+]

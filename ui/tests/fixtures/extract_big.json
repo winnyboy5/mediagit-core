@@ -1,0 +1,34 @@
+[
+  {
+    "progress": {
+      "id": 0,
+      "msg": "Extracting shot_010.mp4",
+      "pos": 41943040,
+      "len": 421527552,
+      "unit": "bytes",
+      "done": false
+    }
+  },
+  {
+    "hold": true
+  },
+  {
+    "progress": {
+      "id": 0,
+      "msg": "Extracting shot_010.mp4",
+      "pos": 314572800,
+      "len": 421527552,
+      "unit": "bytes",
+      "done": false
+    }
+  },
+  {
+    "hold": true
+  },
+  {
+    "resolve": {
+      "path": "/tmp/mediagit-desktop-preview/abc.mp4",
+      "size": 421527552
+    }
+  }
+]

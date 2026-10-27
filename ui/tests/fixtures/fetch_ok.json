@@ -1,0 +1,15 @@
+{
+  "remote": "origin",
+  "branches_updated": 1,
+  "branches_up_to_date": 2,
+  "tags_updated": 0,
+  "pruned": 0,
+  "bytes_downloaded": 3400000,
+  "ref_updates": [
+    {
+      "name": "refs/remotes/origin/main",
+      "old": "0003000300030003000300030003000300030003",
+      "new": "0001000100010001000100010001000100010001"
+    }
+  ]
+}

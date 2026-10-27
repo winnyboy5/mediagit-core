@@ -1,0 +1,15 @@
+{
+  "format_version": 1,
+  "branch": { "name": "main", "detached": false, "detached_oid": null, "has_commits": true, "upstream": { "name": "origin/main", "ahead": 3, "behind": 0 } },
+  "staged": [
+    { "path": "art/hero.psd", "kind": "modified" },
+    { "path": "env/sky_hdri.exr", "kind": "added" },
+    { "path": "char/rig.fbx", "kind": "modified" }
+  ],
+  "modified": ["char/rig_lod1.fbx", "video/shot_020.mp4"],
+  "deleted": ["audio/vo_take1.wav"],
+  "untracked": ["audio/vo_take3.wav", "env/fog_vol.vdb", "video/shot_010.mp4"],
+  "ignored": [],
+  "media": [],
+  "summary": { "staged": 3, "modified": 2, "deleted": 1, "untracked": 3, "total_size": null }
+}

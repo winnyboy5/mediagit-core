@@ -1,0 +1,37 @@
+[
+  {
+    "progress": {
+      "id": 1,
+      "msg": "Updating files",
+      "pos": 0,
+      "len": 40,
+      "unit": "items",
+      "done": false
+    }
+  },
+  {
+    "hold": true
+  },
+  {
+    "progress": {
+      "id": 1,
+      "msg": "Updating files",
+      "pos": 18,
+      "len": 40,
+      "unit": "items",
+      "done": false
+    }
+  },
+  {
+    "hold": true
+  },
+  {
+    "resolve": {
+      "action": "switch",
+      "name": "feature/grade",
+      "oid": "0002000200020002000200020002000200020002",
+      "previous_name": null,
+      "files_updated": 40
+    }
+  }
+]

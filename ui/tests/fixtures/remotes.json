@@ -1,0 +1,8 @@
+{
+  "remotes": [
+    {
+      "name": "origin",
+      "url": "https://mediagit.studio.example/hero-film"
+    }
+  ]
+}

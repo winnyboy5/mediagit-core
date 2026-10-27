@@ -1,0 +1,56 @@
+{
+  "oid": "0000000000000000000000000000000000000000",
+  "parents": [
+    "0001000100010001000100010001000100010001",
+    "0002000200020002000200020002000200020002"
+  ],
+  "author": {
+    "name": "Mira Okafor",
+    "email": "mira@studio.example"
+  },
+  "time": 1792996400,
+  "message": "Merge grade pass into main\n\nBrings the approved grade onto main.\nShot 010 and 020 now match the reference.",
+  "files": [],
+  "tree": [
+    {
+      "path": "art/hero.psd",
+      "size": 50331648,
+      "oid": "0065006500650065006500650065006500650065"
+    },
+    {
+      "path": "art/hero_preview.png",
+      "size": 1363148,
+      "oid": "0066006600660066006600660066006600660066"
+    },
+    {
+      "path": "audio/vo_take2.wav",
+      "size": 14680064,
+      "oid": "0067006700670067006700670067006700670067"
+    },
+    {
+      "path": "char/rig.fbx",
+      "size": 32505856,
+      "oid": "0068006800680068006800680068006800680068"
+    },
+    {
+      "path": "env/fog_vol.vdb",
+      "size": 67108864,
+      "oid": "0069006900690069006900690069006900690069"
+    },
+    {
+      "path": "env/sky_hdri.exr",
+      "size": 96468992,
+      "oid": "006a006a006a006a006a006a006a006a006a006a"
+    },
+    {
+      "path": "video/shot_010.mp4",
+      "size": 421527552,
+      "oid": "006b006b006b006b006b006b006b006b006b006b"
+    },
+    {
+      "path": "README.txt",
+      "size": 812,
+      "oid": "006c006c006c006c006c006c006c006c006c006c"
+    }
+  ]
+}

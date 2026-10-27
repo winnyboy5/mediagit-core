@@ -1,0 +1,22 @@
+{
+  "locks": [
+    {
+      "lock_id": "l-1",
+      "path": "art/hero.psd",
+      "owner": "Mira Okafor",
+      "created_at": 1792992800
+    },
+    {
+      "lock_id": "l-2",
+      "path": "char/rig.fbx",
+      "owner": "Dev Rao",
+      "created_at": 1792906400
+    },
+    {
+      "lock_id": "l-3",
+      "path": "env/sky_hdri.exr",
+      "owner": "Sam Lee",
+      "created_at": 1792568000
+    }
+  ]
+}

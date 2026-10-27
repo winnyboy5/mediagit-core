@@ -1,0 +1,4 @@
+[
+  { "progress": { "id": 1, "msg": "Connecting to server", "pos": 0, "len": null, "unit": "bytes", "done": false } },
+  { "reject": { "code": "E_NET_TIMEOUT", "message": "Server did not answer within 60 s." } }
+]
