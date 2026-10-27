@@ -16,6 +16,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::info;
 
+/// `--machine` data for `init`.
+#[derive(Debug, Clone, serde::Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct InitReport {
+    pub path: String,
+    pub branch: String,
+}
+
 /// Initialize a new MediaGit repository
 ///
 /// Creates a new MediaGit repository with the required directory structure,
@@ -111,6 +120,13 @@ impl InitCmd {
         crate::repo::create_storage_backend(&repo_path)
             .await
             .context("Failed to write LAYOUT marker")?;
+
+        if output::machine_mode() {
+            return output::emit_ok(&InitReport {
+                path: repo_path.display().to_string(),
+                branch: initial_branch.to_string(),
+            });
+        }
 
         if !self.quiet {
             output::success(&format!(

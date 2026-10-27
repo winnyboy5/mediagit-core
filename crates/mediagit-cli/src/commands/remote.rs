@@ -6,6 +6,38 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use console::style;
 use mediagit_config::Config;
+use serde::Serialize;
+
+use crate::output;
+
+/// `--machine` data for `remote list|add|remove`: the resulting remote set.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct RemotesReport {
+    pub remotes: Vec<RemoteReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct RemoteReport {
+    pub name: String,
+    pub url: String,
+}
+
+fn emit_remotes(config: &Config) -> Result<()> {
+    let mut remotes: Vec<RemoteReport> = config
+        .remotes
+        .iter()
+        .map(|(name, r)| RemoteReport {
+            name: name.clone(),
+            url: r.url.clone(),
+        })
+        .collect();
+    remotes.sort_by(|a, b| a.name.cmp(&b.name));
+    output::emit_ok(&RemotesReport { remotes })
+}
 
 /// Manage remote repositories
 #[derive(Parser, Debug)]
@@ -88,6 +120,14 @@ pub enum RemoteSubcommand {
 
 impl RemoteCmd {
     pub async fn execute(&self) -> Result<()> {
+        if matches!(
+            self.command,
+            RemoteSubcommand::Rename { .. }
+                | RemoteSubcommand::Show { .. }
+                | RemoteSubcommand::SetUrl { .. }
+        ) {
+            output::ensure_machine_supported("remote (only list|add|remove)")?;
+        }
         match &self.command {
             RemoteSubcommand::Add {
                 name,
@@ -143,6 +183,10 @@ impl RemoteCmd {
         // Save config
         config.save(&repo_root)?;
 
+        if output::machine_mode() {
+            return emit_remotes(&config);
+        }
+
         println!(
             "{} Added remote '{}' → {}",
             style("✓").green(),
@@ -183,6 +227,10 @@ impl RemoteCmd {
         // Save config
         config.save(&repo_root)?;
 
+        if output::machine_mode() {
+            return emit_remotes(&config);
+        }
+
         println!(
             "{} Removed remote '{}'",
             style("✓").green(),
@@ -195,6 +243,10 @@ impl RemoteCmd {
     async fn list_remotes(&self, verbose: bool) -> Result<()> {
         let repo_root = find_repo_root()?;
         let config = Config::load(&repo_root).await?;
+
+        if output::machine_mode() {
+            return emit_remotes(&config);
+        }
 
         if config.remotes.is_empty() {
             if verbose {

@@ -2,6 +2,7 @@ command_path	flag	takes_value	result
 GLOBAL	-(bare invocation)	no	OK
 GLOBAL	-v,--verbose	no	OK
 GLOBAL	-q,--quiet	no	OK
+GLOBAL	--machine	no	OK
 GLOBAL	--color	yes	OK
 GLOBAL	-C,--repository	yes	ERROR
 GLOBAL	-h,--help	no	OK
@@ -182,6 +183,8 @@ diff	--summary	no	OK
 diff	-U,--unified	yes	USAGE
 show	-(bare invocation)	no	OK
 show	--stat	no	ERROR
+show	--tree	no	OK
+show	--output	yes	ERROR
 status	-(bare invocation)	no	OK
 status	--tracked	no	OK
 status	--untracked	no	OK

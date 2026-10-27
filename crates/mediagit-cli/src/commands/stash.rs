@@ -582,6 +582,7 @@ impl StashCmd {
         if !opts.force {
             // Prompt for confirmation — fall back gracefully when stdin is not a terminal
             use dialoguer::Confirm;
+            crate::output::ensure_interactive("stash clear confirmation")?;
             let confirmed = match Confirm::new()
                 .with_prompt("Clear all stash entries?")
                 .default(false)

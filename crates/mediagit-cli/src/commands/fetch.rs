@@ -7,15 +7,43 @@
 //! without integrating them into the local branches.
 
 use super::super::repo::{collect_local_have, create_storage_backend, find_repo_root};
+use crate::output;
 use crate::progress::{OperationStats, ProgressTracker};
 use anyhow::Result;
 use clap::Parser;
 use console::style;
 use futures::StreamExt;
 use mediagit_versioning::{ObjectDatabase, Ref, RefDatabase};
+use serde::Serialize;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
+
+/// One ref moved by a transfer command (`old` is `None` for a new ref).
+/// Shared by `fetch`, `pull` and `push` machine output.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct RefUpdateReport {
+    pub name: String,
+    pub old: Option<String>,
+    pub new: String,
+}
+
+/// `fetch --machine` data.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct FetchReport {
+    pub remote: String,
+    pub branches_updated: usize,
+    pub branches_up_to_date: usize,
+    pub tags_updated: usize,
+    pub pruned: usize,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bytes_downloaded: u64,
+    pub ref_updates: Vec<RefUpdateReport>,
+}
 
 /// Fetch changes from a remote repository
 ///
@@ -67,10 +95,19 @@ pub struct FetchCmd {
 }
 
 impl FetchCmd {
+    /// Human chatter is silent under `--machine` (stdout is the envelope only).
+    fn quiet(&self) -> bool {
+        self.quiet || output::machine_mode()
+    }
+
+    fn verbose(&self) -> bool {
+        self.verbose && !output::machine_mode()
+    }
+
     pub async fn execute(&self) -> Result<()> {
         let start_time = Instant::now();
         let mut stats = OperationStats::for_operation("fetch");
-        let progress = ProgressTracker::new(self.quiet);
+        let progress = ProgressTracker::new(self.quiet());
 
         let remote = self.remote.as_deref().unwrap_or("origin");
 
@@ -80,7 +117,7 @@ impl FetchCmd {
         let storage = create_storage_backend(&repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
 
-        if !self.quiet {
+        if !self.quiet() {
             println!(
                 "{} Fetching from {}...",
                 style("📥").cyan().bold(),
@@ -94,7 +131,7 @@ impl FetchCmd {
             .resolve_remote_url(remote)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        if self.verbose {
+        if self.verbose() {
             println!("  Remote URL: {}", remote_url);
         }
 
@@ -150,7 +187,7 @@ impl FetchCmd {
         // The server expands these OIDs into a full object closure and prunes
         // anything already on the client from the pack walk.
         let local_have = collect_local_have(&refdb, &odb).await;
-        if self.verbose {
+        if self.verbose() {
             println!("  Local have-set: {} refs", local_have.len());
         }
 
@@ -168,10 +205,10 @@ impl FetchCmd {
             &remote_refs.refs,
             &client,
             &local_have,
-            self.verbose,
+            self.verbose(),
         )
         .await?;
-        if tags_updated > 0 && !self.quiet {
+        if tags_updated > 0 && !self.quiet() {
             println!("  {} Fetched {} tag(s)", style("🏷").cyan(), tags_updated);
         }
 
@@ -182,7 +219,7 @@ impl FetchCmd {
             .filter(|r| r.name.starts_with("refs/heads/"))
             .collect();
 
-        if self.verbose {
+        if self.verbose() {
             println!("  Found {} remote branches", remote_branches.len());
         }
 
@@ -219,8 +256,19 @@ impl FetchCmd {
             if let Some(branch) = &self.branch {
                 anyhow::bail!("Branch '{}' not found on remote", branch);
             } else {
-                if !self.quiet {
+                if !self.quiet() {
                     println!("{} No branches to fetch", style("ℹ").blue());
+                }
+                if output::machine_mode() {
+                    return output::emit_ok(&FetchReport {
+                        remote: remote.to_string(),
+                        branches_updated: 0,
+                        branches_up_to_date: 0,
+                        tags_updated,
+                        pruned: 0,
+                        bytes_downloaded: 0,
+                        ref_updates: Vec::new(),
+                    });
                 }
                 return Ok(());
             }
@@ -245,6 +293,7 @@ impl FetchCmd {
 
         let mut branches_updated = 0;
         let mut branches_uptodate = 0;
+        let mut ref_updates: Vec<RefUpdateReport> = Vec::new();
 
         if self.all && branches_to_fetch.len() > 1 && branch_concurrency > 1 {
             // === Parallel --all path ===
@@ -296,7 +345,7 @@ impl FetchCmd {
                     });
                 } else {
                     branches_uptodate += 1;
-                    if self.verbose {
+                    if self.verbose() {
                         println!("  {} is up to date", branch_name);
                     }
                 }
@@ -309,7 +358,7 @@ impl FetchCmd {
                 oid_short: String,
             }
 
-            if !self.quiet && !pending.is_empty() {
+            if !self.quiet() && !pending.is_empty() {
                 println!(
                     "  Fetching {} branch(es) in parallel (concurrency {})",
                     pending.len(),
@@ -375,10 +424,20 @@ impl FetchCmd {
 
             for result in fetch_results {
                 let f = result?;
+                ref_updates.push(RefUpdateReport {
+                    old: refdb
+                        .read(&f.tracking_ref_name)
+                        .await
+                        .ok()
+                        .and_then(|r| r.oid)
+                        .map(|o| o.to_hex()),
+                    name: f.tracking_ref_name.clone(),
+                    new: f.remote_oid.to_hex(),
+                });
                 let tracking_ref = Ref::new_direct(f.tracking_ref_name, f.remote_oid);
                 refdb.write(&tracking_ref).await?;
                 branches_updated += 1;
-                if !self.quiet {
+                if !self.quiet() {
                     println!(
                         "  {} {} -> {}",
                         style("→").cyan(),
@@ -428,13 +487,13 @@ impl FetchCmd {
 
                 if !needs_update {
                     branches_uptodate += 1;
-                    if self.verbose {
+                    if self.verbose() {
                         println!("  {} is up to date", branch_name);
                     }
                     continue;
                 }
 
-                if self.verbose {
+                if self.verbose() {
                     println!("  Fetching {}...", branch_name);
                 }
 
@@ -453,19 +512,29 @@ impl FetchCmd {
                     // one command whose whole job is transferring data is the
                     // one reporting none.
                     stats.bytes_downloaded += chunk_bytes;
-                    if self.verbose {
+                    if self.verbose() {
                         println!("    Downloaded {} chunks", chunks_downloaded);
                     }
                 }
 
                 let remote_oid = mediagit_versioning::Oid::from_hex(&branch_ref.oid)
                     .map_err(|e| anyhow::anyhow!("Invalid remote OID: {}", e))?;
+                ref_updates.push(RefUpdateReport {
+                    old: refdb
+                        .read(&tracking_ref_name)
+                        .await
+                        .ok()
+                        .and_then(|r| r.oid)
+                        .map(|o| o.to_hex()),
+                    name: tracking_ref_name.clone(),
+                    new: remote_oid.to_hex(),
+                });
                 let tracking_ref = Ref::new_direct(tracking_ref_name.clone(), remote_oid);
                 refdb.write(&tracking_ref).await?;
 
                 branches_updated += 1;
 
-                if !self.quiet {
+                if !self.quiet() {
                     println!(
                         "  {} {} -> {}",
                         style("→").cyan(),
@@ -479,11 +548,13 @@ impl FetchCmd {
         // Prune stale tracking refs if requested.
         // Always compare against ALL remote branches (not just branches_to_fetch),
         // so pruning works correctly when only fetching a subset of branches.
+        let mut pruned = 0;
         if self.prune {
             let stale_count = self
                 .prune_stale_refs(&refdb, remote, &remote_branches)
                 .await?;
-            if stale_count > 0 && !self.quiet {
+            pruned = stale_count;
+            if stale_count > 0 && !self.quiet() {
                 println!(
                     "{} Pruned {} stale tracking refs",
                     style("🗑").yellow(),
@@ -494,7 +565,7 @@ impl FetchCmd {
 
         // Summary
         stats.duration_ms = start_time.elapsed().as_millis() as u64;
-        if !self.quiet {
+        if !self.quiet() {
             if branches_updated > 0 {
                 println!(
                     "\n{} Fetched {} branches ({} already up to date)",
@@ -513,6 +584,17 @@ impl FetchCmd {
             tracing::warn!("Failed to save operation stats: {}", e);
         }
 
+        if output::machine_mode() {
+            return output::emit_ok(&FetchReport {
+                remote: remote.to_string(),
+                branches_updated,
+                branches_up_to_date: branches_uptodate,
+                tags_updated,
+                pruned,
+                bytes_downloaded: stats.bytes_downloaded,
+                ref_updates,
+            });
+        }
         Ok(())
     }
 
@@ -538,7 +620,7 @@ impl FetchCmd {
             let exists_on_remote = remote_branches.iter().any(|r| r.name == remote_ref_name);
 
             if !exists_on_remote {
-                if self.verbose {
+                if self.verbose() {
                     println!("  Pruning stale ref: {}", tracking_ref);
                 }
                 refdb.delete(&tracking_ref).await?;

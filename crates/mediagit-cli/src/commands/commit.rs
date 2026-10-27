@@ -13,6 +13,18 @@ use mediagit_versioning::{
     Tree, TreeEntry,
 };
 
+/// `--machine` data for `commit`.
+#[derive(Debug, Clone, serde::Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct CommitReport {
+    pub oid: String,
+    /// Short name of the branch the commit landed on; `None` when detached.
+    pub branch: Option<String>,
+    /// First line of the commit message.
+    pub summary: String,
+}
+
 /// Record changes to the repository
 ///
 /// Creates a new commit containing the currently staged changes. The commit
@@ -118,6 +130,7 @@ impl CommitCmd {
         } else if self.edit || std::io::IsTerminal::is_terminal(&std::io::stdin()) {
             edit_commit_message()?
         } else {
+            output::ensure_interactive("commit message")?;
             return Err(anyhow::anyhow!("no commit message provided"));
         };
 
@@ -144,6 +157,7 @@ impl CommitCmd {
         // Defer actual appending until after author_name/email are resolved
 
         if self.dry_run {
+            output::ensure_machine_supported("commit --dry-run")?;
             output::info("Running in dry-run mode");
             return Ok(());
         }
@@ -422,10 +436,17 @@ or pass --author \"Your Name <you@example.com>\"."
         );
         // Best-effort: don't fail the commit if reflog write fails
         let _ = reflog.append("HEAD", &entry).await;
+        let mut branch_short = None;
         if let Ok(head_ref) = refdb.read("HEAD").await
             && let Some(branch) = head_ref.target
         {
             let _ = reflog.append(&branch, &entry).await;
+            branch_short = Some(
+                branch
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(&branch)
+                    .to_string(),
+            );
         }
 
         if !self.quiet {
@@ -446,6 +467,14 @@ or pass --author \"Your Name <you@example.com>\"."
         // the gate measure something no one experiences. No-op unless MEDIAGIT_BENCH=1.
         mediagit_protocol::bench::emit_commit_summary(bench_wall_start, bench_files);
 
+        if output::machine_mode() {
+            return output::emit_ok(&CommitReport {
+                oid: commit_oid.to_hex(),
+                branch: branch_short,
+                summary: message.lines().next().unwrap_or("").to_string(),
+            });
+        }
+
         Ok(())
     }
 }
@@ -455,6 +484,7 @@ or pass --author \"Your Name <you@example.com>\"."
 /// git's `-e` / no-message-source commit flow. Comment lines (starting with
 /// `#`) are stripped from the result; emptiness is validated by the caller.
 fn edit_commit_message() -> Result<String> {
+    crate::output::ensure_interactive("commit message")?;
     let editor = std::env::var("EDITOR")
         .or_else(|_| std::env::var("VISUAL"))
         .unwrap_or_else(|_| {

@@ -7,7 +7,28 @@ use clap::{Parser, Subcommand};
 use mediagit_versioning::{
     Commit, ObjectDatabase, ObjectType, Oid, Ref, RefDatabase, Signature, Tag, Tree,
 };
+use serde::Serialize;
 use std::path::PathBuf;
+
+/// `--machine` data for `tag list`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct TagListReport {
+    pub tags: Vec<TagReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct TagReport {
+    pub name: String,
+    /// Commit the tag points at (an annotated tag's target, not the tag object).
+    pub oid: String,
+    pub annotated: bool,
+    /// First line of an annotated tag's message.
+    pub message: Option<String>,
+}
 
 /// Manage tags
 #[derive(Parser, Debug)]
@@ -140,6 +161,9 @@ pub struct VerifyOpts {
 impl TagCmd {
     /// Execute tag command
     pub async fn execute(&self, repo_path: PathBuf) -> Result<()> {
+        if !matches!(self.subcommand, TagSubcommand::List(_)) {
+            crate::output::ensure_machine_supported("tag (only `tag list`)")?;
+        }
         match &self.subcommand {
             TagSubcommand::Create(opts) => self.create(repo_path, opts).await,
             TagSubcommand::List(opts) => self.list(repo_path, opts).await,
@@ -338,6 +362,10 @@ impl TagCmd {
         // Sort tags
         tags = self.sort_tags(tags, &opts.sort, opts.reverse);
 
+        if crate::output::machine_mode() {
+            return self.list_machine(&refdb, tags).await;
+        }
+
         // Display tags
         if opts.show_info {
             self.list_verbose(&refdb, tags).await?;
@@ -346,6 +374,36 @@ impl TagCmd {
         }
 
         Ok(())
+    }
+
+    async fn list_machine(&self, refdb: &RefDatabase, tags: Vec<String>) -> Result<()> {
+        let repo_path = std::env::current_dir()?;
+        let storage = create_storage_backend(&repo_path).await?;
+        let odb = ObjectDatabase::with_smart_compression(storage, 1000);
+
+        let mut out = Vec::with_capacity(tags.len());
+        for tag_ref in tags {
+            let name = tag_ref
+                .strip_prefix("refs/tags/")
+                .unwrap_or(&tag_ref)
+                .to_string();
+            let oid = refdb.read(&tag_ref).await?.oid.context("Tag has no OID")?;
+            out.push(match self.read_tag_object(&odb, &oid).await {
+                Some(tag) => TagReport {
+                    name,
+                    oid: tag.target.to_hex(),
+                    annotated: true,
+                    message: Some(tag.message.lines().next().unwrap_or("").to_string()),
+                },
+                None => TagReport {
+                    name,
+                    oid: oid.to_hex(),
+                    annotated: false,
+                    message: None,
+                },
+            });
+        }
+        crate::output::emit_ok(&TagListReport { tags: out })
     }
 
     /// Filter tags by glob pattern

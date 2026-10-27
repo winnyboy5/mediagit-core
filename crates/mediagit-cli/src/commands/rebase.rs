@@ -358,24 +358,26 @@ impl RebaseCmd {
                 state.set_new_parent(new_parent);
                 state.save(repo_root)?;
 
-                println!(
-                    "{} Rebase stopped: conflict replaying {} '{}'",
-                    style("⚠").yellow().bold(),
-                    &original_oid.to_hex()[..7],
-                    original_commit.message.lines().next().unwrap_or("")
-                );
-                for conflict in &merge_result.conflicts {
-                    println!("  {} {}", style("conflict:").red(), conflict.path);
+                if !crate::output::machine_mode() {
+                    println!(
+                        "{} Rebase stopped: conflict replaying {} '{}'",
+                        style("⚠").yellow().bold(),
+                        &original_oid.to_hex()[..7],
+                        original_commit.message.lines().next().unwrap_or("")
+                    );
+                    for conflict in &merge_result.conflicts {
+                        println!("  {} {}", style("conflict:").red(), conflict.path);
+                    }
+                    println!(
+                        "  Resolve the file(s), {}, then run {}",
+                        style("mediagit add <file>").cyan(),
+                        style("mediagit rebase --continue").cyan()
+                    );
+                    println!(
+                        "  Or abandon the rebase with {}",
+                        style("mediagit rebase --abort").cyan()
+                    );
                 }
-                println!(
-                    "  Resolve the file(s), {}, then run {}",
-                    style("mediagit add <file>").cyan(),
-                    style("mediagit rebase --continue").cyan()
-                );
-                println!(
-                    "  Or abandon the rebase with {}",
-                    style("mediagit rebase --abort").cyan()
-                );
 
                 anyhow::bail!(
                     "rebase stopped: conflict replaying commit {} '{}'",

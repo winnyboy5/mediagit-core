@@ -138,9 +138,12 @@ impl EncryptionKeyCmd {
             KeySubcommand::Recover(opts) => {
                 let code = match opts.code.clone() {
                     Some(code) => code,
-                    None => dialoguer::Password::new()
-                        .with_prompt("Recovery code")
-                        .interact()?,
+                    None => {
+                        output::ensure_interactive("recovery code")?;
+                        dialoguer::Password::new()
+                            .with_prompt("Recovery code")
+                            .interact()?
+                    }
                 };
                 let source = encryption::recover_repo_key(&repo_root, &code)?;
                 output::success("Repository unlocked and re-wrapped");

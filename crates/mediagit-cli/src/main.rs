@@ -8,14 +8,14 @@ mod commands;
 mod encryption;
 mod ignore_rules;
 mod media_meta;
-mod output;
+use mediagit_cli::output; // shared with lib: one machine-mode static
 mod phash_index;
 mod progress;
 mod repo;
 mod worktree_guard;
 
 use anyhow::{Context, Result};
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use clap_complete::{Shell, generate};
 use commands::*;
 use mediagit_observability::LogFormat;
@@ -60,6 +60,13 @@ struct Cli {
     /// `MEDIAGIT_LOG` / `RUST_LOG` still control the filter, not the format.
     #[arg(long, global = true, value_name = "FORMAT")]
     log_format: Option<String>,
+
+    /// Machine-readable mode for GUI/automation: one JSON envelope on stdout,
+    /// NDJSON progress on stderr, prompts fail with `needs_input`.
+    /// Supported by: status, version, log, show, branch, tag (list), add, commit,
+    /// init, media, remote (list|add|remove), lock, fetch, pull, push, clone.
+    #[arg(long, global = true)]
+    machine: bool,
 }
 
 #[derive(Subcommand)]
@@ -420,7 +427,40 @@ fn main() {
     // Preprocess args to support git-style -N shorthand (e.g., log -5 → log -n 5)
     let args = preprocess_args(std::env::args().collect());
     // Parse CLI args on the main thread (lightweight, no async needed)
-    let cli = Cli::parse_from(args);
+    let matches = Cli::command().get_matches_from(args);
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+
+    if cli.machine {
+        output::set_machine_mode(true);
+        console::set_colors_enabled(false);
+        console::set_colors_enabled_stderr(false);
+        let sub = matches.subcommand_name().unwrap_or("(none)");
+        if !matches!(
+            sub,
+            "status"
+                | "version"
+                | "log"
+                | "show"
+                | "branch"
+                | "tag"
+                | "add"
+                | "commit"
+                | "init"
+                | "media"
+                | "remote"
+                | "lock"
+                | "fetch"
+                | "pull"
+                | "push"
+                | "clone"
+        ) {
+            output::emit_err(
+                "json_unsupported",
+                &format!("{sub} has no machine output yet"),
+            );
+            std::process::exit(2);
+        }
+    }
 
     // Run async work on a thread with 32MB stack to handle deeply nested
     // async futures on the single-threaded tokio runtime. The add pipeline
@@ -448,6 +488,11 @@ fn main() {
     match handler.join() {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
+            if output::machine_mode() {
+                let code = output::error_code(&e);
+                output::emit_err(code, &format!("{:#}", e));
+                std::process::exit(if code == "json_unsupported" { 2 } else { 1 });
+            }
             output::error(&format!("Error: {:#}", e));
             std::process::exit(1);
         }
@@ -653,6 +698,12 @@ async fn async_main(cli: Cli) -> Result<()> {
         Some(Commands::Revert(cmd)) => cmd.execute().await,
         Some(Commands::SparseCheckout(cmd)) => cmd.execute().await,
         Some(Commands::Version) => {
+            if output::machine_mode() {
+                return output::emit_ok(&serde_json::json!({
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "contract": output::MACHINE_CONTRACT_VERSION,
+                }));
+            }
             print_version();
             Ok(())
         }

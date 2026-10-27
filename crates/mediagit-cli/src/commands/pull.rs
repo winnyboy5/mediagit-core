@@ -3,14 +3,36 @@
 
 use super::super::repo::{collect_local_have, create_storage_backend, find_repo_root};
 use super::rebase::RebaseCmd;
+use crate::output;
 use crate::progress::{OperationStats, ProgressTracker};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Parser;
 use console::style;
 use mediagit_versioning::{CheckoutManager, Commit, MergeStrategy, RefDatabase, Signature};
+use serde::Serialize;
 use std::sync::Arc;
 use std::time::Instant;
+
+/// `pull --machine` data. `result` is one of `up_to_date`, `fast_forward`,
+/// `merged`, `rebased`, `fetched_branch` (a non-current branch was pulled) or
+/// `dry_run`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct PullReport {
+    pub remote: String,
+    /// Full ref pulled, e.g. `refs/heads/main`.
+    pub branch: String,
+    pub result: String,
+    pub old_head: Option<String>,
+    pub new_head: Option<String>,
+    pub tracking_refs_updated: usize,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bytes_downloaded: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub objects_received: u64,
+}
 
 /// Fetch and integrate remote changes
 ///
@@ -79,6 +101,15 @@ pub struct PullCmd {
 }
 
 impl PullCmd {
+    /// Human chatter is silent under `--machine` (stdout is the envelope only).
+    fn quiet(&self) -> bool {
+        self.quiet || output::machine_mode()
+    }
+
+    fn verbose(&self) -> bool {
+        self.verbose && !output::machine_mode()
+    }
+
     pub async fn execute(&self) -> Result<()> {
         // UX-5: both declared, neither read — `--abort` in particular looked
         // like a way out of a bad pull and did nothing at all.
@@ -98,7 +129,7 @@ impl PullCmd {
         )?;
         let start_time = Instant::now();
         let mut stats = OperationStats::for_operation("pull");
-        let progress = ProgressTracker::new(self.quiet);
+        let progress = ProgressTracker::new(self.quiet());
 
         let remote = self.remote.as_deref().unwrap_or("origin");
 
@@ -108,11 +139,11 @@ impl PullCmd {
         let storage = create_storage_backend(&repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
 
-        if self.dry_run && !self.quiet {
+        if self.dry_run && !self.quiet() {
             println!("{} Running in dry-run mode", style("ℹ").blue());
         }
 
-        if !self.quiet {
+        if !self.quiet() {
             println!(
                 "{} Preparing to pull from {}...",
                 style("📥").cyan().bold(),
@@ -123,7 +154,7 @@ impl PullCmd {
         // Validate local repository state and read HEAD once
         let head = refdb.read("HEAD").await.context("Failed to read HEAD")?;
 
-        if self.verbose {
+        if self.verbose() {
             println!("  Remote: {}", remote);
             if let Some(branch) = &self.branch {
                 println!("  Branch: {}", branch);
@@ -141,7 +172,7 @@ impl PullCmd {
             .resolve_remote_url(remote)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        if self.verbose {
+        if self.verbose() {
             println!("  Remote URL: {}", remote_url);
         }
 
@@ -189,7 +220,7 @@ impl PullCmd {
                 .ok_or_else(|| anyhow::anyhow!("HEAD is detached, please specify a branch"))?
         };
 
-        if self.verbose {
+        if self.verbose() {
             println!("  Pulling ref: {}", remote_ref);
         }
 
@@ -228,12 +259,12 @@ impl PullCmd {
             .find(|r| r.name == remote_ref)
             .map(|r| r.oid.clone());
 
+        let mut tracking_refs_updated = 0;
         if !self.dry_run {
             // Create remotes directory for tracking refs
             let remotes_dir = storage_path.join("refs").join("remotes").join(remote);
             std::fs::create_dir_all(&remotes_dir)?;
 
-            let mut tracking_refs_updated = 0;
             for branch_ref in &remote_branches {
                 let branch_name = branch_ref
                     .name
@@ -258,7 +289,7 @@ impl PullCmd {
                     refdb.write(&tracking_ref).await?;
                     tracking_refs_updated += 1;
 
-                    if self.verbose {
+                    if self.verbose() {
                         println!(
                             "  {} {} -> {}",
                             style("→").cyan(),
@@ -269,7 +300,7 @@ impl PullCmd {
                 }
             }
 
-            if !self.quiet && tracking_refs_updated > 0 {
+            if !self.quiet() && tracking_refs_updated > 0 {
                 println!(
                     "{} Fetched {} remote tracking refs",
                     style("✓").green(),
@@ -279,6 +310,7 @@ impl PullCmd {
         }
 
         // Check if current branch is already synchronized (avoid redundant object download)
+        let remote_name = remote;
         if let (Some(local), Some(remote)) = (
             local_ref.as_ref().and_then(|r| r.oid.as_ref()),
             remote_oid_check.as_ref(),
@@ -291,9 +323,21 @@ impl PullCmd {
                 // downloaded — clone ships only default-branch objects).
                 let have_object = odb.exists(local).await.unwrap_or(false);
                 if have_object {
-                    if !self.quiet {
+                    if !self.quiet() {
                         println!("{} Already up to date", style("✓").green());
                         println!("  {} {}", style("→").cyan(), &remote[..8]);
+                    }
+                    if output::machine_mode() {
+                        return output::emit_ok(&PullReport {
+                            remote: remote_name.to_string(),
+                            branch: remote_ref,
+                            result: "up_to_date".to_string(),
+                            old_head: Some(local_oid_str.clone()),
+                            new_head: Some(local_oid_str),
+                            tracking_refs_updated,
+                            bytes_downloaded: 0,
+                            objects_received: 0,
+                        });
                     }
                     return Ok(());
                 }
@@ -301,6 +345,13 @@ impl PullCmd {
                 // object, so we need to download it.
             }
         }
+
+        let old_head = local_ref
+            .as_ref()
+            .and_then(|r| r.oid.as_ref())
+            .map(|o| o.to_hex());
+        let mut result = "dry_run";
+        let mut new_head: Option<String> = None;
 
         if !self.dry_run {
             // ================================================================
@@ -320,7 +371,7 @@ impl PullCmd {
             // Use streaming pull - objects are written directly to ODB as they're received
             let chunked_oids = client.pull_streaming(&odb, &remote_ref, local_have).await?;
 
-            if !self.quiet {
+            if !self.quiet() {
                 if chunked_oids.is_empty() {
                     println!(
                         "{} Received and unpacked objects (streaming)",
@@ -374,7 +425,7 @@ impl PullCmd {
                 // pull that moved gigabytes reported no transfer at all.
                 stats.bytes_downloaded += chunk_bytes;
 
-                if !self.quiet {
+                if !self.quiet() {
                     println!(
                         "{} Downloaded {} chunks for {} large files",
                         style("✓").green(),
@@ -412,7 +463,7 @@ impl PullCmd {
                 );
                 refdb.write(&tracking_ref).await?;
 
-                if self.verbose {
+                if self.verbose() {
                     println!(
                         "  Updated tracking ref: {} -> {}",
                         tracking_ref_name,
@@ -437,8 +488,10 @@ impl PullCmd {
                 let ref_update =
                     mediagit_versioning::Ref::new_direct(remote_ref.clone(), remote_oid_parsed);
                 refdb.write(&ref_update).await?;
+                result = "fetched_branch";
+                new_head = Some(remote_oid.clone());
 
-                if !self.quiet {
+                if !self.quiet() {
                     println!(
                         "{} Updated {} to {}",
                         style("✓").green(),
@@ -451,7 +504,7 @@ impl PullCmd {
                 let branch_short = remote_ref
                     .strip_prefix("refs/heads/")
                     .unwrap_or(&remote_ref);
-                if !self.quiet {
+                if !self.quiet() {
                     println!(
                         "{} Fetched branch '{}' (use: mediagit branch switch {})",
                         style("✓").green(),
@@ -485,10 +538,12 @@ impl PullCmd {
                         &head,
                         &remote_oid_parsed,
                         &remote_oid,
-                        self.quiet,
-                        self.verbose,
+                        self.quiet(),
+                        self.verbose(),
                     )
                     .await?;
+                    result = "fast_forward";
+                    new_head = Some(remote_oid.clone());
                 } else {
                     // Get upstream ref name (e.g., "origin/main" or just "main")
                     let upstream_name = if remote_ref.starts_with("refs/heads/") {
@@ -501,7 +556,7 @@ impl PullCmd {
                         remote_oid.clone()
                     };
 
-                    if self.verbose {
+                    if self.verbose() {
                         let head_hex = head_oid.to_hex();
                         println!("  Rebasing {} onto {}", &head_hex[..8], &remote_oid[..8]);
                     }
@@ -516,13 +571,15 @@ impl PullCmd {
                         abort: false,
                         continue_rebase: false,
                         skip: false,
-                        quiet: self.quiet,
-                        verbose: self.verbose,
+                        quiet: self.quiet(),
+                        verbose: self.verbose(),
                     };
 
                     rebase_cmd.execute().await?;
+                    result = "rebased";
+                    new_head = refdb.resolve("HEAD").await.ok().map(|o| o.to_hex());
 
-                    if !self.quiet {
+                    if !self.quiet() {
                         println!("{} Rebased successfully", style("✓").green().bold());
                     }
                 }
@@ -549,10 +606,12 @@ impl PullCmd {
                         &head,
                         &remote_oid_parsed,
                         &remote_oid,
-                        self.quiet,
-                        self.verbose,
+                        self.quiet(),
+                        self.verbose(),
                     )
                     .await?;
+                    result = "fast_forward";
+                    new_head = Some(remote_oid.clone());
                 } else {
                     // WT-3: refuse before the merge writes anything. The merge
                     // tree does not exist yet, so collisions cannot be checked
@@ -564,7 +623,7 @@ impl PullCmd {
 
                     let merge_engine = mediagit_versioning::MergeEngine::new(Arc::clone(&odb));
 
-                    if self.verbose {
+                    if self.verbose() {
                         let head_hex = head_oid.to_hex();
                         println!("  Merging {} into {}", &remote_oid[..8], &head_hex[..8]);
                     }
@@ -615,11 +674,13 @@ impl PullCmd {
                         let checkout_mgr =
                             CheckoutManager::new(&odb, &repo_root).with_tracked_paths(tracked);
                         let files_count = checkout_mgr.checkout_commit(&commit_oid).await?;
-                        if self.verbose {
+                        if self.verbose() {
                             println!("  Checked out {} files", files_count);
                         }
+                        result = "merged";
+                        new_head = Some(commit_oid.to_hex());
 
-                        if !self.quiet {
+                        if !self.quiet() {
                             let commit_hex = commit_oid.to_hex();
                             println!(
                                 "{} Merged successfully to {}",
@@ -632,13 +693,13 @@ impl PullCmd {
                     }
                 }
             }
-        } else if !self.quiet {
+        } else if !self.quiet() {
             println!("{} Dry run complete (no changes made)", style("ℹ").blue());
         }
 
         // Print operation summary
         stats.duration_ms = start_time.elapsed().as_millis() as u64;
-        if !self.quiet && !self.dry_run {
+        if !self.quiet() && !self.dry_run {
             println!("\n{} {}", style("📊").cyan(), stats.summary());
         }
 
@@ -656,6 +717,18 @@ impl PullCmd {
                 crate::auto_gc::maybe_run(&repo_root, crate::auto_gc::TriggerMode::PostPull).await;
         }
 
+        if output::machine_mode() {
+            return output::emit_ok(&PullReport {
+                remote: remote.to_string(),
+                branch: remote_ref,
+                result: result.to_string(),
+                old_head,
+                new_head,
+                tracking_refs_updated,
+                bytes_downloaded: stats.bytes_downloaded,
+                objects_received: stats.objects_received,
+            });
+        }
         Ok(())
     }
 }

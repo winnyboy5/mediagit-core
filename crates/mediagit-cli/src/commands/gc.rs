@@ -1730,6 +1730,7 @@ pub async fn run_gc(opts: &GcOptions) -> Result<()> {
             // Confirmation required if >100 objects and not --yes flag.
             // Auto mode skips the prompt — it runs unattended.
             if unreachable.len() > 100 && !opts.yes && !opts.auto {
+                crate::output::ensure_interactive("gc confirmation")?;
                 let confirmed = Confirm::new()
                     .with_prompt(format!(
                         "Delete {} unreachable objects ({})? This action cannot be undone.",

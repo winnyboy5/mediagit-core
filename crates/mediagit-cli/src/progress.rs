@@ -8,7 +8,9 @@ use indicatif::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 /// An ETA this large is not an estimate, it is an artefact — a stall, or a
@@ -76,14 +78,129 @@ mod templates {
 pub struct ProgressTracker {
     multi: Arc<MultiProgress>,
     quiet: bool,
+    /// `--machine` only: samples every bar this tracker creates onto stderr.
+    sampler: Option<MachineSampler>,
+}
+
+/// Bars created by a tracker: `(id, bar, unit)`, unit "bytes" | "items".
+type BarRegistry = Arc<Mutex<Vec<(usize, ProgressBar, &'static str)>>>;
+
+/// Bar ids are process-wide, so a command that builds more than one tracker
+/// (e.g. clone, then checkout) never reuses an id in the NDJSON stream.
+static NEXT_BAR_ID: AtomicUsize = AtomicUsize::new(0);
+
+/// One NDJSON line of the `--machine` progress stream (stderr).
+#[derive(Serialize)]
+struct ProgressLine<'a> {
+    r#type: &'static str,
+    id: usize,
+    msg: &'a str,
+    pos: u64,
+    len: Option<u64>,
+    unit: &'static str,
+    done: bool,
+}
+
+fn progress_line(id: usize, bar: &ProgressBar, unit: &'static str) -> String {
+    serialize_progress_line(
+        id,
+        &bar.message(),
+        bar.position(),
+        bar.length(),
+        unit,
+        bar.is_finished(),
+    )
+}
+
+fn serialize_progress_line(
+    id: usize,
+    msg: &str,
+    pos: u64,
+    len: Option<u64>,
+    unit: &'static str,
+    done: bool,
+) -> String {
+    serde_json::to_string(&ProgressLine {
+        r#type: "progress",
+        id,
+        msg,
+        pos,
+        len,
+        unit,
+        done,
+    })
+    .expect("progress line serializes")
+}
+
+/// Background thread that emits a line per changed bar every 200 ms, and once
+/// more on drop so the final state is never lost.
+struct MachineSampler {
+    bars: BarRegistry,
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl MachineSampler {
+    fn start() -> Self {
+        let bars: BarRegistry = Arc::default();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (b, s) = (bars.clone(), stop.clone());
+        let handle = std::thread::spawn(move || {
+            let mut last: Vec<String> = Vec::new();
+            while !s.load(Ordering::Relaxed) {
+                Self::flush(&b, &mut last);
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Self::flush(&b, &mut last);
+        });
+        Self {
+            bars,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn flush(bars: &BarRegistry, last: &mut Vec<String>) {
+        let bars = bars.lock().unwrap_or_else(|e| e.into_inner());
+        last.resize(bars.len(), String::new());
+        for (i, (id, bar, unit)) in bars.iter().enumerate() {
+            let line = progress_line(*id, bar, unit);
+            if last[i] != line {
+                eprintln!("{line}");
+                last[i] = line;
+            }
+        }
+    }
+
+    fn register(&self, bar: &ProgressBar, unit: &'static str) {
+        self.bars.lock().unwrap_or_else(|e| e.into_inner()).push((
+            NEXT_BAR_ID.fetch_add(1, Ordering::Relaxed),
+            bar.clone(),
+            unit,
+        ));
+    }
+}
+
+impl Drop for MachineSampler {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
 }
 
 impl ProgressTracker {
     /// Create new progress tracker
     /// Uses stderr for progress output to keep stdout clean for piping
     pub fn new(quiet: bool) -> Self {
+        // Machine mode draws nothing, but bars must still exist to be sampled,
+        // so it overrides `quiet` (which would hand out unobservable hidden bars).
+        let machine = crate::output::machine_mode();
+        let quiet = quiet && !machine;
         Self {
-            multi: Arc::new(if quiet {
+            sampler: machine.then(MachineSampler::start),
+            multi: Arc::new(if quiet || machine {
                 MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
             } else {
                 MultiProgress::with_draw_target(ProgressDrawTarget::stderr())
@@ -128,7 +245,21 @@ impl ProgressTracker {
         );
         pb.set_message(msg.to_string());
         pb.enable_steady_tick(Duration::from_millis(100));
+        self.register(
+            &pb,
+            if template.contains("{bytes}") {
+                "bytes"
+            } else {
+                "items"
+            },
+        );
         pb
+    }
+
+    fn register(&self, pb: &ProgressBar, unit: &'static str) {
+        if let Some(s) = &self.sampler {
+            s.register(pb, unit);
+        }
     }
 
     /// Create progress bar for staging (`add`) operations.
@@ -185,6 +316,7 @@ impl ProgressTracker {
         );
         pb.set_message(msg.to_string());
         pb.enable_steady_tick(Duration::from_millis(100));
+        self.register(&pb, "items");
         pb
     }
 }
@@ -359,6 +491,18 @@ impl OperationStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn machine_progress_line_format() {
+        assert_eq!(
+            serialize_progress_line(3, "Pushing", 10, Some(100), "bytes", false),
+            r#"{"type":"progress","id":3,"msg":"Pushing","pos":10,"len":100,"unit":"bytes","done":false}"#
+        );
+        assert_eq!(
+            serialize_progress_line(0, "", 0, None, "items", true),
+            r#"{"type":"progress","id":0,"msg":"","pos":0,"len":null,"unit":"items","done":true}"#
+        );
+    }
 
     /// RP-6: "eta 0s" at 0% told operators a transfer was about to finish at
     /// the exact moment nothing had happened.

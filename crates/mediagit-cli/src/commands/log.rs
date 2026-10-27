@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use mediagit_versioning::{Commit, ObjectDatabase, Oid, RefDatabase, Tag, Tree, resolve_revision};
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -111,6 +112,10 @@ impl LogCmd {
     pub async fn execute(&self) -> Result<()> {
         if self.quiet {
             return Ok(());
+        }
+
+        if crate::output::machine_mode() {
+            return self.execute_machine().await;
         }
 
         let repo_root = find_repo_root()?;
@@ -522,6 +527,224 @@ impl LogCmd {
             }
             Ok(())
         })
+    }
+}
+
+/// `--machine` data for `log`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct LogReport {
+    /// Topological order, newest first: every commit precedes its parents.
+    pub commits: Vec<LogCommitReport>,
+    /// All refs (not subject to `--skip`/`-n`), for decorating the graph.
+    pub refs: Vec<LogRefReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct LogCommitReport {
+    pub oid: String,
+    pub parents: Vec<String>,
+    pub author: LogAuthorReport,
+    /// Author time, unix seconds.
+    #[cfg_attr(test, ts(type = "number"))]
+    pub time: i64,
+    pub summary: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct LogAuthorReport {
+    pub name: String,
+    pub email: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct LogRefReport {
+    pub name: String,
+    /// Commit the ref points at (annotated tags are peeled).
+    pub oid: String,
+    /// `branch`, `tag`, `remote` or `head`.
+    pub kind: String,
+}
+
+/// `p` (repo-relative) matches `file` exactly or as a directory prefix.
+fn path_matches(file: &Path, p: &str) -> bool {
+    let f = file.to_string_lossy().replace('\\', "/");
+    let p = p.replace('\\', "/");
+    let p = p.trim_matches('/');
+    f == p || f.starts_with(&format!("{p}/"))
+}
+
+impl LogCmd {
+    // ponytail: loads every reachable commit to order it; stream/paginate if histories reach millions.
+    async fn execute_machine(&self) -> Result<()> {
+        let repo_root = find_repo_root()?;
+        let storage_path = repo_root.join(".mediagit");
+        let storage = create_storage_backend(&repo_root).await?;
+        let refdb = RefDatabase::new(&storage_path);
+        let odb = ObjectDatabase::with_smart_compression(storage, 1000);
+
+        let mut starts: Vec<Oid> = Vec::new();
+        if let Some(revision) = &self.revision {
+            let oid = resolve_revision(revision, &refdb, &odb)
+                .await
+                .with_context(|| format!("Invalid revision: {}", revision))?;
+            starts.push(Self::peel_to_commit(oid, &odb).await?);
+        } else if let Ok(oid) = refdb.resolve("HEAD").await {
+            starts.push(oid);
+        }
+        if self.all {
+            for r in refdb.list_branches().await.unwrap_or_default() {
+                if let Ok(x) = refdb.read(&r).await
+                    && let Some(oid) = x.oid
+                    && !starts.contains(&oid)
+                {
+                    starts.push(oid);
+                }
+            }
+        }
+
+        let since_bound = match self.since.as_deref() {
+            Some(raw) => Some(parse_date_bound(raw, "--since")?),
+            None => None,
+        };
+        let until_bound = match self.until.as_deref() {
+            Some(raw) => Some(parse_date_bound(raw, "--until")?),
+            None => None,
+        };
+
+        // Load the whole reachable set.
+        let mut commits: HashMap<Oid, Commit> = HashMap::new();
+        let mut stack = starts;
+        while let Some(oid) = stack.pop() {
+            if commits.contains_key(&oid) {
+                continue;
+            }
+            let data = odb.read(&oid).await?;
+            let commit = Commit::deserialize(&data)
+                .with_context(|| format!("Failed to deserialize commit {}", oid))?;
+            stack.extend(commit.parents.iter().filter(|p| !commits.contains_key(*p)));
+            commits.insert(oid, commit);
+        }
+
+        // Kahn's algorithm, newest author time first among ready commits:
+        // a commit is emitted only after all its children.
+        let mut pending_children: HashMap<Oid, usize> = commits.keys().map(|o| (*o, 0)).collect();
+        for c in commits.values() {
+            for p in &c.parents {
+                if let Some(n) = pending_children.get_mut(p) {
+                    *n += 1;
+                }
+            }
+        }
+        let mut ready: std::collections::BinaryHeap<(i64, Oid)> = pending_children
+            .iter()
+            .filter(|(_, n)| **n == 0)
+            .map(|(o, _)| (commits[o].author.timestamp.timestamp(), *o))
+            .collect();
+        let mut ordered: Vec<Oid> = Vec::with_capacity(commits.len());
+        while let Some((_, oid)) = ready.pop() {
+            ordered.push(oid);
+            for p in &commits[&oid].parents {
+                if let Some(n) = pending_children.get_mut(p) {
+                    *n -= 1;
+                    if *n == 0 {
+                        ready.push((commits[p].author.timestamp.timestamp(), *p));
+                    }
+                }
+            }
+        }
+
+        let mut out: Vec<LogCommitReport> = Vec::new();
+        for oid in ordered {
+            let c = &commits[&oid];
+            if let Some(a) = &self.author
+                && !c.author.name.contains(a)
+                && !c.author.email.contains(a)
+            {
+                continue;
+            }
+            if let Some(g) = &self.grep
+                && !c.message.contains(g)
+            {
+                continue;
+            }
+            let ts = c.author.timestamp;
+            if since_bound.is_some_and(|b| ts < b) || until_bound.is_some_and(|b| ts > b) {
+                continue;
+            }
+            if !self.paths.is_empty() {
+                let cur = Self::get_tree_file_list(&odb, &c.tree).await?;
+                let prev = match c.parents.first() {
+                    Some(p) => Self::get_tree_file_list(&odb, &commits[p].tree).await?,
+                    None => HashMap::new(),
+                };
+                let touched = self.paths.iter().any(|p| {
+                    cur.iter()
+                        .any(|(f, o)| path_matches(f, p) && prev.get(f) != Some(o))
+                        || prev
+                            .keys()
+                            .any(|f| path_matches(f, p) && !cur.contains_key(f))
+                });
+                if !touched {
+                    continue;
+                }
+            }
+            out.push(LogCommitReport {
+                oid: oid.to_hex(),
+                parents: c.parents.iter().map(|p| p.to_hex()).collect(),
+                author: LogAuthorReport {
+                    name: c.author.name.clone(),
+                    email: c.author.email.clone(),
+                },
+                time: ts.timestamp(),
+                summary: c.message.lines().next().unwrap_or("").to_string(),
+                message: c.message.clone(),
+            });
+        }
+        let out: Vec<_> = out
+            .into_iter()
+            .skip(self.skip.unwrap_or(0))
+            .take(self.max_count.unwrap_or(usize::MAX))
+            .collect();
+
+        let mut refs = Vec::new();
+        if let Ok(oid) = refdb.resolve("HEAD").await {
+            refs.push(LogRefReport {
+                name: "HEAD".into(),
+                oid: oid.to_hex(),
+                kind: "head".into(),
+            });
+        }
+        let groups = [
+            ("refs/heads/", refdb.list("heads").await?, "branch"),
+            ("refs/remotes/", refdb.list("remotes").await?, "remote"),
+            ("refs/tags/", refdb.list_tags().await?, "tag"),
+        ];
+        for (prefix, names, kind) in groups {
+            for r in names {
+                let norm = r.replace('\\', "/");
+                let short = norm.strip_prefix(prefix).unwrap_or(&norm).to_string();
+                let Some(oid) = refdb.read(&r).await.ok().and_then(|x| x.oid) else {
+                    continue;
+                };
+                let oid = Self::peel_to_commit(oid, &odb).await.unwrap_or(oid);
+                refs.push(LogRefReport {
+                    name: short,
+                    oid: oid.to_hex(),
+                    kind: kind.into(),
+                });
+            }
+        }
+
+        crate::output::emit_ok(&LogReport { commits: out, refs })
     }
 }
 

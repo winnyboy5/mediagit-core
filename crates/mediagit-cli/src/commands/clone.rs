@@ -5,15 +5,35 @@
 //!
 //! The `clone` command creates a copy of an existing remote repository.
 
+use crate::output;
 use crate::progress::{OperationStats, ProgressTracker};
 use crate::repo::create_storage_backend;
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use mediagit_versioning::{CheckoutManager, ObjectDatabase, RefDatabase};
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
+
+/// `clone --machine` data.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct CloneReport {
+    pub url: String,
+    /// Destination directory of the new repository.
+    pub directory: String,
+    pub branch: String,
+    /// Commit the checked-out branch points at.
+    pub head: String,
+    pub files_checked_out: usize,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bytes_downloaded: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub objects_received: u64,
+}
 
 /// Clone a repository into a new directory
 ///
@@ -55,15 +75,28 @@ pub struct CloneCmd {
 }
 
 impl CloneCmd {
+    /// Human chatter is silent under `--machine` (stdout is the envelope only).
+    fn quiet(&self) -> bool {
+        self.quiet || output::machine_mode()
+    }
+
+    fn verbose(&self) -> bool {
+        self.verbose && !output::machine_mode()
+    }
+
     pub async fn execute(&self) -> Result<()> {
         // MediaGit's remote clone protocol speaks HTTP(S) only; anything
         // else is treated as a local repository path (a directory
         // containing `.mediagit`).
-        if self.url.starts_with("http://") || self.url.starts_with("https://") {
-            self.execute_remote().await
+        let report = if self.url.starts_with("http://") || self.url.starts_with("https://") {
+            self.execute_remote().await?
         } else {
-            self.execute_local().await
+            self.execute_local().await?
+        };
+        if output::machine_mode() {
+            return output::emit_ok(&report);
         }
+        Ok(())
     }
 
     /// Clone from a local MediaGit repository. Copies the `.mediagit`
@@ -72,7 +105,7 @@ impl CloneCmd {
     /// fixes up the storage path + `origin` remote in the copied config,
     /// then materializes the working tree via the same `CheckoutManager`
     /// path the remote clone uses.
-    async fn execute_local(&self) -> Result<()> {
+    async fn execute_local(&self) -> Result<CloneReport> {
         let start_time = Instant::now();
 
         let source_dir = dunce::canonicalize(&self.url)
@@ -96,7 +129,7 @@ impl CloneCmd {
             })?),
         };
 
-        if !self.quiet {
+        if !self.quiet() {
             println!(
                 "{} Cloning into '{}'...",
                 style("📦").cyan().bold(),
@@ -114,7 +147,7 @@ impl CloneCmd {
         let target_dir =
             dunce::canonicalize(&target_dir).context("Failed to resolve target directory")?;
 
-        let clone_result: Result<()> = async {
+        let clone_result: Result<CloneReport> = async {
             let storage_path = target_dir.join(".mediagit");
             copy_dir_skip(&source_mediagit, &storage_path, Path::new("index"))
                 .context("Failed to copy .mediagit directory")?;
@@ -165,7 +198,7 @@ impl CloneCmd {
                 })?;
             refdb.update_symbolic("HEAD", &ref_name).await?;
 
-            let progress = ProgressTracker::new(self.quiet);
+            let progress = ProgressTracker::new(self.quiet());
             let checkout_pb = progress.spinner("Checking out files...");
             let checkout_mgr = CheckoutManager::new(&odb, &target_dir);
             let checkout_start = std::time::Instant::now();
@@ -177,7 +210,7 @@ impl CloneCmd {
             );
             checkout_pb.finish_with_message(format!("Checked out {} files", files_count));
 
-            if !self.quiet {
+            if !self.quiet() {
                 println!(
                     "\n{} Cloned into '{}' ({} files, {:.2}s)",
                     style("✅").green().bold(),
@@ -189,25 +222,35 @@ impl CloneCmd {
 
             let _ = crate::auto_gc::maybe_run(&target_dir, crate::auto_gc::TriggerMode::PostClone)
                 .await;
-            Ok(())
+            Ok(CloneReport {
+                url: self.url.clone(),
+                directory: target_dir.display().to_string(),
+                branch,
+                head: oid.to_hex(),
+                files_checked_out: files_count,
+                bytes_downloaded: 0,
+                objects_received: 0,
+            })
         }
         .await;
 
         if clone_result.is_err() {
             let _ = std::fs::remove_dir_all(&target_dir);
-            println!("cleaned up partial clone at {}", target_dir.display());
+            if !output::machine_mode() {
+                println!("cleaned up partial clone at {}", target_dir.display());
+            }
         }
         clone_result
     }
 
-    async fn execute_remote(&self) -> Result<()> {
+    async fn execute_remote(&self) -> Result<CloneReport> {
         let start_time = Instant::now();
 
         // Determine target directory
         let target_dir = self.get_target_directory()?;
         let branch = self.branch.as_deref().unwrap_or("main");
 
-        if !self.quiet {
+        if !self.quiet() {
             println!(
                 "{} Cloning into '{}'...",
                 style("📦").cyan().bold(),
@@ -230,7 +273,7 @@ impl CloneCmd {
                         marker.branch
                     );
                 }
-                if !self.quiet {
+                if !self.quiet() {
                     println!(
                         "{} Resuming interrupted clone in '{}' (already-downloaded objects \
                          are skipped)",
@@ -250,7 +293,7 @@ impl CloneCmd {
 
         // Create progress tracker and stats (matching pull.rs pattern)
         let mut stats = OperationStats::for_operation("clone");
-        let progress = ProgressTracker::new(self.quiet);
+        let progress = ProgressTracker::new(self.quiet());
 
         // Step 1: Create directory
         let init_spinner = progress.spinner("Creating directory...");
@@ -271,7 +314,7 @@ impl CloneCmd {
         // cleans up the partial clone directory before the error propagates
         // (NOTE-RM-3). We always own target_dir here — either the exists()
         // check above bailed, or the marker proves this command created it.
-        let clone_result: Result<()> = async {
+        let clone_result: Result<CloneReport> = async {
         // Step 2: Initialize repository
         init_spinner.set_message("Initializing repository...");
         let storage_path = target_dir.join(".mediagit");
@@ -444,7 +487,7 @@ url = "{}"
                 .map_err(|e| anyhow::anyhow!("the remote's encryption key is unusable: {e}"))?;
             mediagit_compression::set_process_key(&target_dir, repo_key)
                 .context("installing the cloned repository's at-rest encryption key")?;
-            if !self.quiet {
+            if !self.quiet() {
                 println!(
                     "{} This repository is encrypted; its key is now held by {}",
                     style("🔑").cyan(),
@@ -500,7 +543,7 @@ url = "{}"
             .find(|r| r.name == remote_ref_name)
             .ok_or_else(|| anyhow::anyhow!("Remote branch '{}' not found", branch))?;
 
-        if self.verbose {
+        if self.verbose() {
             println!(
                 "  Remote ref: {} -> {}",
                 remote_ref.name,
@@ -523,7 +566,7 @@ url = "{}"
         tracing::debug!(phase = "pull-complete", "clone: bulk transfer finished");
         download_pb.finish_with_message("Received objects");
 
-        if self.verbose {
+        if self.verbose() {
             println!(
                 "  Received objects via streaming, {} chunked objects",
                 chunked_oids.len()
@@ -592,7 +635,7 @@ url = "{}"
             // RP-2: clone reported no download figure either.
             stats.bytes_downloaded += chunk_bytes;
 
-            if self.verbose {
+            if self.verbose() {
                 println!(
                     "  Downloaded {} chunks for {} large files",
                     chunks_downloaded,
@@ -638,7 +681,7 @@ url = "{}"
                     );
                     refdb.write(&tracking_ref).await?;
 
-                    if self.verbose {
+                    if self.verbose() {
                         println!(
                             "  Created tracking ref: {} -> {}",
                             tracking_ref_name,
@@ -667,12 +710,12 @@ url = "{}"
             &remote_refs.refs,
             &client,
             &clone_have,
-            self.verbose,
+            self.verbose(),
         )
         .await?;
 
         // Show available branches to user
-        if !other_branches.is_empty() && !self.quiet {
+        if !other_branches.is_empty() && !self.quiet() {
             println!(
                 "{} {} other branch(es) available: {}",
                 style("ℹ").blue(),
@@ -701,13 +744,13 @@ url = "{}"
         checkout_pb.finish_with_message(format!("Checked out {} files", files_count));
         stats.files_updated = files_count as u64;
 
-        if self.verbose {
+        if self.verbose() {
             println!("  Checked out {} files", files_count);
         }
 
         // Summary with stats
         stats.duration_ms = start_time.elapsed().as_millis() as u64;
-        if !self.quiet {
+        if !self.quiet() {
             println!(
                 "\n{} Cloned into '{}'",
                 style("✅").green().bold(),
@@ -726,7 +769,15 @@ url = "{}"
         let _ =
             crate::auto_gc::maybe_run(&target_dir, crate::auto_gc::TriggerMode::PostClone).await;
 
-            Ok(())
+            Ok(CloneReport {
+                url: self.url.clone(),
+                directory: target_dir.display().to_string(),
+                branch: branch.to_string(),
+                head: remote_oid.to_hex(),
+                files_checked_out: files_count,
+                bytes_downloaded: stats.bytes_downloaded,
+                objects_received: stats.objects_received,
+            })
         }
         .await;
 
@@ -748,16 +799,20 @@ url = "{}"
                 // downloaded, so leaving a stub the next attempt refuses would
                 // be strictly worse than cleaning up. Unchanged behaviour.
                 let _ = std::fs::remove_dir_all(&target_dir);
-                println!("cleaned up partial clone at {}", target_dir.display());
+                if !output::machine_mode() {
+                    println!("cleaned up partial clone at {}", target_dir.display());
+                }
             }
             (false, true) => {
                 // Data landed. Keep it: the marker makes this directory
                 // adoptable, and re-running skips everything already in the
                 // ODB.
-                println!(
-                    "kept partial clone at {} — re-run the same `clone` command to resume",
-                    target_dir.display()
-                );
+                if !output::machine_mode() {
+                    println!(
+                        "kept partial clone at {} — re-run the same `clone` command to resume",
+                        target_dir.display()
+                    );
+                }
             }
         }
         clone_result

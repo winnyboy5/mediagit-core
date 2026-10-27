@@ -105,6 +105,25 @@ pub async fn stage_files_for_commit(paths: &[String], repo_root: &std::path::Pat
     Ok(added_count)
 }
 
+/// `--machine` data for `add`.
+#[derive(Debug, Clone, serde::Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct AddReport {
+    /// New files staged.
+    #[cfg_attr(test, ts(type = "number"))]
+    pub added: u64,
+    /// Files already in HEAD that were re-staged with changes.
+    #[cfg_attr(test, ts(type = "number"))]
+    pub modified: u64,
+    /// Deletions staged.
+    #[cfg_attr(test, ts(type = "number"))]
+    pub deleted: u64,
+    /// Total size of the staged files.
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bytes: u64,
+}
+
 /// Add file contents to the staging area
 ///
 /// Stages changes to files for inclusion in the next commit. This command
@@ -364,6 +383,8 @@ impl AddCmd {
         }
 
         let mut added_count = 0u64;
+        let mut modified_count = 0u64;
+        let mut staged_bytes = 0u64;
         let mut skipped_count = 0u64;
 
         if !self.dry_run && !files_to_add.is_empty() {
@@ -470,6 +491,10 @@ impl AddCmd {
                 while let Some(result) = file_tasks.join_next().await {
                     match result {
                         Ok(Ok(Some(file_result))) => {
+                            staged_bytes += file_result.file_size;
+                            if head_files.contains_key(&file_result.relative_path) {
+                                modified_count += 1;
+                            }
                             let entry = IndexEntry::new(
                                 file_result.relative_path,
                                 file_result.oid,
@@ -537,6 +562,10 @@ impl AddCmd {
                                 );
                             }
 
+                            staged_bytes += file_result.file_size;
+                            if head_files.contains_key(&file_result.relative_path) {
+                                modified_count += 1;
+                            }
                             let entry = IndexEntry::new(
                                 file_result.relative_path,
                                 file_result.oid,
@@ -709,6 +738,15 @@ impl AddCmd {
         }
 
         mediagit_protocol::bench::emit_add_summary(_add_wall, total_bytes, added_count);
+
+        if output::machine_mode() {
+            return output::emit_ok(&AddReport {
+                added: added_count - modified_count,
+                modified: modified_count,
+                deleted: deleted_count,
+                bytes: staged_bytes,
+            });
+        }
 
         Ok(())
     }

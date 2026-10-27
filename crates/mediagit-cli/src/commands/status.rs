@@ -18,6 +18,8 @@ use crate::ignore_rules::IgnoreMatcher;
 /// both derive from this struct (built once per invocation). `--porcelain`
 /// is a separate, frozen format and does not go through this struct.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
 pub struct StatusReport {
     /// Bumped only if the JSON shape changes incompatibly.
     pub format_version: u32,
@@ -37,12 +39,16 @@ pub struct StatusReport {
 /// A single `media: ...` summary line for one modified/staged file, keyed
 /// by path so human rendering can print it right under that file's line.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
 pub struct MediaLineReport {
     pub path: String,
     pub summary: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
 pub struct BranchReport {
     /// Branch name; `None` for detached HEAD or an invalid HEAD ref.
     pub name: Option<String>,
@@ -54,16 +60,22 @@ pub struct BranchReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
 pub struct UpstreamReport {
     /// e.g. "origin/main"
     pub name: String,
     /// `None` when the remote-tracking ref has never been fetched locally
     /// (status never performs network I/O to find out).
+    #[cfg_attr(test, ts(type = "number | null"))]
     pub ahead: Option<u64>,
+    #[cfg_attr(test, ts(type = "number | null"))]
     pub behind: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
 #[serde(rename_all = "snake_case")]
 pub enum StagedKind {
     Added,
@@ -72,18 +84,23 @@ pub enum StagedKind {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
 pub struct StagedFileReport {
     pub path: String,
     pub kind: StagedKind,
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
 pub struct StatusSummaryReport {
     pub staged: usize,
     pub modified: usize,
     pub deleted: usize,
     pub untracked: usize,
     /// Only computed with `--verbose` (matches prior behavior/perf cost).
+    #[cfg_attr(test, ts(type = "number | null"))]
     pub total_size: Option<u64>,
 }
 
@@ -146,7 +163,7 @@ async fn compute_ahead_behind(odb: &ObjectDatabase, local: Oid, remote: Oid) -> 
 /// Resolve upstream tracking + ahead/behind for `branch_name`, if configured.
 /// Offline only: if the remote-tracking ref has never been fetched locally,
 /// the upstream name is still returned but `ahead`/`behind` are `None`.
-async fn resolve_upstream(
+pub(crate) async fn resolve_upstream(
     config: &mediagit_config::Config,
     refdb: &RefDatabase,
     odb: &ObjectDatabase,
@@ -663,6 +680,10 @@ impl StatusCmd {
                 total_size,
             },
         };
+
+        if output::machine_mode() {
+            return output::emit_ok(&report);
+        }
 
         if self.json {
             println!("{}", serde_json::to_string_pretty(&report)?);

@@ -6,7 +6,68 @@ use crate::progress::{OperationStats, ProgressTracker};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use mediagit_versioning::{LcaFinder, ObjectDatabase, Oid, Ref, RefDatabase, Reflog, ReflogEntry};
+use serde::Serialize;
 use std::time::Instant;
+
+/// `--machine` data for `branch list`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct BranchListReport {
+    /// Short name of the branch HEAD points at; `None` when detached.
+    pub current: Option<String>,
+    pub branches: Vec<BranchEntryReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct BranchEntryReport {
+    /// `main`, or `origin/main` for a remote-tracking branch.
+    pub name: String,
+    pub oid: Option<String>,
+    /// Remote-tracking branch (`--remote` / `--all`).
+    pub remote: bool,
+    /// e.g. `origin/main`; `None` when no upstream is configured.
+    pub upstream: Option<String>,
+    /// `None` when there is no upstream or it was never fetched.
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub ahead: Option<u64>,
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub behind: Option<u64>,
+    pub protected: bool,
+}
+
+/// `--machine` data for `branch create|switch|rename`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct BranchActionReport {
+    /// `create`, `switch` or `rename`.
+    pub action: String,
+    pub name: String,
+    pub oid: Option<String>,
+    /// `rename`: the previous name.
+    pub previous_name: Option<String>,
+    /// `switch`: working-tree files updated.
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub files_updated: Option<u64>,
+}
+
+/// `--machine` data for `branch delete`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct BranchDeleteReport {
+    pub deleted: Vec<String>,
+}
+
+fn short_ref(name: &str) -> String {
+    name.replace('\\', "/")
+        .trim_start_matches("refs/heads/")
+        .trim_start_matches("refs/remotes/")
+        .to_string()
+}
 
 /// Manage branches
 ///
@@ -254,6 +315,14 @@ pub struct ShowOpts {
 
 impl BranchCmd {
     pub async fn execute(&self) -> Result<()> {
+        if matches!(
+            self.subcommand,
+            BranchSubcommand::Protect(_) | BranchSubcommand::Show(_)
+        ) {
+            crate::output::ensure_machine_supported(
+                "branch (only list|create|switch|delete|rename)",
+            )?;
+        }
         match &self.subcommand {
             BranchSubcommand::List(opts) => self.list(opts).await,
             BranchSubcommand::Create(opts) => self.create(opts).await,
@@ -277,6 +346,48 @@ impl BranchCmd {
         // Get current branch for highlighting
         let head = refdb.read("HEAD").await.ok();
         let current_branch = head.and_then(|h| h.target);
+
+        if output::machine_mode() {
+            let storage = create_storage_backend(&repo_root).await?;
+            let odb = ObjectDatabase::with_smart_compression(storage, 1000);
+            let config = mediagit_config::Config::load(&repo_root).await?;
+            let mut branches = Vec::new();
+            if !opts.remote {
+                for r in refdb.list("heads").await? {
+                    let name = short_ref(&r);
+                    let oid = refdb.read(&r).await.ok().and_then(|x| x.oid);
+                    let up =
+                        super::status::resolve_upstream(&config, &refdb, &odb, &name, oid).await;
+                    branches.push(BranchEntryReport {
+                        protected: config.get_branch_protection(&name).is_some(),
+                        oid: oid.map(|o| o.to_hex()),
+                        remote: false,
+                        upstream: up.as_ref().map(|u| u.name.clone()),
+                        ahead: up.as_ref().and_then(|u| u.ahead),
+                        behind: up.as_ref().and_then(|u| u.behind),
+                        name,
+                    });
+                }
+            }
+            if opts.remote || opts.all {
+                for r in refdb.list("remotes").await? {
+                    let oid = refdb.read(&r).await.ok().and_then(|x| x.oid);
+                    branches.push(BranchEntryReport {
+                        name: short_ref(&r),
+                        oid: oid.map(|o| o.to_hex()),
+                        remote: true,
+                        upstream: None,
+                        ahead: None,
+                        behind: None,
+                        protected: false,
+                    });
+                }
+            }
+            return output::emit_ok(&BranchListReport {
+                current: current_branch.as_deref().map(short_ref),
+                branches,
+            });
+        }
 
         let mut any_branches_found = false;
 
@@ -489,6 +600,16 @@ impl BranchCmd {
             }
         }
 
+        if output::machine_mode() {
+            return output::emit_ok(&BranchActionReport {
+                action: "create".into(),
+                name: opts.name.clone(),
+                oid: Some(start_oid.to_hex()),
+                previous_name: None,
+                files_updated: None,
+            });
+        }
+
         Ok(())
     }
 
@@ -681,13 +802,23 @@ impl BranchCmd {
 
         // Print operation summary
         stats.duration_ms = start_time.elapsed().as_millis() as u64;
-        if !opts.quiet && stats.files_updated > 0 {
+        if !opts.quiet && !output::machine_mode() && stats.files_updated > 0 {
             println!("\n📊 {}", stats.summary());
         }
 
         // Save stats for later retrieval by stats command
         if let Err(e) = stats.save(&storage_path) {
             tracing::warn!("Failed to save operation stats: {}", e);
+        }
+
+        if output::machine_mode() {
+            return output::emit_ok(&BranchActionReport {
+                action: "switch".into(),
+                name: branch_name.to_string(),
+                oid: Some(target_commit_oid.to_hex()),
+                previous_name: None,
+                files_updated: Some(files_updated as u64),
+            });
         }
 
         Ok(())
@@ -702,6 +833,9 @@ impl BranchCmd {
         let refdb = RefDatabase::new(&storage_path);
 
         let mut deleted_count = 0;
+        // `--machine`: warnings are silent, so skips become one error at the end.
+        let mut deleted_names: Vec<String> = Vec::new();
+        let mut problems: Vec<String> = Vec::new();
 
         // Handle remote tracking branch deletion (e.g. origin/feature)
         if opts.remote {
@@ -710,6 +844,7 @@ impl BranchCmd {
                 let (remote_name, branch_part) = match branch_name.split_once('/') {
                     Some((r, b)) => (r, b),
                     None => {
+                        problems.push(format!("invalid remote branch name '{}'", branch_name));
                         if !opts.quiet {
                             output::warning(&format!(
                                 "Invalid remote branch name '{}' (expected format: remote/branch)",
@@ -727,6 +862,7 @@ impl BranchCmd {
                     Ok(_) => {
                         refdb.delete(&remote_ref_name).await?;
                         deleted_count += 1;
+                        deleted_names.push(branch_name.clone());
 
                         if !opts.quiet {
                             output::success(&format!(
@@ -736,6 +872,10 @@ impl BranchCmd {
                         }
                     }
                     Err(_) => {
+                        problems.push(format!(
+                            "remote-tracking branch '{}' not found",
+                            branch_name
+                        ));
                         if !opts.quiet {
                             output::warning(&format!(
                                 "Remote-tracking branch '{}' not found",
@@ -744,6 +884,10 @@ impl BranchCmd {
                         }
                     }
                 }
+            }
+
+            if output::machine_mode() {
+                return Self::finish_delete_machine(deleted_names, problems);
             }
 
             if !opts.quiet && deleted_count == 0 {
@@ -781,6 +925,7 @@ impl BranchCmd {
 
             // Check if trying to delete current branch
             if Some(&branch_ref_name) == current_branch.as_ref() {
+                problems.push(format!("cannot delete current branch '{}'", branch_name));
                 if !opts.quiet {
                     output::warning(&format!("Cannot delete current branch '{}'", branch_name));
                 }
@@ -792,6 +937,7 @@ impl BranchCmd {
                 && protection.prevent_deletion
                 && !opts.force
             {
+                problems.push(format!("branch '{}' is protected", branch_name));
                 if !opts.quiet {
                     output::warning(&format!(
                         "Branch '{}' is protected (use --force to override)",
@@ -808,6 +954,7 @@ impl BranchCmd {
                     .await?
             {
                 unmerged.push(branch_name.clone());
+                problems.push(format!("branch '{}' is not fully merged", branch_name));
                 if !opts.quiet {
                     output::warning(&format!(
                         "The branch '{}' is not fully merged (use -D to force delete)",
@@ -823,17 +970,23 @@ impl BranchCmd {
                     // Delete the branch reference
                     refdb.delete(&branch_ref_name).await?;
                     deleted_count += 1;
+                    deleted_names.push(branch_name.clone());
 
                     if !opts.quiet {
                         output::success(&format!("Deleted branch '{}'", branch_name));
                     }
                 }
                 Err(_) => {
+                    problems.push(format!("branch '{}' not found", branch_name));
                     if !opts.quiet {
                         output::warning(&format!("Branch '{}' not found", branch_name));
                     }
                 }
             }
+        }
+
+        if output::machine_mode() {
+            return Self::finish_delete_machine(deleted_names, problems);
         }
 
         if !opts.quiet && deleted_count == 0 && unmerged.is_empty() {
@@ -848,6 +1001,21 @@ impl BranchCmd {
         }
 
         Ok(())
+    }
+
+    fn finish_delete_machine(deleted: Vec<String>, problems: Vec<String>) -> Result<()> {
+        if !problems.is_empty() {
+            anyhow::bail!(
+                "{} (deleted: {})",
+                problems.join("; "),
+                if deleted.is_empty() {
+                    "none".to_string()
+                } else {
+                    deleted.join(", ")
+                }
+            );
+        }
+        crate::output::emit_ok(&BranchDeleteReport { deleted })
     }
 
     /// UX-1: a branch is merged when its tip is reachable from HEAD, or from
@@ -1002,6 +1170,16 @@ impl BranchCmd {
                 "Renamed branch '{}' to '{}'",
                 old_branch, new_branch
             ));
+        }
+
+        if output::machine_mode() {
+            return output::emit_ok(&BranchActionReport {
+                action: "rename".into(),
+                name: new_branch,
+                oid: Some(branch_oid.to_hex()),
+                previous_name: Some(old_branch),
+                files_updated: None,
+            });
         }
 
         Ok(())

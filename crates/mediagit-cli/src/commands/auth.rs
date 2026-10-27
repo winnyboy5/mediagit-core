@@ -584,6 +584,7 @@ async fn set_login_author(name: &str, email: &str) {
 /// error)`); it's skipped on the stdin-pipe path since re-typing a value
 /// that's already coming from a pipe isn't a meaningful check.
 fn read_value(prompt: &str, secret: bool, confirm: Option<(&str, &str)>) -> Result<String> {
+    output::ensure_interactive(prompt)?;
     if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         Ok(if secret {
             let mut pw = Password::new().with_prompt(prompt);

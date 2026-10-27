@@ -2,7 +2,9 @@
 // Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
 use super::super::repo::{create_storage_backend, find_repo_root};
+use super::fetch::RefUpdateReport;
 use super::utils::validate_ref_name;
+use crate::output;
 use crate::progress::{OperationStats, ProgressTracker};
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -10,8 +12,33 @@ use console::style;
 use indicatif::ProgressBar;
 use mediagit_protocol::PushPhase;
 use mediagit_versioning::{LcaFinder, ObjectType, RefDatabase};
+use serde::Serialize;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+/// `push --machine` data. `result` is one of `pushed`, `up_to_date`,
+/// `deleted` or `dry_run`. For `deleted`, each update's `new` is empty.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct PushReport {
+    pub remote: String,
+    pub result: String,
+    pub ref_updates: Vec<RefUpdateReport>,
+    pub skipped_up_to_date: usize,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bytes_uploaded: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub objects_sent: u64,
+}
+
+fn update_report(u: &mediagit_protocol::RefUpdate) -> RefUpdateReport {
+    RefUpdateReport {
+        name: u.name.clone(),
+        old: u.old_oid.clone(),
+        new: u.new_oid.clone(),
+    }
+}
 
 /// Update remote references and send objects
 ///
@@ -108,6 +135,15 @@ pub struct PushCmd {
 }
 
 impl PushCmd {
+    /// Human chatter is silent under `--machine` (stdout is the envelope only).
+    fn quiet(&self) -> bool {
+        self.quiet || output::machine_mode()
+    }
+
+    fn verbose(&self) -> bool {
+        self.verbose && !output::machine_mode()
+    }
+
     pub async fn execute(&self) -> Result<()> {
         let start_time = Instant::now();
         let mut stats = OperationStats::for_operation("push");
@@ -121,11 +157,11 @@ impl PushCmd {
         let storage = create_storage_backend(&repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
 
-        if self.dry_run && !self.quiet {
+        if self.dry_run && !self.quiet() {
             println!("{} Running in dry-run mode", style("ℹ").blue());
         }
 
-        if !self.quiet {
+        if !self.quiet() {
             println!(
                 "{} Preparing to push to {}...",
                 style("📤").cyan().bold(),
@@ -140,7 +176,7 @@ impl PushCmd {
             anyhow::bail!("Nothing to push - no commits yet");
         }
 
-        if self.verbose {
+        if self.verbose() {
             println!("  Remote: {}", remote);
             if !self.refspec.is_empty() {
                 println!("  Refspecs: {}", self.refspec.join(", "));
@@ -160,7 +196,7 @@ impl PushCmd {
             .resolve_push_url(remote)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        if self.verbose {
+        if self.verbose() {
             println!("  Remote URL: {}", remote_url);
         }
 
@@ -206,7 +242,7 @@ impl PushCmd {
             crate::encryption::verify_remote_key_compatible(&repo_root, &client).await?
         {
             client.put_encryption_key(&key).await?;
-            if !self.quiet {
+            if !self.quiet() {
                 println!(
                     "{} Escrowed this repository's encryption key with {}",
                     style("🔑").cyan(),
@@ -227,7 +263,7 @@ impl PushCmd {
                 anyhow::bail!("push --delete requires at least one branch name");
             }
 
-            if !self.quiet {
+            if !self.quiet() {
                 println!(
                     "{} Deleting remote branch(es): {}",
                     style("🗑️").red().bold(),
@@ -270,7 +306,7 @@ impl PushCmd {
                     .map(|r| r.oid.clone());
 
                 if remote_oid.is_none() {
-                    if !self.quiet {
+                    if !self.quiet() {
                         println!(
                             "  {} Branch '{}' does not exist on remote",
                             style("⚠").yellow(),
@@ -289,8 +325,18 @@ impl PushCmd {
             }
 
             if updates.is_empty() {
-                if !self.quiet {
+                if !self.quiet() {
                     println!("{} No branches to delete", style("ℹ").blue());
+                }
+                if output::machine_mode() {
+                    return output::emit_ok(&PushReport {
+                        remote: remote.to_string(),
+                        result: "deleted".to_string(),
+                        ref_updates: Vec::new(),
+                        skipped_up_to_date: 0,
+                        bytes_uploaded: 0,
+                        objects_sent: 0,
+                    });
                 }
                 return Ok(());
             }
@@ -308,7 +354,7 @@ impl PushCmd {
             // Report results
             for result in &response.results {
                 if result.success {
-                    if !self.quiet {
+                    if !self.quiet() {
                         let display_name = result
                             .ref_name
                             .strip_prefix("refs/heads/")
@@ -334,13 +380,13 @@ impl PushCmd {
                                 );
                             }
                             _ => {
-                                if self.verbose {
+                                if self.verbose() {
                                     println!("  Cleaned up local tracking ref: {}", tracking_ref);
                                 }
                             }
                         }
                     }
-                } else if !self.quiet {
+                } else if !self.quiet() {
                     let display_name = result
                         .ref_name
                         .strip_prefix("refs/heads/")
@@ -360,7 +406,7 @@ impl PushCmd {
             }
 
             // Hint about garbage collection
-            if !self.quiet {
+            if !self.quiet() {
                 println!(
                     "\n{} To reclaim storage, run: mediagit gc",
                     style("hint:").cyan()
@@ -372,6 +418,25 @@ impl PushCmd {
                 tracing::warn!("Failed to save operation stats: {}", e);
             }
 
+            if output::machine_mode() {
+                return output::emit_ok(&PushReport {
+                    remote: remote.to_string(),
+                    result: "deleted".to_string(),
+                    ref_updates: updates
+                        .iter()
+                        .filter(|u| {
+                            response
+                                .results
+                                .iter()
+                                .any(|r| r.success && r.ref_name == u.name)
+                        })
+                        .map(update_report)
+                        .collect(),
+                    skipped_up_to_date: 0,
+                    bytes_uploaded: 0,
+                    objects_sent: 0,
+                });
+            }
             return Ok(());
         }
 
@@ -382,7 +447,7 @@ impl PushCmd {
             if branches.is_empty() {
                 anyhow::bail!("No branches to push");
             }
-            if self.verbose {
+            if self.verbose() {
                 println!("  Pushing {} branches", branches.len());
             }
             branches
@@ -477,7 +542,7 @@ impl PushCmd {
                     }
                 }
             }
-            if self.verbose {
+            if self.verbose() {
                 let tag_count = refs_to_push
                     .iter()
                     .filter(|r| r.starts_with("refs/tags/"))
@@ -522,7 +587,7 @@ impl PushCmd {
                 && remote == &local_oid_str
             {
                 skipped_uptodate += 1;
-                if self.verbose {
+                if self.verbose() {
                     println!("  {} already up to date", ref_to_push);
                 }
                 continue;
@@ -574,14 +639,14 @@ impl PushCmd {
         // (BUG-RM-3), since ordinary push dedup never re-checks content once the
         // server claims to already have a chunk.
         if self.repair {
-            if !self.quiet {
+            if !self.quiet() {
                 println!("{} Verifying remote chunk integrity...", style("🔧").cyan());
             }
             let report = client
                 .repair_remote(&odb, repair_commit_oids.clone())
                 .await
                 .context("Remote chunk repair failed")?;
-            if !self.quiet {
+            if !self.quiet() {
                 println!(
                     "  {} verified {} chunk(s): {} repaired, {} unrepairable",
                     style("✓").green(),
@@ -601,20 +666,31 @@ impl PushCmd {
 
         // If all refs are up-to-date, exit early
         if updates.is_empty() {
-            if !self.quiet {
+            if !self.quiet() {
                 println!(
                     "{} All {} refs already up to date",
                     style("✓").green(),
                     skipped_uptodate
                 );
             }
+            if output::machine_mode() {
+                return output::emit_ok(&PushReport {
+                    remote: remote.to_string(),
+                    result: "up_to_date".to_string(),
+                    ref_updates: Vec::new(),
+                    skipped_up_to_date: skipped_uptodate,
+                    bytes_uploaded: 0,
+                    objects_sent: 0,
+                });
+            }
             return Ok(());
         }
 
+        let mut pushed_updates: Vec<RefUpdateReport> = Vec::new();
         if !self.dry_run {
-            let tracker = ProgressTracker::new(self.quiet);
+            let tracker = ProgressTracker::new(self.quiet());
             // Spinner covers Collecting + Packing phases (no byte count yet)
-            let phase_spinner = if !self.quiet {
+            let phase_spinner = if !self.quiet() {
                 Some(tracker.spinner("Collecting objects..."))
             } else {
                 None
@@ -777,10 +853,21 @@ impl PushCmd {
                 anyhow::bail!("Push failed: {}", errors.join(", "));
             }
 
+            pushed_updates = updates
+                .iter()
+                .filter(|u| {
+                    result
+                        .results
+                        .iter()
+                        .any(|r| r.success && r.ref_name == u.name)
+                })
+                .map(update_report)
+                .collect();
+
             // Track which branches are new (didn't exist on remote before this push)
             let mut new_branches: Vec<String> = Vec::new();
 
-            if !self.quiet {
+            if !self.quiet() {
                 println!("{} Push successful!", style("✓").green().bold());
 
                 for res in result.results {
@@ -851,7 +938,7 @@ impl PushCmd {
                             mediagit_versioning::Ref::new_direct(tracking_ref_name.clone(), oid);
                         match refdb.write(&tracking_ref).await {
                             Err(e) => {
-                                if self.verbose {
+                                if self.verbose() {
                                     println!(
                                         "  Warning: Failed to update tracking ref {}: {}",
                                         tracking_ref_name, e
@@ -859,7 +946,7 @@ impl PushCmd {
                                 }
                             }
                             _ => {
-                                if self.verbose {
+                                if self.verbose() {
                                     println!("  Updated tracking ref: {}", tracking_ref_name);
                                 }
                             }
@@ -896,7 +983,7 @@ impl PushCmd {
                         config.set_branch_upstream(branch_name, remote, ref_to_push.clone());
                         any_upstream_set = true;
 
-                        if !self.quiet {
+                        if !self.quiet() {
                             println!(
                                 "{} Branch '{}' set up to track '{}/{}'",
                                 style("ℹ").blue(),
@@ -913,7 +1000,7 @@ impl PushCmd {
                     config.save(&repo_root)?;
                 }
             }
-        } else if !self.quiet {
+        } else if !self.quiet() {
             println!("{} Would push {} refs:", style("ℹ").blue(), updates.len());
             for update in &updates {
                 if let Some(ref old) = update.old_oid {
@@ -934,7 +1021,7 @@ impl PushCmd {
 
         // Print operation summary
         stats.duration_ms = start_time.elapsed().as_millis() as u64;
-        if !self.quiet && !self.dry_run {
+        if !self.quiet() && !self.dry_run {
             println!("{} {}", style("📊").cyan(), stats.summary());
         }
 
@@ -945,6 +1032,20 @@ impl PushCmd {
             tracing::warn!("Failed to save operation stats: {}", e);
         }
 
+        if output::machine_mode() {
+            return output::emit_ok(&PushReport {
+                remote: remote.to_string(),
+                result: if self.dry_run { "dry_run" } else { "pushed" }.to_string(),
+                ref_updates: if self.dry_run {
+                    updates.iter().map(update_report).collect()
+                } else {
+                    pushed_updates
+                },
+                skipped_up_to_date: skipped_uptodate,
+                bytes_uploaded: stats.bytes_uploaded,
+                objects_sent: stats.objects_sent,
+            });
+        }
         Ok(())
     }
 }

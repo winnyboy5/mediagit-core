@@ -70,11 +70,17 @@ impl InfoOpts {
             .and_then(|e| e.to_str())
             .map(|e| e.to_lowercase())
         else {
+            if crate::output::machine_mode() {
+                anyhow::bail!("Not a recognized media file: {filename}");
+            }
             println!("Not a recognized media file: {filename}");
             return Ok(());
         };
 
         if !is_supported_extension(&ext) {
+            if crate::output::machine_mode() {
+                anyhow::bail!("Unsupported media type: '.{ext}'");
+            }
             println!(
                 "Unsupported media type: '.{ext}' — no metadata parser available for {filename}"
             );
@@ -85,6 +91,9 @@ impl InfoOpts {
             .with_context(|| format!("Failed to stat '{filename}'"))?
             .len();
         if size > MAX_MEDIA_INFO_BYTES {
+            if crate::output::machine_mode() {
+                anyhow::bail!("{filename} exceeds the media-metadata size cap");
+            }
             println!(
                 "{filename}: {} exceeds the {} MB media-metadata cap, skipping",
                 indicatif::HumanBytes(size),
@@ -135,7 +144,7 @@ impl InfoOpts {
         let info = mediagit_media::VfxParser::new()
             .parse(data, filename)
             .await?;
-        if self.json {
+        if self.json || crate::output::machine_mode() {
             return print_json(&info);
         }
         println!("format: {:?}", info.format);
@@ -168,7 +177,7 @@ impl InfoOpts {
 
     async fn show_image(&self, data: &[u8], filename: &str) -> Result<()> {
         let meta = mediagit_media::ImageMetadataParser::parse(data, filename).await?;
-        if self.json {
+        if self.json || crate::output::machine_mode() {
             print_json(&meta)
         } else {
             println!("format: {:?}", meta.format);
@@ -188,7 +197,7 @@ impl InfoOpts {
 
     async fn show_video(&self, data: &[u8]) -> Result<()> {
         let info = mediagit_media::VideoParser::new().parse(data).await?;
-        if self.json {
+        if self.json || crate::output::machine_mode() {
             print_json(&info)
         } else {
             println!("duration_seconds: {:.2}", info.duration_seconds);
@@ -214,7 +223,7 @@ impl InfoOpts {
         let info = mediagit_media::AudioParser::new()
             .parse(data, filename)
             .await?;
-        if self.json {
+        if self.json || crate::output::machine_mode() {
             print_json(&info)
         } else {
             println!("duration_seconds: {:.2}", info.duration_seconds);
@@ -234,7 +243,7 @@ impl InfoOpts {
 
     async fn show_psd(&self, data: &[u8]) -> Result<()> {
         let info = mediagit_media::PsdParser::new().parse(data).await?;
-        if self.json {
+        if self.json || crate::output::machine_mode() {
             print_json(&info)
         } else {
             println!("width: {}", info.width);
@@ -252,7 +261,7 @@ impl InfoOpts {
         let info = mediagit_media::Model3DParser::new()
             .parse(data, filename)
             .await?;
-        if self.json {
+        if self.json || crate::output::machine_mode() {
             print_json(&info)
         } else {
             println!("format: {:?}", info.format);
@@ -281,6 +290,9 @@ impl InfoOpts {
 }
 
 fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
+    if crate::output::machine_mode() {
+        return crate::output::emit_ok(value);
+    }
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
 }

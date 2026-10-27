@@ -922,6 +922,7 @@ fn create_keychain_master() -> Result<Option<EncryptionKey>> {
 /// only at `key init` — a typo there is unrecoverable, since nothing else on
 /// the machine knows the passphrase.
 fn prompt_passphrase(confirm: bool) -> Result<SecretString> {
+    crate::output::ensure_interactive("encryption passphrase")?;
     let mut prompt = dialoguer::Password::new().with_prompt("Encryption passphrase");
     if confirm {
         prompt = prompt.with_confirmation("Confirm passphrase", "Passphrases don't match");

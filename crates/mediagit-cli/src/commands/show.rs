@@ -6,8 +6,69 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use mediagit_versioning::{Commit, ObjectDatabase, Oid, RefDatabase, Tag, Tree, resolve_revision};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+use super::log::LogAuthorReport;
+
+/// `--machine` data for `show <rev>`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct ShowCommitReport {
+    pub oid: String,
+    pub parents: Vec<String>,
+    pub author: LogAuthorReport,
+    /// Author time, unix seconds.
+    #[cfg_attr(test, ts(type = "number"))]
+    pub time: i64,
+    pub message: String,
+    /// Changes against the first parent (everything is `added` for a root commit).
+    pub files: Vec<ShowFileReport>,
+    /// Every file in the commit's tree, sorted by path. Only with `--tree`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub tree: Option<Vec<ShowTreeEntryReport>>,
+}
+
+/// One file of a commit's tree (`show <rev> --tree`).
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct ShowTreeEntryReport {
+    pub path: String,
+    /// `None` when the blob is not available locally (partial clone).
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub size: Option<u64>,
+    pub oid: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct ShowFileReport {
+    pub path: String,
+    /// `added`, `modified` or `deleted`.
+    pub status: String,
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub old_size: Option<u64>,
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub new_size: Option<u64>,
+}
+
+/// `--machine` data for `show <rev>:<path> --output <file>`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct ShowBlobReport {
+    /// Path inside the revision.
+    pub path: String,
+    /// File the bytes were written to.
+    pub output: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub size: u64,
+}
 
 /// Show object information
 #[derive(Parser, Debug)]
@@ -32,6 +93,15 @@ pub struct ShowCmd {
     #[arg(short = 'U', long, value_name = "NUM", hide = true)]
     pub unified: Option<usize>,
 
+    /// With `<rev>:<path>`: write the blob to FILE instead of stdout
+    /// (required under `--machine`, where stdout carries only the envelope)
+    #[arg(long, value_name = "FILE")]
+    pub output: Option<PathBuf>,
+
+    /// With a commit: list every file in its tree as `<size>\t<path>`, sorted by path
+    #[arg(long)]
+    pub tree: bool,
+
     /// Quiet mode
     #[arg(short, long)]
     pub quiet: bool,
@@ -49,7 +119,7 @@ impl ShowCmd {
                 "show --stat is not yet implemented. Use `mediagit diff --stat` instead."
             );
         }
-        if self.quiet {
+        if self.quiet && !crate::output::machine_mode() {
             return Ok(());
         }
 
@@ -62,9 +132,40 @@ impl ShowCmd {
         // Resolve object ID using revision parser (supports HEAD~N)
         let object_str = self.object.as_deref().unwrap_or("HEAD");
 
+        if crate::output::machine_mode() {
+            return self.execute_machine(object_str, &refdb, &odb).await;
+        }
+        if self.output.is_some() && !object_str.contains(':') {
+            anyhow::bail!("--output requires <rev>:<path>");
+        }
+        if self.tree {
+            if object_str.contains(':') {
+                anyhow::bail!("--tree takes a commit, not <rev>:<path>");
+            }
+            let oid = resolve_revision(object_str, &refdb, &odb)
+                .await
+                .context(format!("Cannot resolve object: {}", object_str))?;
+            let oid = Self::peel_to_commit(oid, &odb).await?;
+            let commit = Commit::deserialize(&odb.read(&oid).await?)
+                .context(format!("Object {} is not a commit", oid))?;
+            let cur = Self::get_tree_file_list(&odb, &commit.tree).await?;
+            for e in Self::tree_report(&odb, &cur).await? {
+                println!(
+                    "{}\t{}",
+                    e.size.map_or("-".to_string(), |s| s.to_string()),
+                    e.path
+                );
+            }
+            return Ok(());
+        }
+
         // `<rev>:<path>` — historical file access. Split on the FIRST ':' so
         // OIDs/refs never contain one; only the path may.
         if let Some((rev, path)) = object_str.split_once(':') {
+            if let Some(out) = &self.output {
+                Self::write_blob_to_file(rev, path, out, &refdb, &odb).await?;
+                return Ok(());
+            }
             return Self::show_path_at_revision(rev, path, &refdb, &odb).await;
         }
 
@@ -229,6 +330,146 @@ impl ShowCmd {
         }
 
         Ok(())
+    }
+
+    /// Stream `<rev>:<path>` into `out`; returns the byte count.
+    async fn write_blob_to_file(
+        rev: &str,
+        path: &str,
+        out: &Path,
+        refdb: &RefDatabase,
+        odb: &ObjectDatabase,
+    ) -> Result<u64> {
+        let mut file = tokio::fs::File::create(out)
+            .await
+            .with_context(|| format!("Cannot create {}", out.display()))?;
+        Self::write_path_at_revision(rev, path, refdb, odb, &mut file).await?;
+        Ok(tokio::fs::metadata(out).await?.len())
+    }
+
+    async fn execute_machine(
+        &self,
+        object_str: &str,
+        refdb: &RefDatabase,
+        odb: &ObjectDatabase,
+    ) -> Result<()> {
+        use crate::output;
+
+        if let Some((rev, path)) = object_str.split_once(':') {
+            let Some(out) = &self.output else {
+                return Err(output::CodedError::new(
+                    "invalid_args",
+                    "show <rev>:<path> under --machine requires --output <FILE>",
+                )
+                .into());
+            };
+            let size = Self::write_blob_to_file(rev, path, out, refdb, odb).await?;
+            return output::emit_ok(&ShowBlobReport {
+                path: path.to_string(),
+                output: out.display().to_string(),
+                size,
+            });
+        }
+        if self.output.is_some() {
+            return Err(
+                output::CodedError::new("invalid_args", "--output requires <rev>:<path>").into(),
+            );
+        }
+        if self.tree && object_str.contains(':') {
+            return Err(output::CodedError::new(
+                "invalid_args",
+                "--tree takes a commit, not <rev>:<path>",
+            )
+            .into());
+        }
+
+        let oid = resolve_revision(object_str, refdb, odb)
+            .await
+            .context(format!("Cannot resolve object: {}", object_str))?;
+        let oid = Self::peel_to_commit(oid, odb).await?;
+        let commit = Commit::deserialize(&odb.read(&oid).await?)
+            .context(format!("Object {} is not a commit", oid))?;
+
+        let cur = Self::get_tree_file_list(odb, &commit.tree).await?;
+        let prev = match commit.parents.first() {
+            Some(p) => {
+                let pc = Commit::deserialize(&odb.read(p).await?)
+                    .context(format!("Parent {} is not a commit", p))?;
+                Self::get_tree_file_list(odb, &pc.tree).await?
+            }
+            None => HashMap::new(),
+        };
+
+        let mut files = Vec::new();
+        for (path, new_oid) in &cur {
+            let status = match prev.get(path) {
+                None => "added",
+                Some(old) if old != new_oid => "modified",
+                _ => continue,
+            };
+            files.push(ShowFileReport {
+                path: path.to_string_lossy().replace('\\', "/"),
+                status: status.into(),
+                old_size: match prev.get(path) {
+                    Some(o) => Some(odb.get_object_size(o).await? as u64),
+                    None => None,
+                },
+                new_size: Some(odb.get_object_size(new_oid).await? as u64),
+            });
+        }
+        for (path, old) in &prev {
+            if !cur.contains_key(path) {
+                files.push(ShowFileReport {
+                    path: path.to_string_lossy().replace('\\', "/"),
+                    status: "deleted".into(),
+                    old_size: Some(odb.get_object_size(old).await? as u64),
+                    new_size: None,
+                });
+            }
+        }
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+
+        let tree = if self.tree {
+            Some(Self::tree_report(odb, &cur).await?)
+        } else {
+            None
+        };
+
+        output::emit_ok(&ShowCommitReport {
+            oid: oid.to_hex(),
+            parents: commit.parents.iter().map(|p| p.to_hex()).collect(),
+            author: LogAuthorReport {
+                name: commit.author.name.clone(),
+                email: commit.author.email.clone(),
+            },
+            time: commit.author.timestamp.timestamp(),
+            message: commit.message.clone(),
+            files,
+            tree,
+        })
+    }
+
+    /// Sorted file listing of a tree. Sizes come from `get_object_size`:
+    /// manifest-only for chunked blobs, a full read for small unchunked ones
+    /// (bounded by the chunking threshold), 16 at a time.
+    async fn tree_report(
+        odb: &ObjectDatabase,
+        files: &HashMap<PathBuf, Oid>,
+    ) -> Result<Vec<ShowTreeEntryReport>> {
+        use futures::StreamExt;
+        let mut entries: Vec<ShowTreeEntryReport> = futures::stream::iter(files.iter())
+            .map(|(path, oid)| async move {
+                ShowTreeEntryReport {
+                    path: path.to_string_lossy().replace('\\', "/"),
+                    size: odb.get_object_size(oid).await.ok().map(|s| s as u64),
+                    oid: oid.to_hex(),
+                }
+            })
+            .buffered(16)
+            .collect()
+            .await;
+        entries.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(entries)
     }
 
     /// Raw-object summary. `head` must hold at least the first

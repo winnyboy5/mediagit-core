@@ -11,7 +11,47 @@ use super::super::repo::find_repo_root;
 use crate::output;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use mediagit_protocol::ProtocolClient;
+use mediagit_protocol::{LockInfo, ProtocolClient};
+use serde::Serialize;
+
+/// `--machine` data for one lock.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct LockReport {
+    pub lock_id: String,
+    pub path: String,
+    pub owner: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub created_at: u64,
+}
+
+impl From<&LockInfo> for LockReport {
+    fn from(l: &LockInfo) -> Self {
+        Self {
+            lock_id: l.lock_id.clone(),
+            path: l.path.clone(),
+            owner: l.owner.clone(),
+            created_at: l.created_at,
+        }
+    }
+}
+
+/// `--machine` data for `lock list`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct LocksReport {
+    pub locks: Vec<LockReport>,
+}
+
+/// `--machine` data for `lock unlock`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct UnlockReport {
+    pub lock_id: String,
+}
 
 /// Manage server-enforced file locks
 #[derive(Parser, Debug)]
@@ -192,6 +232,9 @@ impl LockCmd {
             },
         };
         crate::repo::remember_credentials(&config, &remote, &credentials);
+        if output::machine_mode() {
+            return output::emit_ok(&LockReport::from(&info));
+        }
         output::success(&format!(
             "Locked '{}' as {} (id {})",
             info.path, info.owner, info.lock_id
@@ -255,6 +298,9 @@ impl LockCmd {
             },
         }
         crate::repo::remember_credentials(&config, &remote, &credentials);
+        if output::machine_mode() {
+            return output::emit_ok(&UnlockReport { lock_id });
+        }
         output::success(&format!("Unlocked {}", lock_id));
         Ok(())
     }
@@ -281,6 +327,12 @@ impl LockCmd {
             },
         };
         crate::repo::remember_credentials(&config, &remote, &credentials);
+
+        if output::machine_mode() {
+            return output::emit_ok(&LocksReport {
+                locks: locks.iter().map(LockReport::from).collect(),
+            });
+        }
 
         if opts.json {
             let json: Vec<_> = locks
