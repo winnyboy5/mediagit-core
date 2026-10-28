@@ -51,13 +51,38 @@ Share work with your team through a remote (add or remove remotes here):
 
 Ahead and behind counts show `--` until you fetch.
 
+### Merge & conflicts
+
+Bring another branch's work into the branch you are on. Choose the branch and what to do when files clash: blend (`recursive`), keep ours, or keep theirs. You can also force a merge version even when a fast-forward is possible. If files conflict, they are listed; for each one choose your version or theirs, then **Finish merge**. **Cancel merge** discards your choices and puts your files back as they were before the merge started.
+
+### Compare
+
+Pick two different versions (or compare your working folder with the latest version) to list the changed files. Select a file to see both sides: a media preview you can slide between before and after, and a table of properties that differ. Line-by-line changes are not shown yet.
+
+### Tags & Stash
+
+- **Tags** name a version, such as a delivery. Tag the latest version, or delete a tag; only the name is removed.
+- **Stash** parks unsaved changes so you can switch tasks. Apply brings them back and keeps the entry; pop applies and removes it; drop removes one entry; remove all deletes every entry for good.
+
+### Undo menu
+
+In History, the undo menu on a version offers:
+
+- **Undo this version**: adds a new version that reverses it. Nothing is deleted. If it conflicts you can continue, skip or abandon the undo.
+- **Move branch back**: moves the branch to that version. Keeping your files is the safe choice; the option that overwrites your working folder is separate and asks you to confirm that unsaved work will be lost.
+- **Restore file**: overwrites one working file with its content at that version (its unsaved edits are lost).
+
+### Remote Browser
+
+Browse the folders and files of a remote at a chosen version without cloning. Select a file to preview it, or **Download to...** to save a single file; the download can be cancelled and does not wait behind other actions on your repository. To get everything, clone from Welcome. Add a remote on the Sync page first.
+
 ### Activity bar and drawer
 
 Long actions (clone, fetch, pull, push, switching branches) appear in the activity drawer with live progress bars, so you can keep working in another view.
 
 ## Cancelling and queueing
 
-- **Cancel** is available for clone, fetch, pull and push. It stops the operation immediately. A cancelled transfer leaves the repository intact; run it again to continue.
+- **Cancel** is available for clone, fetch, pull, push and single-file downloads. It stops the operation immediately. A cancelled transfer leaves the repository intact; run it again to continue.
 - Actions that change a repository run one at a time per repository, in the order you started them. A second action waits for the first. Read-only views keep working meanwhile.
 
 ## If something goes wrong

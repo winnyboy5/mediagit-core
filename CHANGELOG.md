@@ -30,6 +30,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     push ("Send") with live progress and cancel.
   - **Activity bar and drawer**: running and finished operations with their
     progress bars.
+- **W2 views.**
+  - **Merge & conflicts**: merge a branch (strategy `recursive`, `ours` or
+    `theirs`, optional always-create-merge-version), resolve each conflicted
+    file with our or their side, then finish or cancel the merge.
+  - **Compare**: changed files and media property differences between two
+    versions, or the working folder against the latest version, with a
+    before/after preview.
+  - **Tags & Stash**: create and delete tags; stash save, apply, pop, drop and
+    remove-all.
+  - **Undo menu** (History): revert a version (with continue, abort, skip when
+    it conflicts), move the branch back with `reset` soft, mixed or hard, and
+    restore one file from a version.
+  - **Remote Browser**: browse a remote's folders at a ref, preview a remote
+    file, or download one file without cloning (cancellable).
+- **`--machine` now also covers** `merge`, `diff`, `stash`, `reset`, `revert`,
+  `download` and `tag create`/`tag delete`, plus the new
+  `mediagit remote ls-tree <remote> [path] [--ref <ref>]` (one remote
+  directory level).
 - **CLI `--machine` contract (version 1).** A global `--machine` flag makes a
   command print exactly one JSON envelope on stdout
   (`{"v":1,"ok":true,"data":...}` or `{"v":1,"ok":false,"error":{"code","message"}}`)

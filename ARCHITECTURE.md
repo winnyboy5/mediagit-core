@@ -1237,6 +1237,18 @@ graph LR
   `$TEMP/mediagit-desktop-preview` (cached by rev and path, wiped at each app
   start). The Tauri asset protocol is scoped to that directory, plus each
   repository the user opens (`repo_allow`) so working files can be previewed.
+- **Downloads skip the write lane.** `repo_download` and
+  `repo_download_preview` do not touch the repository, so each call gets a
+  private lane and neither waits behind nor blocks queued writes. Both are
+  cancellable. Previews download under a `.part` name and are renamed on
+  success.
+- **`reset --hard` is its own command** (`repo_reset_hard`, with progress).
+  `repo_reset` refuses mode `hard`, so a destructive reset cannot be reached
+  through the soft/mixed path.
+- **Per-file merge resolve.** The CLI only has whole-merge strategies, so
+  `merge_resolve` extracts the chosen side (`HEAD` or the other commit) with
+  `show <rev>:<path> --output` and then runs `add`, both inside one write-lane
+  turn. Finishing is `merge --continue`; giving up is `merge --abort`.
 - **Why a subprocess, not an in-process ops crate.**
   - One source of truth: the app runs the same binary the CLI test suites and
     QA campaigns exercise, so GUI and CLI cannot drift.
