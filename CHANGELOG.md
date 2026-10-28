@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`status` listed unchanged files as staged after `reset --soft` or
+  `merge --continue`.** Both leave the whole tree in the index; `status` now
+  reports an index entry as staged only when it differs from HEAD.
 - **gc could delete data a concurrent push or `add` was still writing.** The
   prune grace period (`MEDIAGIT_GC_GRACE_SECS`, default 3600 s) covered only
   loose objects, and only on the local backend. Orphan chunks, chunk
