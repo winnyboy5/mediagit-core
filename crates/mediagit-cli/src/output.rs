@@ -65,6 +65,44 @@ pub fn ensure_interactive(what: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+static SECRET_STDIN: AtomicBool = AtomicBool::new(false);
+
+/// `--secret-stdin` (requires `--machine`): secret prompts read one line each
+/// from stdin instead of failing with `needs_input`.
+pub fn set_secret_stdin(on: bool) {
+    SECRET_STDIN.store(on, Ordering::Relaxed);
+}
+
+/// The only way a secret (passphrase, password, recovery code) enters the
+/// process in machine mode: never argv, never env. With `--secret-stdin`,
+/// reads exactly one line from stdin (trailing newline stripped) into a
+/// zeroizing buffer; without it, `Ok(None)` so the caller falls through to
+/// its prompt, which fails with `needs_input` in machine mode.
+pub fn read_secret_line(
+    what: &str,
+) -> anyhow::Result<Option<mediagit_security::Zeroizing<String>>> {
+    use std::io::BufRead;
+    if !SECRET_STDIN.load(Ordering::Relaxed) {
+        return Ok(None);
+    }
+    let mut line = mediagit_security::Zeroizing::new(String::new());
+    let n = std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(|e| CodedError::new("invalid_args", format!("reading {what} from stdin: {e}")))?;
+    if n == 0 {
+        return Err(CodedError::new(
+            "invalid_args",
+            format!("--secret-stdin given but stdin was empty ({what})"),
+        )
+        .into());
+    }
+    while line.ends_with(['\n', '\r']) {
+        line.pop();
+    }
+    Ok(Some(line))
+}
+
 /// A subcommand reached in machine mode that has no machine output yet.
 #[derive(Debug)]
 pub struct JsonUnsupported(pub String);
@@ -100,6 +138,24 @@ impl std::fmt::Display for CodedError {
 }
 
 impl std::error::Error for CodedError {}
+
+/// An operation (rebase, cherry-pick) stopped on conflicts. Carries the paths
+/// so machine mode can report them; the message is what human mode prints.
+#[derive(Debug)]
+pub struct ConflictStop {
+    pub message: String,
+    pub paths: Vec<String>,
+    /// The commit being replayed when it stopped.
+    pub commit: Option<String>,
+}
+
+impl std::fmt::Display for ConflictStop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ConflictStop {}
 
 /// Guard for subcommands without machine output: errors in machine mode.
 pub fn ensure_machine_supported(what: &str) -> anyhow::Result<()> {

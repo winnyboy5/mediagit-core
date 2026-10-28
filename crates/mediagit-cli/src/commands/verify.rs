@@ -97,7 +97,11 @@ impl VerifyCmd {
         let repo_path = std::path::PathBuf::from(repo_path_str);
         let mediagit_dir = repo_path.join(".mediagit");
 
-        if !self.quiet {
+        if self.commit.is_some() || self.start.is_some() || self.end.is_some() {
+            crate::output::ensure_machine_supported("verify (only whole-repository verify)")?;
+        }
+
+        if !self.quiet && !crate::output::machine_mode() {
             println!(
                 "{} Verifying repository integrity...",
                 style("✔").cyan().bold()
@@ -137,6 +141,10 @@ impl VerifyCmd {
             .check(options)
             .await
             .context("Verification failed")?;
+
+        if crate::output::machine_mode() {
+            return super::fsck::emit_integrity(&report, None);
+        }
 
         // Display results
         self.display_report(&report)?;

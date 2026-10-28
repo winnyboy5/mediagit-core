@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (C) 2025-2026 Aswin Krishnamoorthy
 
+use super::super::output::{self, ConflictStop};
 use super::super::repo::{create_storage_backend, find_repo_root};
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -9,6 +10,7 @@ use mediagit_versioning::{
     CheckoutManager, Commit, Index, MergeEngine, ObjectDatabase, Oid, Ref, RefDatabase, Tree,
     apply_merge_to_workdir,
 };
+use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -16,7 +18,8 @@ use std::sync::Arc;
 #[derive(Parser, Debug)]
 pub struct CherryPickCmd {
     /// Commit hash(es) to cherry-pick
-    #[arg(value_name = "COMMITS", required = true)]
+    /// (not required by clap: `--continue`, `--abort` and `--skip` take none)
+    #[arg(value_name = "COMMITS")]
     pub commits: Vec<String>,
 
     /// Continue cherry-pick after resolving conflicts
@@ -48,8 +51,74 @@ pub struct CherryPickCmd {
     pub quiet: bool,
 }
 
+/// `--machine` data for `cherry-pick` (start, `--continue`, `--skip`, `--abort`).
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct CherryPickReport {
+    /// `start`, `continue`, `skip` or `abort`.
+    pub action: String,
+    /// `picked`, `not_committed`, `completed`, `aborted` or `conflict` (the
+    /// command then also exits 1; resolve, `add`, then `--continue`).
+    pub status: String,
+    /// New commits created by this run.
+    pub commits: Vec<String>,
+    /// `conflict`: the commit being picked and the unresolved paths.
+    pub conflict_commit: Option<String>,
+    pub conflicts: Vec<String>,
+}
+
+struct Outcome {
+    status: &'static str,
+    commits: Vec<String>,
+}
+
+fn outcome(status: &'static str, commits: Vec<String>) -> Result<Outcome> {
+    Ok(Outcome { status, commits })
+}
+
 impl CherryPickCmd {
+    fn quiet(&self) -> bool {
+        self.quiet || output::machine_mode()
+    }
+
     pub async fn execute(&self) -> Result<()> {
+        let action = if self.abort {
+            "abort"
+        } else if self.continue_pick {
+            "continue"
+        } else if self.skip {
+            "skip"
+        } else {
+            "start"
+        };
+        match self.run().await {
+            Ok(o) if output::machine_mode() => output::emit_ok(&CherryPickReport {
+                action: action.into(),
+                status: o.status.into(),
+                commits: o.commits,
+                conflict_commit: None,
+                conflicts: Vec::new(),
+            }),
+            Ok(_) => Ok(()),
+            Err(e) if output::machine_mode() => match e.downcast_ref::<ConflictStop>() {
+                Some(c) => {
+                    output::emit_ok(&CherryPickReport {
+                        action: action.into(),
+                        status: "conflict".into(),
+                        commits: Vec::new(),
+                        conflict_commit: c.commit.clone(),
+                        conflicts: c.paths.clone(),
+                    })?;
+                    std::process::exit(1);
+                }
+                None => Err(e),
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn run(&self) -> Result<Outcome> {
         let repo_root = find_repo_root()?;
 
         // Handle special operations
@@ -65,11 +134,18 @@ impl CherryPickCmd {
             return self.skip_cherrypick(&repo_root).await;
         }
 
+        if self.commits.is_empty() {
+            anyhow::bail!(
+                "missing <COMMITS>\n  usage: mediagit cherry-pick <COMMITS>...\n  \
+                 (--continue, --abort and --skip take no commits)"
+            );
+        }
+
         // Start new cherry-pick operation
         self.start_cherrypick(&repo_root).await
     }
 
-    async fn start_cherrypick(&self, repo_root: &PathBuf) -> Result<()> {
+    async fn start_cherrypick(&self, repo_root: &PathBuf) -> Result<Outcome> {
         let mediagit_dir = repo_root.join(".mediagit");
         let storage = create_storage_backend(repo_root).await?;
         let odb = Arc::new(ObjectDatabase::with_smart_compression(
@@ -92,7 +168,7 @@ impl CherryPickCmd {
             .await?
             .ensure_clean("cherry-pick")?;
 
-        if !self.quiet {
+        if !self.quiet() {
             println!(
                 "{} Starting cherry-pick on branch at {}",
                 style("→").cyan(),
@@ -102,13 +178,14 @@ impl CherryPickCmd {
 
         // Process each commit to cherry-pick
         let mut picked_commits = Vec::new();
+        let mut created = Vec::new();
         for commit_ref in &self.commits {
             let commit_oid = self
                 .resolve_commit(&refdb, repo_root, commit_ref)
                 .await
                 .context(format!("Failed to resolve commit: {}", commit_ref))?;
 
-            if !self.quiet {
+            if !self.quiet() {
                 println!(
                     "{} Applying commit {}",
                     style("→").cyan(),
@@ -128,14 +205,16 @@ impl CherryPickCmd {
                         // produced by the 3-way merge above (not an index
                         // rebuild, which would drop every file not touched
                         // by this commit).
-                        self.create_cherry_pick_commit(
-                            odb.as_ref(),
-                            &refdb,
-                            repo_root,
-                            &commit_oid,
-                            Some(merged_tree_oid),
-                        )
-                        .await?;
+                        let new_oid = self
+                            .create_cherry_pick_commit(
+                                odb.as_ref(),
+                                &refdb,
+                                repo_root,
+                                &commit_oid,
+                                Some(merged_tree_oid),
+                            )
+                            .await?;
+                        created.push(new_oid.to_hex());
                     }
                 }
                 Err(e) => {
@@ -143,29 +222,31 @@ impl CherryPickCmd {
                     self.save_cherrypick_state(repo_root, &self.commits, &picked_commits)
                         .await?;
 
-                    println!("{} Cherry-pick failed with conflicts", style("✗").red());
-                    println!("{} {}", style("Error:").red(), e);
-                    println!();
-                    println!("Resolve conflicts, then run:");
-                    println!(
-                        "  {} to continue",
-                        style("mediagit cherry-pick --continue").yellow()
-                    );
-                    println!(
-                        "  {} to abort",
-                        style("mediagit cherry-pick --abort").yellow()
-                    );
-                    println!(
-                        "  {} to skip this commit",
-                        style("mediagit cherry-pick --skip").yellow()
-                    );
+                    if !output::machine_mode() {
+                        println!("{} Cherry-pick failed with conflicts", style("✗").red());
+                        println!("{} {}", style("Error:").red(), e);
+                        println!();
+                        println!("Resolve conflicts, then run:");
+                        println!(
+                            "  {} to continue",
+                            style("mediagit cherry-pick --continue").yellow()
+                        );
+                        println!(
+                            "  {} to abort",
+                            style("mediagit cherry-pick --abort").yellow()
+                        );
+                        println!(
+                            "  {} to skip this commit",
+                            style("mediagit cherry-pick --skip").yellow()
+                        );
+                    }
 
                     return Err(e);
                 }
             }
         }
 
-        if !self.quiet {
+        if !self.quiet() {
             println!(
                 "{} Successfully cherry-picked {} commit(s)",
                 style("✓").green(),
@@ -173,7 +254,14 @@ impl CherryPickCmd {
             );
         }
 
-        Ok(())
+        outcome(
+            if self.no_commit {
+                "not_committed"
+            } else {
+                "picked"
+            },
+            created,
+        )
     }
 
     async fn apply_commit(
@@ -239,7 +327,16 @@ impl CherryPickCmd {
 
             index.save(repo_root)?;
 
-            anyhow::bail!("Merge conflicts detected");
+            return Err(ConflictStop {
+                message: "Merge conflicts detected".into(),
+                paths: merge_result
+                    .conflicts
+                    .iter()
+                    .map(|c| c.path.clone())
+                    .collect(),
+                commit: Some(commit_oid.to_hex()),
+            }
+            .into());
         }
 
         let tree_oid = merge_result
@@ -273,7 +370,7 @@ impl CherryPickCmd {
         repo_root: &std::path::Path,
         original_oid: &Oid,
         merged_tree_oid: Option<Oid>,
-    ) -> Result<()> {
+    ) -> Result<Oid> {
         // Load original commit for message
         let original_commit = Commit::read(odb, original_oid).await?;
 
@@ -330,7 +427,7 @@ impl CherryPickCmd {
             refdb.write(&new_ref).await?;
         }
 
-        if !self.quiet {
+        if !self.quiet() {
             println!(
                 "{} Created commit {}",
                 style("✓").green(),
@@ -338,10 +435,10 @@ impl CherryPickCmd {
             );
         }
 
-        Ok(())
+        Ok(commit_oid)
     }
 
-    async fn continue_cherrypick(&self, repo_root: &PathBuf) -> Result<()> {
+    async fn continue_cherrypick(&self, repo_root: &PathBuf) -> Result<Outcome> {
         let state_path = repo_root.join(".mediagit/CHERRY_PICK_STATE");
         if !state_path.exists() {
             anyhow::bail!("No cherry-pick in progress");
@@ -361,10 +458,13 @@ impl CherryPickCmd {
         let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
         let refdb = RefDatabase::new(&mediagit_dir);
 
+        let mut created = Vec::new();
         if let Some(current) = &state.current_commit {
             let current_oid = Oid::from_hex(current)?;
-            self.create_cherry_pick_commit(&odb, &refdb, repo_root, &current_oid, None)
+            let new_oid = self
+                .create_cherry_pick_commit(&odb, &refdb, repo_root, &current_oid, None)
                 .await?;
+            created.push(new_oid.to_hex());
         }
 
         // Continue with remaining commits
@@ -372,10 +472,10 @@ impl CherryPickCmd {
             // Clean up state
             std::fs::remove_file(&state_path)?;
 
-            if !self.quiet {
+            if !self.quiet() {
                 println!("{} Cherry-pick complete", style("✓").green());
             }
-            return Ok(());
+            return outcome("completed", created);
         }
 
         // Process remaining commits
@@ -393,10 +493,12 @@ impl CherryPickCmd {
             quiet: self.quiet,
         };
 
-        cmd.start_cherrypick(repo_root).await
+        let mut rest = cmd.start_cherrypick(repo_root).await?;
+        created.append(&mut rest.commits);
+        outcome(rest.status, created)
     }
 
-    async fn skip_cherrypick(&self, repo_root: &PathBuf) -> Result<()> {
+    async fn skip_cherrypick(&self, repo_root: &PathBuf) -> Result<Outcome> {
         let state_path = repo_root.join(".mediagit/CHERRY_PICK_STATE");
         if !state_path.exists() {
             anyhow::bail!("No cherry-pick in progress");
@@ -407,7 +509,7 @@ impl CherryPickCmd {
         let state_json = std::fs::read_to_string(&state_path)?;
         let state: CherryPickState = serde_json::from_str(&state_json)?;
 
-        if !self.quiet {
+        if !self.quiet() {
             println!(
                 "{} Skipping commit {}",
                 style("→").cyan(),
@@ -419,10 +521,10 @@ impl CherryPickCmd {
         if state.remaining_commits.is_empty() {
             std::fs::remove_file(&state_path)?;
 
-            if !self.quiet {
+            if !self.quiet() {
                 println!("{} Cherry-pick complete", style("✓").green());
             }
-            return Ok(());
+            return outcome("completed", Vec::new());
         }
 
         let remaining: Vec<String> = state.remaining_commits.clone();
@@ -442,7 +544,7 @@ impl CherryPickCmd {
         cmd.start_cherrypick(repo_root).await
     }
 
-    async fn abort_cherrypick(&self, repo_root: &PathBuf) -> Result<()> {
+    async fn abort_cherrypick(&self, repo_root: &PathBuf) -> Result<Outcome> {
         let state_path = repo_root.join(".mediagit/CHERRY_PICK_STATE");
         if !state_path.exists() {
             anyhow::bail!("No cherry-pick in progress");
@@ -481,11 +583,11 @@ impl CherryPickCmd {
         // Clean up state
         std::fs::remove_file(&state_path)?;
 
-        if !self.quiet {
+        if !self.quiet() {
             println!("{} Cherry-pick aborted", style("✓").green());
         }
 
-        Ok(())
+        outcome("aborted", Vec::new())
     }
 
     async fn save_cherrypick_state(
@@ -594,8 +696,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_missing_commits_is_error() {
-        assert!(parse(&[]).is_err());
+    fn parse_missing_commits_is_deferred_to_runtime() {
+        // Not a clap error: `--continue`, `--abort` and `--skip` take no
+        // commits (execute() rejects a bare `cherry-pick`).
+        assert!(parse(&[]).unwrap().commits.is_empty());
+        assert!(parse(&["--abort"]).unwrap().abort);
     }
 
     #[test]

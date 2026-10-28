@@ -63,10 +63,19 @@ struct Cli {
 
     /// Machine-readable mode for GUI/automation: one JSON envelope on stdout,
     /// NDJSON progress on stderr, prompts fail with `needs_input`.
-    /// Supported by: status, version, log, show, branch, tag (list), add, commit,
-    /// init, media, remote (list|add|remove), lock, fetch, pull, push, clone.
+    /// Supported by: status, version, log, show, branch, tag (list|create|delete),
+    /// add, commit, init, media, remote (list|add|remove|ls-tree), lock, fetch,
+    /// pull, push, clone, merge, diff, stash, reset, revert, download, auth
+    /// (login|status|whoami|logout), key, stats, gc, fsck, verify, config,
+    /// sparse-checkout, rebase, cherry-pick, bisect, reflog.
     #[arg(long, global = true)]
     machine: bool,
+
+    /// With --machine: read secrets (encryption passphrase, auth password,
+    /// recovery code) from stdin, one line per prompt in prompt order, instead
+    /// of failing with `needs_input`. Never read from argv or the environment.
+    #[arg(long, global = true, requires = "machine")]
+    secret_stdin: bool,
 }
 
 #[derive(Subcommand)]
@@ -447,6 +456,7 @@ fn main() {
 
     if cli.machine {
         output::set_machine_mode(true);
+        output::set_secret_stdin(cli.secret_stdin);
         console::set_colors_enabled(false);
         console::set_colors_enabled_stderr(false);
         let sub = matches.subcommand_name().unwrap_or("(none)");
@@ -474,6 +484,18 @@ fn main() {
                 | "reset"
                 | "revert"
                 | "download"
+                | "auth"
+                | "key"
+                | "stats"
+                | "gc"
+                | "fsck"
+                | "verify"
+                | "config"
+                | "sparse-checkout"
+                | "rebase"
+                | "cherry-pick"
+                | "bisect"
+                | "reflog"
         ) {
             output::emit_err(
                 "json_unsupported",

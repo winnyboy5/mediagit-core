@@ -18,6 +18,16 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info, warn};
 
+// In machine mode stdout carries only the envelope, so every human `println!`
+// in this module (including auto-gc triggered from other commands) goes quiet.
+macro_rules! println {
+    ($($t:tt)*) => {
+        if !crate::output::machine_mode() {
+            std::println!($($t)*)
+        }
+    };
+}
+
 /// Default horizon (in days) for protecting reflog-referenced commits from
 /// gc. Entries older than this are no longer roots, matching git's
 /// `gc.reflogExpire` behavior. `0` disables reflog roots entirely (old
@@ -1578,8 +1588,64 @@ impl GcCmd {
         if self.aggressive {
             anyhow::bail!("gc --aggressive is not yet implemented.");
         }
+        if crate::output::machine_mode() {
+            let opts = GcOptions::from(self);
+            let s = run_gc_stats(&opts).await?;
+            crate::output::emit_ok(&GcReport {
+                dry_run: opts.dry_run,
+                objects_scanned: s.objects_scanned,
+                reachable_objects: s.reachable_objects,
+                unreachable_objects: s.unreachable_objects,
+                objects_deleted: s.objects_deleted,
+                bytes_reclaimed: s.bytes_reclaimed,
+                manifests_deleted: s.manifests_deleted,
+                chunks_deleted: s.chunks_deleted,
+                chunk_bytes_reclaimed: s.chunk_bytes_reclaimed,
+                deltas_deleted: s.blob_deltas_deleted + s.chunk_deltas_deleted,
+                delta_bytes_reclaimed: s.blob_delta_bytes_reclaimed + s.chunk_delta_bytes_reclaimed,
+                duration_secs: s.duration_secs,
+                errors: s.errors.clone(),
+            })?;
+            if !s.errors.is_empty() {
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
         run_gc(&GcOptions::from(self)).await
     }
+}
+
+/// `--machine` data for `gc`. Errors during the run: the report still prints
+/// (`errors` non-empty) and the process exits 1. A gc that needs confirmation
+/// (more than 100 unreachable objects) fails `needs_input` unless `--yes`.
+#[derive(Debug, Clone, serde::Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct GcReport {
+    /// `--dry-run`: the `*_deleted` / `*_reclaimed` figures are what would be.
+    pub dry_run: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub objects_scanned: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub reachable_objects: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub unreachable_objects: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub objects_deleted: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub bytes_reclaimed: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub manifests_deleted: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub chunks_deleted: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub chunk_bytes_reclaimed: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub deltas_deleted: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub delta_bytes_reclaimed: u64,
+    pub duration_secs: f64,
+    pub errors: Vec<String>,
 }
 
 /// Run garbage collection with the given options.
@@ -1587,6 +1653,14 @@ impl GcCmd {
 /// Public so other commands (auto-gc after commit/pull/clone) can invoke it
 /// without going through the clap CLI parser.
 pub async fn run_gc(opts: &GcOptions) -> Result<()> {
+    let stats = run_gc_stats(opts).await?;
+    if !stats.errors.is_empty() {
+        anyhow::bail!("{} errors occurred during GC", stats.errors.len());
+    }
+    Ok(())
+}
+
+async fn run_gc_stats(opts: &GcOptions) -> Result<GcStats> {
     let start = Instant::now();
 
     // Determine repository root (canonicalize to match index paths)
@@ -1679,7 +1753,7 @@ pub async fn run_gc(opts: &GcOptions) -> Result<()> {
                     AUTO_GC_MIN_ORPHAN_COUNT,
                 );
             }
-            return Ok(());
+            return Ok(stats);
         }
 
         if !opts.quiet {
@@ -1705,7 +1779,7 @@ pub async fn run_gc(opts: &GcOptions) -> Result<()> {
         stats.unreachable_objects = unreachable.len() as u64;
         stats.duration_secs = start.elapsed().as_secs_f64();
         stats.print_summary(opts.quiet);
-        return Ok(());
+        return Ok(stats);
     }
 
     if has_unreachable_objects {
@@ -1742,7 +1816,7 @@ pub async fn run_gc(opts: &GcOptions) -> Result<()> {
 
                 if !confirmed {
                     println!("{} GC cancelled by user", style("✗").red());
-                    return Ok(());
+                    return Ok(stats);
                 }
             }
 
@@ -1966,11 +2040,7 @@ pub async fn run_gc(opts: &GcOptions) -> Result<()> {
     stats.duration_secs = start.elapsed().as_secs_f64();
     stats.print_summary(opts.quiet);
 
-    if !stats.errors.is_empty() {
-        anyhow::bail!("{} errors occurred during GC", stats.errors.len());
-    }
-
-    Ok(())
+    Ok(stats)
 }
 
 #[cfg(test)]

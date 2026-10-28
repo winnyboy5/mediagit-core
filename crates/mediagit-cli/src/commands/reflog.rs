@@ -11,7 +11,35 @@ use clap::{Parser, Subcommand};
 use console::style;
 use mediagit_versioning::Reflog;
 
+use serde::Serialize;
+
+use super::super::output;
 use super::super::repo::find_repo_root;
+
+/// `--machine` data for `reflog [show] [<ref>]`, newest entry first.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct ReflogReport {
+    pub reference: String,
+    pub entries: Vec<ReflogEntryReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct ReflogEntryReport {
+    /// `<ref>@{index}`.
+    #[cfg_attr(test, ts(type = "number"))]
+    pub index: u64,
+    pub old_oid: String,
+    pub new_oid: String,
+    pub message: String,
+    /// Unix seconds.
+    #[cfg_attr(test, ts(type = "number"))]
+    pub time: i64,
+    pub committer: String,
+}
 
 /// Show reference logs (reflog)
 ///
@@ -94,6 +122,14 @@ pub enum ReflogAction {
 
 impl ReflogCmd {
     pub async fn execute(&self) -> Result<()> {
+        if matches!(
+            self.action,
+            Some(ReflogAction::Delete { .. })
+                | Some(ReflogAction::Expire { .. })
+                | Some(ReflogAction::Show { all: true, .. })
+        ) {
+            output::ensure_machine_supported("reflog (only the entries of one ref)")?;
+        }
         let repo_root = find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
         let reflog = Reflog::new(&storage_path);
@@ -133,6 +169,24 @@ impl ReflogCmd {
         limit: Option<usize>,
     ) -> Result<()> {
         let entries = reflog.read(ref_name, limit).await?;
+
+        if output::machine_mode() {
+            return output::emit_ok(&ReflogReport {
+                reference: ref_name.to_string(),
+                entries: entries
+                    .iter()
+                    .enumerate()
+                    .map(|(i, e)| ReflogEntryReport {
+                        index: i as u64,
+                        old_oid: e.old_oid.to_hex(),
+                        new_oid: e.new_oid.to_hex(),
+                        message: e.message.clone(),
+                        time: e.committer.timestamp.timestamp(),
+                        committer: e.committer.name.clone(),
+                    })
+                    .collect(),
+            });
+        }
 
         if entries.is_empty() {
             if !self.quiet {

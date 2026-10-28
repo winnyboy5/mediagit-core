@@ -17,6 +17,29 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use console::style;
 use mediagit_config::Config;
+use serde::Serialize;
+
+use crate::output;
+
+/// `--machine` data for `config get|set|unset|list`. `author.name` and
+/// `author.email` are the commit identity (compare with lock owners).
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct ConfigReport {
+    /// `get`, `set`, `unset` or `list`.
+    pub action: String,
+    pub entries: Vec<ConfigEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct ConfigEntry {
+    pub key: String,
+    /// `None` when unset.
+    pub value: Option<String>,
+}
 
 /// Get and set repository configuration
 #[derive(Parser, Debug)]
@@ -92,6 +115,30 @@ impl ConfigCmd {
         let mut config = Config::load(&repo_root).await?;
 
         match &self.subcommand {
+            ConfigSubcommand::List if output::machine_mode() => {
+                let entries = KEYS
+                    .iter()
+                    .map(|k| ConfigEntry {
+                        key: k.to_string(),
+                        value: read_key(&config, k).unwrap_or_default(),
+                    })
+                    .collect();
+                output::emit_ok(&ConfigReport {
+                    action: "list".into(),
+                    entries,
+                })
+            }
+            ConfigSubcommand::Get(opts) if output::machine_mode() => {
+                // Unlike the human form, "unset" is a normal answer: value null.
+                let value = read_key(&config, &opts.key)?;
+                output::emit_ok(&ConfigReport {
+                    action: "get".into(),
+                    entries: vec![ConfigEntry {
+                        key: opts.key.clone(),
+                        value,
+                    }],
+                })
+            }
             ConfigSubcommand::List => {
                 for key in KEYS {
                     let shown = read_key(&config, key)
@@ -120,6 +167,15 @@ impl ConfigCmd {
                 config
                     .save(&repo_root)
                     .with_context(|| format!("Failed to save {}", opts.key))?;
+                if output::machine_mode() {
+                    return output::emit_ok(&ConfigReport {
+                        action: "set".into(),
+                        entries: vec![ConfigEntry {
+                            key: opts.key.clone(),
+                            value: Some(opts.value.trim().to_string()),
+                        }],
+                    });
+                }
                 println!(
                     "{} {} = {}",
                     style("✓").green().bold(),
@@ -134,6 +190,15 @@ impl ConfigCmd {
                 config
                     .save(&repo_root)
                     .with_context(|| format!("Failed to save {}", opts.key))?;
+                if output::machine_mode() {
+                    return output::emit_ok(&ConfigReport {
+                        action: "unset".into(),
+                        entries: vec![ConfigEntry {
+                            key: opts.key.clone(),
+                            value: None,
+                        }],
+                    });
+                }
                 println!("{} {} unset", style("✓").green().bold(), opts.key);
                 Ok(())
             }

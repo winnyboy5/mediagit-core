@@ -39,6 +39,59 @@ use mediagit_security::auth::{AuthResponse, GrantLevel, user::Role};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// `--machine` data for `auth login|status|whoami|logout`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct AuthReport {
+    /// `login`, `status`, `whoami` or `logout`.
+    pub action: String,
+    /// Server origin; `None` for `logout --all` without a target.
+    pub server: Option<String>,
+    /// `false` when the server has authentication disabled.
+    pub auth_enabled: bool,
+    /// A valid credential is in effect (identity is then set).
+    pub logged_in: bool,
+    /// `status`: where the credential came from.
+    pub credential_tier: Option<String>,
+    /// Who the credential belongs to; compare `username` with lock owners.
+    pub identity: Option<AuthIdentity>,
+    /// `logout`: stored credentials removed.
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub removed: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct AuthIdentity {
+    pub username: String,
+    pub email: String,
+    /// `read`, `write` or `admin`.
+    pub role: String,
+    pub grants: Vec<AuthGrant>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct AuthGrant {
+    pub repo: String,
+    pub level: String,
+}
+
+fn auth_report(action: &str, server: Option<&str>) -> AuthReport {
+    AuthReport {
+        action: action.into(),
+        server: server.map(str::to_string),
+        auth_enabled: true,
+        logged_in: false,
+        credential_tier: None,
+        identity: None,
+        removed: None,
+    }
+}
+
 /// Manage authentication with a MediaGit server
 #[derive(Parser, Debug)]
 pub struct AuthCmd {
@@ -264,6 +317,15 @@ const AUTH_DISABLED_MSG: &str = "this server has authentication disabled - no lo
 
 impl AuthCmd {
     pub async fn execute(&self) -> Result<()> {
+        if !matches!(
+            self.subcommand,
+            AuthSubcommand::Login(_)
+                | AuthSubcommand::Status(_)
+                | AuthSubcommand::Whoami(_)
+                | AuthSubcommand::Logout(_)
+        ) {
+            output::ensure_machine_supported("auth (only login|status|whoami|logout)")?;
+        }
         match &self.subcommand {
             AuthSubcommand::Login(opts) => login(opts).await,
             AuthSubcommand::Register(opts) => register(opts).await,
@@ -504,6 +566,22 @@ struct GrantInfoResp {
     level: GrantLevel,
 }
 
+fn identity_of(who: &WhoAmI) -> AuthIdentity {
+    AuthIdentity {
+        username: who.username.clone(),
+        email: who.email.clone(),
+        role: format!("{:?}", who.role).to_lowercase(),
+        grants: who
+            .grants
+            .iter()
+            .map(|g| AuthGrant {
+                repo: g.repo.clone(),
+                level: format!("{:?}", g.level).to_lowercase(),
+            })
+            .collect(),
+    }
+}
+
 fn print_whoami_body(who: &WhoAmI) {
     output::detail("Username", &who.username);
     output::detail("Role", &format!("{:?}", who.role));
@@ -584,6 +662,11 @@ async fn set_login_author(name: &str, email: &str) {
 /// error)`); it's skipped on the stdin-pipe path since re-typing a value
 /// that's already coming from a pipe isn't a meaningful check.
 fn read_value(prompt: &str, secret: bool, confirm: Option<(&str, &str)>) -> Result<String> {
+    // Machine mode: secrets only, from stdin (`--secret-stdin`); anything else
+    // (usernames, emails) must come from flags, so it stays `needs_input`.
+    if secret && let Some(line) = output::read_secret_line(prompt)? {
+        return Ok(line.to_string());
+    }
     output::ensure_interactive(prompt)?;
     if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         Ok(if secret {
@@ -654,6 +737,15 @@ fn auth_http_client() -> reqwest::Client {
 }
 
 async fn login(opts: &LoginOpts) -> Result<()> {
+    // A token or key in argv shows up in process listings; in machine mode
+    // secrets arrive on stdin only (`--secret-stdin`, password login).
+    if output::machine_mode() && (opts.token.is_some() || opts.api_key.is_some()) {
+        return Err(output::CodedError::new(
+            "invalid_args",
+            "--token/--api-key put a secret in argv; use --secret-stdin with a password login",
+        )
+        .into());
+    }
     let target = resolve_server_target(&opts.server).await?;
     let client = auth_http_client();
 
@@ -693,6 +785,12 @@ async fn login(opts: &LoginOpts) -> Result<()> {
 
     if resp.status().as_u16() == 404 {
         output::info(AUTH_DISABLED_MSG);
+        if output::machine_mode() {
+            return output::emit_ok(&AuthReport {
+                auth_enabled: false,
+                ..auth_report("login", Some(target.origin()))
+            });
+        }
         return Ok(());
     }
     if !resp.status().is_success() {
@@ -704,6 +802,20 @@ async fn login(opts: &LoginOpts) -> Result<()> {
         .context("failed to parse login response")?;
     let creds = Credentials::Bearer(auth.tokens.access_token.clone());
     target.remember(&creds);
+
+    if output::machine_mode() {
+        set_login_author(&auth.user.username, &auth.user.email).await;
+        return output::emit_ok(&AuthReport {
+            logged_in: true,
+            identity: Some(AuthIdentity {
+                username: auth.user.username.clone(),
+                email: auth.user.email.clone(),
+                role: format!("{:?}", auth.user.role).to_lowercase(),
+                grants: Vec::new(),
+            }),
+            ..auth_report("login", Some(target.origin()))
+        });
+    }
 
     output::success(&format!("Logged in as {}", auth.user.username));
     output::detail("Server", target.origin());
@@ -803,6 +915,12 @@ async fn status(opts: &ServerOpts) -> Result<()> {
     // Server auth mode is reported first, before any local tier info.
     if resp.status().as_u16() == 404 {
         output::info("Server auth mode: disabled - no login is required");
+        if output::machine_mode() {
+            return output::emit_ok(&AuthReport {
+                auth_enabled: false,
+                ..auth_report("status", Some(target.origin()))
+            });
+        }
         return Ok(());
     }
     output::info("Server auth mode: enabled");
@@ -818,6 +936,12 @@ async fn status(opts: &ServerOpts) -> Result<()> {
 
     if resp.status().as_u16() == 401 {
         output::warning("Not logged in (no valid credential for this server)");
+        if output::machine_mode() {
+            return output::emit_ok(&AuthReport {
+                credential_tier: Some(tier.into()),
+                ..auth_report("status", Some(target.origin()))
+            });
+        }
         return Ok(());
     }
     if !resp.status().is_success() {
@@ -828,6 +952,14 @@ async fn status(opts: &ServerOpts) -> Result<()> {
         .await
         .context("failed to parse /auth/whoami response")?;
     print_whoami_body(&who);
+    if output::machine_mode() {
+        return output::emit_ok(&AuthReport {
+            logged_in: true,
+            credential_tier: Some(tier.into()),
+            identity: Some(identity_of(&who)),
+            ..auth_report("status", Some(target.origin()))
+        });
+    }
     Ok(())
 }
 
@@ -835,7 +967,15 @@ async fn whoami(opts: &ServerOpts) -> Result<()> {
     let target = resolve_server_target(&opts.server).await?;
     let (creds, _source) = target.resolve_credentials();
     let client = auth_http_client();
-    fetch_and_print_whoami(&client, target.origin(), &creds).await?;
+    let who = fetch_and_print_whoami(&client, target.origin(), &creds).await?;
+    if output::machine_mode() {
+        return output::emit_ok(&AuthReport {
+            auth_enabled: who.is_some(),
+            logged_in: who.is_some(),
+            identity: who.as_ref().map(identity_of),
+            ..auth_report("whoami", Some(target.origin()))
+        });
+    }
     Ok(())
 }
 
@@ -876,6 +1016,12 @@ async fn logout(opts: &LogoutOpts) -> Result<()> {
         }
     }
 
+    if output::machine_mode() {
+        return output::emit_ok(&AuthReport {
+            removed: Some(removed as u64),
+            ..auth_report("logout", None)
+        });
+    }
     if removed == 0 {
         output::info("No stored credential found");
     } else {

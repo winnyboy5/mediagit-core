@@ -12,7 +12,26 @@ use crate::output;
 use crate::repo::find_repo_root;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use serde::Serialize;
 use std::path::PathBuf;
+
+/// `--machine` data for `key`. Only `key init` ever carries `recovery_code`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct KeyReport {
+    /// `init`, `status`, `recover` or `rotate-master`.
+    pub action: String,
+    /// A key file exists for this repository.
+    pub enabled: bool,
+    /// How the master key is supplied on this machine; `None` when off or
+    /// when no master key is available (objects cannot currently be read).
+    pub source: Option<String>,
+    pub wrapped_key: Option<String>,
+    pub recovery_slot: Option<bool>,
+    /// One-time recovery code, `init` only. Show it once; it is not stored.
+    pub recovery_code: Option<String>,
+}
 
 /// Manage at-rest encryption for this repository
 #[derive(Parser, Debug)]
@@ -102,6 +121,20 @@ impl EncryptionKeyCmd {
         match &self.subcommand {
             KeySubcommand::Init => {
                 let outcome = encryption::init_repo_key(&repo_root)?;
+                if output::machine_mode() {
+                    // The one-time recovery code is part of the envelope: the
+                    // caller must show it to the user, there is no second chance.
+                    return output::emit_ok(&KeyReport {
+                        action: "init".into(),
+                        enabled: true,
+                        source: Some(outcome.source.describe().to_string()),
+                        wrapped_key: Some(
+                            encryption::key_file_path(&repo_root).display().to_string(),
+                        ),
+                        recovery_slot: Some(true),
+                        recovery_code: Some(outcome.recovery_code.to_string()),
+                    });
+                }
                 output::success("At-rest encryption enabled for this repository");
                 println!("  Master key: {}", outcome.source.describe());
                 println!(
@@ -136,16 +169,39 @@ impl EncryptionKeyCmd {
                 Ok(())
             }
             KeySubcommand::Recover(opts) => {
+                if output::machine_mode() && opts.code.is_some() {
+                    return Err(output::CodedError::new(
+                        "invalid_args",
+                        "pass the recovery code on stdin with --secret-stdin, not as an argument",
+                    )
+                    .into());
+                }
                 let code = match opts.code.clone() {
                     Some(code) => code,
                     None => {
-                        output::ensure_interactive("recovery code")?;
-                        dialoguer::Password::new()
-                            .with_prompt("Recovery code")
-                            .interact()?
+                        if let Some(line) = output::read_secret_line("recovery code")? {
+                            line.to_string()
+                        } else {
+                            output::ensure_interactive("recovery code")?;
+                            dialoguer::Password::new()
+                                .with_prompt("Recovery code")
+                                .interact()?
+                        }
                     }
                 };
                 let source = encryption::recover_repo_key(&repo_root, &code)?;
+                if output::machine_mode() {
+                    return output::emit_ok(&KeyReport {
+                        action: "recover".into(),
+                        enabled: true,
+                        source: Some(source.describe().to_string()),
+                        wrapped_key: Some(
+                            encryption::key_file_path(&repo_root).display().to_string(),
+                        ),
+                        recovery_slot: Some(true),
+                        recovery_code: None,
+                    });
+                }
                 output::success("Repository unlocked and re-wrapped");
                 println!("  Master key: {}", source.describe());
                 println!("  Your recovery code is unchanged — keep it.");
@@ -154,6 +210,18 @@ impl EncryptionKeyCmd {
             KeySubcommand::RotateMaster(opts) => {
                 let source =
                     encryption::rotate_master_key(&repo_root, opts.new_keyfile.as_deref())?;
+                if output::machine_mode() {
+                    return output::emit_ok(&KeyReport {
+                        action: "rotate-master".into(),
+                        enabled: true,
+                        source: Some(source.describe().to_string()),
+                        wrapped_key: Some(
+                            encryption::key_file_path(&repo_root).display().to_string(),
+                        ),
+                        recovery_slot: Some(encryption::has_recovery_slot(&repo_root)?),
+                        recovery_code: None,
+                    });
+                }
                 output::success("Master key rotated");
                 println!("  Master key: {}", source.describe());
                 println!(
@@ -173,6 +241,28 @@ impl EncryptionKeyCmd {
                 Ok(())
             }
             KeySubcommand::Status => {
+                if output::machine_mode() {
+                    let enabled = encryption::has_key(&repo_root);
+                    return output::emit_ok(&KeyReport {
+                        action: "status".into(),
+                        enabled,
+                        // Unlock source on this machine; None if it cannot unlock.
+                        source: if enabled {
+                            encryption::available_master_source(&repo_root)?
+                                .map(|s| s.describe().to_string())
+                        } else {
+                            None
+                        },
+                        wrapped_key: enabled
+                            .then(|| encryption::key_file_path(&repo_root).display().to_string()),
+                        recovery_slot: if enabled {
+                            Some(encryption::has_recovery_slot(&repo_root)?)
+                        } else {
+                            None
+                        },
+                        recovery_code: None,
+                    });
+                }
                 if !encryption::has_key(&repo_root) {
                     println!("At-rest encryption: off");
                     // Say the condition, not just the command. Suggesting

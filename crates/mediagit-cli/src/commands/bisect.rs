@@ -10,6 +10,50 @@ use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use super::super::output;
+
+// In machine mode stdout carries only the envelope: silence every human
+// `println!` in this module.
+macro_rules! println {
+    ($($t:tt)*) => {
+        if !output::machine_mode() {
+            std::println!($($t)*)
+        }
+    };
+}
+
+/// `--machine` data for `bisect start|good|bad|skip|reset|log`.
+#[derive(Debug, Clone, serde::Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct BisectReport {
+    /// `start`, `good`, `bad`, `skip`, `reset` or `log`.
+    pub action: String,
+    /// `waiting_for_good` (no good commit marked yet), `testing`, `complete`
+    /// (`first_bad` is set), `reset` or `log`.
+    pub status: String,
+    /// Commit checked out for testing now; `None` unless `testing`.
+    pub current: Option<String>,
+    /// Candidates still to test after `current`.
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub remaining_steps: Option<u64>,
+    pub first_bad: Option<String>,
+    /// Current upper bound (a commit known bad).
+    pub bad: Option<String>,
+    pub good: Vec<String>,
+    pub skipped: Vec<String>,
+    /// `log` only.
+    pub log: Vec<String>,
+}
+
+/// Result of one `advance`.
+#[derive(Default)]
+struct Step {
+    waiting_for_good: bool,
+    first_bad: Option<String>,
+    remaining: Option<u64>,
+}
+
 /// Find commit that introduced a bug using binary search
 #[derive(Parser, Debug)]
 pub struct BisectCmd {
@@ -155,12 +199,12 @@ impl BisectCmd {
         println!("{} Bisect session started", style("→").cyan());
 
         // Narrow the range and check out the next midpoint (or declare complete)
-        self.advance(&repo_root, &mut state).await?;
+        let step = self.advance(&repo_root, &mut state).await?;
 
         // Save state
         self.save_bisect_state(&mediagit_dir, &state)?;
 
-        Ok(())
+        self.emit_step(&state, step)
     }
 
     async fn good(&self, opts: &GoodOpts) -> Result<()> {
@@ -187,12 +231,12 @@ impl BisectCmd {
         );
 
         // Narrow the range and check out the next midpoint (or declare complete)
-        self.advance(&repo_root, &mut state).await?;
+        let step = self.advance(&repo_root, &mut state).await?;
 
         // Save state
         self.save_bisect_state(&mediagit_dir, &state)?;
 
-        Ok(())
+        self.emit_step(&state, step)
     }
 
     async fn bad(&self, opts: &BadOpts) -> Result<()> {
@@ -219,12 +263,12 @@ impl BisectCmd {
         );
 
         // Narrow the range and check out the next midpoint (or declare complete)
-        self.advance(&repo_root, &mut state).await?;
+        let step = self.advance(&repo_root, &mut state).await?;
 
         // Save state
         self.save_bisect_state(&mediagit_dir, &state)?;
 
-        Ok(())
+        self.emit_step(&state, step)
     }
 
     async fn skip(&self, opts: &SkipOpts) -> Result<()> {
@@ -251,12 +295,12 @@ impl BisectCmd {
         );
 
         // Find next commit to test
-        self.advance(&repo_root, &mut state).await?;
+        let step = self.advance(&repo_root, &mut state).await?;
 
         // Save state
         self.save_bisect_state(&mediagit_dir, &state)?;
 
-        Ok(())
+        self.emit_step(&state, step)
     }
 
     /// Resolve the commit a bare `good`/`bad`/`skip` (no argument) applies to:
@@ -322,6 +366,20 @@ impl BisectCmd {
         println!("{} Bisect session ended", style("✓").green());
         println!("  Reset to {}", style(&reset_oid.to_hex()[..7]).yellow());
 
+        if output::machine_mode() {
+            return output::emit_ok(&BisectReport {
+                action: "reset".into(),
+                status: "reset".into(),
+                current: None,
+                remaining_steps: None,
+                first_bad: None,
+                bad: None,
+                good: Vec::new(),
+                skipped: Vec::new(),
+                log: Vec::new(),
+            });
+        }
+
         Ok(())
     }
 
@@ -332,6 +390,20 @@ impl BisectCmd {
         // Load bisect state
         let state = self.load_bisect_state(&mediagit_dir)?;
 
+        if output::machine_mode() {
+            return output::emit_ok(&BisectReport {
+                action: "log".into(),
+                status: "log".into(),
+                current: state.current.clone(),
+                remaining_steps: None,
+                first_bad: None,
+                bad: Some(state.bad.clone()),
+                good: state.good.clone(),
+                skipped: state.skip.clone(),
+                log: state.log.clone(),
+            });
+        }
+
         println!("{}", style("Bisect Log:").bold());
         for entry in &state.log {
             println!("  {}", entry);
@@ -341,6 +413,7 @@ impl BisectCmd {
     }
 
     async fn replay(&self, opts: &ReplayOpts) -> Result<()> {
+        output::ensure_machine_supported("bisect replay")?;
         let logfile_content =
             // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- local CLI arg (--logfile)
             std::fs::read_to_string(&opts.logfile).context("Failed to read log file")?;
@@ -414,14 +487,17 @@ impl BisectCmd {
     /// range [good, bad] isn't established (BUG-ML-1 fix: this replaces the
     /// old heuristic that declared completion as soon as any good+bad pair
     /// existed, without ever testing intermediate commits).
-    async fn advance(&self, repo_root: &Path, state: &mut BisectState) -> Result<()> {
+    async fn advance(&self, repo_root: &Path, state: &mut BisectState) -> Result<Step> {
         if state.good.is_empty() {
             state.current = None;
             println!(
                 "  Mark a good commit with: {}",
                 style("mediagit bisect good <commit>").yellow()
             );
-            return Ok(());
+            return Ok(Step {
+                waiting_for_good: true,
+                ..Step::default()
+            });
         }
 
         let storage = create_storage_backend(repo_root).await?;
@@ -492,7 +568,10 @@ impl BisectCmd {
                 style("mediagit bisect reset").yellow()
             );
 
-            return Ok(());
+            return Ok(Step {
+                first_bad: Some(bad_oid.to_hex()),
+                ..Step::default()
+            });
         }
 
         // Binary search: choose midpoint of the remaining candidates
@@ -528,7 +607,44 @@ impl BisectCmd {
             style("mediagit bisect skip").yellow()
         );
 
-        Ok(())
+        Ok(Step {
+            remaining: Some(candidates.len() as u64 - 1),
+            ..Step::default()
+        })
+    }
+
+    /// Machine output after a start/good/bad/skip step (state already saved).
+    /// The action is the verb the step just logged.
+    fn emit_step(&self, state: &BisectState, step: Step) -> Result<()> {
+        if !output::machine_mode() {
+            return Ok(());
+        }
+        let action = state
+            .log
+            .last()
+            // Entries read "<timestamp>: <verb>: <args>".
+            .and_then(|l| l.split_once(": "))
+            .and_then(|(_, rest)| rest.split(':').next())
+            .unwrap_or("start")
+            .to_string();
+        let status = if step.waiting_for_good {
+            "waiting_for_good"
+        } else if step.first_bad.is_some() {
+            "complete"
+        } else {
+            "testing"
+        };
+        output::emit_ok(&BisectReport {
+            action,
+            status: status.into(),
+            current: state.current.clone(),
+            remaining_steps: step.remaining,
+            first_bad: step.first_bad,
+            bad: Some(state.bad.clone()),
+            good: state.good.clone(),
+            skipped: state.skip.clone(),
+            log: Vec::new(),
+        })
     }
 
     /// Breadth-first walk of `start` and all its ancestors (parents,

@@ -8,6 +8,9 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use mediagit_versioning::{FsckChecker, FsckOptions, FsckRepair, IssueSeverity, RefDatabase};
+use serde::Serialize;
+
+use crate::output;
 
 /// Check repository integrity with comprehensive verification
 ///
@@ -92,14 +95,91 @@ pub struct FsckCmd {
     pub path: Option<String>,
 }
 
+/// `--machine` data for `fsck`. Errors found: `healthy:false` and exit 1
+/// (the envelope is still `ok:true` so the issue list is not lost).
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct FsckCliReport {
+    /// No issue of severity `error`.
+    pub healthy: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub objects_checked: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub refs_checked: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub corrupted_objects: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub broken_refs: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub missing_objects: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub dangling_objects: u64,
+    /// `--repair`: issues actually repaired (`--dry-run`: that would be).
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub repaired: Option<u64>,
+    pub issues: Vec<FsckIssueReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct FsckIssueReport {
+    /// `info`, `warning` or `error`.
+    pub severity: String,
+    pub category: String,
+    pub message: String,
+    pub oid: Option<String>,
+    pub ref_name: Option<String>,
+    pub repairable: bool,
+}
+
+/// Emit the machine report for `fsck` / `verify`; exits 1 when unhealthy.
+pub(super) fn emit_integrity(
+    report: &mediagit_versioning::FsckReport,
+    repaired: Option<u64>,
+) -> Result<()> {
+    let healthy = !report.has_errors();
+    output::emit_ok(&FsckCliReport {
+        healthy,
+        objects_checked: report.objects_checked,
+        refs_checked: report.refs_checked,
+        corrupted_objects: report.corrupted_objects,
+        broken_refs: report.broken_refs,
+        missing_objects: report.missing_objects,
+        dangling_objects: report.dangling_objects,
+        repaired,
+        issues: report
+            .issues
+            .iter()
+            .map(|i| FsckIssueReport {
+                severity: format!("{:?}", i.severity).to_lowercase(),
+                category: format!("{:?}", i.category),
+                message: i.message.clone(),
+                oid: i.oid.map(|o| o.to_hex()),
+                ref_name: i.ref_name.clone(),
+                repairable: i.repairable,
+            })
+            .collect(),
+    })?;
+    if !healthy {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 impl FsckCmd {
+    fn quiet(&self) -> bool {
+        self.quiet || output::machine_mode()
+    }
+
     pub async fn execute(&self) -> Result<()> {
         // Determine repository path
         let repo_path_str = self.path.as_deref().unwrap_or(".");
         let repo_path = std::path::PathBuf::from(repo_path_str);
         let mediagit_dir = repo_path.join(".mediagit");
 
-        if !self.quiet {
+        if !self.quiet() {
             println!(
                 "{} Checking repository integrity at {}",
                 style("🔍").cyan().bold(),
@@ -121,7 +201,7 @@ impl FsckCmd {
         // Configure options
         let options = self.build_options();
 
-        if self.verbose {
+        if self.verbose && !output::machine_mode() {
             println!("{} Configuration:", style("⚙").dim());
             println!("  • Check objects: {}", options.check_objects);
             println!("  • Check references: {}", options.check_refs);
@@ -140,11 +220,14 @@ impl FsckCmd {
             .context("Failed to complete integrity check")?;
 
         // Display results
-        self.display_report(&report)?;
+        if !output::machine_mode() {
+            self.display_report(&report)?;
+        }
 
         // Repair if requested
+        let mut repaired_count = None;
         if self.repair && !report.repairable_issues().is_empty() {
-            if !self.quiet {
+            if !self.quiet() {
                 println!();
                 println!(
                     "{} Attempting to repair {} issue(s)...",
@@ -169,7 +252,8 @@ impl FsckCmd {
             // unconditional "✅ Successfully repaired 0 issue(s)" read as
             // success and sent operators away believing the repo was fixed.
             let attempted = report.repairable_issues().len();
-            if !self.quiet {
+            repaired_count = Some(repaired as u64);
+            if !self.quiet() {
                 if self.dry_run {
                     println!(
                         "{} [DRY RUN] Would repair {} of {} issue(s)",
@@ -202,9 +286,13 @@ impl FsckCmd {
             }
         }
 
+        if output::machine_mode() {
+            return emit_integrity(&report, repaired_count);
+        }
+
         // Exit with error if critical issues found
         if report.has_errors() {
-            if !self.quiet {
+            if !self.quiet() {
                 println!();
                 println!(
                     "{} Repository has critical integrity issues!",
@@ -244,7 +332,7 @@ impl FsckCmd {
     }
 
     fn display_report(&self, report: &mediagit_versioning::FsckReport) -> Result<()> {
-        if !self.quiet {
+        if !self.quiet() {
             println!();
             println!("{} Statistics:", style("📊").cyan().bold());
             println!("  • Objects checked: {}", report.objects_checked);
@@ -276,7 +364,7 @@ impl FsckCmd {
             println!();
         }
 
-        if !warnings.is_empty() && !self.quiet {
+        if !warnings.is_empty() && !self.quiet() {
             println!("{} Warnings:", style("⚠").yellow().bold());
             for issue in &warnings {
                 println!("  • {}", style(&issue.message).yellow());
@@ -307,7 +395,7 @@ impl FsckCmd {
         }
 
         // Summary
-        if !self.quiet {
+        if !self.quiet() {
             if report.total_issues() == 0 {
                 println!(
                     "{} Repository integrity: {}",

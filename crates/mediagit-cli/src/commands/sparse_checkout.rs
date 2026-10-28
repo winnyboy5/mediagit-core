@@ -18,8 +18,49 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use mediagit_versioning::{CheckoutManager, ObjectDatabase, RefDatabase, SparseFilter, SparseMode};
 
+use serde::Serialize;
+
 use super::super::output;
 use super::super::repo::{create_storage_backend, find_repo_root};
+
+/// `--machine` data for `sparse-checkout set|list|disable`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct SparseReport {
+    /// `set`, `list` or `disable`.
+    pub action: String,
+    pub enabled: bool,
+    /// `cone` or `pattern`; `None` when disabled.
+    pub mode: Option<String>,
+    pub patterns: Vec<String>,
+    /// `set`/`disable`: files materialized.
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub files_added: Option<u64>,
+    /// `set`: files removed from disk.
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub files_removed: Option<u64>,
+}
+
+fn mode_name(mode: SparseMode) -> String {
+    if matches!(mode, SparseMode::Cone) {
+        "cone"
+    } else {
+        "pattern"
+    }
+    .into()
+}
+
+fn set_report(mode: SparseMode, patterns: &[String], added: usize, removed: usize) -> SparseReport {
+    SparseReport {
+        action: "set".into(),
+        enabled: true,
+        mode: Some(mode_name(mode)),
+        patterns: patterns.to_vec(),
+        files_added: Some(added as u64),
+        files_removed: Some(removed as u64),
+    }
+}
 
 /// Manage sparse checkout (partial working tree)
 #[derive(Parser, Debug)]
@@ -108,6 +149,9 @@ impl SetOpts {
             if !self.quiet {
                 output::info("No commits yet; patterns saved, nothing to materialize.");
             }
+            if output::machine_mode() {
+                return output::emit_ok(&set_report(mode, &self.patterns, 0, 0));
+            }
             return Ok(());
         };
 
@@ -172,6 +216,9 @@ impl SetOpts {
                 added
             ));
         }
+        if output::machine_mode() {
+            return output::emit_ok(&set_report(mode, &self.patterns, added, removed));
+        }
         Ok(())
     }
 }
@@ -180,6 +227,20 @@ impl ListOpts {
     pub async fn execute(&self) -> Result<()> {
         let repo_root = find_repo_root()?;
         let filter = SparseFilter::load(&repo_root)?;
+        if output::machine_mode() {
+            return output::emit_ok(&SparseReport {
+                action: "list".into(),
+                enabled: filter.is_enabled(),
+                mode: filter.is_enabled().then(|| mode_name(filter.mode())),
+                patterns: if filter.is_enabled() {
+                    filter.patterns().to_vec()
+                } else {
+                    Vec::new()
+                },
+                files_added: None,
+                files_removed: None,
+            });
+        }
         if !filter.is_enabled() {
             println!("Sparse checkout is disabled (full working tree).");
             return Ok(());
@@ -208,9 +269,20 @@ impl DisableOpts {
         let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
 
         let old_filter = SparseFilter::load(&repo_root)?;
+        let disabled_report = || SparseReport {
+            action: "disable".into(),
+            enabled: false,
+            mode: None,
+            patterns: Vec::new(),
+            files_added: Some(0),
+            files_removed: Some(0),
+        };
         if !old_filter.is_enabled() {
             if !self.quiet {
                 output::info("Sparse checkout is already disabled.");
+            }
+            if output::machine_mode() {
+                return output::emit_ok(&disabled_report());
             }
             return Ok(());
         }
@@ -239,6 +311,12 @@ impl DisableOpts {
                 "Sparse checkout disabled; {} file(s) restored.",
                 restored
             ));
+        }
+        if output::machine_mode() {
+            return output::emit_ok(&SparseReport {
+                files_added: Some(restored as u64),
+                ..disabled_report()
+            });
         }
         Ok(())
     }

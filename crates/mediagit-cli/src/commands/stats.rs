@@ -61,6 +61,57 @@ pub struct StatsCmd {
     pub verbose: bool,
 }
 
+/// `--machine` data for `stats`. There is no separate dedup figure: the
+/// compression ratio is original bytes over bytes stored (chunk dedup included).
+#[derive(Debug, Clone, serde::Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct StatsReport {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub total_bytes: u64,
+    /// Pre-compression bytes from chunk manifests (0 when nothing is chunked).
+    #[cfg_attr(test, ts(type = "number"))]
+    pub original_bytes: u64,
+    /// `original_bytes / total_bytes`; `None` when either is 0.
+    pub compression_ratio: Option<f64>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub loose_objects: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub chunks: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub deltas: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub pack_files: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub commits: u64,
+    /// Unix seconds.
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub first_commit_time: Option<i64>,
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub last_commit_time: Option<i64>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub local_branches: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub remote_branches: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub tags: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub files: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub media_files: u64,
+    pub authors: Vec<StatsAuthorReport>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct StatsAuthorReport {
+    pub name: String,
+    pub email: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub commits: u64,
+}
+
 /// Storage statistics gathered from disk
 #[derive(Debug, Default)]
 struct StorageStats {
@@ -114,7 +165,7 @@ struct FileStats {
 
 impl StatsCmd {
     pub async fn execute(&self) -> Result<()> {
-        if self.quiet {
+        if self.quiet && !crate::output::machine_mode() {
             return Ok(());
         }
 
@@ -123,6 +174,10 @@ impl StatsCmd {
         let storage = create_storage_backend(&repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
         let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
+
+        if crate::output::machine_mode() {
+            return self.output_machine(&storage, &odb, &refdb).await;
+        }
 
         // Handle Prometheus format output
         if self.prometheus {
@@ -806,6 +861,54 @@ impl StatsCmd {
         println!("mediagit_chunks_total {}", storage_stats.chunk_count);
 
         Ok(())
+    }
+
+    async fn output_machine(
+        &self,
+        storage: &Arc<dyn StorageBackend>,
+        odb: &ObjectDatabase,
+        refdb: &RefDatabase,
+    ) -> Result<()> {
+        let s = self.compute_storage_stats(storage).await?;
+        let commits = self
+            .compute_commit_stats(odb, refdb)
+            .await
+            .unwrap_or_default();
+        let authors = self
+            .compute_author_stats(odb, refdb)
+            .await
+            .unwrap_or_default();
+        let files = self
+            .compute_file_stats(odb, refdb)
+            .await
+            .unwrap_or_default();
+        let total_bytes = s.loose_bytes + s.pack_bytes + s.chunk_bytes + s.delta_bytes;
+        crate::output::emit_ok(&StatsReport {
+            total_bytes,
+            original_bytes: s.original_bytes,
+            compression_ratio: (s.original_bytes > 0 && total_bytes > 0)
+                .then(|| s.original_bytes as f64 / total_bytes as f64),
+            loose_objects: s.loose_object_count,
+            chunks: s.chunk_count,
+            deltas: s.delta_count,
+            pack_files: s.pack_count,
+            commits: commits.total_commits,
+            first_commit_time: commits.first_commit_date.map(|d| d.timestamp()),
+            last_commit_time: commits.last_commit_date.map(|d| d.timestamp()),
+            local_branches: refdb.list("heads").await.unwrap_or_default().len() as u64,
+            remote_branches: refdb.list("remotes").await.unwrap_or_default().len() as u64,
+            tags: refdb.list("tags").await.unwrap_or_default().len() as u64,
+            files: files.total_files,
+            media_files: files.media_files,
+            authors: authors
+                .iter()
+                .map(|a| StatsAuthorReport {
+                    name: a.name.clone(),
+                    email: a.email.clone(),
+                    commits: a.commit_count,
+                })
+                .collect(),
+        })
     }
 
     async fn output_json(

@@ -922,6 +922,14 @@ fn create_keychain_master() -> Result<Option<EncryptionKey>> {
 /// only at `key init` — a typo there is unrecoverable, since nothing else on
 /// the machine knows the passphrase.
 fn prompt_passphrase(confirm: bool) -> Result<SecretString> {
+    // Machine mode: one line from stdin (`--secret-stdin`), no confirmation
+    // re-type (the caller already typed it once, into its own field).
+    if let Some(line) = crate::output::read_secret_line("encryption passphrase")? {
+        if line.is_empty() {
+            bail!("an empty passphrase is not accepted");
+        }
+        return Ok(SecretString::from(line.to_string()));
+    }
     crate::output::ensure_interactive("encryption passphrase")?;
     let mut prompt = dialoguer::Password::new().with_prompt("Encryption passphrase");
     if confirm {

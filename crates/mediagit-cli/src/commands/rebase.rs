@@ -9,9 +9,11 @@ use mediagit_versioning::{
     ObjectType, Oid, Ref, RefDatabase, Signature, Tree, TreeEntry, apply_merge_to_workdir,
     resolve_revision,
 };
+use serde::Serialize;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use super::super::output::{self, ConflictStop};
 use super::super::repo::{create_storage_backend, find_repo_root};
 use super::rebase_state::RebaseState;
 
@@ -64,8 +66,97 @@ pub struct RebaseCmd {
     pub verbose: bool,
 }
 
+/// `--machine` data for `rebase` (start, `--continue`, `--skip`, `--abort`).
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct RebaseReport {
+    /// `start`, `continue`, `skip` or `abort`.
+    pub action: String,
+    /// `rebased`, `up_to_date`, `nothing_to_rebase`, `aborted` or `conflict`
+    /// (the command then also exits 1; resolve, `add`, then `--continue`).
+    pub status: String,
+    /// New HEAD after a finished rebase, or the restored HEAD after `abort`.
+    pub head: Option<String>,
+    /// `start`: commits replayed.
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub commits_rebased: Option<u64>,
+    /// `conflict`: the commit being replayed and the unresolved paths.
+    pub conflict_commit: Option<String>,
+    pub conflicts: Vec<String>,
+}
+
+/// What a finished rebase step reports to `--machine`.
+struct Outcome {
+    status: &'static str,
+    head: Option<Oid>,
+    rebased: Option<u64>,
+}
+
+impl Outcome {
+    fn new(status: &'static str, head: Option<Oid>, rebased: Option<u64>) -> Self {
+        Self {
+            status,
+            head,
+            rebased,
+        }
+    }
+}
+
 impl RebaseCmd {
+    fn quiet(&self) -> bool {
+        self.quiet || output::machine_mode()
+    }
+
+    fn verbose(&self) -> bool {
+        self.verbose && !output::machine_mode()
+    }
+
     pub async fn execute(&self) -> Result<()> {
+        let action = if self.abort {
+            "abort"
+        } else if self.continue_rebase {
+            "continue"
+        } else if self.skip {
+            "skip"
+        } else {
+            "start"
+        };
+        match self.run().await {
+            Ok(o) if output::machine_mode() => output::emit_ok(&RebaseReport {
+                action: action.into(),
+                status: o.status.into(),
+                head: o.head.map(|h| h.to_hex()),
+                commits_rebased: o.rebased,
+                conflict_commit: None,
+                conflicts: Vec::new(),
+            }),
+            Ok(_) => Ok(()),
+            Err(e) if output::machine_mode() => match e.downcast_ref::<ConflictStop>() {
+                Some(c) => {
+                    output::emit_ok(&RebaseReport {
+                        action: action.into(),
+                        status: "conflict".into(),
+                        head: None,
+                        commits_rebased: None,
+                        conflict_commit: c.commit.clone(),
+                        conflicts: c.paths.clone(),
+                    })?;
+                    std::process::exit(1);
+                }
+                None => Err(e),
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Do the rebase without emitting a `--machine` envelope: for callers
+    /// (`pull --rebase`) that emit their own single envelope.
+    pub(super) async fn apply(&self) -> Result<()> {
+        self.run().await.map(|_| ())
+    }
+
+    async fn run(&self) -> Result<Outcome> {
         let repo_root = find_repo_root()?;
 
         // Handle special operations
@@ -135,7 +226,7 @@ impl RebaseCmd {
         let tracked =
             crate::worktree_guard::tracked_paths(&repo_root, &odb, Some(&current_oid)).await?;
 
-        if !self.quiet {
+        if !self.quiet() {
             println!(
                 "{} Rebasing onto {}...",
                 style("🔄").cyan().bold(),
@@ -155,29 +246,29 @@ impl RebaseCmd {
 
         let base_oid = merge_bases[0];
 
-        if self.verbose {
+        if self.verbose() {
             println!("  Merge base: {}", &base_oid.to_string()[..7]);
         }
 
         // Check if already up to date
         if lca_finder.is_ancestor(&upstream_oid, &current_oid).await? {
-            if !self.quiet {
+            if !self.quiet() {
                 println!("{} Already up to date", style("✓").green());
             }
-            return Ok(());
+            return Ok(Outcome::new("up_to_date", Some(current_oid), None));
         }
 
         // Collect commits to rebase (from base to current)
         let commits_to_rebase = self.collect_commits(&odb, &base_oid, &current_oid).await?;
 
         if commits_to_rebase.is_empty() {
-            if !self.quiet {
+            if !self.quiet() {
                 println!("{} No commits to rebase", style("ℹ").blue());
             }
-            return Ok(());
+            return Ok(Outcome::new("nothing_to_rebase", Some(current_oid), None));
         }
 
-        if !self.quiet {
+        if !self.quiet() {
             println!("  Rebasing {} commit(s)...", commits_to_rebase.len());
         }
 
@@ -243,14 +334,18 @@ impl RebaseCmd {
                 // Clear rebase state on success
                 RebaseState::clear(&repo_root)?;
 
-                if !self.quiet {
+                if !self.quiet() {
                     println!(
                         "{} Successfully rebased {} commit(s)",
                         style("✓").green().bold(),
                         commits_to_rebase.len()
                     );
                 }
-                Ok(())
+                Ok(Outcome::new(
+                    "rebased",
+                    Some(new_head),
+                    Some(commits_to_rebase.len() as u64),
+                ))
             }
             Err(e) => {
                 // State is preserved for continue/abort
@@ -279,7 +374,7 @@ impl RebaseCmd {
             state.set_new_parent(new_parent);
             state.save(repo_root)?;
 
-            if self.verbose {
+            if self.verbose() {
                 let (current, total) = state.progress();
                 println!(
                     "  [{}/{}] {}",
@@ -379,11 +474,20 @@ impl RebaseCmd {
                     );
                 }
 
-                anyhow::bail!(
-                    "rebase stopped: conflict replaying commit {} '{}'",
-                    &original_oid.to_hex()[..7],
-                    original_commit.message.lines().next().unwrap_or("")
-                );
+                return Err(ConflictStop {
+                    message: format!(
+                        "rebase stopped: conflict replaying commit {} '{}'",
+                        &original_oid.to_hex()[..7],
+                        original_commit.message.lines().next().unwrap_or("")
+                    ),
+                    paths: merge_result
+                        .conflicts
+                        .iter()
+                        .map(|c| c.path.clone())
+                        .collect(),
+                    commit: Some(original_oid.to_hex()),
+                }
+                .into());
             }
 
             let merged_tree = merge_result
@@ -451,7 +555,7 @@ impl RebaseCmd {
         Ok(commits)
     }
 
-    async fn abort_rebase(&self, repo_root: &std::path::Path) -> Result<()> {
+    async fn abort_rebase(&self, repo_root: &std::path::Path) -> Result<Outcome> {
         // Check if rebase is in progress
         if !RebaseState::in_progress(repo_root) {
             anyhow::bail!("No rebase in progress");
@@ -459,7 +563,7 @@ impl RebaseCmd {
 
         let state = RebaseState::load(repo_root)?;
 
-        if !self.quiet {
+        if !self.quiet() {
             println!("{} Aborting rebase...", style("✗").red());
         }
 
@@ -480,7 +584,7 @@ impl RebaseCmd {
         // Clear rebase state
         RebaseState::clear(repo_root)?;
 
-        if !self.quiet {
+        if !self.quiet() {
             println!(
                 "{} Rebase aborted. HEAD restored to {}",
                 style("✓").green(),
@@ -488,10 +592,10 @@ impl RebaseCmd {
             );
         }
 
-        Ok(())
+        Ok(Outcome::new("aborted", Some(state.original_head), None))
     }
 
-    async fn continue_rebase_process(&self, repo_root: &std::path::Path) -> Result<()> {
+    async fn continue_rebase_process(&self, repo_root: &std::path::Path) -> Result<Outcome> {
         // Check if rebase is in progress
         if !RebaseState::in_progress(repo_root) {
             anyhow::bail!("No rebase in progress");
@@ -524,7 +628,7 @@ impl RebaseCmd {
             );
         }
 
-        if !self.quiet {
+        if !self.quiet() {
             println!("{} Continuing rebase...", style("→").cyan());
         }
 
@@ -585,7 +689,7 @@ impl RebaseCmd {
             state.set_conflicts(Vec::new());
             state.save(repo_root)?;
 
-            if !self.quiet {
+            if !self.quiet() {
                 println!(
                     "  {} resolved {} '{}'",
                     style("✓").green(),
@@ -616,10 +720,10 @@ impl RebaseCmd {
 
             RebaseState::clear(repo_root)?;
 
-            if !self.quiet {
+            if !self.quiet() {
                 println!("{} Rebase complete", style("✓").green().bold());
             }
-            return Ok(());
+            return Ok(Outcome::new("rebased", Some(state.new_parent), None));
         }
 
         // Continue applying remaining commits
@@ -647,19 +751,19 @@ impl RebaseCmd {
 
                 RebaseState::clear(repo_root)?;
 
-                if !self.quiet {
+                if !self.quiet() {
                     println!(
                         "{} Successfully rebased remaining commit(s)",
                         style("✓").green().bold()
                     );
                 }
-                Ok(())
+                Ok(Outcome::new("rebased", Some(new_head), None))
             }
             Err(e) => Err(e),
         }
     }
 
-    async fn skip_commit(&self, repo_root: &std::path::Path) -> Result<()> {
+    async fn skip_commit(&self, repo_root: &std::path::Path) -> Result<Outcome> {
         // Check if rebase is in progress
         if !RebaseState::in_progress(repo_root) {
             anyhow::bail!("No rebase in progress");
@@ -671,7 +775,7 @@ impl RebaseCmd {
             anyhow::bail!("No commit to skip");
         }
 
-        if !self.quiet {
+        if !self.quiet() {
             if let Some(current) = state.current_commit {
                 println!(
                     "{} Skipping commit {}...",

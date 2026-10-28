@@ -603,7 +603,7 @@ impl PullCmd {
                         verbose: self.verbose(),
                     };
 
-                    rebase_cmd.execute().await?;
+                    rebase_cmd.apply().await?;
                     result = "rebased";
                     new_head = refdb.resolve("HEAD").await.ok().map(|o| o.to_hex());
 

@@ -3,6 +3,7 @@ GLOBAL	-(bare invocation)	no	OK
 GLOBAL	-v,--verbose	no	OK
 GLOBAL	-q,--quiet	no	OK
 GLOBAL	--machine	no	OK
+GLOBAL	--secret-stdin	no	USAGE
 GLOBAL	--color	yes	OK
 GLOBAL	-C,--repository	yes	ERROR
 GLOBAL	-h,--help	no	OK

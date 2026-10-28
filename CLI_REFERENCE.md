@@ -111,6 +111,26 @@ lines that are not `type:"progress"`.
 writes a blob to a file. Every other command prints a `json_unsupported`
 envelope and exits 2 without running.
 
+W3 adds `auth` (`login|status|whoami|logout`; `whoami`/`status` carry the
+account `identity` to compare with lock owners), `key`, `stats`, `gc`, `fsck`,
+`verify` (whole repository only), `config`, `sparse-checkout`, `rebase`,
+`cherry-pick`, `bisect` (not `replay`) and `reflog` (one ref's entries). `rebase`,
+`cherry-pick` and `revert` conflicts use the same `status:"conflict"` shape as
+`merge`; `fsck`/`verify`/`gc` that find errors print their report with
+`healthy:false` / non-empty `errors` and exit 1. `config get` of an unset key
+returns `value:null`. `key init` returns the one-time `recovery_code` in its
+envelope: show it once, it is not stored.
+
+**Secrets (`--secret-stdin`).** Passphrases, passwords and recovery codes are
+never accepted in argv or the environment under `--machine`. With
+`--machine --secret-stdin` (the flag requires `--machine`) every secret prompt
+(`key init|recover`, the encryption passphrase any object-touching command asks
+for, `auth login` password) reads exactly one line from stdin, in the order the
+prompts occur, into a zeroizing buffer; no confirmation re-type is asked. Without
+the flag the prompt fails `needs_input` and stdin is left unread. Empty stdin is
+`invalid_args`. `key recover <CODE>` and `auth login --token/--api-key` are
+`invalid_args` in machine mode, because they put the secret in argv.
+
 `tag` supports `list`, `create` and `delete`. `remote ls-tree <remote> [path] [--ref <ref>]` lists one remote directory
 (`{remote, ref, path, entries:[{name, path, kind: file|dir, size|null, oid}]}`);
 human output is `<type>\t<size>\t<path>` per entry. See `book/src/cli/remote.md`.
