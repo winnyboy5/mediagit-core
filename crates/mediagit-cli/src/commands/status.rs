@@ -405,9 +405,17 @@ impl StatusCmd {
             }
         }
 
+        // An index entry identical to HEAD is not a staged change. `reset --soft`
+        // and `merge --continue` leave the whole tree in the index, so without
+        // this filter every unchanged file would be reported as staged `M`.
+        let staged_entries: Vec<&mediagit_versioning::IndexEntry> = index
+            .entries()
+            .filter(|e| head_files.get(&e.path) != Some(&e.oid))
+            .collect();
+
         // Build index file map (path -> oid) for staged changes
         let mut index_files: HashMap<PathBuf, Oid> = HashMap::new();
-        for entry in index.entries() {
+        for entry in &staged_entries {
             index_files.insert(entry.path.clone(), entry.oid);
         }
 
@@ -541,7 +549,7 @@ impl StatusCmd {
         if self.porcelain {
             if show_tracked {
                 // Staged files (new files in index)
-                for entry in index.entries() {
+                for entry in &staged_entries {
                     // Check if it's a new file or modified staged file
                     if head_files.contains_key(&entry.path) {
                         println!("M  {}", entry.path.display());
@@ -582,8 +590,8 @@ impl StatusCmd {
         // Build the single-source-of-truth report. Human rendering below
         // reads from `report`, not from the raw collections above; --json
         // serializes `report` directly.
-        let mut staged: Vec<StagedFileReport> = index
-            .entries()
+        let mut staged: Vec<StagedFileReport> = staged_entries
+            .iter()
             .map(|entry| {
                 let kind = if head_files.contains_key(&entry.path) {
                     StagedKind::Modified
@@ -664,7 +672,7 @@ impl StatusCmd {
         let total_size = if self.verbose {
             let mut total_size: u64 = 0;
             if show_tracked {
-                for entry in index.entries() {
+                for entry in &staged_entries {
                     total_size += entry.size;
                 }
                 for path in &modified_files {
