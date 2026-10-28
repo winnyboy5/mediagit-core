@@ -692,6 +692,75 @@ async fn auth_machine_login_reads_password_from_stdin_only() {
 }
 
 // ---------------------------------------------------------------------------
+// empty results: refuse (cherry-pick, revert) or drop (rebase), never commit
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cherry_pick_of_an_already_applied_change_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_repo(dir);
+    commit_file(dir, "base.txt", b"base", "base");
+    human(dir, &["branch", "create", "feature"]);
+    human(dir, &["branch", "switch", "feature"]);
+    commit_file(dir, "f.txt", b"f", "f1");
+    let f1 = head_oid(dir);
+    human(dir, &["branch", "switch", "main"]);
+
+    assert_eq!(ok(dir, &["cherry-pick", &f1])["status"], "picked");
+    let after_first = head_oid(dir);
+
+    assert_eq!(err(dir, &["cherry-pick", &f1]), "empty_commit");
+    assert_eq!(head_oid(dir), after_first, "no commit may be created");
+
+    // Human mode: non-zero exit, same message, still no commit.
+    mediagit()
+        .args(["cherry-pick", &f1])
+        .current_dir(dir)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("already on this branch"));
+    assert_eq!(head_oid(dir), after_first);
+}
+
+#[test]
+fn revert_of_an_already_reverted_change_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_repo(dir);
+    commit_file(dir, "a.txt", b"one\n", "first");
+    commit_file(dir, "b.txt", b"two\n", "add b");
+    let add_b = head_oid(dir);
+
+    assert_eq!(ok(dir, &["revert", &add_b])["status"], "reverted");
+    let after_first = head_oid(dir);
+
+    assert_eq!(err(dir, &["revert", &add_b]), "empty_commit");
+    assert_eq!(head_oid(dir), after_first, "no commit may be created");
+}
+
+#[test]
+fn rebase_drops_a_commit_whose_change_is_already_upstream() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_repo(dir);
+    commit_file(dir, "base.txt", b"base", "base");
+    human(dir, &["branch", "create", "feature"]);
+    human(dir, &["branch", "switch", "feature"]);
+    commit_file(dir, "same.txt", b"same", "feature adds same.txt");
+    human(dir, &["branch", "switch", "main"]);
+    commit_file(dir, "same.txt", b"same", "main adds same.txt");
+    let main_head = head_oid(dir);
+    human(dir, &["branch", "switch", "feature"]);
+
+    let d = ok(dir, &["rebase", "main"]);
+    assert_eq!(d["status"], "rebased");
+    // The feature commit became empty, so it is dropped (git's behaviour):
+    // the branch now sits exactly at upstream.
+    assert_eq!(head_oid(dir), main_head);
+}
+
+// ---------------------------------------------------------------------------
 // passphrase master: one unwrap per process, and it really is the master
 // ---------------------------------------------------------------------------
 

@@ -359,6 +359,19 @@ impl RevertCmd {
 
         let mut created = None;
         if !self.no_commit {
+            // Reverting a change that is already undone would record an empty
+            // commit and report success.
+            if new_tree_oid == head_commit.tree {
+                return Err(output::CodedError::new(
+                    "empty_commit",
+                    format!(
+                        "nothing to commit - the change from {} is already reverted on this branch",
+                        &commit_oid.to_hex()[..7]
+                    ),
+                )
+                .into());
+            }
+
             let message = self.message.clone().unwrap_or_else(|| {
                 format!(
                     "Revert \"{}\"\n\nThis reverts commit {}.",

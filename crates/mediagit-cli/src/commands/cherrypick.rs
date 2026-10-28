@@ -405,6 +405,19 @@ impl CherryPickCmd {
         // Get current HEAD as parent
         let current_oid = refdb.resolve("HEAD").await?;
 
+        // A pick that changes nothing (the change is already on this branch)
+        // must not manufacture an empty commit and call it success.
+        if Commit::read(odb, &current_oid).await?.tree == tree_oid {
+            return Err(output::CodedError::new(
+                "empty_commit",
+                format!(
+                    "nothing to commit - the change from {} is already on this branch",
+                    &original_oid.to_hex()[..7]
+                ),
+            )
+            .into());
+        }
+
         // Create new commit
         let new_commit = Commit {
             tree: tree_oid,
