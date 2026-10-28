@@ -12,6 +12,8 @@ export interface E2EState {
   root: string
   repo: string // the fixture repo the app opens
   clone2: string // path for the second clone (created by the spec)
+  locked: string // encrypted fixture repo (W3 security tests)
+  passphrase: string // its passphrase: a test value
   remoteUrl: string
   cli: string
   cdpPort: number
@@ -79,7 +81,7 @@ export default async function globalSetup() {
   const logs = join(root, 'logs')
   mkdirSync(logs)
   const state: E2EState = {
-    root, repo: join(root, 'hero-film'), clone2: join(root, 'second-clone'), remoteUrl: '', cli, cdpPort,
+    root, repo: join(root, 'hero-film'), clone2: join(root, 'second-clone'), locked: join(root, 'locked-film'), passphrase: 'e2e-Correct-Horse-9', remoteUrl: '', cli, cdpPort,
     serverPort: 0, pids: [], tempDirs: [root], env: { ...AUTHOR },
   }
   const statePath = join(root, 'state.json')
@@ -87,6 +89,10 @@ export default async function globalSetup() {
   const save = () => writeFileSync(statePath, JSON.stringify(state, null, 2))
   const env = { ...process.env, ...AUTHOR, MEDIAGIT_CDC_SEED: '20260716' }
   const mg = (cwd: string, ...args: string[]) => execFileSync(cli, args, { cwd, env, encoding: 'utf8' })
+
+  // Machine mode with the passphrase as one stdin line, the way the desktop app drives the CLI.
+  const mgIn = (cwd: string, input: string, ...args: string[]) =>
+    execFileSync(cli, ['--machine', '--secret-stdin', ...args], { cwd, env, encoding: 'utf8', input: `${input}\n` })
 
   const teardown = async () => {
     for (const pid of [...state.pids].reverse()) killTree(pid)
@@ -112,8 +118,14 @@ export default async function globalSetup() {
     mg(root, 'init', '--bare', srvRepo)
     const fwd = (p: string) => p.replace(/\\/g, '/')
     writeFileSync(join(srvRepo, '.mediagit', 'config.toml'), `[storage]\nbackend = "filesystem"\nbase_path = "${fwd(join(srvDir, 'storage'))}"\n`)
+    // a second server repo for the encrypted fixture
+    const lockedSrv = join(srvDir, 'repos', 'locked-film')
+    mkdirSync(lockedSrv, { recursive: true })
+    mg(root, 'init', '--bare', lockedSrv)
+    writeFileSync(join(lockedSrv, '.mediagit', 'config.toml'), `[storage]\nbackend = "filesystem"\nbase_path = "${fwd(join(srvDir, 'storage-locked'))}"\n`)
     state.serverPort = await freePort()
-    writeFileSync(join(srvDir, 'server.toml'), `port = ${state.serverPort}\nhost = "127.0.0.1"\nrepos_dir = "${fwd(join(srvDir, 'repos'))}"\nenable_rate_limiting = true\n`)
+    writeFileSync(join(srvDir, 'server.toml'), `port = ${state.serverPort}\nhost = "127.0.0.1"\nrepos_dir = "${fwd(join(srvDir, 'repos'))}"\nenable_rate_limiting = true\n\n[encryption]\nenabled = true\nmaster_key_path = "${fwd(join(srvDir, 'master.key'))}"\n`)
+    writeFileSync(join(srvDir, 'master.key'), '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff') // test-only server master key
     start(server, ['--config', join(srvDir, 'server.toml')], 'server')
     const base = `http://127.0.0.1:${state.serverPort}`
     await waitFor('mediagit-server health', 60_000, () => up(`${base}/health`))
@@ -137,6 +149,15 @@ export default async function globalSetup() {
     mg(state.repo, 'commit', '-m', 'Initial fixture')
     mg(state.repo, 'remote', 'add', 'origin', state.remoteUrl)
     mg(state.repo, 'push', '-u', 'origin', 'main')
+
+    // --- encrypted fixture repo: key init and every later read take the passphrase on stdin ---
+    mkdirSync(state.locked)
+    mg(state.locked, 'init')
+    mgIn(state.locked, state.passphrase, 'key', 'init')
+    writeFileSync(join(state.locked, 'secret.txt'), 'classified storyboard\n')
+    mgIn(state.locked, state.passphrase, 'add', '.')
+    mgIn(state.locked, state.passphrase, 'commit', '-m', 'Encrypted initial')
+    mg(state.locked, 'remote', 'add', 'origin', `${base}/locked-film`)
 
     // --- Vite dev server (the debug desktop build loads http://localhost:5173) ---
     const devUp = await up('http://localhost:5173').catch(() => false)
