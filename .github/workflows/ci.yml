@@ -100,9 +100,9 @@ jobs:
       - name: Build
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --target ${{ matrix.target }} --verbose
+            cross build --workspace --exclude mediagit-desktop --target ${{ matrix.target }} --verbose
           else
-            cargo build --target ${{ matrix.target }} --verbose
+            cargo build --workspace --exclude mediagit-desktop --target ${{ matrix.target }} --verbose
           fi
         shell: bash
 
@@ -122,7 +122,9 @@ jobs:
       # number silently becomes wrong.
       - name: Run tests
         if: ${{ !matrix.cross }}
-        run: cargo test --workspace --verbose --all-features
+        # mediagit-desktop (Tauri) needs WebKitGTK on Linux and a staged CLI
+        # sidecar everywhere; the `desktop` job below owns it.
+        run: cargo test --workspace --exclude mediagit-desktop --verbose --all-features
         shell: bash
         env:
           CARGO_PROFILE_DEV_DEBUG: line-tables-only
@@ -149,7 +151,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --exclude mediagit-desktop --all-targets --all-features -- -D warnings
 
   license-check:
     name: License Check
@@ -295,7 +297,7 @@ jobs:
           key: msrv
 
       - name: cargo check at MSRV
-        run: cargo check --workspace --all-features
+        run: cargo check --workspace --exclude mediagit-desktop --all-features
 
   # Phase 4: Unused dependency detection
   unused-deps:
@@ -365,7 +367,7 @@ jobs:
       - name: Generate coverage report
         run: |
           set +e
-          cargo tarpaulin --workspace --all-features --out Xml \
+          cargo tarpaulin --workspace --exclude mediagit-desktop --all-features --out Xml \
             --output-dir coverage/ --timeout 300 --skip-clean
           rc=$?
           echo "tarpaulin exit=$rc (non-blocking by design)"
@@ -414,7 +416,7 @@ jobs:
       # The harness runs the shipped binaries, not `cargo run`: $QA.MG defaults
       # to target\release\mediagit.exe.
       - name: Build release binaries
-        run: cargo build --release --workspace --bins
+        run: cargo build --release --workspace --exclude mediagit-desktop --bins
 
       - name: Run QA phases 12 and 05
         shell: pwsh
@@ -426,4 +428,84 @@ jobs:
         with:
           name: qa-suite-logs
           path: dev-tests/qa-suite/logs/
+          retention-days: 14
+
+  # Desktop app (Tauri 2 crate + Vue UI). Kept out of the workspace jobs above
+  # (`--exclude mediagit-desktop`): Linux would need WebKitGTK. Windows only, the
+  # one shipped target (NSIS). The CLI sidecar is only declared for installer
+  # builds (tauri.bundle.conf.json), so check/test need no staged binary.
+  #
+  # The real-app Playwright suite (`pnpm e2e:real`) is NOT run here: it attaches
+  # to the app's WebView2 over CDP and needs a desktop session plus a running
+  # server. It stays a local/QA-suite gate (MG_QA_DESKTOP_E2E_REAL=1).
+  desktop:
+    name: Desktop
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: desktop
+
+      # ui/package.json engines.node is >=22.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      # lockfileVersion 9 = pnpm 9 or 10.
+      - name: Install pnpm
+        run: npm install -g pnpm@10
+
+      - name: Install UI dependencies
+        run: pnpm --dir ui install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm --dir ui typecheck
+
+      - name: Unit tests (vitest)
+        run: pnpm --dir ui test
+
+      # ts-rs writes ui/src/api/generated/ from the CLI's tests; a stale commit
+      # means a Rust report struct changed without regenerating the types.
+      - name: Generated TypeScript types are current
+        shell: bash
+        run: |
+          cargo test -p mediagit-cli --bins export_bindings
+          git diff --exit-code -- ui/src/api/generated
+
+      # The desktop engine tests run the real CLI from target/debug.
+      - name: Build CLI
+        run: cargo build -p mediagit-cli
+
+      - name: Clippy
+        run: cargo clippy -p mediagit-desktop --all-targets -- -D warnings
+
+      - name: Rust tests
+        run: cargo test -p mediagit-desktop
+
+      - name: Install Playwright Chromium
+        run: pnpm --dir ui exec playwright install --with-deps chromium
+
+      # playwright.config.ts: workers 2, retries 1 (more Chromium start-ups at
+      # once stall on Windows). CI=true switches it to the github reporter.
+      - name: Mocked Playwright suite
+        run: pnpm --dir ui e2e
+
+      - name: Upload Playwright traces
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: desktop-playwright-results
+          path: ui/test-results/
           retention-days: 14

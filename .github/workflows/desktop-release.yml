@@ -1,0 +1,99 @@
+name: Desktop Release
+
+# Separate from release.yml (tags v*.*.*, CLI/server archives): the desktop app
+# ships as an NSIS installer on its own `desktop-v*` tags.
+
+permissions:
+  contents: write
+
+on:
+  push:
+    tags:
+      - 'desktop-v*'
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Build the installer but skip the GitHub release'
+        required: false
+        type: boolean
+        default: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.97.1"
+  TARGET: x86_64-pc-windows-msvc
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    name: NSIS installer (x86_64-pc-windows-msvc)
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ env.TARGET }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: desktop-release
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        run: npm install -g pnpm@10
+
+      - name: Install UI dependencies
+        run: pnpm --dir ui install --frozen-lockfile
+
+      # Tauri sidecar naming: binaries/<name>-<target-triple>.exe. The installer
+      # drops it beside the app as plain `mediagit.exe`, which is where
+      # engine.rs (Engine::locate) looks.
+      - name: Build CLI sidecar
+        shell: bash
+        run: |
+          cargo build --release --target "$TARGET" -p mediagit-cli --bin mediagit
+          mkdir -p crates/mediagit-desktop/binaries
+          cp "target/$TARGET/release/mediagit.exe" "crates/mediagit-desktop/binaries/mediagit-$TARGET.exe"
+
+      # Code signing is deferred (no certificate decision yet). When one exists,
+      # add `bundle.windows.signCommand` to tauri.conf.json and pass the
+      # certificate through repository secrets here; do not invent them in
+      # this file. The updater key (TAURI_SIGNING_PRIVATE_KEY) is likewise unused.
+      # beforeBuildCommand in tauri.conf.json runs `pnpm build` for the UI.
+      - name: Build installer
+        shell: bash
+        working-directory: crates/mediagit-desktop
+        run: ../../ui/node_modules/.bin/tauri build --target "$TARGET" --bundles nsis --config tauri.bundle.conf.json
+
+      - name: List installer
+        shell: bash
+        run: ls -lh target/$TARGET/release/bundle/nsis/*.exe
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: mediagit-desktop-nsis
+          path: target/${{ env.TARGET }}/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/desktop-v')
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          name: MediaGit Desktop ${{ github.ref_name }}
+          files: target/${{ env.TARGET }}/release/bundle/nsis/*.exe
+          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
