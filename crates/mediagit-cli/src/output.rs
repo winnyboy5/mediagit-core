@@ -73,6 +73,11 @@ pub fn set_secret_stdin(on: bool) {
     SECRET_STDIN.store(on, Ordering::Relaxed);
 }
 
+/// `--secret-stdin` was given: the caller is supplying a passphrase.
+pub fn secret_stdin() -> bool {
+    SECRET_STDIN.load(Ordering::Relaxed)
+}
+
 /// The only way a secret (passphrase, password, recovery code) enters the
 /// process in machine mode: never argv, never env. With `--secret-stdin`,
 /// reads exactly one line from stdin (trailing newline stripped) into a

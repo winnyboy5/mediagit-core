@@ -12,6 +12,7 @@ use crate::output;
 use crate::repo::find_repo_root;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use mediagit_security::Zeroizing;
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -177,15 +178,17 @@ impl EncryptionKeyCmd {
                     .into());
                 }
                 let code = match opts.code.clone() {
-                    Some(code) => code,
+                    Some(code) => Zeroizing::new(code),
                     None => {
                         if let Some(line) = output::read_secret_line("recovery code")? {
-                            line.to_string()
+                            line
                         } else {
                             output::ensure_interactive("recovery code")?;
-                            dialoguer::Password::new()
-                                .with_prompt("Recovery code")
-                                .interact()?
+                            Zeroizing::new(
+                                dialoguer::Password::new()
+                                    .with_prompt("Recovery code")
+                                    .interact()?,
+                            )
                         }
                     }
                 };

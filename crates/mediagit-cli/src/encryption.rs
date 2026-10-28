@@ -188,7 +188,7 @@ pub fn load_repo_key(repo_root: &Path) -> Result<Option<EncryptionKey>> {
         return Ok(None);
     }
     let stored = read_stored(repo_root)?;
-    let (bytes, _master) = unwrap_repo_key_bytes(&stored)?;
+    let bytes = unwrap_once(repo_root, &stored)?;
     let key = EncryptionKey::from_bytes(bytes.to_vec())
         .map_err(|e| anyhow!("encryption-key: unwrapped key is unusable: {e}"))?;
     Ok(Some(key))
@@ -205,8 +205,40 @@ pub fn load_repo_key_bytes(repo_root: &Path) -> Result<Option<Zeroizing<Vec<u8>>
         return Ok(None);
     }
     let stored = read_stored(repo_root)?;
-    let (bytes, _master) = unwrap_repo_key_bytes(&stored)?;
-    Ok(Some(bytes))
+    Ok(Some(unwrap_once(repo_root, &stored)?))
+}
+
+/// The repo key unwrapped at most once per process (per repository).
+///
+/// A transfer command unwraps twice -- the remote-compatibility pre-flight
+/// (`load_repo_key_bytes`) and then `install_armed_key` -- and with a passphrase
+/// master each unwrap is a prompt. Memoizing here, below both callers, fixes it
+/// for every command at once. The cached copy is `Zeroizing` and lives only as
+/// long as the process-wide key it duplicates. `rotate`/`recover` deliberately
+/// bypass this (they must re-prove the master), and every key-file write
+/// drops it.
+static UNWRAPPED: std::sync::Mutex<Option<(PathBuf, Zeroizing<Vec<u8>>)>> =
+    std::sync::Mutex::new(None);
+
+fn cache_root(repo_root: &Path) -> PathBuf {
+    dunce::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf())
+}
+
+fn unwrap_once(repo_root: &Path, stored: &StoredKey) -> Result<Zeroizing<Vec<u8>>> {
+    let root = cache_root(repo_root);
+    let mut slot = UNWRAPPED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((cached_root, bytes)) = slot.as_ref()
+        && *cached_root == root
+    {
+        return Ok(Zeroizing::new(bytes.to_vec()));
+    }
+    let (bytes, _master) = unwrap_repo_key_bytes(stored)?;
+    *slot = Some((root, Zeroizing::new(bytes.to_vec())));
+    Ok(bytes)
+}
+
+fn forget_unwrapped() {
+    *UNWRAPPED.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// Refuse, before any object moves, when this repository's encryption state
@@ -886,11 +918,16 @@ fn provision_master() -> Result<(EncryptionKey, MasterSource, Option<String>)> {
     if std::env::var_os(KEYFILE_ENV).is_some() {
         return Ok((keyfile_master()?, MasterSource::Keyfile, None));
     }
-    if let Some(existing) = keychain_master() {
-        return Ok((existing, MasterSource::Keychain, None));
-    }
-    if let Some(fresh) = create_keychain_master()? {
-        return Ok((fresh, MasterSource::Keychain, None));
+    // `--secret-stdin` means the caller is handing us a passphrase: honour it
+    // even where a keychain exists, instead of silently never reading the line.
+    // (A keyfile still wins above; it needs no secret, so stdin stays unread.)
+    if !crate::output::secret_stdin() {
+        if let Some(existing) = keychain_master() {
+            return Ok((existing, MasterSource::Keychain, None));
+        }
+        if let Some(fresh) = create_keychain_master()? {
+            return Ok((fresh, MasterSource::Keychain, None));
+        }
     }
     // No keychain on this machine (headless Linux, locked service). Fall back
     // to a passphrase rather than refusing to encrypt at all.
@@ -952,6 +989,7 @@ fn prompt_passphrase(confirm: bool) -> Result<SecretString> {
 fn write_new(path: &Path, stored: &StoredKey) -> Result<()> {
     use std::io::Write;
 
+    forget_unwrapped();
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -969,6 +1007,7 @@ fn write_new(path: &Path, stored: &StoredKey) -> Result<()> {
 /// wrapping that makes the repository readable: a torn write here would leave a
 /// repo that neither the old nor the new master key can open.
 fn write_over(path: &Path, stored: &StoredKey) -> Result<()> {
+    forget_unwrapped();
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, render(stored)?).with_context(|| format!("writing {}", tmp.display()))?;
     restrict_permissions(&tmp);

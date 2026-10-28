@@ -690,3 +690,76 @@ async fn auth_machine_login_reads_password_from_stdin_only() {
     assert_eq!(r.json["ok"], false);
     assert_no_leak(&r, "wrong-Password-1!");
 }
+
+// ---------------------------------------------------------------------------
+// passphrase master: one unwrap per process, and it really is the master
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stdin_passphrase_selects_passphrase_master_even_with_a_keychain() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_repo(dir);
+    // Keychain NOT disabled: `--secret-stdin` must still choose the passphrase
+    // (and never touch the keychain on the way).
+    let out = mediagit()
+        .env_remove("MEDIAGIT_NO_KEYRING")
+        .args(["--machine", "--secret-stdin", "key", "init"])
+        .write_stdin(format!("{PASSPHRASE}\n"))
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(stdout.lines().count(), 1, "{stdout:?}");
+    let v: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(out.status.code(), Some(0), "{v}");
+    assert!(
+        v["data"]["source"].as_str().unwrap().contains("assphrase"),
+        "{v}"
+    );
+    assert!(!stdout.contains(PASSPHRASE));
+    assert!(!String::from_utf8_lossy(&out.stderr).contains(PASSPHRASE));
+    // The key file records the passphrase master (a salt is stored).
+    let key_file = fs::read_to_string(dir.join(".mediagit/encryption-key")).unwrap();
+    assert!(
+        key_file.contains("passphrase") && key_file.contains("salt"),
+        "{key_file}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn passphrase_repo_push_fetch_pull_read_one_line() {
+    let server = TempDir::new().unwrap();
+    // The server must hold an encryption master, or it refuses a keyed repo.
+    let master = mediagit_security::encryption::EncryptionKey::from_bytes(vec![0xa7; 32]).unwrap();
+    let base = serve(
+        mediagit_server::AppState::new(server.path().to_path_buf())
+            .with_encryption_master(Some(master)),
+    )
+    .await;
+    fs::create_dir_all(server.path().join("pp")).unwrap();
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_repo(dir);
+    let line = format!("{PASSPHRASE}\n");
+    let step = |args: &[&str]| {
+        let r = run_full(dir, &["--secret-stdin"], args, Some(&line));
+        assert_eq!(r.code, 0, "{args:?} -> {}", r.stdout);
+        assert_eq!(r.json["ok"], true, "{args:?} -> {}", r.stdout);
+        assert_no_leak(&r, PASSPHRASE);
+        r
+    };
+
+    step(&["key", "init"]);
+    fs::write(dir.join("a.txt"), "payload").unwrap();
+    step(&["add", "a.txt"]);
+    step(&["commit", "-m", "c1"]);
+    human(dir, &["remote", "add", "origin", &format!("{base}/pp")]);
+
+    // Each of these used to unwrap the key twice -- two prompts, so with one
+    // stdin line the second read hit EOF.
+    let r = step(&["push", "-u", "origin"]);
+    assert_eq!(r.json["data"]["remote"], "origin");
+    step(&["fetch", "origin"]);
+    step(&["pull", "origin"]);
+}

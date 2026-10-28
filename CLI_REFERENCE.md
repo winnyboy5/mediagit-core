@@ -128,7 +128,11 @@ never accepted in argv or the environment under `--machine`. With
 for, `auth login` password) reads exactly one line from stdin, in the order the
 prompts occur, into a zeroizing buffer; no confirmation re-type is asked. Without
 the flag the prompt fails `needs_input` and stdin is left unread. Empty stdin is
-`invalid_args`. `key recover <CODE>` and `auth login --token/--api-key` are
+`invalid_args`. `--secret-stdin` on `key init`/`rotate-master`/`clone` selects a
+passphrase master even where an OS keychain exists (a key file named by
+`MEDIAGIT_ENCRYPTION_KEYFILE` still wins and leaves stdin unread); the envelope's
+`source` reports which master was used. A passphrase repository is unwrapped once
+per process, so `push`/`fetch`/`pull` read exactly one line. `key recover <CODE>` and `auth login --token/--api-key` are
 `invalid_args` in machine mode, because they put the secret in argv.
 
 `tag` supports `list`, `create` and `delete`. `remote ls-tree <remote> [path] [--ref <ref>]` lists one remote directory

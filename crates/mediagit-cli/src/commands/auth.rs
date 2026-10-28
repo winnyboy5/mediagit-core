@@ -35,6 +35,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use dialoguer::{Input, Password};
 use mediagit_protocol::Credentials;
+use mediagit_security::Zeroizing;
 use mediagit_security::auth::{AuthResponse, GrantLevel, user::Role};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -661,15 +662,19 @@ async fn set_login_author(name: &str, email: &str) {
 /// `confirm`, if set, adds an interactive re-type check (`(prompt, mismatch
 /// error)`); it's skipped on the stdin-pipe path since re-typing a value
 /// that's already coming from a pipe isn't a meaningful check.
-fn read_value(prompt: &str, secret: bool, confirm: Option<(&str, &str)>) -> Result<String> {
+fn read_value(
+    prompt: &str,
+    secret: bool,
+    confirm: Option<(&str, &str)>,
+) -> Result<Zeroizing<String>> {
     // Machine mode: secrets only, from stdin (`--secret-stdin`); anything else
     // (usernames, emails) must come from flags, so it stays `needs_input`.
     if secret && let Some(line) = output::read_secret_line(prompt)? {
-        return Ok(line.to_string());
+        return Ok(line);
     }
     output::ensure_interactive(prompt)?;
     if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        Ok(if secret {
+        Ok(Zeroizing::new(if secret {
             let mut pw = Password::new().with_prompt(prompt);
             if let Some((confirm_prompt, mismatch_err)) = confirm {
                 pw = pw.with_confirmation(confirm_prompt, mismatch_err);
@@ -677,13 +682,15 @@ fn read_value(prompt: &str, secret: bool, confirm: Option<(&str, &str)>) -> Resu
             pw.interact()?
         } else {
             Input::new().with_prompt(prompt).interact_text()?
-        })
+        }))
     } else {
-        let mut line = String::new();
+        let mut line = Zeroizing::new(String::new());
         std::io::stdin()
             .read_line(&mut line)
             .context("failed to read from stdin")?;
-        Ok(line.trim_end_matches(['\n', '\r']).to_string())
+        Ok(Zeroizing::new(
+            line.trim_end_matches(['\n', '\r']).to_string(),
+        ))
     }
 }
 
@@ -761,7 +768,7 @@ async fn login(opts: &LoginOpts) -> Result<()> {
     }
 
     let username = match &opts.username {
-        Some(u) => u.clone(),
+        Some(u) => Zeroizing::new(u.clone()),
         None => read_value("Username or email", false, None)?,
     };
     let password = read_value("Password", true, None)?;
