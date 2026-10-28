@@ -54,6 +54,33 @@ fn add_and_commit(dir: &Path, name: &str, content: &str, message: &str) {
 // Status Command Tests
 // ============================================================================
 
+/// `reset --soft` fills the index with the old HEAD's whole tree. Entries that
+/// match the new HEAD are not staged changes and must not be listed as `M`.
+#[test]
+fn test_status_after_soft_reset_lists_only_real_changes() {
+    let temp_dir = TempDir::new().unwrap();
+    let dir = temp_dir.path();
+    init_repo(dir);
+    add_and_commit(dir, "b.txt", "b", "first");
+    add_and_commit(dir, "c.txt", "c", "second");
+
+    let porcelain = |dir: &Path| {
+        let out = mediagit()
+            .args(["status", "--porcelain"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    };
+
+    mediagit()
+        .args(["reset", "--soft", "HEAD~1"])
+        .current_dir(dir)
+        .assert()
+        .success();
+    assert_eq!(porcelain(dir).trim(), "A  c.txt");
+}
+
 #[test]
 fn test_status_clean() {
     let temp_dir = TempDir::new().unwrap();
