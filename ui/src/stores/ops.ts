@@ -58,6 +58,8 @@ export interface OpSpec {
   cancel?: Op['cancel']
   /** Store-level action Retry runs (keeps its busy guard and refresh); defaults to re-running `fn`. */
   retry?: () => void
+  /** The call carries a secret: keep no closure that could re-run it (and so hold the secret). */
+  noRetry?: boolean
 }
 
 /** Bytes/s over the sample window, or null until two samples >= 1 s apart exist. */
@@ -220,7 +222,7 @@ export const useOpsStore = defineStore('ops', () => {
     } catch (e) {
       fail(id, toApiError(e))
       const op = get(id)
-      if (op && op.status === 'failed') {
+      if (op && op.status === 'failed' && !spec.noRetry) {
         op.retry =
           spec.retry ??
           (() => {

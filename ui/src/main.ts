@@ -8,5 +8,9 @@ import './styles/tokens.css'
 import './styles/base.css'
 import Root from './Root.vue'
 import { router } from './router'
+import { useLookStore } from './stores/settings'
 
-createApp(Root).use(createPinia()).use(router).mount('#app')
+const pinia = createPinia()
+// Apply the saved theme and density before anything is shown.
+useLookStore(pinia)
+createApp(Root).use(pinia).use(router).mount('#app')

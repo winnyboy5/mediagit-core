@@ -1,0 +1,41 @@
+[
+  {
+    "progress": {
+      "id": 1,
+      "msg": "Checking objects",
+      "pos": 0,
+      "len": 48213,
+      "unit": "items",
+      "done": false
+    }
+  },
+  {
+    "hold": true
+  },
+  {
+    "progress": {
+      "id": 1,
+      "msg": "Checking objects",
+      "pos": 20000,
+      "len": 48213,
+      "unit": "items",
+      "done": false
+    }
+  },
+  {
+    "hold": true
+  },
+  {
+    "resolve": {
+      "healthy": true,
+      "objects_checked": 48213,
+      "refs_checked": 9,
+      "corrupted_objects": 0,
+      "broken_refs": 0,
+      "missing_objects": 0,
+      "dangling_objects": 2,
+      "repaired": null,
+      "issues": []
+    }
+  }
+]

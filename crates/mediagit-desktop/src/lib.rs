@@ -383,7 +383,30 @@ pub fn run() {
             commands::repo_restore_file,
             commands::repo_download,
             commands::repo_download_preview,
-            commands::remote_ls_tree
+            commands::remote_ls_tree,
+            commands::admin::repo_stats,
+            commands::admin::repo_gc,
+            commands::admin::repo_fsck,
+            commands::admin::repo_verify,
+            commands::admin::auth_login,
+            commands::admin::auth_run,
+            commands::admin::key_status,
+            commands::admin::key_init,
+            commands::admin::key_recover,
+            commands::admin::config_list,
+            commands::admin::config_set,
+            commands::admin::config_unset,
+            commands::admin::sparse_list,
+            commands::admin::sparse_set,
+            commands::admin::sparse_disable,
+            commands::admin::rebase_start,
+            commands::admin::sequencer_control,
+            commands::admin::pick_start,
+            commands::admin::bisect_start,
+            commands::admin::bisect_mark,
+            commands::admin::bisect_reset,
+            commands::admin::bisect_log,
+            commands::admin::reflog_list
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| panic!("failed to start MediaGit desktop: {e}"));

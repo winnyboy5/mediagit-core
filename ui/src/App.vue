@@ -5,6 +5,7 @@ import { api } from '@/api'
 import Toast from '@/components/Toast.vue'
 import ActivityBar from '@/shell/ActivityBar.vue'
 import ActivityDrawer from '@/shell/ActivityDrawer.vue'
+import UnlockDialog from '@/shell/UnlockDialog.vue'
 import Inspector from '@/shell/Inspector.vue'
 import Sidebar from '@/shell/Sidebar.vue'
 import { useRepoStore } from '@/stores/repo'
@@ -74,6 +75,7 @@ onBeforeUnmount(() => {
     </div>
     <ActivityBar />
     <ActivityDrawer />
+    <UnlockDialog />
     <Toast />
   </div>
 </template>

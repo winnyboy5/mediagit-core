@@ -1,0 +1,38 @@
+[
+  {
+    "progress": {
+      "id": 1,
+      "msg": "Replaying versions",
+      "pos": 0,
+      "len": 3,
+      "unit": "items",
+      "done": false
+    }
+  },
+  {
+    "hold": true
+  },
+  {
+    "progress": {
+      "id": 1,
+      "msg": "Replaying versions",
+      "pos": 1,
+      "len": 3,
+      "unit": "items",
+      "done": false
+    }
+  },
+  {
+    "hold": true
+  },
+  {
+    "resolve": {
+      "action": "start",
+      "status": "rebased",
+      "head": "00aa00aa00aa00aa00aa00aa00aa00aa00aa00aa",
+      "commits_rebased": 3,
+      "conflict_commit": null,
+      "conflicts": []
+    }
+  }
+]

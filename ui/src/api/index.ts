@@ -4,6 +4,17 @@ import { Channel, convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import type {
   ApiError,
+  AuthReport,
+  BisectReport,
+  CherryPickReport,
+  ConfigReport,
+  FsckCliReport,
+  GcReport,
+  KeyReport,
+  RebaseReport,
+  ReflogReport,
+  SparseReport,
+  StatsReport,
   BranchActionReport,
   BranchListReport,
   DiffReport,
@@ -146,4 +157,44 @@ export const api = {
     invoke<Extracted>('repo_download_preview', { repo, remotePath, gitRef, opId, onProgress: channel(onProgress) }),
   download: (repo: string, remotePath: string, gitRef: string | null, output: string, opId: string, onProgress: Report) =>
     invoke<DownloadReport>('repo_download', { repo, remotePath, gitRef, output, opId, onProgress: channel(onProgress) }),
+
+  // Secrets (`passphrase`, `password`, `code`) go to the child's stdin only; `passphrase` answers a
+  // `needs_input` prompt on retry (see stores/unlock.ts).
+  stats: (repo: string, passphrase?: string) => invoke<StatsReport>('repo_stats', { repo, passphrase: passphrase ?? null }),
+  gc: (repo: string, dryRun: boolean, confirmed: boolean, passphrase: string | undefined, onProgress: Report) =>
+    invoke<GcReport>('repo_gc', { repo, dryRun, confirmed, passphrase: passphrase ?? null, onProgress: channel(onProgress) }),
+  fsck: (repo: string, deep: boolean, passphrase: string | undefined, onProgress: Report) =>
+    invoke<FsckCliReport>('repo_fsck', { repo, deep, passphrase: passphrase ?? null, onProgress: channel(onProgress) }),
+  verify: (repo: string, quick: boolean, passphrase: string | undefined, onProgress: Report) =>
+    invoke<FsckCliReport>('repo_verify', { repo, quick, passphrase: passphrase ?? null, onProgress: channel(onProgress) }),
+
+  authLogin: (repo: string | null, server: string | null, username: string | null, password: string) =>
+    invoke<AuthReport>('auth_login', { repo, server, username, password }),
+  authRun: (repo: string | null, action: 'status' | 'whoami' | 'logout', server: string | null, all = false) =>
+    invoke<AuthReport>('auth_run', { repo, action, server, all }),
+  keyStatus: (repo: string, passphrase?: string) => invoke<KeyReport>('key_status', { repo, passphrase: passphrase ?? null }),
+  keyInit: (repo: string, passphrase: string | null) => invoke<KeyReport>('key_init', { repo, passphrase }),
+  keyRecover: (repo: string, code: string, passphrase: string | null) => invoke<KeyReport>('key_recover', { repo, code, passphrase }),
+
+  configList: (repo: string) => invoke<ConfigReport>('config_list', { repo }),
+  configSet: (repo: string, key: string, value: string) => invoke<ConfigReport>('config_set', { repo, key, value }),
+  configUnset: (repo: string, key: string) => invoke<ConfigReport>('config_unset', { repo, key }),
+  sparseList: (repo: string) => invoke<SparseReport>('sparse_list', { repo }),
+  sparseSet: (repo: string, patterns: string[], patternMode: boolean, onProgress: Report) =>
+    invoke<SparseReport>('sparse_set', { repo, patterns, patternMode, onProgress: channel(onProgress) }),
+  sparseDisable: (repo: string, onProgress: Report) => invoke<SparseReport>('sparse_disable', { repo, onProgress: channel(onProgress) }),
+
+  rebaseStart: (repo: string, upstream: string, onProgress: Report) =>
+    invoke<RebaseReport>('rebase_start', { repo, upstream, onProgress: channel(onProgress) }),
+  sequencerControl: <T = RebaseReport | CherryPickReport>(repo: string, command: 'rebase' | 'cherry-pick', action: 'continue' | 'abort' | 'skip', onProgress: Report) =>
+    invoke<T>('sequencer_control', { repo, command, action, onProgress: channel(onProgress) }),
+  pickStart: (repo: string, commits: string[], onProgress: Report) =>
+    invoke<CherryPickReport>('pick_start', { repo, commits, onProgress: channel(onProgress) }),
+  bisectStart: (repo: string, bad: string, good: string | null, onProgress: Report) =>
+    invoke<BisectReport>('bisect_start', { repo, bad, good, onProgress: channel(onProgress) }),
+  bisectMark: (repo: string, verdict: 'good' | 'bad' | 'skip', commit: string | null, onProgress: Report) =>
+    invoke<BisectReport>('bisect_mark', { repo, verdict, commit, onProgress: channel(onProgress) }),
+  bisectReset: (repo: string, onProgress: Report) => invoke<BisectReport>('bisect_reset', { repo, onProgress: channel(onProgress) }),
+  bisectLog: (repo: string) => invoke<BisectReport>('bisect_log', { repo }),
+  reflog: (repo: string, reference: string, count: number) => invoke<ReflogReport>('reflog_list', { repo, reference, count }),
 }

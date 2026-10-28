@@ -12,11 +12,16 @@ import SegmentedControl from '@/components/SegmentedControl.vue'
 import SkeletonRows from '@/components/SkeletonRows.vue'
 import TextField from '@/components/TextField.vue'
 import { timeAgo } from '@/lib/persist'
+import { useIdentityStore } from '@/stores/identity'
 import { filterLocks, useLocksStore, type LockFilter } from '@/stores/locks'
 import type { LockReport } from '@/api'
 
 const locks = useLocksStore()
-onMounted(() => void locks.refresh())
+const identity = useIdentityStore()
+onMounted(() => {
+  void locks.refresh()
+  void identity.refresh()
+})
 
 const FILTERS = [
   { value: 'all', label: 'All' },
@@ -24,9 +29,9 @@ const FILTERS = [
   { value: 'others', label: 'Others' },
 ]
 const filter = ref<LockFilter>('all')
-const shown = computed(() => filterLocks(locks.locks, filter.value, locks.me))
+const shown = computed(() => filterLocks(locks.locks, filter.value, locks.names))
 const firstLoad = computed(() => !locks.loaded && !locks.error)
-const isMine = (l: LockReport) => locks.me !== null && l.owner === locks.me
+const isMine = (l: LockReport) => locks.isMine(l)
 
 // Lock a file -----------------------------------------------------------
 const lockOpen = ref(false)
@@ -93,7 +98,7 @@ function askForce(l: LockReport) {
     <div v-else-if="!shown.length" class="pad">
       <EmptyState
         :title="filter === 'mine' ? 'You have no locks' : 'Nobody else has locks'"
-        :description="filter === 'mine' && locks.me === null ? 'MediaGit learns your lock name the first time you lock a file here.' : 'Choose All to see every lock.'"
+        :description="filter === 'mine' && !locks.names.length ? 'Sign in or set your name in Settings so MediaGit knows which locks are yours.' : 'Choose All to see every lock.'"
       />
     </div>
 

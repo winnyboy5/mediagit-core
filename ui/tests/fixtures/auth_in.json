@@ -1,0 +1,23 @@
+{
+  "action": "status",
+  "server": "https://mediagit.studio.example",
+  "auth_enabled": true,
+  "logged_in": true,
+  "credential_tier": "stored login",
+  "identity": {
+    "username": "mira",
+    "email": "mira@studio.example",
+    "role": "write",
+    "grants": [
+      {
+        "repo": "hero-film",
+        "level": "write"
+      },
+      {
+        "repo": "trailer-cut",
+        "level": "admin"
+      }
+    ]
+  },
+  "removed": null
+}

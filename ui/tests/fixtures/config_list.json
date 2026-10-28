@@ -1,0 +1,21 @@
+{
+  "action": "list",
+  "entries": [
+    {
+      "key": "author.name",
+      "value": "Mira Okafor"
+    },
+    {
+      "key": "author.email",
+      "value": "mira@studio.example"
+    },
+    {
+      "key": "performance.upload_concurrency",
+      "value": "8"
+    },
+    {
+      "key": "performance.download_concurrency",
+      "value": null
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "reference": "HEAD",
+  "entries": [
+    {
+      "index": 0,
+      "old_oid": "0001000100010001000100010001000100010001",
+      "new_oid": "0000000000000000000000000000000000000000",
+      "message": "merge feature/grade: Fast-forward",
+      "time": 1792996400,
+      "committer": "Mira Okafor"
+    },
+    {
+      "index": 1,
+      "old_oid": "0002000200020002000200020002000200020002",
+      "new_oid": "0001000100010001000100010001000100010001",
+      "message": "commit: Fix audio sync on VO take 2",
+      "time": 1792990000,
+      "committer": "Mira Okafor"
+    },
+    {
+      "index": 2,
+      "old_oid": "0003000300030003000300030003000300030003",
+      "new_oid": "0002000200020002000200020002000200020002",
+      "message": "reset: moving to HEAD~1",
+      "time": 1792980000,
+      "committer": "Ravi Shah"
+    }
+  ]
+}

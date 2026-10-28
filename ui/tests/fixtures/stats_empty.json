@@ -1,0 +1,18 @@
+{
+  "total_bytes": 0,
+  "original_bytes": 0,
+  "compression_ratio": null,
+  "loose_objects": 0,
+  "chunks": 0,
+  "deltas": 0,
+  "pack_files": 0,
+  "commits": 0,
+  "first_commit_time": null,
+  "last_commit_time": null,
+  "local_branches": 0,
+  "remote_branches": 0,
+  "tags": 0,
+  "files": 0,
+  "media_files": 0,
+  "authors": []
+}

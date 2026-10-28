@@ -178,13 +178,12 @@ test.describe('Changes: refresh and shell', () => {
     await expect.poll(n).toBeGreaterThan(b)
   })
 
-  test('Ctrl+2 goes to History, Ctrl+1 back; More items are disabled with a reason', async ({ page }) => {
+  test('Ctrl+2 goes to History, Ctrl+1 back', async ({ page }) => {
     await boot(page)
     await page.keyboard.press('Control+2')
     await expect(page).toHaveURL(/#\/history$/)
     await page.keyboard.press('Control+1')
     await expect(page).toHaveURL(/#\/changes$/)
-    await expect(page.getByRole('button', { name: 'Storage' })).toHaveAttribute('aria-disabled', 'true')
   })
 
   test('keyboard: list takes focus with a ring; arrows move, Space toggles', async ({ page }) => {

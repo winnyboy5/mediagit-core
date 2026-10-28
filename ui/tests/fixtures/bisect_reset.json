@@ -1,0 +1,11 @@
+{
+  "action": "reset",
+  "status": "reset",
+  "current": null,
+  "remaining_steps": null,
+  "first_bad": null,
+  "bad": null,
+  "good": [],
+  "skipped": [],
+  "log": []
+}

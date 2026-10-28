@@ -1,0 +1,11 @@
+{
+  "action": "set",
+  "enabled": true,
+  "mode": "cone",
+  "patterns": [
+    "art",
+    "video"
+  ],
+  "files_added": 12,
+  "files_removed": 340
+}

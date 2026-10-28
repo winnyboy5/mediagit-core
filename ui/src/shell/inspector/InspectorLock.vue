@@ -6,18 +6,22 @@ import { Lock, LockOpen } from 'lucide-vue-next'
 import Button from '@/components/Button.vue'
 import type { InspectFile } from '@/lib/inspect'
 import { timeAgo } from '@/lib/persist'
+import { useIdentityStore } from '@/stores/identity'
 import { useLocksStore } from '@/stores/locks'
 
 const props = defineProps<{ file: InspectFile }>()
 const locks = useLocksStore()
+const identity = useIdentityStore()
 
 onMounted(() => {
   if (!locks.loaded && !locks.loading) void locks.refresh()
+  if (!identity.loaded) void identity.refresh()
 })
 
 const held = computed(() => locks.byPath.get(props.file.path))
-// Unknown owner identity: offer Unlock and let the server refuse if it is not ours.
-const mine = computed(() => !!held.value && (locks.me === null || held.value.owner === locks.me))
+// Yours when the owner is your account or commit author. With neither known, offer Unlock
+// and let the server refuse if it is not ours.
+const mine = computed(() => !!held.value && (!locks.names.length || locks.isMine(held.value)))
 const here = computed(() => locks.busy === `lock:${props.file.path}` || (!!held.value && locks.busy === `unlock:${held.value.lock_id}`))
 const gone = computed(() => props.file.deleted || props.file.status === 'deleted')
 </script>

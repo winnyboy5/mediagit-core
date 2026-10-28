@@ -14,7 +14,7 @@ use std::process::Stdio;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 /// Machine contract version this app understands. Must match the CLI's
@@ -119,6 +119,45 @@ struct CliError {
     message: String,
 }
 
+/// A passphrase, password or recovery code on its way to a child's stdin. It is never
+/// serialized, printed or compared, and its text is overwritten when it is dropped.
+pub struct Secret(String);
+
+impl Secret {
+    /// One line of at most 1 KiB: no line breaks or NUL (they would split or end the prompt).
+    pub fn new(text: String) -> Result<Self, EngineError> {
+        if text.is_empty() || text.len() > 1024 || text.contains(['\n', '\r', '\0']) {
+            // The message names no part of the value.
+            return Err(EngineError::InvalidArgument("bad secret".into()));
+        }
+        Ok(Self(text))
+    }
+
+    fn line(&self) -> String {
+        format!("{}\n", self.0)
+    }
+
+    /// Whether `needle` is this secret (for tests that check it never leaks elsewhere).
+    pub fn is(&self, needle: &str) -> bool {
+        self.0 == needle
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(***)")
+    }
+}
+
+impl Drop for Secret {
+    fn drop(&mut self) {
+        // Best effort without `unsafe`: overwrite in place, then release.
+        let n = self.0.len();
+        self.0 = "x".repeat(n);
+        self.0.clear();
+    }
+}
+
 /// Handle to the `mediagit` binary.
 #[derive(Debug, Clone)]
 pub struct Engine {
@@ -170,15 +209,35 @@ impl Engine {
         &self,
         repo: Option<&Path>,
         args: &[&str],
+        on_progress: impl FnMut(Progress),
+    ) -> Result<Value, EngineError> {
+        self.run_with(repo, args, &[], on_progress).await
+    }
+
+    /// [`Engine::run`] that also answers the command's secret prompts. Each secret is
+    /// written to the child's stdin as one line (`--secret-stdin`), in prompt order, and
+    /// stdin is then closed. Secrets never go in argv or the environment and are not logged.
+    pub async fn run_with(
+        &self,
+        repo: Option<&Path>,
+        args: &[&str],
+        secrets: &[Secret],
         mut on_progress: impl FnMut(Progress),
     ) -> Result<Value, EngineError> {
         let mut cmd = Command::new(&self.bin);
         if let Some(repo) = repo {
             cmd.arg("-C").arg(repo);
         }
-        cmd.arg("--machine")
-            .args(args)
-            .stdin(Stdio::null())
+        cmd.arg("--machine");
+        if !secrets.is_empty() {
+            cmd.arg("--secret-stdin");
+        }
+        cmd.args(args)
+            .stdin(if secrets.is_empty() {
+                Stdio::null()
+            } else {
+                Stdio::piped()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -186,6 +245,21 @@ impl Engine {
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: no console flash
 
         let mut child = cmd.spawn().map_err(|e| EngineError::Spawn(e.to_string()))?;
+        if !secrets.is_empty() {
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| EngineError::Spawn("no stdin".into()))?;
+            // A fixed message: whatever the OS says must not carry the secret's neighbours.
+            let fail = |_| EngineError::Spawn("could not pass the secret to mediagit".into());
+            for secret in secrets {
+                stdin
+                    .write_all(secret.line().as_bytes())
+                    .await
+                    .map_err(fail)?;
+            }
+            drop(stdin); // EOF: a prompt that wants more input fails instead of hanging
+        }
         let mut stdout = child
             .stdout
             .take()

@@ -1,0 +1,11 @@
+{
+  "action": "start",
+  "status": "waiting_for_good",
+  "current": null,
+  "remaining_steps": null,
+  "first_bad": null,
+  "bad": "0000000000000000000000000000000000000000",
+  "good": [],
+  "skipped": [],
+  "log": []
+}

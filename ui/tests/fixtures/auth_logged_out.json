@@ -1,0 +1,9 @@
+{
+  "action": "logout",
+  "server": "https://mediagit.studio.example",
+  "auth_enabled": true,
+  "logged_in": false,
+  "credential_tier": null,
+  "identity": null,
+  "removed": 1
+}

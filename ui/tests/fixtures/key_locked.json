@@ -1,0 +1,8 @@
+{
+  "action": "status",
+  "enabled": true,
+  "source": null,
+  "wrapped_key": "key.json",
+  "recovery_slot": true,
+  "recovery_code": null
+}

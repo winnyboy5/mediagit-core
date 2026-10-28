@@ -78,7 +78,7 @@ async fn unconverted_command_is_refused_not_run() {
     let tmp = tempfile::tempdir().unwrap();
     init_repo(&engine, tmp.path());
     let err = engine
-        .run(Some(tmp.path()), &["gc"], |_| {})
+        .run(Some(tmp.path()), &["completions", "bash"], |_| {})
         .await
         .unwrap_err();
     assert!(

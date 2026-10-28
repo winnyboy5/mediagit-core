@@ -1,0 +1,8 @@
+{
+  "action": "init",
+  "enabled": true,
+  "source": "OS keychain",
+  "wrapped_key": "key.json",
+  "recovery_slot": true,
+  "recovery_code": "RC-7QK2-M9XD-4TVB-HE8A"
+}

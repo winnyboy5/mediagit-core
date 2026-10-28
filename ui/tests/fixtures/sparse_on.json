@@ -1,0 +1,11 @@
+{
+  "action": "list",
+  "enabled": true,
+  "mode": "cone",
+  "patterns": [
+    "art",
+    "audio"
+  ],
+  "files_added": null,
+  "files_removed": null
+}

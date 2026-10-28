@@ -1,0 +1,9 @@
+{
+  "action": "continue",
+  "status": "picked",
+  "commits": [
+    "00cc00cc00cc00cc00cc00cc00cc00cc00cc00cc"
+  ],
+  "conflict_commit": null,
+  "conflicts": []
+}

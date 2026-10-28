@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, ref, shallowRef, watch } from 'vue'
 import { api, toApiError, type ApiError, type LockReport } from '@/api'
 import { load, save } from '@/lib/persist'
+import { useIdentityStore } from './identity'
 import { useOpsStore } from './ops'
 import { useRepoStore } from './repo'
 
@@ -9,16 +10,18 @@ const OWNER_KEY = 'mg.lock.owner'
 
 export type LockFilter = 'all' | 'mine' | 'others'
 
-/** Pure: which locks a filter shows. `me` is unknown until this app has created a lock. */
-export function filterLocks(locks: readonly LockReport[], filter: LockFilter, me: string | null): LockReport[] {
+/** Pure: which locks a filter shows. `me` is every name that is yours (account, commit author, a lock made here). */
+export function filterLocks(locks: readonly LockReport[], filter: LockFilter, me: string | readonly string[] | null): LockReport[] {
   if (filter === 'all') return [...locks]
-  return locks.filter((l) => (filter === 'mine') === (me !== null && l.owner === me))
+  const names = me === null ? [] : typeof me === 'string' ? [me] : me
+  return locks.filter((l) => (filter === 'mine') === names.includes(l.owner))
 }
 
 /** File locks on the remote: list, lock, unlock. */
 export const useLocksStore = defineStore('locks', () => {
   const repo = useRepoStore()
   const ops = useOpsStore()
+  const identity = useIdentityStore()
 
   const locks = shallowRef<LockReport[]>([])
   const loaded = ref(false)
@@ -30,6 +33,9 @@ export const useLocksStore = defineStore('locks', () => {
   const me = ref<string | null>(load<string | null>(OWNER_KEY, null))
   let token = 0
 
+  /** Every name that is yours: the signed-in account, the commit author, and the owner of a lock made here. */
+  const names = computed(() => [...new Set([...identity.names, ...(me.value ? [me.value] : [])])])
+  const isMine = (l: LockReport) => names.value.includes(l.owner)
   const byPath = computed(() => new Map(locks.value.map((l) => [l.path, l])))
 
   async function refresh() {
@@ -88,5 +94,5 @@ export const useLocksStore = defineStore('locks', () => {
     },
   )
 
-  return { locks, byPath, loaded, loading, error, actionError, busy, me, refresh, lock, unlock }
+  return { locks, byPath, names, isMine, loaded, loading, error, actionError, busy, me, refresh, lock, unlock }
 })

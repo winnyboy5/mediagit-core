@@ -1,0 +1,11 @@
+{
+  "healthy": true,
+  "objects_checked": 48213,
+  "refs_checked": 9,
+  "corrupted_objects": 0,
+  "broken_refs": 0,
+  "missing_objects": 0,
+  "dangling_objects": 2,
+  "repaired": null,
+  "issues": []
+}

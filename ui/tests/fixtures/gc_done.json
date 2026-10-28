@@ -1,0 +1,15 @@
+{
+  "dry_run": false,
+  "objects_scanned": 5000,
+  "reachable_objects": 4800,
+  "unreachable_objects": 200,
+  "objects_deleted": 200,
+  "bytes_reclaimed": 1288490188,
+  "manifests_deleted": 4,
+  "chunks_deleted": 0,
+  "chunk_bytes_reclaimed": 0,
+  "deltas_deleted": 0,
+  "delta_bytes_reclaimed": 0,
+  "duration_secs": 1.5,
+  "errors": []
+}

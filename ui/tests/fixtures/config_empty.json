@@ -1,0 +1,13 @@
+{
+  "action": "list",
+  "entries": [
+    {
+      "key": "author.name",
+      "value": null
+    },
+    {
+      "key": "author.email",
+      "value": null
+    }
+  ]
+}

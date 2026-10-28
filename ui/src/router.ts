@@ -29,6 +29,11 @@ export const router = createRouter({
     { path: '/compare', component: () => import('./views/CompareView.vue'), meta: { needsRepo: true, title: 'Compare' } },
     { path: '/tags', component: () => import('./views/TagsStashView.vue'), meta: { needsRepo: true, title: 'Tags & Stash' } },
     { path: '/remote', component: () => import('./views/RemoteView.vue'), meta: { needsRepo: true, title: 'Remote Browser' } },
+    { path: '/storage', component: () => import('./views/StorageView.vue'), meta: { needsRepo: true, title: 'Storage' } },
+    { path: '/maintenance', component: () => import('./views/MaintenanceView.vue'), meta: { needsRepo: true, title: 'Maintenance' } },
+    { path: '/security', component: () => import('./views/SecurityView.vue'), meta: { needsRepo: true, title: 'Security' } },
+    { path: '/advanced', component: () => import('./views/AdvancedView.vue'), meta: { needsRepo: true, title: 'Advanced' } },
+    { path: '/settings', component: () => import('./views/SettingsView.vue'), meta: { needsRepo: true, title: 'Settings' } },
     { path: '/kit', component: () => import('./kit/KitView.vue'), meta: { bare: true } },
   ],
 })

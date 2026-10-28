@@ -25,7 +25,7 @@ use tauri::ipc::Channel;
 use tokio::sync::Mutex as AsyncMutex;
 
 use super::{Ops, Throttle, clone_source_ok, plain_arg, repo_path, repo_relative};
-use crate::engine::{Engine, EngineError, Progress};
+use crate::engine::{Engine, EngineError, Progress, Secret};
 
 /// One mutating operation per repository at a time; reads are not queued.
 #[derive(Default)]
@@ -493,11 +493,38 @@ async fn stream(
     cancellable: bool,
     channel: &Channel<Progress>,
 ) -> Result<Value, EngineError> {
+    stream_with(
+        engine,
+        ops,
+        queues,
+        repo,
+        argv,
+        &[],
+        op_id,
+        cancellable,
+        channel,
+    )
+    .await
+}
+
+/// [`stream`] for a command that may be asked for secrets (passed on its stdin).
+#[allow(clippy::too_many_arguments)]
+async fn stream_with(
+    engine: &Engine,
+    ops: &Ops,
+    queues: &RepoQueues,
+    repo: &Path,
+    argv: &[String],
+    secrets: &[Secret],
+    op_id: &str,
+    cancellable: bool,
+    channel: &Channel<Progress>,
+) -> Result<Value, EngineError> {
     let mut throttle = Throttle::new(Duration::from_millis(100));
     let args = as_args(argv);
     let run = queues.write(
         repo,
-        engine.run(Some(repo), &args, |p| {
+        engine.run_with(Some(repo), &args, secrets, |p| {
             if throttle.allow(p.id, p.done, Instant::now()) {
                 // A closed channel means the window went away; nobody to tell.
                 let _ = channel.send(p);
@@ -1348,6 +1375,8 @@ pub async fn repo_download_preview(
         }
     }
 }
+
+pub mod admin;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]

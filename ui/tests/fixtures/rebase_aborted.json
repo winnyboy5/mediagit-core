@@ -1,0 +1,8 @@
+{
+  "action": "abort",
+  "status": "aborted",
+  "head": "00bb00bb00bb00bb00bb00bb00bb00bb00bb00bb",
+  "commits_rebased": null,
+  "conflict_commit": null,
+  "conflicts": []
+}

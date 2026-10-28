@@ -1,0 +1,40 @@
+[
+  {
+    "progress": {
+      "id": 1,
+      "msg": "Updating files",
+      "pos": 0,
+      "len": 352,
+      "unit": "items",
+      "done": false
+    }
+  },
+  {
+    "hold": true
+  },
+  {
+    "progress": {
+      "id": 1,
+      "msg": "Updating files",
+      "pos": 100,
+      "len": 352,
+      "unit": "items",
+      "done": false
+    }
+  },
+  {
+    "hold": true
+  },
+  {
+    "resolve": {
+      "action": "set",
+      "enabled": true,
+      "mode": "cone",
+      "patterns": [
+        "art"
+      ],
+      "files_added": 0,
+      "files_removed": 352
+    }
+  }
+]

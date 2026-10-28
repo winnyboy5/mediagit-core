@@ -1,0 +1,29 @@
+{
+  "total_bytes": 19756849562,
+  "original_bytes": 44223334400,
+  "compression_ratio": 2.24,
+  "loose_objects": 1204,
+  "chunks": 48213,
+  "deltas": 312,
+  "pack_files": 12,
+  "commits": 148,
+  "first_commit_time": 1780000000,
+  "last_commit_time": 1792996400,
+  "local_branches": 3,
+  "remote_branches": 2,
+  "tags": 3,
+  "files": 2310,
+  "media_files": 1980,
+  "authors": [
+    {
+      "name": "Mira Okafor",
+      "email": "mira@studio.example",
+      "commits": 97
+    },
+    {
+      "name": "Ravi Shah",
+      "email": "ravi@studio.example",
+      "commits": 51
+    }
+  ]
+}

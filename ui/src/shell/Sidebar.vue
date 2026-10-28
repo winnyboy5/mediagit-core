@@ -22,7 +22,6 @@ import {
 } from 'lucide-vue-next'
 import logo from '@/assets/logo-16.svg'
 import DropdownMenu, { type MenuItem } from '@/components/DropdownMenu.vue'
-import Tooltip from '@/components/Tooltip.vue'
 import { useChangesStore } from '@/stores/changes'
 import { useRecentStore } from '@/stores/recent'
 import { useRepoStore } from '@/stores/repo'
@@ -57,16 +56,13 @@ const nav = [
   { to: '/compare', label: 'Compare', icon: GitCompare },
   { to: '/tags', label: 'Tags & Stash', icon: Tag },
   { to: '/remote', label: 'Remote Browser', icon: Cloud },
+  { to: '/storage', label: 'Storage', icon: HardDrive },
+  { to: '/maintenance', label: 'Maintenance', icon: Wrench },
+  { to: '/security', label: 'Security', icon: ShieldCheck },
+  { to: '/advanced', label: 'Advanced', icon: Wand2 },
+  { to: '/settings', label: 'Settings', icon: Settings },
 ] as const
 
-// Views that ship in later waves: listed so the whole product is discoverable.
-const more = [
-  { label: 'Storage', icon: HardDrive },
-  { label: 'Maintenance', icon: Wrench },
-  { label: 'Security', icon: ShieldCheck },
-  { label: 'Advanced', icon: Wand2 },
-  { label: 'Settings', icon: Settings },
-] as const
 </script>
 
 <template>
@@ -96,7 +92,7 @@ const more = [
     <div class="navscroll">
     <ul class="items">
       <li v-for="(n, i) in nav" :key="n.to">
-        <RouterLink :to="n.to" class="item" :aria-keyshortcuts="`Control+${i + 1}`">
+        <RouterLink :to="n.to" class="item" :aria-keyshortcuts="i < 9 ? `Control+${i + 1}` : undefined">
           <component :is="n.icon" :size="18" aria-hidden="true" />
           <span class="lbl">{{ n.label }}</span>
           <span v-if="n.to === '/changes' && changes.counts.total" class="count mono" :aria-label="`${changes.counts.total} changed files`">{{
@@ -109,18 +105,6 @@ const more = [
       </li>
     </ul>
 
-    <h2 class="group">More</h2>
-    <ul class="items more">
-      <li v-for="m in more" :key="m.label">
-        <Tooltip text="Coming soon">
-          <button type="button" class="item soon" aria-disabled="true" @click.prevent>
-            <component :is="m.icon" :size="18" aria-hidden="true" />
-            <span class="lbl">{{ m.label }}</span>
-            <span class="sr-only">(coming soon)</span>
-          </button>
-        </Tooltip>
-      </li>
-    </ul>
     </div>
   </nav>
 </template>

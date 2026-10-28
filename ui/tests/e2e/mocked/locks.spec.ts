@@ -53,7 +53,7 @@ test.describe('Locks: filter and actions', () => {
     await boot(page)
     await page.getByRole('button', { name: 'Mine' }).click()
     await expect(page.getByText('You have no locks')).toBeVisible()
-    await expect(page.getByText('learns your lock name')).toBeVisible()
+    await expect(page.getByText('Sign in or set your name in Settings')).toBeVisible()
     await page.getByRole('button', { name: 'Others' }).click()
     await expect(page.getByRole('table').getByRole('row')).toHaveCount(4)
   })
@@ -67,6 +67,24 @@ test.describe('Locks: filter and actions', () => {
     await expect.poll(async () => (await ipcCalls(page, 'lock_unlock')).map((c) => c.args)).toEqual([{ repo: '/repos/hero-film', lockId: 'l-1', force: false }])
     await page.getByRole('button', { name: 'Others' }).click()
     await expect(page.getByRole('table').getByRole('row')).toHaveCount(3)
+  })
+
+  test('mine is decided by the signed-in account, not by the first lock made here', async ({ page }) => {
+    await boot(page, { auth_run: { ...fixture<object>('auth_in'), identity: { username: 'Dev Rao', email: 'dev@x.example', role: 'write', grants: [] } } })
+    await page.getByRole('button', { name: 'Mine' }).click()
+    await expect(page.getByRole('table').getByRole('row')).toHaveCount(2)
+    await expect(row(page, 'char/rig.fbx')).toContainText('You')
+    await expect(row(page, 'char/rig.fbx').getByRole('button', { name: 'Unlock', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Others' }).click()
+    await expect(row(page, 'art/hero.psd')).not.toContainText('You')
+    await expectNoAxeViolations(page)
+  })
+
+  test('with no account, the commit author name marks your locks', async ({ page }) => {
+    await boot(page, { config_list: { action: 'list', entries: [{ key: 'author.name', value: 'Sam Lee' }, { key: 'author.email', value: 'sam@x.example' }] } })
+    await page.getByRole('button', { name: 'Mine' }).click()
+    await expect(page.getByRole('table').getByRole('row')).toHaveCount(2)
+    await expect(row(page, 'env/sky_hdri.exr')).toContainText('You')
   })
 
   test('force unlock explains the consequences and needs a second confirmation', async ({ page }) => {

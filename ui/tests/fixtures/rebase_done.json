@@ -1,0 +1,8 @@
+{
+  "action": "continue",
+  "status": "rebased",
+  "head": "00aa00aa00aa00aa00aa00aa00aa00aa00aa00aa",
+  "commits_rebased": 3,
+  "conflict_commit": null,
+  "conflicts": []
+}

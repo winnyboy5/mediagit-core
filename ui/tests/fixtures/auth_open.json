@@ -1,0 +1,9 @@
+{
+  "action": "status",
+  "server": "https://mediagit.studio.example",
+  "auth_enabled": false,
+  "logged_in": false,
+  "credential_tier": null,
+  "identity": null,
+  "removed": null
+}
