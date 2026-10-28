@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
-import { toApiError } from '@/api'
+import { reactive, ref } from 'vue'
+import { api, toApiError } from '@/api'
 
 /**
  * The encryption passphrase prompt. A command that reaches a passphrase prompt fails with
@@ -11,6 +11,8 @@ import { toApiError } from '@/api'
  */
 export const useUnlockStore = defineStore('unlock', () => {
   const open = ref(false)
+  /** Repositories unlocked for this session (the backend holds the passphrase; this is only the fact). */
+  const unlocked = reactive(new Set<string>())
   /** Set when the previous answer did not work. */
   const retry = ref(false)
   let waiting: ((answer: string | null) => void) | null = null
@@ -43,5 +45,43 @@ export const useUnlockStore = defineStore('unlock', () => {
     }
   }
 
-  return { open, retry, answer, withUnlock }
+  /** Prompts being answered, by repository: commands that fail together share one dialog. */
+  const asking = new Map<string, Promise<boolean>>()
+
+  /**
+   * Unlock `repo` for the session: ask until the backend accepts the passphrase or the person
+   * cancels. The passphrase goes straight to `unlock_repo` and nowhere else.
+   */
+  function unlockRepo(repo: string): Promise<boolean> {
+    const existing = asking.get(repo)
+    if (existing) return existing
+    const job = (async () => {
+      let again = false
+      for (;;) {
+        const pass = await ask(again)
+        if (pass === null) return false
+        try {
+          await api.unlockRepo(repo, pass)
+          unlocked.add(repo)
+          return true
+        } catch (e) {
+          // Only a rejected passphrase is asked about again; any other failure is the real answer.
+          if (toApiError(e).code !== 'wrong_passphrase') throw e
+          again = true
+        }
+      }
+    })().finally(() => asking.delete(repo))
+    asking.set(repo, job)
+    return job
+  }
+
+  /** Forget the session passphrase for `repo`; its next encrypted read asks again. */
+  function lock(repo: string) {
+    unlocked.delete(repo)
+    void Promise.resolve()
+      .then(() => api.lockRepo(repo))
+      .catch(() => {})
+  }
+
+  return { open, retry, unlocked, answer, withUnlock, unlockRepo, lock }
 })

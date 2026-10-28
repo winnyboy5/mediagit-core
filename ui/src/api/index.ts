@@ -1,6 +1,6 @@
 // The only module that talks to the Tauri backend. Views and stores call
 // these wrappers, so a later HTTP transport (server web UI) swaps in here.
-import { Channel, convertFileSrc, invoke } from '@tauri-apps/api/core'
+import { Channel, convertFileSrc, invoke as rawInvoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import type {
   ApiError,
@@ -61,6 +61,32 @@ function channel(onProgress?: (p: Progress) => void): Channel<Progress> {
 }
 
 type Report = (p: Progress) => void
+
+/** Asks the person to unlock `repo`; true once it is unlocked, false if they cancelled. */
+type UnlockHandler = (repo: string) => Promise<boolean>
+let unlockHandler: UnlockHandler | null = null
+
+/** Registered once at startup (main.ts), so this module needs no store. */
+export function setUnlockHandler(h: UnlockHandler | null) {
+  unlockHandler = h
+}
+
+/**
+ * Every command goes through here. An encrypted repository that is not unlocked fails
+ * `needs_input`; the person is asked for the passphrase once (the backend keeps it in memory
+ * for that repository) and the command is run again, once. The passphrase never passes
+ * through this function: it only goes to `unlock_repo`.
+ */
+async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  try {
+    return await rawInvoke<T>(cmd, args)
+  } catch (e) {
+    const repo = args?.repo
+    if (toApiError(e).code !== 'needs_input' || typeof repo !== 'string' || !unlockHandler) throw e
+    if (!(await unlockHandler(repo))) throw { code: 'cancelled', message: 'Cancelled' } satisfies ApiError
+    return rawInvoke<T>(cmd, args)
+  }
+}
 
 /** `recursive` asks per file; `ours`/`theirs` settle every conflict the same way. */
 export type MergeStrategy = 'recursive' | 'ours' | 'theirs'
@@ -158,6 +184,11 @@ export const api = {
   download: (repo: string, remotePath: string, gitRef: string | null, output: string, opId: string, onProgress: Report) =>
     invoke<DownloadReport>('repo_download', { repo, remotePath, gitRef, output, opId, onProgress: channel(onProgress) }),
 
+  /** Check a passphrase and keep it for this repository for the session; rejects `wrong_passphrase`. */
+  unlockRepo: (repo: string, passphrase: string) => rawInvoke<void>('unlock_repo', { repo, passphrase }),
+  /** Forget the session passphrase. */
+  lockRepo: (repo: string) => rawInvoke<void>('lock_repo', { repo }),
+
   // Secrets (`passphrase`, `password`, `code`) go to the child's stdin only; `passphrase` answers a
   // `needs_input` prompt on retry (see stores/unlock.ts).
   stats: (repo: string, passphrase?: string) => invoke<StatsReport>('repo_stats', { repo, passphrase: passphrase ?? null }),
@@ -169,12 +200,12 @@ export const api = {
     invoke<FsckCliReport>('repo_verify', { repo, quick, passphrase: passphrase ?? null, onProgress: channel(onProgress) }),
 
   authLogin: (repo: string | null, server: string | null, username: string | null, password: string) =>
-    invoke<AuthReport>('auth_login', { repo, server, username, password }),
+    rawInvoke<AuthReport>('auth_login', { repo, server, username, password }),
   authRun: (repo: string | null, action: 'status' | 'whoami' | 'logout', server: string | null, all = false) =>
     invoke<AuthReport>('auth_run', { repo, action, server, all }),
   keyStatus: (repo: string, passphrase?: string) => invoke<KeyReport>('key_status', { repo, passphrase: passphrase ?? null }),
-  keyInit: (repo: string, passphrase: string | null) => invoke<KeyReport>('key_init', { repo, passphrase }),
-  keyRecover: (repo: string, code: string, passphrase: string | null) => invoke<KeyReport>('key_recover', { repo, code, passphrase }),
+  keyInit: (repo: string, passphrase: string | null) => rawInvoke<KeyReport>('key_init', { repo, passphrase }),
+  keyRecover: (repo: string, code: string, passphrase: string | null) => rawInvoke<KeyReport>('key_recover', { repo, code, passphrase }),
 
   configList: (repo: string) => invoke<ConfigReport>('config_list', { repo }),
   configSet: (repo: string, key: string, value: string) => invoke<ConfigReport>('config_set', { repo, key, value }),

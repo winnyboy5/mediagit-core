@@ -33,7 +33,7 @@ function submit() {
 </script>
 
 <template>
-  <Dialog v-model:open="open" title="Unlock this repository" description="Its files are encrypted. Enter the passphrase to continue. It is used once and not saved.">
+  <Dialog v-model:open="open" title="Unlock this repository" description="Its files are encrypted. Enter the passphrase to continue. MediaGit keeps it in memory, and only in memory, until you lock the repository or close the app.">
     <form id="unlock-form" class="form" autocomplete="off" @submit.prevent="submit">
       <TextField v-model="pass" label="Passphrase" type="password" :error="unlock.retry ? 'That passphrase did not unlock the repository.' : undefined" />
     </form>

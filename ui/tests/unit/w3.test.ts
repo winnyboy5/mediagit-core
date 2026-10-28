@@ -180,16 +180,19 @@ describe('security store: secrets', () => {
   it('keeps the recovery code in memory only until dismissed, never in ops or storage', async () => {
     open()
     const sec = useSecurityStore()
-    api.keyInit.mockResolvedValue({ action: 'init', enabled: true, recovery_code: 'RC-SECRET-CODE' })
+    api.keyInit.mockResolvedValue({ action: 'init', enabled: true, source: 'OS keychain', recovery_code: 'RC-SECRET-CODE' })
     expect(await sec.enableEncryption('')).toBe(true)
     expect(api.keyInit).toHaveBeenCalledWith('/repos/hero', null)
     expect(sec.recoveryCode).toBe('RC-SECRET-CODE')
+    expect(sec.keySource).toBe('OS keychain')
+    expect(useOpsStore().ops.at(-1)!.summary).toBe('Encryption is on, unlocks with OS keychain')
     const ops = JSON.stringify(useOpsStore().ops.map((o) => [o.label, o.summary, o.error]))
     expect(ops).not.toContain('SECRET-CODE')
     expect(useOpsStore().ops.at(-1)!.retry).toBeUndefined()
     expect(JSON.stringify({ ...localStorage })).not.toContain('SECRET-CODE')
     sec.dismissRecovery()
     expect(sec.recoveryCode).toBeNull()
+    expect(sec.keySource).toBeNull()
   })
 
   it('a failed init sets no recovery code; changing repository clears one', async () => {

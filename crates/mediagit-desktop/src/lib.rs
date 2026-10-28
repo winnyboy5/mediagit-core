@@ -384,6 +384,8 @@ pub fn run() {
             commands::repo_download,
             commands::repo_download_preview,
             commands::remote_ls_tree,
+            commands::admin::unlock_repo,
+            commands::admin::lock_repo,
             commands::admin::repo_stats,
             commands::admin::repo_gc,
             commands::admin::repo_fsck,

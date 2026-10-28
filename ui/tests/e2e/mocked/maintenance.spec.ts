@@ -134,15 +134,16 @@ test.describe('Maintenance: states', () => {
     await expect(alert).toHaveCount(0)
   })
 
-  test('an encrypted repository asks for the passphrase and the check runs again with it', async ({ page }) => {
-    const h = `(a) => { if (!a.passphrase) throw { code: 'needs_input', message: 'passphrase needed' }; return ${JSON.stringify(fixture('fsck_ok'))} }`
-    await boot(page, {}, {}, { repo_fsck: h })
+  test('an encrypted repository asks for the passphrase and the check runs again once unlocked', async ({ page }) => {
+    const locked = `(a, calls) => { if (!calls.some((c) => c.cmd === 'unlock_repo')) throw { code: 'needs_input', message: 'passphrase needed' }; return ${JSON.stringify(fixture('fsck_ok'))} }`
+    await boot(page, {}, {}, { repo_fsck: locked, unlock_repo: '() => null' })
     await card(page, 'fsck').getByRole('button', { name: 'Run integrity check' }).click()
     const dlg = page.getByRole('dialog', { name: 'Unlock this repository' })
     await dlg.getByLabel('Passphrase').fill('tr0ub4dor&3')
     await dlg.getByRole('button', { name: 'Unlock' }).click()
     await expect(page.getByTestId('fsck-result')).toContainText('No problems found')
-    expect((await ipcCalls(page, 'repo_fsck')).map((c) => c.args.passphrase)).toEqual([null, 'tr0ub4dor&3'])
+    expect((await ipcCalls(page, 'unlock_repo')).map((c) => c.args.passphrase)).toEqual(['tr0ub4dor&3'])
+    expect((await ipcCalls(page, 'repo_fsck')).map((c) => c.args.passphrase)).toEqual([null, null])
     // The activity list shows labels only, never the passphrase.
     await page.getByRole('button', { name: 'Activity' }).click()
     expect(await page.evaluate(() => document.body.innerText)).not.toContain('tr0ub4dor')

@@ -25,11 +25,14 @@ import DropdownMenu, { type MenuItem } from '@/components/DropdownMenu.vue'
 import { useChangesStore } from '@/stores/changes'
 import { useRecentStore } from '@/stores/recent'
 import { useRepoStore } from '@/stores/repo'
+import { useUnlockStore } from '@/stores/unlock'
 import { useOpenRepo } from './useOpenRepo'
 
 const repo = useRepoStore()
 const recent = useRecentStore()
 const changes = useChangesStore()
+const unlock = useUnlockStore()
+const isUnlocked = computed(() => !!repo.path && unlock.unlocked.has(repo.path))
 const { openPath, pickAndOpen } = useOpenRepo()
 
 const repoName = computed(() => recent.list.find((r) => r.path === repo.path)?.name ?? repo.path ?? '')
@@ -86,6 +89,14 @@ const nav = [
         <span v-if="up && (up.ahead || up.behind)" class="sync mono" :aria-label="`${up.ahead ?? 0} ahead, ${up.behind ?? 0} behind`">
           <template v-if="up.ahead"><ArrowUp :size="14" aria-hidden="true" />{{ up.ahead }}</template><template v-if="up.behind"><ArrowDown :size="14" aria-hidden="true" />{{ up.behind }}</template>
         </span>
+      </span>
+    </div>
+
+    <div v-if="isUnlocked" class="switch static" data-testid="unlocked-chip">
+      <span class="cap">Encryption</span>
+      <span class="val">
+        <span class="name">Unlocked</span>
+        <button type="button" class="lockbtn" aria-label="Lock this repository" @click="unlock.lock(repo.path!)">Lock</button>
       </span>
     </div>
 
@@ -167,6 +178,16 @@ button.switch:hover {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 500;
+}
+.lockbtn {
+  padding: 0 var(--space-2);
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
 }
 .muted {
   color: var(--text-muted);

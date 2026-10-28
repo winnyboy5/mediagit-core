@@ -149,6 +149,7 @@ test.describe('Security: encryption', () => {
 
     const dlg = page.getByRole('dialog', { name: 'Save your recovery code' })
     await expect(dlg.getByTestId('recovery-code')).toHaveText(CODE)
+    await expect(dlg.getByTestId('key-source')).toContainText('OS keychain')
     await expect(dlg.getByRole('button', { name: 'Done' })).toBeDisabled()
     await expectNoAxeViolations(page)
     await page.keyboard.press('Escape')

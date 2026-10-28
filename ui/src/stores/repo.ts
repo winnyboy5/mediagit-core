@@ -3,6 +3,7 @@ import { ref, shallowRef } from 'vue'
 import { api, toApiError, type ApiError, type StatusReport } from '@/api'
 import { forget, load, save } from '@/lib/persist'
 import { useRecentStore } from './recent'
+import { useUnlockStore } from './unlock'
 
 const KEY = 'mg.repo'
 
@@ -23,6 +24,11 @@ export const useRepoStore = defineStore('repo', () => {
     api.allowRepo(p).catch(() => {
       if (allowed === p) allowed = null
     })
+  }
+
+  /** Leaving a repository forgets its session passphrase. */
+  function lock(p: string) {
+    useUnlockStore().lock(p)
   }
 
   async function refresh() {
@@ -56,6 +62,7 @@ export const useRepoStore = defineStore('repo', () => {
       return false
     }
     token++ // supersede any refresh of the previous repo
+    if (path.value && path.value !== dir) lock(path.value)
     path.value = dir
     status.value = s
     error.value = null
@@ -68,6 +75,7 @@ export const useRepoStore = defineStore('repo', () => {
 
   function close() {
     token++
+    if (path.value) lock(path.value)
     path.value = null
     status.value = null
     error.value = null

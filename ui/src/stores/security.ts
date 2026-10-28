@@ -20,6 +20,8 @@ export const useSecurityStore = defineStore('security', () => {
   const loading = ref(false)
   /** Shown once after `key init`; cleared by `dismissRecovery`. Never persisted or logged. */
   const recoveryCode = ref<string | null>(null)
+  /** How the new key unlocks on this machine (keychain, passphrase...), shown with the code. Not a secret. */
+  const keySource = ref<string | null>(null)
   let token = 0
 
   async function refresh() {
@@ -49,15 +51,19 @@ export const useSecurityStore = defineStore('security', () => {
   const logout = (all: boolean) => run(all ? 'Sign out everywhere' : 'Sign out', (root) => api.authRun(root, 'logout', null, all), () => 'Signed out')
 
   async function enableEncryption(passphrase: string) {
-    const r = await run('Turn on encryption', (root) => api.keyInit(root, passphrase || null), () => 'Encryption is on', undefined, true)
-    if (r?.value.recovery_code) recoveryCode.value = r.value.recovery_code
+    const r = await run('Turn on encryption', (root) => api.keyInit(root, passphrase || null), (k) => (k.source ? `Encryption is on, unlocks with ${k.source}` : 'Encryption is on'), undefined, true)
+    if (r?.value.recovery_code) {
+      recoveryCode.value = r.value.recovery_code
+      keySource.value = r.value.source
+    }
     return !!r
   }
   const recover = (code: string, passphrase: string) =>
-    run('Recover key', (root) => api.keyRecover(root, code, passphrase || null), () => 'Key recovered', undefined, true)
+    run('Recover key', (root) => api.keyRecover(root, code, passphrase || null), (k) => (k.source ? `Key recovered, unlocks with ${k.source}` : 'Key recovered'), undefined, true)
 
   function dismissRecovery() {
     recoveryCode.value = null
+    keySource.value = null
   }
 
   watch(
@@ -67,8 +73,9 @@ export const useSecurityStore = defineStore('security', () => {
       auth.value = key.value = null
       authError.value = keyError.value = actionError.value = null
       recoveryCode.value = null
+      keySource.value = null
     },
   )
 
-  return { auth, authError, key, keyError, loading, recoveryCode, busy, actionError, refresh, login, logout, enableEncryption, recover, dismissRecovery }
+  return { auth, authError, key, keyError, loading, recoveryCode, keySource, busy, actionError, refresh, login, logout, enableEncryption, recover, dismissRecovery }
 })

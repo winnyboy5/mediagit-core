@@ -16,7 +16,7 @@ use super::{
     Ops, RepoQueues, Secret, as_args, clone_source_ok, invalid, plain_arg, ref_name_ok, repo_path,
     rev_ok, stream_with,
 };
-use crate::engine::{Engine, EngineError, Progress};
+use crate::engine::{Engine, EngineError, Progress, is_unlock_failure};
 
 /// A command line plus the secrets its prompts will ask for, kept apart on purpose.
 pub struct SecretCmd {
@@ -287,6 +287,46 @@ fn reflog_argv(reference: &str, count: u32) -> Result<Vec<String>, EngineError> 
 // ---------------------------------------------------------------------------
 // commands
 // ---------------------------------------------------------------------------
+
+/// Unlock an encrypted repository for this session: the passphrase is checked with a cheap
+/// read, then answers that repository's prompts (on stdin, in this process only) until
+/// `lock_repo` or exit. A wrong passphrase leaves it locked.
+#[tauri::command]
+pub async fn unlock_repo(
+    engine: tauri::State<'_, Engine>,
+    repo: String,
+    passphrase: String,
+) -> Result<(), EngineError> {
+    let repo = repo_path(&repo)?;
+    let secret = Secret::new(passphrase)?;
+    engine.lock(&repo);
+    let cmd = SecretCmd {
+        argv: vec!["log".into(), "-n".into(), "1".into()],
+        secrets: vec![secret.duplicate()],
+    };
+    // Only the CLI's own "that key did not open it" is a wrong passphrase; anything else (a
+    // missing repository, a broken store) is reported as it is, not asked about again.
+    run(&engine, Some(&repo), &cmd).await.map_err(|e| {
+        if is_unlock_failure(&e) {
+            EngineError::Cli {
+                code: "wrong_passphrase".into(),
+                message: "That passphrase did not unlock the repository.".into(),
+            }
+        } else {
+            e
+        }
+    })?;
+    engine.unlock(&repo, secret);
+    Ok(())
+}
+
+/// Forget the session passphrase for a repository.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)] // tauri injects State by value
+pub fn lock_repo(engine: tauri::State<'_, Engine>, repo: String) -> Result<(), EngineError> {
+    engine.lock(&repo_path(&repo)?);
+    Ok(())
+}
 
 /// Repository size and shape. `passphrase` answers an encryption prompt on retry.
 #[tauri::command]

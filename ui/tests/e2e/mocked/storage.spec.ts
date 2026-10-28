@@ -65,11 +65,16 @@ test.describe('Storage: states', () => {
 })
 
 test.describe('Unlock prompt (needs_input)', () => {
-  const needs = (right: string) =>
-    `(a) => { if (a.passphrase !== ${JSON.stringify(right)}) throw { code: 'needs_input', message: 'passphrase needed' }; return ${JSON.stringify(fixture('stats'))} }`
+  // Locked until `unlock_repo` was called with the right passphrase; the passphrase itself
+  // never reaches `repo_stats`.
+  const locked = (right: string) =>
+    `(a, calls) => { if (!calls.some((c) => c.cmd === 'unlock_repo' && c.args.passphrase === ${JSON.stringify(right)})) throw { code: 'needs_input', message: 'passphrase needed' }; return ${JSON.stringify(fixture('stats'))} }`
+  const unlocking = (right: string) =>
+    `(a) => { if (a.passphrase !== ${JSON.stringify(right)}) throw { code: 'wrong_passphrase', message: 'no' }; return null }`
+  const handlers = (right: string) => ({ repo_stats: locked(right), unlock_repo: unlocking(right) })
 
-  test('asks for the passphrase, retries with it, and forgets it', async ({ page }) => {
-    await boot(page, {}, { repo_stats: needs('open-sesame-42') }, {}, false)
+  test('asks for the passphrase, unlocks the repository, runs again, and forgets it', async ({ page }) => {
+    await boot(page, {}, handlers('open-sesame-42'), {}, false)
     const dlg = page.getByRole('dialog', { name: 'Unlock this repository' })
     await expect(dlg).toBeVisible()
     await expectNoAxeViolations(page)
@@ -77,18 +82,15 @@ test.describe('Unlock prompt (needs_input)', () => {
     await expect(dlg.getByLabel('Passphrase')).toHaveAttribute('type', 'password')
     await dlg.getByRole('button', { name: 'Unlock' }).click()
     await expect(page.getByRole('list', { name: 'Storage summary' })).toBeVisible()
-    const calls = (await ipcCalls(page, 'repo_stats')).map((c) => c.args.passphrase)
-    expect(calls).toEqual([null, 'open-sesame-42'])
-    // Nothing keeps the passphrase: not the page, not browser storage.
+    // The command itself carries no passphrase; only `unlock_repo` does.
+    expect((await ipcCalls(page, 'repo_stats')).map((c) => c.args.passphrase)).toEqual([null, null])
+    expect((await ipcCalls(page, 'unlock_repo')).map((c) => c.args)).toEqual([{ repo: '/repos/hero-film', passphrase: 'open-sesame-42' }])
     expect(await page.evaluate(() => JSON.stringify({ ...localStorage }) + JSON.stringify({ ...sessionStorage }))).not.toContain('open-sesame-42')
     expect(await page.evaluate(() => document.body.innerText)).not.toContain('open-sesame-42')
-    await page.getByRole('button', { name: 'Recalculate storage' }).click()
-    await expect(dlg).toBeVisible()
-    await expect(dlg.getByLabel('Passphrase')).toHaveValue('')
   })
 
   test('a wrong passphrase asks again and says so', async ({ page }) => {
-    await boot(page, {}, { repo_stats: needs('right-one') }, {}, false)
+    await boot(page, {}, handlers('right-one'), {}, false)
     const dlg = page.getByRole('dialog', { name: 'Unlock this repository' })
     await dlg.getByLabel('Passphrase').fill('wrong-one')
     await dlg.getByRole('button', { name: 'Unlock' }).click()
@@ -101,14 +103,15 @@ test.describe('Unlock prompt (needs_input)', () => {
   })
 
   test('cancelling leaves the view with a plain message and no retry loop', async ({ page }) => {
-    await boot(page, {}, { repo_stats: needs('x') }, {}, false)
+    await boot(page, {}, handlers('x'), {}, false)
     await page.getByRole('dialog', { name: 'Unlock this repository' }).getByRole('button', { name: 'Cancel' }).click()
     await expect(page.getByRole('alert')).toContainText('Cancelled')
     expect(await ipcCalls(page, 'repo_stats')).toHaveLength(1)
+    expect(await ipcCalls(page, 'unlock_repo')).toHaveLength(0)
   })
 
   test('Escape cancels too', async ({ page }) => {
-    await boot(page, {}, { repo_stats: needs('x') }, {}, false)
+    await boot(page, {}, handlers('x'), {}, false)
     await expect(page.getByRole('dialog', { name: 'Unlock this repository' })).toBeVisible()
     await page.keyboard.press('Escape')
     await expect(page.getByRole('dialog')).toHaveCount(0)

@@ -36,6 +36,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 dunce = "1.0"  # canonical repo paths without the Windows \\?\ prefix
+zeroize = "1.8"  # Secret text is wiped on drop
 
 [dev-dependencies]
 tempfile = { workspace = true }

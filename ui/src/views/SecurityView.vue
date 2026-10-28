@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { Copy, KeyRound, LogIn, ShieldCheck } from 'lucide-vue-next'
+import { Copy, KeyRound, Lock, LockOpen, LogIn, ShieldCheck } from 'lucide-vue-next'
 import AlertDialog from '@/components/AlertDialog.vue'
 import Button from '@/components/Button.vue'
 import Checkbox from '@/components/Checkbox.vue'
@@ -8,9 +8,14 @@ import Dialog from '@/components/Dialog.vue'
 import ErrorState from '@/components/ErrorState.vue'
 import SkeletonRows from '@/components/SkeletonRows.vue'
 import TextField from '@/components/TextField.vue'
+import { useRepoStore } from '@/stores/repo'
 import { useSecurityStore } from '@/stores/security'
+import { useUnlockStore } from '@/stores/unlock'
 
 const sec = useSecurityStore()
+const repo = useRepoStore()
+const unlock = useUnlockStore()
+const isUnlocked = computed(() => !!repo.path && unlock.unlocked.has(repo.path))
 onMounted(() => void sec.refresh())
 
 const a = computed(() => sec.auth)
@@ -138,7 +143,11 @@ const sourceText = (s: string | null) => s ?? 'No key available on this machine'
               <dt>Recovery code</dt><dd>{{ k.recovery_slot ? 'Set up' : 'Not set up' }}</dd>
             </dl>
             <p v-if="!k.source" class="muted">This machine has no key for it, so its files cannot be read here. Recover it with your recovery code.</p>
-            <Button :disabled="sec.busy" @click="recoverOpen = true">Recover with a code…</Button>
+            <p v-if="isUnlocked" class="who" data-testid="unlocked"><LockOpen :size="18" aria-hidden="true" /> Unlocked for this session. MediaGit keeps the passphrase in memory only.</p>
+            <div class="btns">
+              <Button v-if="isUnlocked" @click="unlock.lock(repo.path!)"><Lock :size="16" aria-hidden="true" /> Lock now</Button>
+              <Button :disabled="sec.busy" @click="recoverOpen = true">Recover with a code…</Button>
+            </div>
           </template>
           <template v-else>
             <p class="muted">Files in this repository are stored as they are. Turn on encryption to protect new data at rest.</p>
@@ -192,6 +201,7 @@ const sourceText = (s: string | null) => s ?? 'No key available on this machine'
 
     <Dialog v-model:open="showCode" title="Save your recovery code" description="This is the only time it is shown. MediaGit does not keep it. Store it somewhere safe, like a password manager.">
       <div class="code" data-testid="recovery-code"><code class="mono">{{ sec.recoveryCode }}</code></div>
+      <p v-if="sec.keySource" class="muted" data-testid="key-source">On this computer the key unlocks with: {{ sec.keySource }}.</p>
       <div class="row">
         <Button @click="copy"><Copy :size="16" aria-hidden="true" /> {{ copied ? 'Copied' : 'Copy code' }}</Button>
       </div>
@@ -312,6 +322,11 @@ h2 {
   font-size: var(--fs-lg);
   overflow-wrap: anywhere;
   user-select: all;
+}
+.btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
 }
 .row {
   display: flex;

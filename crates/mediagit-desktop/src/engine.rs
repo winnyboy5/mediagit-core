@@ -9,8 +9,12 @@
 //! process keeps its process-global state (at-rest key, cwd, prompts) per
 //! operation, and means the app exercises the same binary the test suites do.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, Mutex, PoisonError};
+
+use zeroize::Zeroizing;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -119,13 +123,28 @@ struct CliError {
     message: String,
 }
 
+/// Commands that must never be handed the session passphrase: they set up or change keys
+/// and credentials (a missing answer there must stay a question, not silently adopt the
+/// unlock passphrase), or do not read objects at all.
+pub const NO_SESSION_PASSPHRASE: [&str; 6] = ["key", "auth", "config", "version", "init", "clone"];
+
+/// The CLI's failure when the master key (or passphrase) cannot open the repository key.
+const UNLOCK_FAILURE: &str = "could not unlock this repository's encryption key";
+
+/// Whether `e` is the CLI saying the supplied (or missing) key did not unlock the repository.
+pub fn is_unlock_failure(e: &EngineError) -> bool {
+    matches!(e, EngineError::Cli { message, .. } if message.contains(UNLOCK_FAILURE))
+}
+
 /// A passphrase, password or recovery code on its way to a child's stdin. It is never
 /// serialized, printed or compared, and its text is overwritten when it is dropped.
-pub struct Secret(String);
+pub struct Secret(Zeroizing<String>);
 
 impl Secret {
     /// One line of at most 1 KiB: no line breaks or NUL (they would split or end the prompt).
     pub fn new(text: String) -> Result<Self, EngineError> {
+        // Wrapped first, so a refused text is wiped too.
+        let text = Zeroizing::new(text);
         if text.is_empty() || text.len() > 1024 || text.contains(['\n', '\r', '\0']) {
             // The message names no part of the value.
             return Err(EngineError::InvalidArgument("bad secret".into()));
@@ -133,13 +152,14 @@ impl Secret {
         Ok(Self(text))
     }
 
-    fn line(&self) -> String {
-        format!("{}\n", self.0)
+    /// An independent copy, for answering a prompt while the original stays unlocked.
+    pub fn duplicate(&self) -> Self {
+        Self(Zeroizing::new(self.0.as_str().to_owned()))
     }
 
     /// Whether `needle` is this secret (for tests that check it never leaks elsewhere).
     pub fn is(&self, needle: &str) -> bool {
-        self.0 == needle
+        self.0.as_str() == needle
     }
 }
 
@@ -149,25 +169,67 @@ impl std::fmt::Debug for Secret {
     }
 }
 
-impl Drop for Secret {
-    fn drop(&mut self) {
-        // Best effort without `unsafe`: overwrite in place, then release.
-        let n = self.0.len();
-        self.0 = "x".repeat(n);
-        self.0.clear();
-    }
-}
-
 /// Handle to the `mediagit` binary.
 #[derive(Debug, Clone)]
 pub struct Engine {
     bin: PathBuf,
+    /// Encryption passphrases the person has unlocked repositories with, by canonical repo
+    /// path. Held in this process's memory only (never written, logged or sent to the
+    /// webview) and answered on stdin to commands in that repo. `lock` forgets one.
+    unlocked: Arc<Mutex<HashMap<PathBuf, Secret>>>,
 }
 
 impl Engine {
     /// Use an explicit binary path.
     pub fn new(bin: PathBuf) -> Self {
-        Self { bin }
+        Self {
+            bin,
+            unlocked: Arc::default(),
+        }
+    }
+
+    /// Answer this repository's passphrase prompts with `secret` from now on.
+    pub fn unlock(&self, repo: &Path, secret: Secret) {
+        self.unlocked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(repo.to_path_buf(), secret);
+    }
+
+    /// Forget the passphrase for `repo`; its next prompt fails `needs_input` again.
+    pub fn lock(&self, repo: &Path) {
+        self.unlocked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(repo);
+    }
+
+    /// What goes on the child's stdin: the caller's own secrets, else this repo's unlock
+    /// passphrase (if any). A command that has its own secrets never also gets the cached one.
+    fn stdin_secrets(
+        &self,
+        repo: Option<&Path>,
+        args: &[&str],
+        explicit: &[Secret],
+    ) -> Vec<Secret> {
+        if !explicit.is_empty() {
+            return explicit.iter().map(Secret::duplicate).collect();
+        }
+        if args
+            .first()
+            .is_some_and(|a| NO_SESSION_PASSPHRASE.contains(a))
+        {
+            return Vec::new();
+        }
+        repo.and_then(|r| {
+            self.unlocked
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(r)
+                .map(Secret::duplicate)
+        })
+        .into_iter()
+        .collect()
     }
 
     /// Path of the CLI binary this engine runs.
@@ -224,6 +286,9 @@ impl Engine {
         secrets: &[Secret],
         mut on_progress: impl FnMut(Progress),
     ) -> Result<Value, EngineError> {
+        let explicit_empty = secrets.is_empty();
+        let secrets = self.stdin_secrets(repo, args, secrets);
+        let used_cached = !secrets.is_empty() && explicit_empty;
         let mut cmd = Command::new(&self.bin);
         if let Some(repo) = repo {
             cmd.arg("-C").arg(repo);
@@ -250,13 +315,15 @@ impl Engine {
                 .stdin
                 .take()
                 .ok_or_else(|| EngineError::Spawn("no stdin".into()))?;
-            // A fixed message: whatever the OS says must not carry the secret's neighbours.
-            let fail = |_| EngineError::Spawn("could not pass the secret to mediagit".into());
-            for secret in secrets {
-                stdin
-                    .write_all(secret.line().as_bytes())
-                    .await
-                    .map_err(fail)?;
+            // A command that never prompts exits without reading, which closes the pipe under
+            // us. That is not a failure (its envelope says how it went), and the error text is
+            // never surfaced, so nothing about the secret can leak through it.
+            for secret in &secrets {
+                // Bytes, then the newline: no formatted copy of the secret is ever made.
+                let sent = stdin.write_all(secret.0.as_bytes()).await;
+                if sent.is_err() || stdin.write_all(b"\n").await.is_err() {
+                    break;
+                }
             }
             drop(stdin); // EOF: a prompt that wants more input fails instead of hanging
         }
@@ -310,12 +377,25 @@ impl Engine {
             .await
             .map_err(|e| EngineError::Spawn(e.to_string()))?
             .map_err(|e| EngineError::Spawn(e.to_string()))?;
-        parse_envelope(&out).map_err(|e| match e {
+        let result = parse_envelope(&out).map_err(|e| match e {
             EngineError::Protocol(m) if !tail.is_empty() => {
                 EngineError::Protocol(format!("{m}; stderr: {}", tail.join("\n")))
             }
             other => other,
-        })
+        });
+        // The remembered passphrase no longer opens the repository (the key was changed):
+        // forget it and ask again rather than fail every command from now on.
+        if used_cached
+            && let (Some(repo), Err(e)) = (repo, &result)
+            && is_unlock_failure(e)
+        {
+            self.lock(repo);
+            return Err(EngineError::Cli {
+                code: "needs_input".into(),
+                message: "the saved passphrase no longer unlocks this repository".into(),
+            });
+        }
+        result
     }
 }
 
@@ -413,6 +493,110 @@ mod tests {
         assert!(parse_progress(&line).is_none());
         let p = lossy_line(b"{\"type\":\"progress\",\"id\":1,\"msg\":\"caf\xe9\",\"pos\":1,\"len\":2,\"unit\":\"items\",\"done\":false}\n");
         assert_eq!(parse_progress(&p).unwrap().msg, "caf\u{fffd}");
+    }
+
+    #[test]
+    fn an_unlocked_repo_answers_its_own_prompts_and_nobody_elses() {
+        let e = Engine::new(PathBuf::from("mediagit"));
+        let a = Path::new("/r/a");
+        let b = Path::new("/r/b");
+        assert!(e.stdin_secrets(Some(a), &["log"], &[]).is_empty());
+        e.unlock(a, Secret::new("pw-a".into()).unwrap());
+        let got = e.stdin_secrets(Some(a), &["log"], &[]);
+        assert_eq!(got.len(), 1);
+        assert!(got[0].is("pw-a"));
+        assert!(
+            e.stdin_secrets(Some(b), &["log"], &[]).is_empty(),
+            "other repos are not unlocked"
+        );
+        assert!(
+            e.stdin_secrets(None, &["log"], &[]).is_empty(),
+            "no repo, no passphrase"
+        );
+        // A command with its own secrets never also gets the cached one.
+        let own = [Secret::new("own".into()).unwrap()];
+        let got = e.stdin_secrets(Some(a), &["log"], &own);
+        assert_eq!(got.len(), 1);
+        assert!(got[0].is("own"));
+        // Clones of the engine share the unlock; locking forgets it.
+        let c = e.clone();
+        assert_eq!(c.stdin_secrets(Some(a), &["log"], &[]).len(), 1);
+        e.lock(a);
+        assert!(c.stdin_secrets(Some(a), &["log"], &[]).is_empty());
+        assert!(!format!("{e:?}").contains("pw-a"));
+    }
+
+    #[test]
+    fn the_session_passphrase_is_never_offered_to_key_or_credential_commands() {
+        let e = Engine::new(PathBuf::from("mediagit"));
+        let r = Path::new("/r/a");
+        e.unlock(r, Secret::new("pw".into()).unwrap());
+        for cmd in ["key", "auth", "config", "version", "init", "clone"] {
+            assert!(
+                e.stdin_secrets(Some(r), &[cmd, "init"], &[]).is_empty(),
+                "{cmd}"
+            );
+        }
+        for cmd in [
+            "log",
+            "status",
+            "show",
+            "add",
+            "commit",
+            "branch",
+            "merge",
+            "diff",
+            "stash",
+            "reset",
+            "revert",
+            "fetch",
+            "pull",
+            "push",
+            "download",
+            "stats",
+            "gc",
+            "fsck",
+            "verify",
+            "rebase",
+            "cherry-pick",
+            "bisect",
+            "reflog",
+            "remote",
+            "tag",
+            "lock",
+            "media",
+            "sparse-checkout",
+        ] {
+            assert_eq!(e.stdin_secrets(Some(r), &[cmd], &[]).len(), 1, "{cmd}");
+        }
+        // The list itself is what the tests above pin: nothing else is excluded by accident.
+        assert_eq!(NO_SESSION_PASSPHRASE.len(), 6);
+    }
+
+    #[test]
+    fn only_the_cli_unlock_failure_counts_as_one() {
+        let hit = EngineError::Cli {
+            code: "error".into(),
+            message: "could not unlock this repository's encryption key; tried: passphrase".into(),
+        };
+        assert!(is_unlock_failure(&hit));
+        let other = EngineError::Cli {
+            code: "error".into(),
+            message: "not a repository".into(),
+        };
+        assert!(!is_unlock_failure(&other));
+        assert!(!is_unlock_failure(&EngineError::Spawn("x".into())));
+    }
+
+    #[test]
+    fn secrets_are_one_line_and_debug_never_shows_them() {
+        for bad in ["", "a\nb", "a\rb", "a\0b"] {
+            assert!(Secret::new(bad.into()).is_err(), "{bad:?}");
+        }
+        assert!(Secret::new("x".repeat(1025)).is_err());
+        let s = Secret::new("p@ss w0rd".into()).unwrap();
+        assert!(s.is("p@ss w0rd") && s.duplicate().is("p@ss w0rd"));
+        assert_eq!(format!("{s:?}"), "Secret(***)");
     }
 
     #[test]
