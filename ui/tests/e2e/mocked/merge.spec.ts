@@ -179,6 +179,7 @@ test.describe('Merge: conflicts', () => {
 
   test('a merge started elsewhere: Finish is offered on the empty state', async ({ page }) => {
     await boot(page)
+    await page.getByText('Merge started in another tool?').click()
     await page.getByRole('button', { name: 'Finish merge' }).click()
     await expect.poll(async () => (await ipcCalls(page, 'repo_merge_control')).map((c) => c.args.action)).toEqual(['continue'])
   })

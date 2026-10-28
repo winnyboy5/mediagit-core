@@ -182,13 +182,13 @@ export const useOpsStore = defineStore('ops', () => {
     syncTaskbar()
   }
 
-  function finish(id: string, summary?: string, at = Date.now()) {
+  function finish(id: string, summary?: string, at = Date.now(), warn = false) {
     const op = get(id)
     if (!op || op.status !== 'running') return
     for (const b of op.bars.values()) b.done = true
     op.summary = summary
     end(op, 'done', at)
-    toast.push({ kind: 'success', title: op.label, description: summary })
+    toast.push({ kind: warn ? 'warning' : 'success', title: op.label, description: summary })
   }
 
   function fail(id: string, error: ApiError, at = Date.now()) {
@@ -210,11 +210,12 @@ export const useOpsStore = defineStore('ops', () => {
     spec: OpSpec,
     fn: (report: (p: Progress) => void, id: string) => Promise<T>,
     summarize?: (result: T) => string | undefined,
+    warn?: (result: T) => boolean,
   ): Promise<T> {
     const id = begin(spec)
     try {
       const result = await fn((p) => progress(id, p), id)
-      finish(id, summarize?.(result))
+      finish(id, summarize?.(result), Date.now(), warn?.(result))
       return result
     } catch (e) {
       fail(id, toApiError(e))
@@ -223,7 +224,7 @@ export const useOpsStore = defineStore('ops', () => {
         op.retry =
           spec.retry ??
           (() => {
-            track(spec, fn, summarize).catch(() => {})
+            track(spec, fn, summarize, warn).catch(() => {})
           })
       }
       throw e

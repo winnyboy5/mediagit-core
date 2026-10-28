@@ -20,6 +20,7 @@ export function useAction(after: () => Promise<unknown>) {
     label: string,
     fn: (root: string, report: (p: Progress) => void) => Promise<T>,
     summarize: (r: T) => string | undefined,
+    warn?: (r: T) => boolean,
   ): Promise<{ value: T } | null> {
     if (!repo.path || busy.value) return null
     const root = repo.path
@@ -27,12 +28,13 @@ export function useAction(after: () => Promise<unknown>) {
     error.value = null
     try {
       const value = await ops.track(
-        { kind: 'other', label, retry: () => void run(label, fn, summarize) },
+        { kind: 'other', label, retry: () => void run(label, fn, summarize, warn) },
         (report, id) => {
           opId.value = id
           return fn(root, report)
         },
         summarize,
+        warn,
       )
       return { value }
     } catch (e) {

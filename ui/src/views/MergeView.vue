@@ -98,8 +98,10 @@ const theirsMissing = computed(() => !merge.theirsOid)
             <span class="muted">{{ conflictReason(c.kind) }}</span>
             <span v-if="missingSide(c.kind)" class="muted">{{ REASONS[missingSide(c.kind)!] }}</span>
           </div>
-          <span v-if="c.resolved" class="chip done">
-            {{ c.resolved === 'ours' ? 'Kept mine' : c.resolved === 'theirs' ? 'Kept theirs' : 'Resolved' }}
+          <span class="kept">
+            <span v-if="c.resolved" class="chip done">
+              {{ c.resolved === 'ours' ? 'Kept mine' : c.resolved === 'theirs' ? 'Kept theirs' : 'Resolved' }}
+            </span>
           </span>
           <div class="acts" role="group" :aria-label="`Choose a version of ${c.path}`">
             <Button
@@ -143,11 +145,14 @@ const theirsMissing = computed(() => !merge.theirsOid)
         <Button variant="primary" :disabled="merge.busy || !others.length" @click="openStart">Start a merge</Button>
         <p v-if="!others.length" class="muted">There is no other branch to merge yet.</p>
       </EmptyState>
-      <div class="resume">
-        <span class="muted">Already merging, from another tool?</span>
-        <Button size="sm" :disabled="merge.busy" @click="merge.continue()">Finish merge</Button>
-        <Button size="sm" variant="ghost" :disabled="merge.busy" @click="abortOpen = true">Cancel merge</Button>
-      </div>
+      <!-- The status report does not say whether a merge is under way, so these stay behind a disclosure. -->
+      <details class="resume">
+        <summary class="muted">Merge started in another tool?</summary>
+        <div class="resume-acts">
+          <Button size="sm" :disabled="merge.busy" @click="merge.continue()">Finish merge</Button>
+          <Button size="sm" variant="ghost" :disabled="merge.busy" @click="abortOpen = true">Cancel merge</Button>
+        </div>
+      </details>
       <div v-if="merge.running" class="busy" role="status" data-testid="merge-progress">
         <strong>{{ merge.running.label }}</strong>
         <ProgressBar label="Updating files" :value="bar && bar.len != null ? bar.pos : null" :max="bar?.len ?? 100" />
@@ -260,7 +265,7 @@ h1 {
 }
 .row {
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) auto auto;
+  grid-template-columns: auto minmax(0, 1fr) 96px auto;
   align-items: center;
   gap: var(--space-4);
   min-height: 56px;
@@ -288,6 +293,10 @@ h1 {
   font-size: var(--fs-xs);
   font-weight: 600;
 }
+.kept {
+  display: flex;
+  justify-content: flex-start;
+}
 .chip.done {
   background: var(--success-soft);
   color: var(--success);
@@ -307,10 +316,18 @@ h1 {
   background: var(--success-soft);
 }
 .resume {
+  justify-self: center;
+  text-align: center;
+}
+.resume summary {
+  cursor: pointer;
+  font-size: var(--fs-sm);
+}
+.resume-acts {
   display: flex;
-  align-items: center;
   justify-content: center;
   gap: var(--space-3);
+  margin-top: var(--space-2);
 }
 .busy {
   display: grid;

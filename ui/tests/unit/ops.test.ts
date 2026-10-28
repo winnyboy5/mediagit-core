@@ -187,6 +187,7 @@ describe('queue and toasts', () => {
 
   it('finishing pushes a success toast with the summary', () => {
     const toast = useToast()
+    toast.items.value.forEach((t) => toast.dismiss(t.id))
     const before = toast.items.value.length
     const id = ops.begin({ kind: 'push', label: 'Push origin' }, 0)
     ops.finish(id, 'Pushed 14 files', 10)

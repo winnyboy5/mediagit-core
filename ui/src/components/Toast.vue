@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { ToastClose, ToastDescription, ToastProvider, ToastRoot, ToastTitle, ToastViewport } from 'reka-ui'
-import { CircleAlert, CircleCheck, Info, X } from 'lucide-vue-next'
+import { CircleAlert, CircleCheck, Info, TriangleAlert, X } from 'lucide-vue-next'
 import { useToast } from './useToast'
 
 const { items, dismiss } = useToast()
-const ICON = { success: CircleCheck, error: CircleAlert, info: Info }
+const ICON = { success: CircleCheck, warning: TriangleAlert, error: CircleAlert, info: Info }
 </script>
 
 <template>
@@ -15,6 +15,7 @@ const ICON = { success: CircleCheck, error: CircleAlert, info: Info }
       class="mg-toast"
       :class="`mg-${t.kind}`"
       :type="t.kind === 'error' ? 'foreground' : 'background'"
+      :duration="t.kind === 'error' ? Number.MAX_SAFE_INTEGER : 5000"
       @update:open="(o: boolean) => !o && dismiss(t.id)"
     >
       <component :is="ICON[t.kind]" class="mg-ico" :size="20" aria-hidden="true" />
@@ -61,6 +62,9 @@ const ICON = { success: CircleCheck, error: CircleAlert, info: Info }
 }
 .mg-success .mg-ico {
   color: var(--success);
+}
+.mg-warning .mg-ico {
+  color: var(--modified);
 }
 .mg-error .mg-ico {
   color: var(--danger);

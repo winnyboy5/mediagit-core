@@ -48,6 +48,7 @@ export const useUndoStore = defineStore('undo', () => {
         `Undo ${shortOid(p.rev)}`,
         (root) => api.revert(root, p.rev),
         (x) => (x.status === 'conflict' ? `Stopped: ${x.conflicts.length} files clash` : 'Undone with a new version'),
+        (x) => x.status === 'conflict',
       )
       if (r) revertConflicts.value = r.value.status === 'conflict' ? r.value.conflicts : []
       return !!r
@@ -61,6 +62,7 @@ export const useUndoStore = defineStore('undo', () => {
       action === 'abort' ? 'Abandon undo' : 'Continue undo',
       (root) => api.revertControl(root, action),
       (x) => (x.status === 'conflict' ? 'Still stopped' : 'Done'),
+      (x) => x.status === 'conflict',
     )
     if (r) revertConflicts.value = r.value.status === 'conflict' ? r.value.conflicts : []
     return !!r

@@ -26,11 +26,11 @@ const emit = defineEmits<{ select: [id: string] }>()
   <DropdownMenuRoot :modal="false">
     <DropdownMenuTrigger as-child><slot /></DropdownMenuTrigger>
     <DropdownMenuPortal>
-      <DropdownMenuContent class="menu" :side-offset="6" align="end">
+      <DropdownMenuContent class="mg-menu" :side-offset="6" align="end">
         <template v-for="it in items" :key="it.id">
-          <DropdownMenuSeparator v-if="it.separated" class="sep" />
+          <DropdownMenuSeparator v-if="it.separated" class="mg-menu-sep" />
           <DropdownMenuItem
-            class="item"
+            class="mg-menu-item"
             :class="{ danger: it.danger }"
             :disabled="it.disabled"
             @select="emit('select', it.id)"
@@ -43,8 +43,9 @@ const emit = defineEmits<{ select: [id: string] }>()
   </DropdownMenuRoot>
 </template>
 
-<style scoped>
-.menu {
+<style>
+/* Unscoped: the menu renders in a portal, outside this component's scope id. */
+.mg-menu {
   z-index: 60;
   min-width: 200px;
   padding: var(--space-1);
@@ -54,7 +55,7 @@ const emit = defineEmits<{ select: [id: string] }>()
   color: var(--text);
   box-shadow: var(--shadow-2);
 }
-.item {
+.mg-menu-item {
   display: flex;
   align-items: center;
   height: var(--control-h);
@@ -63,17 +64,17 @@ const emit = defineEmits<{ select: [id: string] }>()
   cursor: pointer;
   outline: none;
 }
-.item[data-highlighted] {
+.mg-menu-item[data-highlighted] {
   background: var(--accent-soft);
 }
-.item[data-disabled] {
+.mg-menu-item[data-disabled] {
   opacity: 0.5;
   cursor: not-allowed;
 }
-.item.danger {
+.mg-menu-item.danger {
   color: var(--danger);
 }
-.sep {
+.mg-menu-sep {
   height: 1px;
   margin: var(--space-1) 0;
   background: var(--border);

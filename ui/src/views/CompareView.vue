@@ -161,9 +161,12 @@ const size = (f: { old_size: number | null; new_size: number | null }) => format
                   <label class="range">Blend before and after<input v-model.number="blend" type="range" min="0" max="100" aria-label="Blend before and after" /></label>
                 </div>
                 <div v-else class="stack-wrap">
-                  <div class="stack" data-testid="swipe">
+                  <div class="stack swipe" data-testid="swipe">
                     <img :src="src(eb)" :alt="`Before: ${compare.file.path}`" />
                     <img class="top" :style="{ clipPath: `inset(0 0 0 ${divider}%)` }" :src="src(ea)" :alt="`After: ${compare.file.path}`" />
+                    <span class="corner l" aria-hidden="true">{{ beforeLabel }}</span>
+                    <span class="corner r" aria-hidden="true">After</span>
+                    <span class="divider" :style="{ left: `${divider}%` }" aria-hidden="true"><span class="grab" /></span>
                   </div>
                   <label class="range">Move divider<input v-model.number="divider" type="range" min="0" max="100" aria-label="Move divider" /></label>
                 </div>
@@ -267,7 +270,7 @@ h3 {
 }
 .file {
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: var(--space-2);
   width: 100%;
@@ -386,6 +389,48 @@ img {
   max-width: 360px;
   font-size: var(--fs-sm);
   color: var(--text-muted);
+  /* Neutral thumb: a blue or orange control would tint a colour-critical comparison. */
+  accent-color: var(--text-muted);
+}
+.swipe {
+  position: relative;
+}
+.divider {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--text-muted);
+  pointer-events: none;
+}
+.grab {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 20px;
+  height: 36px;
+  border: 1px solid var(--text-muted);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  box-shadow: var(--shadow-1);
+  transform: translate(-50%, -50%);
+}
+.corner {
+  position: absolute;
+  top: var(--space-2);
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  pointer-events: none;
+}
+.corner.l {
+  left: var(--space-2);
+}
+.corner.r {
+  right: var(--space-2);
 }
 .meta {
   display: grid;

@@ -40,9 +40,11 @@ export const useMergeStore = defineStore('merge', () => {
     }
   }
 
+  const isStopped = (r: MergeReport) => r.status === 'conflict'
+
   async function start(name: string, strategy: MergeStrategy, noFf: boolean) {
     const oid = branches.list.find((b) => b.name === name)?.oid ?? null
-    const r = await run(`Merge ${name}`, (root, report) => api.merge(root, name, strategy, noFf, report), mergeSummary)
+    const r = await run(`Merge ${name}`, (root, report) => api.merge(root, name, strategy, noFf, report), mergeSummary, isStopped)
     if (r) apply(r.value, name, oid)
     return !!r
   }
@@ -62,7 +64,7 @@ export const useMergeStore = defineStore('merge', () => {
 
   async function control(action: 'continue' | 'abort') {
     const label = action === 'continue' ? 'Finish merge' : 'Cancel merge'
-    const r = await run(label, (root, report) => api.mergeControl(root, action, report), mergeSummary)
+    const r = await run(label, (root, report) => api.mergeControl(root, action, report), mergeSummary, isStopped)
     if (r) apply(r.value, null, null)
     return !!r
   }

@@ -105,7 +105,7 @@ const when = (iso: string) => (Number.isNaN(Date.parse(iso)) ? '' : timeAgo(Date
       <section class="card" aria-labelledby="stash-h">
         <div class="card-head">
           <h2 id="stash-h">Stash</h2>
-          <Button v-if="ts.stashes.length" size="sm" variant="ghost" :disabled="ts.busy" @click="clearOpen = true">Remove all</Button>
+          <Button v-if="ts.stashes.length" size="sm" variant="secondary" class="dtxt" :disabled="ts.busy" @click="clearOpen = true">Remove all</Button>
         </div>
         <form class="save" @submit.prevent="save">
           <TextField v-model="message" label="Message (optional)" placeholder="WIP lighting" />
@@ -134,7 +134,7 @@ const when = (iso: string) => (Number.isNaN(Date.parse(iso)) ? '' : timeAgo(Date
             <div class="acts">
               <Button size="sm" :disabled="ts.busy" :aria-label="`Apply stash ${e.index}`" @click="ts.apply(e.index)">Apply</Button>
               <Button size="sm" :disabled="ts.busy" :aria-label="`Pop stash ${e.index}`" @click="ts.pop(e.index)">Pop</Button>
-              <Button size="sm" variant="ghost" :disabled="ts.busy" :aria-label="`Drop stash ${e.index}`" @click="askDrop(e.index)">Drop</Button>
+              <Button size="sm" variant="secondary" class="dtxt" :disabled="ts.busy" :aria-label="`Drop stash ${e.index}`" @click="askDrop(e.index)">Drop</Button>
             </div>
           </li>
         </ul>
@@ -230,6 +230,9 @@ h2 {
   border: 1px solid var(--border);
   border-radius: var(--radius-panel);
   background: var(--surface);
+}
+.card .dtxt {
+  color: var(--danger);
 }
 .card-head {
   display: flex;
