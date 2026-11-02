@@ -138,6 +138,23 @@ test.describe('Advanced: cherry-pick', () => {
     expect((await ipcCalls(page, 'pick_start')).map((c) => c.args)).toMatchObject([{ repo: '/repos/hero-film', commits: ['0000000000000000000000000000000000000000'] }])
   })
 
+  test('versions can come from another branch: pick the branch, then one of its versions', async ({ page }) => {
+    await boot(page, 'Cherry-pick', { pick_start: fixture('pick_done') })
+    await expect(page.getByLabel('From branch')).toContainText('All branches')
+    await page.getByLabel('From branch').click()
+    await page.getByRole('option', { name: 'review/cut-2' }).click()
+    // Only what review/cut-2 reaches is offered; the merge on main is not.
+    await expect(page.getByLabel('Copy this version')).toContainText('Grade pass: warmer shadows')
+    await page.getByLabel('Copy this version').click()
+    await expect(page.getByRole('option', { name: /Merge grade pass into main/ })).toHaveCount(0)
+    await page.keyboard.press('Escape')
+    await expectNoAxeViolations(page)
+    await page.getByRole('button', { name: 'Copy version' }).click()
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Copy version' }).click()
+    await expect(page.getByTestId('pick-result')).toBeVisible()
+    expect((await ipcCalls(page, 'pick_start')).map((c) => c.args)).toMatchObject([{ commits: [C] }])
+  })
+
   test('a clash is decided per file, then continued with the cherry-pick command', async ({ page }) => {
     await boot(page, 'Cherry-pick', { pick_start: fixture('pick_conflict'), sequencer_control: fixture('pick_done') })
     await page.getByRole('button', { name: 'Copy version' }).click()

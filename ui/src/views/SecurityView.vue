@@ -140,7 +140,7 @@ const sourceText = (s: string | null) => s ?? 'No key available on this machine'
             <p class="who"><KeyRound :size="18" aria-hidden="true" /> This repository is encrypted.</p>
             <dl class="kv">
               <dt>Unlocks with</dt><dd>{{ sourceText(k.source) }}</dd>
-              <dt>Recovery code</dt><dd>{{ k.recovery_slot ? 'Set up' : 'Not set up' }}</dd>
+              <dt>Recovery code</dt><dd>{{ k.recovery_slot ? 'Saved' : 'Not set up' }}</dd>
             </dl>
             <p v-if="!k.source" class="muted">This machine has no key for it, so its files cannot be read here. Recover it with your recovery code.</p>
             <p v-if="isUnlocked" class="who" data-testid="unlocked"><LockOpen :size="18" aria-hidden="true" /> Unlocked for this session. MediaGit keeps the passphrase in memory only.</p>
@@ -199,7 +199,7 @@ const sourceText = (s: string | null) => s ?? 'No key available on this machine'
       </template>
     </Dialog>
 
-    <Dialog v-model:open="showCode" title="Save your recovery code" description="This is the only time it is shown. MediaGit does not keep it. Store it somewhere safe, like a password manager.">
+    <Dialog v-model:open="showCode" :dismissable="false" title="Save your recovery code" description="This is the only time it is shown. MediaGit does not keep it. Store it somewhere safe, like a password manager.">
       <div class="code" data-testid="recovery-code"><code class="mono">{{ sec.recoveryCode }}</code></div>
       <p v-if="sec.keySource" class="muted" data-testid="key-source">On this computer the key unlocks with: {{ sec.keySource }}.</p>
       <div class="row">

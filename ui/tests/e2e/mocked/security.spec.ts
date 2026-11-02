@@ -35,7 +35,7 @@ test.describe('Security: states', () => {
     await expect(account(page).getByRole('list', { name: 'Projects you can reach' })).toContainText('trailer-cut')
     await expect(enc(page)).toContainText('This repository is encrypted.')
     await expect(enc(page)).toContainText('OS keychain')
-    await expect(enc(page)).toContainText('Set up')
+    await expect(enc(page)).toContainText('Saved')
     await expectNoAxeViolations(page)
   })
 
@@ -150,6 +150,7 @@ test.describe('Security: encryption', () => {
     const dlg = page.getByRole('dialog', { name: 'Save your recovery code' })
     await expect(dlg.getByTestId('recovery-code')).toHaveText(CODE)
     await expect(dlg.getByTestId('key-source')).toContainText('OS keychain')
+    await expect(dlg.getByRole('button', { name: 'Close' })).toHaveCount(0)
     await expect(dlg.getByRole('button', { name: 'Done' })).toBeDisabled()
     await expectNoAxeViolations(page)
     await page.keyboard.press('Escape')

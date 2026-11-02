@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // Asks for the repository's encryption passphrase when a command needs it. Mounted once in the shell.
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import Button from '@/components/Button.vue'
 import Dialog from '@/components/Dialog.vue'
 import TextField from '@/components/TextField.vue'
@@ -21,7 +21,11 @@ const open = computed({
 // Never keep the text around once the dialog is gone.
 watch(
   () => unlock.open,
-  (o) => !o && (pass.value = ''),
+  (o) => {
+    if (!o) pass.value = ''
+    // The dialog opens on its close button; the passphrase is what the person came to type.
+    else void nextTick(() => setTimeout(() => document.querySelector<HTMLInputElement>('#unlock-form input')?.focus(), 0))
+  },
 )
 
 function submit() {

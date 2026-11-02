@@ -27,6 +27,7 @@ test.describe('Unlock: a W1 command (History)', () => {
   test('log needs the passphrase: prompt, unlock, versions appear', async ({ page }) => {
     await boot(page, '/history', { repo_log: gate(fixture('log_graph')), repo_show: showHandler() })
     await expect(dialog(page)).toBeVisible()
+    await expect(dialog(page).getByLabel('Passphrase')).toBeFocused()
     await expectNoAxeViolations(page)
     await dialog(page).getByLabel('Passphrase').fill(PASS)
     await dialog(page).getByRole('button', { name: 'Unlock' }).click()

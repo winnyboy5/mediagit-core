@@ -20,8 +20,28 @@ const isRebase = props.kind === 'rebase'
 const options = computed(() =>
   isRebase
     ? branches.list.filter((b) => b.name !== branches.current).map((b) => ({ value: b.name, label: b.name }))
-    : versions.list.map((c) => ({ value: c.oid, label: `${shortOid(c.oid)} · ${c.summary || '(no message)'}` })),
+    : pickable.value.map((c) => ({ value: c.oid, label: `${shortOid(c.oid)} · ${c.summary || '(no message)'}` })),
 )
+// Cherry-pick copies from any branch: choose the branch first, then one of its versions.
+const ALL = '*all'
+const source = ref(ALL)
+const sourceOptions = computed(() => [{ value: ALL, label: 'All branches' }, ...branches.list.map((b) => ({ value: b.name, label: b.name }))])
+const pickable = computed(() => {
+  if (source.value === ALL) return versions.allList
+  const tip = branches.list.find((b) => b.name === source.value)?.oid
+  const byOid = new Map(versions.allList.map((c) => [c.oid, c]))
+  const seen = new Set<string>()
+  const out = []
+  const todo = tip ? [tip] : []
+  while (todo.length) {
+    const c = byOid.get(todo.pop()!)
+    if (!c || seen.has(c.oid)) continue
+    seen.add(c.oid)
+    out.push(c)
+    todo.push(...c.parents)
+  }
+  return versions.allList.filter((c) => seen.has(c.oid))
+})
 const target = ref('')
 watch(
   options,
@@ -84,6 +104,7 @@ const targetLabel = computed(() => options.value.find((o) => o.value === target.
     <template v-else>
       <p v-if="seq.last" class="done" role="status" :data-testid="`${kind}-result`">{{ stepSummary(seq.last) }}.</p>
       <div class="start">
+        <Select v-if="!isRebase" v-model="source" label="From branch" :options="sourceOptions" :disabled="seq.busy" />
         <Select v-model="target" :label="isRebase ? 'Rebase onto' : 'Copy this version'" :options="options" :disabled="!options.length || seq.busy" />
         <Button variant="primary" :disabled="!target || seq.busy" @click="confirmOpen = true">{{ isRebase ? 'Start rebase…' : 'Copy version' }}</Button>
       </div>
@@ -144,6 +165,7 @@ const targetLabel = computed(() => options.value.find((o) => o.value === target.
 }
 .start {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-end;
   gap: var(--space-3);
 }

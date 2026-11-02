@@ -11,6 +11,9 @@ const SIZES = [
   { w: 1440, h: 900 },
   { w: 1024, h: 700 },
 ]
+const wrong = `() => { throw { code: 'wrong_passphrase', message: 'no' } }`
+const PASS = 'correct-horse-battery'
+const good = `(a) => { if (a.passphrase !== ${JSON.stringify(PASS)}) throw { code: 'wrong_passphrase', message: 'no' }; return null }`
 const needs = `() => { throw { code: 'needs_input', message: 'passphrase needed' } }`
 
 interface Boot {
@@ -72,7 +75,7 @@ for (const { w, h } of SIZES) {
       await shot(page, 'V11-storage-empty', t, w)
     })
     T('V11 error', async (page, t) => {
-      await open(page, '/storage', 'Storage', { commands: { repo_stats: { __error: { code: 'error', message: 'Could not read the repository.' } } } })
+      await open(page, '/storage', 'Storage', { commands: { repo_stats: { __error: { code: 'error', message: 'Could not read the storage folder: the object store is missing.' } } } })
       await expect(page.getByRole('alert')).toBeVisible()
       await shot(page, 'V11-storage-error', t, w)
     })
@@ -80,6 +83,15 @@ for (const { w, h } of SIZES) {
       await open(page, '/storage', '', { handlers: { repo_stats: needs } })
       await expect(page.getByRole('dialog', { name: 'Unlock this repository' })).toBeVisible()
       await shot(page, 'V11-storage-unlock', t, w)
+    })
+
+    T('V11 unlock wrong passphrase', async (page, t) => {
+      await open(page, '/storage', '', { handlers: { repo_stats: needs, unlock_repo: wrong } })
+      const dlg = page.getByRole('dialog', { name: 'Unlock this repository' })
+      await dlg.getByLabel('Passphrase').fill('nope')
+      await dlg.getByRole('button', { name: 'Unlock' }).click()
+      await expect(dlg).toContainText('That passphrase did not unlock the repository.')
+      await shot(page, 'V11-storage-unlock-wrong', t, w)
     })
 
     // V12 Maintenance
@@ -148,6 +160,38 @@ for (const { w, h } of SIZES) {
       await page.getByRole('dialog', { name: 'Turn on encryption' }).getByRole('button', { name: 'Turn on encryption' }).click()
       await expect(page.getByTestId('recovery-code')).toBeVisible()
       await shot(page, 'V13-security-recovery', t, w)
+    })
+
+    T('V13 recovery code over encrypted card', async (page, t) => {
+      await open(page, '/security', 'Security', { commands: { key_status: fixture('key_off'), key_init: fixture('key_init') } })
+      await page.getByRole('button', { name: 'Turn on encryption…' }).click()
+      await page.getByRole('dialog', { name: 'Turn on encryption' }).getByRole('button', { name: 'Turn on encryption' }).click()
+      await expect(page.getByTestId('key-source')).toBeVisible()
+      await shot(page, 'V13-security-recovery-source', t, w)
+    })
+    T('V13 unlocked and Lock now', async (page, t) => {
+      await open(page, '/history', '', { handlers: { repo_log: needs, unlock_repo: good } })
+      const dlg = page.getByRole('dialog', { name: 'Unlock this repository' })
+      await expect(dlg).toBeVisible()
+      await dlg.getByLabel('Passphrase').fill(PASS)
+      await dlg.getByRole('button', { name: 'Unlock' }).click()
+      await expect(dlg).toHaveCount(0)
+      await page.goto('/#/security')
+      await expect(page.getByTestId('unlocked')).toBeVisible()
+      await shot(page, 'V13-security-unlocked', t, w)
+    })
+    T('sidebar Lock chip locked', async (page, t) => {
+      await open(page, '/changes', 'Changes')
+      await expect(page.getByTestId('unlocked-chip')).toHaveCount(0)
+      await shot(page, 'chip-locked', t, w)
+    })
+    T('sidebar Lock chip unlocked', async (page, t) => {
+      await open(page, '/history', '', { handlers: { repo_log: needs, unlock_repo: good } })
+      const dlg = page.getByRole('dialog', { name: 'Unlock this repository' })
+      await dlg.getByLabel('Passphrase').fill(PASS)
+      await dlg.getByRole('button', { name: 'Unlock' }).click()
+      await expect(page.getByTestId('unlocked-chip')).toBeVisible()
+      await shot(page, 'chip-unlocked', t, w)
     })
 
     // V14 Advanced

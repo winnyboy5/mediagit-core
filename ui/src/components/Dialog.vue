@@ -12,7 +12,7 @@ import {
 import { X } from 'lucide-vue-next'
 
 const open = defineModel<boolean>('open', { default: false })
-defineProps<{ title: string; description?: string }>()
+withDefaults(defineProps<{ title: string; description?: string; dismissable?: boolean }>(), { dismissable: true })
 </script>
 
 <template>
@@ -20,10 +20,15 @@ defineProps<{ title: string; description?: string }>()
     <DialogTrigger v-if="$slots.trigger" as-child><slot name="trigger" /></DialogTrigger>
     <DialogPortal>
       <DialogOverlay class="scrim" />
-      <DialogContent class="panel">
+      <DialogContent
+        class="panel"
+        @escape-key-down="(e: Event) => !dismissable && e.preventDefault()"
+        @pointer-down-outside="(e: Event) => !dismissable && e.preventDefault()"
+        @interact-outside="(e: Event) => !dismissable && e.preventDefault()"
+      >
         <header>
           <DialogTitle class="title">{{ title }}</DialogTitle>
-          <DialogClose class="x" aria-label="Close"><X :size="18" /></DialogClose>
+          <DialogClose v-if="dismissable" class="x" aria-label="Close"><X :size="18" /></DialogClose>
         </header>
         <DialogDescription v-if="description" class="desc">{{ description }}</DialogDescription>
         <div class="body"><slot /></div>

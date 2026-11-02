@@ -18,7 +18,7 @@ test.describe('Locks: states', () => {
     await expect(table.getByRole('row')).toHaveCount(4) // header + 3
     await expect(table.getByRole('row').nth(1)).toContainText('art/hero.psd')
     await expect(row(page, 'art/hero.psd')).toContainText('Mira Okafor')
-    await expect(row(page, 'env/sky_hdri.exr')).toContainText(/\d+d ago/)
+    await expect(row(page, 'env/sky_hdri.exr')).toContainText(/\d+[dw] ago/)
     await expectNoAxeViolations(page)
   })
 

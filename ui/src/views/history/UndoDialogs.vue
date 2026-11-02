@@ -60,6 +60,7 @@ const bar = computed(() => (undo.running ? primaryBar(undo.running) : undefined)
       :title="`Move this branch back to ${rev}?`"
       :description="resetText"
       confirm-label="Move branch back"
+      destructive
       @confirm="undo.confirm()"
     />
 

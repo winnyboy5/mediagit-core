@@ -38,6 +38,8 @@ export function stepSummary(s: Step): string {
 export const useVersionsStore = defineStore('versions', () => {
   const repo = useRepoStore()
   const list = shallowRef<LogCommitReport[]>([])
+  /** Every branch's versions, for pickers that copy from another branch. */
+  const allList = shallowRef<LogCommitReport[]>([])
   const loaded = ref(false)
   const error = ref<ApiError | null>(null)
 
@@ -46,9 +48,10 @@ export const useVersionsStore = defineStore('versions', () => {
     if (!root) return
     error.value = null
     try {
-      const r = await api.log(root, 0, 100, false)
+      const [r, all] = await Promise.all([api.log(root, 0, 100, false), api.log(root, 0, 200, true)])
       if (root !== repo.path) return
       list.value = r.commits
+      allList.value = all.commits
       loaded.value = true
     } catch (e) {
       error.value = toApiError(e)
@@ -60,11 +63,12 @@ export const useVersionsStore = defineStore('versions', () => {
     () => repo.path,
     () => {
       list.value = []
+      allList.value = []
       loaded.value = false
       error.value = null
     },
   )
-  return { list, loaded, error, load, summaryOf }
+  return { list, allList, loaded, error, load, summaryOf }
 })
 
 /** Rebase and cherry-pick share one flow: start, maybe stop on clashes, then continue / skip / abort. */
