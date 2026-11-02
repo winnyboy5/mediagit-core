@@ -4,45 +4,14 @@ Consolidated and **priority-ordered** registry of planned features, code-level T
 known limitations for MediaGit. Items are sourced from documentation and source code;
 each entry cites the file it was verified against.
 
-> Last updated: 2026-10-26 | v0.6.0-rc.1 | Every open item re-verified against code on this date.
-> Closed items (16, 21-24, 26, 27, 29, 32, 33, 34, 37, 41) were removed; their record is in CHANGELOG.md and git history.
+> Last updated: 2026-11-02 | v0.7.0-rc.1 | Every open item re-verified against code on this date.
+> Closed items (6, 16, 21-24, 26, 27, 29, 32, 33, 34, 37, 38, 41) were removed; their record is in CHANGELOG.md and git history.
 
 **Priority levels:**
 - **P0** — Quick win or active blocker — ≤1 day effort, implement immediately
 - **P1** — High impact, near-term — 1-2 weeks, next milestone target
 - **P2** — Medium impact or complex — 2-6 weeks, planned but not urgent
 - **P3** — Low priority / long-term — deferred until triggered by demand
-
-> **Two unrelated P0–P3 batches share this file and the same priority labels —
-> don't conflate them.** The section immediately below is a closed, dated
-> incident-response sprint (2026-07-18, leaked secrets) with its own 3-item P0
-> checklist. The **Quick Reference — Priority Matrix** further down is the
-> forward-looking product backlog (P1–P3, no P0s in it) that a
-> "100% of P0–P3 implemented" claim would actually be about. Both reuse
-> P0/P1/P2/P3 as effort/urgency labels; neither implies the other is done.
-
----
-
-## ⚠ P0 — Security Remediation: leaked secrets in git history (2026-07-18, closed incident sprint)
-
-Secrets (`.mcp.json` Morph key, `enc_key`/`enc_key.pub` SSH pair, an Anthropic API key) were
-scrubbed from git history and force-pushed on all branches; a fresh-clone verification
-confirmed the remote is clean. Both API keys were revoked regardless of the cleanup.
-
-- [ ] Close/regenerate dependabot PRs (all branch hashes changed by the history rewrite) —
-      **checked 2026-10-26 with `gh pr list`:** #56, #57 and #58 (GitHub Actions bumps, opened
-      2026-03-30, before the rewrite) are still open and need closing. The cargo PRs #87–#91
-      were opened after the rewrite and are unaffected.
-- [ ] Request cached-view purge via GitHub Support — public repo: old commits (e.g. `82295e8`,
-      `7177269`) may remain servable by direct SHA URL until purged — **unverified 2026-08-25**,
-      same reason (no GitHub API access; this is an external support request, not something
-      `git log` would show either way). Still unverified 2026-10-26.
-- [ ] Delete the backup mirror `D:\own\saas\mediagit-core-backup-20260718.git` — it is now the
-      **only remaining copy of the secrets on disk**; remote verified clean 2026-07-18 so its
-      rollback purpose is served. **CONFIRMED STILL PRESENT 2026-10-26** — the directory still
-      exists on disk. Still open, not a false positive.
-
----
 
 ## Quick Reference — Priority Matrix
 
@@ -52,7 +21,6 @@ confirmed the remote is clean. Both API keys were revoked regardless of the clea
 | 3 | Git migration tooling (rewrite filter/install/track) | **P3** | 2-3 wk | Crate deleted in `c5d0a23`; rewrite, not re-integration. `docs/next-set/SAAS-readiness.md` §8 ranks a Git LFS importer as roadmap Phase 1: re-prioritize when started |
 | 4 | `mediagit://` URL scheme | **P3** | 1 day | Post-HTTP/3 adoption |
 | 5 | Differential checkout (only changed files) | **P3** | 1-2 wk | 70% branch switch latency reduction |
-| 6 | Incremental status scan (inode/mtime cache) | **P3** | 1-2 wk | Repeated `status` performance |
 | 7 | Pack file format documentation | **P3** | 0.5 day | Book completeness |
 | 8 | TOML-configurable similarity thresholds | **P3** | 0.5-3 day | User tunability; ~32 values across 2 tables, not 3 |
 | 9 | Windows ARM64 native binaries | **P3** | — | Blocked on GitHub runner availability |
@@ -146,18 +114,6 @@ repos) claimed here was measured against the pre-skip behaviour, so it is **stal
 estimate** — re-baseline before scoping.
 
 Requires a tree diff engine in `mediagit-versioning`. Effort: **1-2 weeks**.
-
----
-
-### 6. Incremental Status Scan (inode / mtime Cache)
-*Source: `crates/mediagit-cli/src/commands/status.rs` (`scan_working_directory`, called at
-`status.rs:373`)*
-
-Full-tree scan on every `status` invocation. An inode cache / mtime-based incremental scan
-(similar to git's index) would reduce repeated-status overhead significantly for repos with
-large working trees.
-
-Effort: **1-2 weeks**.
 
 ---
 
@@ -256,7 +212,6 @@ None of these shipped in v0.3.0–v0.6.0. Checked 2026-10-26.
 | 3 | P3 | **Git migration CLI** | `mediagit-git` deleted in `c5d0a23` (its clean filter destroyed file content); git/git-LFS import documented unsupported | `c5d0a23` |
 | 4 | P3 | **`mediagit://` scheme** | No native URL scheme; uses `http://` | R&D 2026-03 |
 | 5 | P3 | **Differential checkout** | Unchanged files already skipped by hash; every path still visited + hashed, no tree diff | `checkout.rs:152` |
-| 6 | P3 | **Incremental status** | Full-tree scan on every `status` invocation | `status.rs:373` |
 | 7 | P3 | **Pack file docs** | Pack v3 internal format (header, entries, index, trailer) not documented; only the `packs/` path is | `file-formats.md`, `pack.rs` |
 | 8 | P3 | **Similarity thresholds** | Hardcoded in `similarity.rs` (19 arms) + `odb/mod.rs` (`delta_ratio_threshold`), not configurable via `config.toml` | `similarity.rs` |
 | 9 | P3 | **Windows ARM64** | No native pre-built binary; x64 emulation works but slower | `windows-arm64.md` |
