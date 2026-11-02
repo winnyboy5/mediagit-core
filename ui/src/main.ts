@@ -8,7 +8,7 @@ import './styles/tokens.css'
 import './styles/base.css'
 import Root from './Root.vue'
 import { router } from './router'
-import { setUnlockHandler } from './api'
+import { setStillLockedHandler, setUnlockHandler } from './api'
 import { useLookStore } from './stores/settings'
 import { useUnlockStore } from './stores/unlock'
 
@@ -17,4 +17,5 @@ const pinia = createPinia()
 useLookStore(pinia)
 // An encrypted repository that needs its passphrase asks for it, whichever view hit it.
 setUnlockHandler((repo) => useUnlockStore(pinia).unlockRepo(repo))
+setStillLockedHandler((repo) => useUnlockStore(pinia).markLocked(repo))
 createApp(Root).use(pinia).use(router).mount('#app')

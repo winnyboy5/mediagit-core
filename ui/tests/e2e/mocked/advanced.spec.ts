@@ -5,6 +5,11 @@ import { fixture, healthy, ipcCalls, ipcRelease, mockIpc, RECENT } from './ipc-m
 const REPO = { 'mg.repo': JSON.stringify('/repos/hero-film'), 'mg.recent': RECENT }
 const C = '0004000400040004000400040004000400040004'
 const OLDEST = fixture<{ commits: { oid: string }[] }>('log_graph').commits.at(-1)!.oid
+// Copying starts with no version chosen (an empty copy is refused), so tests choose one.
+async function chooseVersion(page: Page, name: string | RegExp = /Merge grade pass into main/) {
+  await page.getByLabel('Copy this version').click()
+  await page.getByRole('option', { name }).click()
+}
 const file = (page: Page, p: string) => page.locator(`[data-file="${p}"]`)
 
 async function boot(page: Page, tab: string, commands: Record<string, unknown> = {}, scripts: Record<string, unknown[]> = {}, handlers: Record<string, string> = {}) {
@@ -129,6 +134,8 @@ test.describe('Advanced: rebase', () => {
 test.describe('Advanced: cherry-pick', () => {
   test('copies the chosen version after a confirm', async ({ page }) => {
     await boot(page, 'Cherry-pick', { pick_start: fixture('pick_done') })
+    await expect(page.getByRole('button', { name: 'Copy version' })).toBeDisabled()
+    await chooseVersion(page)
     await expect(page.getByLabel('Copy this version')).toContainText('Merge grade pass into main')
     await expectNoAxeViolations(page)
     await page.getByRole('button', { name: 'Copy version' }).click()
@@ -144,10 +151,10 @@ test.describe('Advanced: cherry-pick', () => {
     await page.getByLabel('From branch').click()
     await page.getByRole('option', { name: 'review/cut-2' }).click()
     // Only what review/cut-2 reaches is offered; the merge on main is not.
-    await expect(page.getByLabel('Copy this version')).toContainText('Grade pass: warmer shadows')
     await page.getByLabel('Copy this version').click()
+    await expect(page.getByRole('option', { name: /Grade pass: warmer shadows/ })).toBeVisible()
     await expect(page.getByRole('option', { name: /Merge grade pass into main/ })).toHaveCount(0)
-    await page.keyboard.press('Escape')
+    await page.getByRole('option', { name: /Grade pass: warmer shadows/ }).click()
     await expectNoAxeViolations(page)
     await page.getByRole('button', { name: 'Copy version' }).click()
     await page.getByRole('alertdialog').getByRole('button', { name: 'Copy version' }).click()
@@ -157,6 +164,7 @@ test.describe('Advanced: cherry-pick', () => {
 
   test('a clash is decided per file, then continued with the cherry-pick command', async ({ page }) => {
     await boot(page, 'Cherry-pick', { pick_start: fixture('pick_conflict'), sequencer_control: fixture('pick_done') })
+    await chooseVersion(page)
     await page.getByRole('button', { name: 'Copy version' }).click()
     await page.getByRole('alertdialog').getByRole('button', { name: 'Copy version' }).click()
     await expect(page.getByTestId('pick-summary')).toContainText('1 of 1 files need a decision')
@@ -168,6 +176,7 @@ test.describe('Advanced: cherry-pick', () => {
 
   test('busy: a bar while it copies', async ({ page }) => {
     await boot(page, 'Cherry-pick', {}, { pick_start: fixture('seq_progress') })
+    await chooseVersion(page)
     await page.getByRole('button', { name: 'Copy version' }).click()
     await page.getByRole('alertdialog').getByRole('button', { name: 'Copy version' }).click()
     await expect(page.getByTestId('pick-progress').getByRole('progressbar')).toHaveAttribute('aria-valuemax', '3')
@@ -285,7 +294,7 @@ test.describe('Advanced: reflog', () => {
 
   test('choosing another ref lists it', async ({ page }) => {
     await boot(page, 'Reflog')
-    await page.getByLabel('Which ref').click()
+    await page.getByLabel('Look at').click()
     await page.getByRole('option', { name: 'feature/grade' }).click()
     await expect.poll(async () => (await ipcCalls(page, 'reflog_list')).at(-1)?.args.reference).toBe('feature/grade')
   })

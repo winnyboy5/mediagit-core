@@ -100,7 +100,8 @@ const rows = computed(() => rs.entries.filter((e) => e.value !== null))
 
       <section class="card wide" aria-labelledby="cfg-h" data-testid="config">
         <h2 id="cfg-h">All settings</h2>
-        <p v-if="!rows.length && rs.loaded" class="muted">Nothing has been changed from the defaults.</p>
+        <ErrorState v-if="rs.error && !rs.loaded" :code="rs.error.code" :message="rs.error.message" @retry="rs.refresh()" />
+        <p v-else-if="!rows.length && rs.loaded" class="muted">Nothing has been changed from the defaults.</p>
         <table v-else-if="rows.length" class="t">
           <thead><tr><th scope="col">Setting</th><th scope="col">Value</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
           <tbody>
@@ -241,9 +242,13 @@ h2 {
   border-collapse: collapse;
   font-size: var(--fs-sm);
 }
+.t tr {
+  height: var(--row-h);
+}
 .t th,
 .t td {
-  padding: var(--space-2) var(--space-3);
+  /* 8px at the comfortable 36px row; the 8px shrinks by half of what compact takes off the row. */
+  padding: calc(var(--space-2) - (36px - var(--row-h)) / 2) var(--space-3);
   border-bottom: 1px solid var(--border);
   text-align: left;
 }

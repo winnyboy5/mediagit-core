@@ -11,7 +11,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn() }))
 
-import { api, setUnlockHandler } from '@/api'
+import { api, setStillLockedHandler, setUnlockHandler } from '@/api'
 import { useUnlockStore } from '@/stores/unlock'
 
 const needs = { code: 'needs_input', message: 'passphrase needed' }
@@ -20,6 +20,7 @@ beforeEach(() => {
   setActivePinia(createPinia())
   core.invoke.mockReset()
   setUnlockHandler(null)
+  setStillLockedHandler(null)
 })
 
 describe('central unlock in the api layer', () => {
@@ -72,6 +73,38 @@ describe('central unlock in the api layer', () => {
     await expect(api.keyRecover('/repos/a', 'CODE', null)).rejects.toMatchObject({ code: 'needs_input' })
     await expect(api.authLogin('/repos/a', null, 'm', 'pw')).rejects.toMatchObject({ code: 'needs_input' })
     expect(handler).not.toHaveBeenCalled()
+  })
+})
+
+describe('a repository that still needs the passphrase is not "unlocked"', () => {
+  it('needs_input right after an unlock moves the repo from unlocked to locked', async () => {
+    const u = useUnlockStore()
+    u.unlocked.add('/repos/a')
+    setUnlockHandler(async () => true)
+    setStillLockedHandler((r) => u.markLocked(r))
+    core.invoke.mockRejectedValue(needs)
+    await expect(api.repoStatus('/repos/a')).rejects.toMatchObject({ code: 'needs_input' })
+    expect(u.unlocked.has('/repos/a')).toBe(false)
+    expect(u.locked.has('/repos/a')).toBe(true)
+  })
+
+  it('asking marks the repo locked until the passphrase is accepted; cancelling leaves it locked', async () => {
+    const u = useUnlockStore()
+    u.unlocked.add('/repos/a')
+    core.invoke.mockResolvedValue(undefined)
+    const job = u.unlockRepo('/repos/a')
+    expect(u.unlocked.has('/repos/a')).toBe(false)
+    expect(u.locked.has('/repos/a')).toBe(true)
+    await vi.waitFor(() => expect(u.open).toBe(true))
+    u.answer(null)
+    await job
+    expect(u.locked.has('/repos/a')).toBe(true)
+    const again = u.unlockRepo('/repos/a')
+    await vi.waitFor(() => expect(u.open).toBe(true))
+    u.answer('pw')
+    await again
+    expect(u.unlocked.has('/repos/a')).toBe(true)
+    expect(u.locked.has('/repos/a')).toBe(false)
   })
 })
 

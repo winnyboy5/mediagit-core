@@ -46,7 +46,8 @@ const target = ref('')
 watch(
   options,
   (o) => {
-    if (!o.some((x) => x.value === target.value)) target.value = o[0]?.value ?? ''
+    // A copy that would be empty is refused, so the person picks the version; a rebase has a likely target.
+    if (!o.some((x) => x.value === target.value)) target.value = isRebase ? (o[0]?.value ?? '') : ''
   },
   { immediate: true },
 )
@@ -105,7 +106,7 @@ const targetLabel = computed(() => options.value.find((o) => o.value === target.
       <p v-if="seq.last" class="done" role="status" :data-testid="`${kind}-result`">{{ stepSummary(seq.last) }}.</p>
       <div class="start">
         <Select v-if="!isRebase" v-model="source" label="From branch" :options="sourceOptions" :disabled="seq.busy" />
-        <Select v-model="target" :label="isRebase ? 'Rebase onto' : 'Copy this version'" :options="options" :disabled="!options.length || seq.busy" />
+        <Select v-model="target" :label="isRebase ? 'Rebase onto' : 'Copy this version'" :placeholder="isRebase ? undefined : 'Choose a version…'" :options="options" :disabled="!options.length || seq.busy" />
         <Button variant="primary" :disabled="!target || seq.busy" @click="confirmOpen = true">{{ isRebase ? 'Start rebase…' : 'Copy version' }}</Button>
       </div>
       <p v-if="!options.length" class="muted">{{ isRebase ? 'There is no other branch to rebase onto.' : 'There are no versions to copy yet.' }}</p>

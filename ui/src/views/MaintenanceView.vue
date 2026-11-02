@@ -24,6 +24,8 @@ const last = (t: Task) => {
   const at = repo.path ? m.last[repo.path]?.[t] : undefined
   return at ? `Last run ${timeAgo(at)}` : 'Never run'
 }
+const n = (x: number) => x.toLocaleString('en-US')
+const warn = (sev: string) => /^warn/i.test(sev)
 const running = (t: Task) => m.task === t && !!m.running
 
 function runGc() {
@@ -42,7 +44,7 @@ function runGc() {
     </header>
 
     <div v-if="m.error" class="banner" role="alert">
-      <code class="mono">{{ m.error.code }}</code>
+      <span class="chip bad">Error</span>
       <span>{{ m.error.message }}</span>
       <Button size="sm" variant="ghost" @click="m.error = null">Dismiss</Button>
     </div>
@@ -53,7 +55,7 @@ function runGc() {
         <h2 id="gc-h">Clean up storage</h2>
         <p class="muted">Remove data no version needs.</p>
         <Checkbox v-model="preview" label="Preview only" :disabled="m.busy" />
-        <Button variant="primary" :disabled="m.busy" :loading="m.task === 'gc' && m.busy" @click="runGc">{{ preview === true ? 'Preview clean-up' : 'Clean up…' }}</Button>
+        <Button :variant="preview === true ? 'primary' : 'danger'" :disabled="m.busy" :loading="m.task === 'gc' && m.busy" @click="runGc">{{ preview === true ? 'Preview clean-up' : 'Clean up…' }}</Button>
         <span class="muted">{{ last('gc') }}</span>
         <div v-if="running('gc')" class="bar" role="status" data-testid="gc-progress">
           <span>{{ m.running!.phase || 'Starting…' }}</span>
@@ -66,10 +68,10 @@ function runGc() {
             {{ m.gc.preview ? 'Preview: this would free' : 'Freed' }} {{ formatBytes(m.gc.report.bytes_reclaimed + m.gc.report.chunk_bytes_reclaimed + m.gc.report.delta_bytes_reclaimed) }}
           </strong>
           <dl class="kv">
-            <dt>Objects looked at</dt><dd class="mono">{{ m.gc.report.objects_scanned }}</dd>
-            <dt>Still needed</dt><dd class="mono">{{ m.gc.report.reachable_objects }}</dd>
-            <dt>Not needed</dt><dd class="mono">{{ m.gc.report.unreachable_objects }}</dd>
-            <dt>{{ m.gc.preview ? 'Would be removed' : 'Removed' }}</dt><dd class="mono">{{ m.gc.report.objects_deleted + m.gc.report.chunks_deleted + m.gc.report.deltas_deleted }}</dd>
+            <dt>Objects looked at</dt><dd class="mono">{{ n(m.gc.report.objects_scanned) }}</dd>
+            <dt>Still needed</dt><dd class="mono">{{ n(m.gc.report.reachable_objects) }}</dd>
+            <dt>Not needed</dt><dd class="mono">{{ n(m.gc.report.unreachable_objects) }}</dd>
+            <dt>{{ m.gc.preview ? 'Would be removed' : 'Removed' }}</dt><dd class="mono">{{ n(m.gc.report.objects_deleted + m.gc.report.chunks_deleted + m.gc.report.deltas_deleted) }}</dd>
           </dl>
           <ul v-if="m.gc.report.errors.length" class="issues" aria-label="Clean-up problems">
             <li v-for="e in m.gc.report.errors" :key="e">{{ e }}</li>
@@ -99,14 +101,14 @@ function runGc() {
             {{ m[t[0]]!.report.healthy ? 'No problems found' : 'Problems found' }}
           </strong>
           <dl class="kv">
-            <dt>Objects checked</dt><dd class="mono">{{ m[t[0]]!.report.objects_checked }}</dd>
-            <dt>Refs checked</dt><dd class="mono">{{ m[t[0]]!.report.refs_checked }}</dd>
-            <dt>Damaged</dt><dd class="mono">{{ m[t[0]]!.report.corrupted_objects }}</dd>
-            <dt>Missing</dt><dd class="mono">{{ m[t[0]]!.report.missing_objects }}</dd>
-            <dt>Broken refs</dt><dd class="mono">{{ m[t[0]]!.report.broken_refs }}</dd>
+            <dt>Objects checked</dt><dd class="mono">{{ n(m[t[0]]!.report.objects_checked) }}</dd>
+            <dt>Refs checked</dt><dd class="mono">{{ n(m[t[0]]!.report.refs_checked) }}</dd>
+            <dt>Damaged</dt><dd class="mono" :class="{ bad: m[t[0]]!.report.corrupted_objects }">{{ n(m[t[0]]!.report.corrupted_objects) }}</dd>
+            <dt>Missing</dt><dd class="mono" :class="{ bad: m[t[0]]!.report.missing_objects }">{{ n(m[t[0]]!.report.missing_objects) }}</dd>
+            <dt>Broken refs</dt><dd class="mono" :class="{ bad: m[t[0]]!.report.broken_refs }">{{ n(m[t[0]]!.report.broken_refs) }}</dd>
           </dl>
           <ul v-if="m[t[0]]!.report.issues.length" class="issues" :aria-label="`${t[1]} findings`">
-            <li v-for="(i, k) in m[t[0]]!.report.issues.slice(0, 50)" :key="k"><b>{{ i.severity }}</b> {{ i.message }}</li>
+            <li v-for="(i, k) in m[t[0]]!.report.issues.slice(0, 50)" :key="k"><span class="chip" :class="warn(i.severity) ? 'warn' : 'bad'">{{ warn(i.severity) ? 'Warning' : 'Error' }}</span> {{ i.message }}</li>
           </ul>
         </div>
       </section>
@@ -222,9 +224,31 @@ h2 {
   margin: 0;
 }
 .issues {
+  display: grid;
+  gap: var(--space-1);
   margin: 0;
-  padding-left: var(--space-5);
+  padding: 0;
+  list-style: none;
   font-size: var(--fs-sm);
   overflow-wrap: anywhere;
+}
+.kv dd.bad {
+  color: var(--danger);
+  font-weight: 600;
+}
+.chip {
+  display: inline-block;
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+.chip.bad {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.chip.warn {
+  background: var(--modified-soft);
+  color: var(--modified);
 }
 </style>

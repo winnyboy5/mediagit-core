@@ -91,6 +91,8 @@ function sequencer(command: 'rebase' | 'cherry-pick') {
       clashes.value = s.status === 'conflict' ? s.conflicts.map((path) => ({ path, resolved: null })) : []
       conflictCommit.value = s.status === 'conflict' ? s.conflictCommit : null
     }
+    /** Stopped on clashes is not a success: it needs the person, so the toast warns. */
+    const stopped = (x: RebaseReport | CherryPickReport) => x.status === 'conflict'
     const stepOf = (r: RebaseReport | CherryPickReport): Step => ({ status: r.status, conflicts: r.conflicts, conflictCommit: r.conflict_commit })
 
     async function start(target: string) {
@@ -99,6 +101,7 @@ function sequencer(command: 'rebase' | 'cherry-pick') {
         label,
         (root, report) => (command === 'rebase' ? api.rebaseStart(root, target, report) : api.pickStart(root, [target], report)),
         (x) => stepSummary(stepOf(x)),
+        stopped,
       )
       if (r) apply(stepOf(r.value))
       return !!r
@@ -109,6 +112,7 @@ function sequencer(command: 'rebase' | 'cherry-pick') {
         `${action === 'abort' ? 'Cancel' : action === 'skip' ? 'Skip step of' : 'Continue'} ${command}`,
         (root, report) => api.sequencerControl(root, command, action, report),
         (x) => stepSummary(stepOf(x)),
+        stopped,
       )
       if (r) apply(stepOf(r.value))
       return !!r

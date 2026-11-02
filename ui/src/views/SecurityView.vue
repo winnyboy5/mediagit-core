@@ -151,7 +151,7 @@ const sourceText = (s: string | null) => s ?? 'No key available on this machine'
           </template>
           <template v-else>
             <p class="muted">Files in this repository are stored as they are. Turn on encryption to protect new data at rest.</p>
-            <Button variant="primary" :disabled="sec.busy" @click="initOpen = true">Turn on encryption…</Button>
+            <Button :disabled="sec.busy" @click="initOpen = true">Turn on encryption…</Button>
           </template>
         </template>
       </section>

@@ -33,6 +33,8 @@ const recent = useRecentStore()
 const changes = useChangesStore()
 const unlock = useUnlockStore()
 const isUnlocked = computed(() => !!repo.path && unlock.unlocked.has(repo.path))
+// A command found it locked and it has not been unlocked since.
+const isLocked = computed(() => !!repo.path && !isUnlocked.value && unlock.locked.has(repo.path))
 const { openPath, pickAndOpen } = useOpenRepo()
 
 const repoName = computed(() => recent.list.find((r) => r.path === repo.path)?.name ?? repo.path ?? '')
@@ -59,6 +61,8 @@ const nav = [
   { to: '/compare', label: 'Compare', icon: GitCompare },
   { to: '/tags', label: 'Tags & Stash', icon: Tag },
   { to: '/remote', label: 'Remote Browser', icon: Cloud },
+] as const
+const more = [
   { to: '/storage', label: 'Storage', icon: HardDrive },
   { to: '/maintenance', label: 'Maintenance', icon: Wrench },
   { to: '/security', label: 'Security', icon: ShieldCheck },
@@ -100,6 +104,14 @@ const nav = [
       </span>
     </div>
 
+    <div v-else-if="isLocked" class="switch static" data-testid="locked-chip">
+      <span class="cap">Encryption</span>
+      <span class="val">
+        <span class="name">Locked</span>
+        <button type="button" class="lockbtn" aria-label="Unlock this repository" @click="unlock.unlockRepo(repo.path!).catch(() => {})">Unlock…</button>
+      </span>
+    </div>
+
     <div class="navscroll">
     <ul class="items">
       <li v-for="(n, i) in nav" :key="n.to">
@@ -112,6 +124,16 @@ const nav = [
           <span v-else-if="n.to === '/sync' && up && (up.ahead || up.behind)" class="count mono" aria-hidden="true">
             <template v-if="up.ahead"><ArrowUp :size="14" aria-hidden="true" />{{ up.ahead }}</template><template v-if="up.behind"><ArrowDown :size="14" aria-hidden="true" />{{ up.behind }}</template>
           </span>
+        </RouterLink>
+      </li>
+    </ul>
+
+    <h2 class="group">More</h2>
+    <ul class="items more">
+      <li v-for="n in more" :key="n.to">
+        <RouterLink :to="n.to" class="item">
+          <component :is="n.icon" :size="18" aria-hidden="true" />
+          <span class="lbl">{{ n.label }}</span>
         </RouterLink>
       </li>
     </ul>
@@ -226,7 +248,7 @@ button.switch:hover {
   align-items: center;
   gap: var(--space-3);
   width: 100%;
-  height: var(--control-h);
+  height: var(--row-h);
   padding: 0 var(--space-3);
   border: 0;
   border-radius: var(--radius-control);

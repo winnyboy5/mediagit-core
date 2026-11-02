@@ -206,9 +206,13 @@ h2 {
   border-collapse: collapse;
   font-size: var(--fs-sm);
 }
+.t tr {
+  height: var(--row-h);
+}
 .t th,
 .t td {
-  padding: var(--space-2) var(--space-3);
+  /* 8px at the comfortable 36px row; the 8px shrinks by half of what compact takes off the row. */
+  padding: calc(var(--space-2) - (36px - var(--row-h)) / 2) var(--space-3);
   border-bottom: 1px solid var(--border);
   text-align: left;
 }

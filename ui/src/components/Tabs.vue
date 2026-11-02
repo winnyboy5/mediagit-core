@@ -23,14 +23,15 @@ defineProps<{ items: { value: string; label: string }[]; label: string }>()
   border-bottom: 1px solid var(--border);
 }
 .tab {
-  height: var(--control-h);
-  padding: 0 var(--space-4);
+  min-height: var(--control-h);
+  padding: var(--space-1) var(--space-4);
   margin-bottom: -1px;
   border: 0;
   border-bottom: 2px solid transparent;
   background: transparent;
   color: var(--text-muted);
-  font: 500 var(--fs-md) / 1 var(--font-sans);
+  font: 500 var(--fs-md) / 1.25 var(--font-sans);
+  text-wrap: balance;
   cursor: pointer;
 }
 .tab:hover {

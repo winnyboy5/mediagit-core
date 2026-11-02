@@ -66,6 +66,12 @@ type Report = (p: Progress) => void
 type UnlockHandler = (repo: string) => Promise<boolean>
 let unlockHandler: UnlockHandler | null = null
 
+/** Told when a command still needs the passphrase right after the person unlocked the repository. */
+let stillLockedHandler: ((repo: string) => void) | null = null
+export function setStillLockedHandler(h: ((repo: string) => void) | null) {
+  stillLockedHandler = h
+}
+
 /** Registered once at startup (main.ts), so this module needs no store. */
 export function setUnlockHandler(h: UnlockHandler | null) {
   unlockHandler = h
@@ -84,7 +90,12 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
     const repo = args?.repo
     if (toApiError(e).code !== 'needs_input' || typeof repo !== 'string' || !unlockHandler) throw e
     if (!(await unlockHandler(repo))) throw { code: 'cancelled', message: 'Cancelled' } satisfies ApiError
-    return rawInvoke<T>(cmd, args)
+    try {
+      return await rawInvoke<T>(cmd, args)
+    } catch (e2) {
+      if (toApiError(e2).code === 'needs_input') stillLockedHandler?.(repo)
+      throw e2
+    }
   }
 }
 

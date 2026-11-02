@@ -15,6 +15,8 @@ const wrong = `() => { throw { code: 'wrong_passphrase', message: 'no' } }`
 const PASS = 'correct-horse-battery'
 const good = `(a) => { if (a.passphrase !== ${JSON.stringify(PASS)}) throw { code: 'wrong_passphrase', message: 'no' }; return null }`
 const needs = `() => { throw { code: 'needs_input', message: 'passphrase needed' } }`
+// Needs the passphrase until unlock_repo has been called, like a real encrypted repository.
+const gated = `(a, calls) => { if (!calls.some((c) => c.cmd === 'unlock_repo')) throw { code: 'needs_input', message: 'passphrase needed' }; return ${JSON.stringify(fixture('log_graph'))} }`
 
 interface Boot {
   commands?: Record<string, unknown>
@@ -170,7 +172,7 @@ for (const { w, h } of SIZES) {
       await shot(page, 'V13-security-recovery-source', t, w)
     })
     T('V13 unlocked and Lock now', async (page, t) => {
-      await open(page, '/history', '', { handlers: { repo_log: needs, unlock_repo: good } })
+      await open(page, '/history', '', { handlers: { repo_log: gated, unlock_repo: good } })
       const dlg = page.getByRole('dialog', { name: 'Unlock this repository' })
       await expect(dlg).toBeVisible()
       await dlg.getByLabel('Passphrase').fill(PASS)
@@ -185,8 +187,22 @@ for (const { w, h } of SIZES) {
       await expect(page.getByTestId('unlocked-chip')).toHaveCount(0)
       await shot(page, 'chip-locked', t, w)
     })
-    T('sidebar Lock chip unlocked', async (page, t) => {
+    T('sidebar Locked chip (prompt cancelled)', async (page, t) => {
+      await open(page, '/history', '', { handlers: { repo_log: needs } })
+      await page.getByRole('dialog', { name: 'Unlock this repository' }).getByRole('button', { name: 'Cancel' }).click()
+      await expect(page.getByTestId('locked-chip')).toBeVisible()
+      await shot(page, 'chip-locked-needs', t, w)
+    })
+    T('locked error state after unlock', async (page, t) => {
       await open(page, '/history', '', { handlers: { repo_log: needs, unlock_repo: good } })
+      const dlg = page.getByRole('dialog', { name: 'Unlock this repository' })
+      await dlg.getByLabel('Passphrase').fill(PASS)
+      await dlg.getByRole('button', { name: 'Unlock' }).click()
+      await expect(page.getByRole('alert')).toContainText('This repository is locked')
+      await shot(page, 'locked-error', t, w)
+    })
+    T('sidebar Lock chip unlocked', async (page, t) => {
+      await open(page, '/history', '', { handlers: { repo_log: gated, unlock_repo: good } })
       const dlg = page.getByRole('dialog', { name: 'Unlock this repository' })
       await dlg.getByLabel('Passphrase').fill(PASS)
       await dlg.getByRole('button', { name: 'Unlock' }).click()

@@ -13,6 +13,8 @@ export const useUnlockStore = defineStore('unlock', () => {
   const open = ref(false)
   /** Repositories unlocked for this session (the backend holds the passphrase; this is only the fact). */
   const unlocked = reactive(new Set<string>())
+  /** Repositories a command found locked (`needs_input`) and that are not unlocked now. */
+  const locked = reactive(new Set<string>())
   /** Set when the previous answer did not work. */
   const retry = ref(false)
   let waiting: ((answer: string | null) => void) | null = null
@@ -55,6 +57,9 @@ export const useUnlockStore = defineStore('unlock', () => {
   function unlockRepo(repo: string): Promise<boolean> {
     const existing = asking.get(repo)
     if (existing) return existing
+    // A command just needed the passphrase, so whatever we believed before is stale.
+    unlocked.delete(repo)
+    locked.add(repo)
     const job = (async () => {
       let again = false
       for (;;) {
@@ -63,6 +68,7 @@ export const useUnlockStore = defineStore('unlock', () => {
         try {
           await api.unlockRepo(repo, pass)
           unlocked.add(repo)
+          locked.delete(repo)
           return true
         } catch (e) {
           // Only a rejected passphrase is asked about again; any other failure is the real answer.
@@ -78,10 +84,17 @@ export const useUnlockStore = defineStore('unlock', () => {
   /** Forget the session passphrase for `repo`; its next encrypted read asks again. */
   function lock(repo: string) {
     unlocked.delete(repo)
+    locked.add(repo)
     void Promise.resolve()
       .then(() => api.lockRepo(repo))
       .catch(() => {})
   }
 
-  return { open, retry, unlocked, answer, withUnlock, unlockRepo, lock }
+  /** The backend still wants the passphrase after an unlock: the "unlocked" fact was wrong. */
+  function markLocked(repo: string) {
+    unlocked.delete(repo)
+    locked.add(repo)
+  }
+
+  return { open, retry, unlocked, locked, markLocked, answer, withUnlock, unlockRepo, lock }
 })

@@ -66,7 +66,7 @@ const name = (oid: string | null) => (oid ? `${shortOid(oid)}${versions.summaryO
         </p>
         <div class="verdicts" role="group" aria-label="Does it work?">
           <Button variant="primary" :disabled="bisect.busy" @click="bisect.mark('good')">It works (good)</Button>
-          <Button variant="danger" :disabled="bisect.busy" @click="bisect.mark('bad')">It is broken (bad)</Button>
+          <Button :disabled="bisect.busy" @click="bisect.mark('bad')">It is broken (bad)</Button>
           <Button :disabled="bisect.busy" @click="bisect.mark('skip')">Cannot tell (skip)</Button>
         </div>
       </template>
@@ -75,7 +75,7 @@ const name = (oid: string | null) => (oid ? `${shortOid(oid)}${versions.summaryO
         <dt>Known good</dt><dd class="mono">{{ r.good.map(shortOid).join(', ') || '–' }}</dd>
         <dt>Skipped</dt><dd class="mono">{{ r.skipped.map(shortOid).join(', ') || '–' }}</dd>
       </dl>
-      <Button variant="ghost" :disabled="bisect.busy" @click="resetOpen = true">End bisect…</Button>
+      <Button :disabled="bisect.busy" @click="resetOpen = true">End bisect…</Button>
     </div>
 
     <AlertDialog

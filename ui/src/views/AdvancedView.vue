@@ -15,10 +15,10 @@ onMounted(() => {
 })
 
 const TABS = [
-  { value: 'rebase', label: 'Rebase' },
-  { value: 'pick', label: 'Cherry-pick' },
-  { value: 'bisect', label: 'Bisect' },
-  { value: 'reflog', label: 'Reflog' },
+  { value: 'rebase', label: 'Replay onto a branch (rebase)' },
+  { value: 'pick', label: 'Copy a version (cherry-pick)' },
+  { value: 'bisect', label: 'Find the break (bisect)' },
+  { value: 'reflog', label: 'Undo log (reflog)' },
 ]
 const tab = ref('rebase')
 </script>

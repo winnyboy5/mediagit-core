@@ -34,6 +34,7 @@ const api = vi.hoisted(() => ({
 }))
 vi.mock('@/api', async (orig) => ({ ...(await orig<typeof import('@/api')>()), api }))
 
+import { useToast } from '@/components/useToast'
 import { stepSummary, useBisectStore, usePickStore, useRebaseStore, useReflogStore } from '@/stores/advanced'
 import { useIdentityStore } from '@/stores/identity'
 import { filterLocks } from '@/stores/locks'
@@ -276,6 +277,20 @@ describe('rebase and cherry-pick stores', () => {
     expect(api.sequencerControl).toHaveBeenCalledWith('/repos/hero', 'rebase', 'continue', expect.any(Function))
     expect(rb.active).toBe(false)
     expect(rb.last?.status).toBe('rebased')
+  })
+
+  it('stopping on clashes toasts a warning, finishing toasts success', async () => {
+    open()
+    const toast = useToast()
+    api.rebaseStart.mockResolvedValue(conflict)
+    await useRebaseStore().start('feature')
+    expect(toast.items.value.at(-1)).toMatchObject({ kind: 'warning', description: 'Stopped: 2 files clash' })
+    api.sequencerControl.mockResolvedValue({ action: 'continue', status: 'rebased', head: 'h', commits_rebased: 2, conflict_commit: null, conflicts: [] })
+    await useRebaseStore().control('continue')
+    expect(toast.items.value.at(-1)).toMatchObject({ kind: 'success' })
+    api.pickStart.mockResolvedValue({ action: 'start', status: 'conflict', commits: [], conflict_commit: 'dd', conflicts: ['x.wav'] })
+    await usePickStore().start('abc')
+    expect(toast.items.value.at(-1)).toMatchObject({ kind: 'warning' })
   })
 
   it('cherry-pick uses its own command name and is independent of rebase', async () => {

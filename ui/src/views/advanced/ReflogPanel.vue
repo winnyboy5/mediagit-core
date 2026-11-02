@@ -30,8 +30,8 @@ const first = computed(() => reflog.entries[0]?.index)
 
 <template>
   <div class="panel" data-panel="reflog" :aria-busy="reflog.loading || undefined">
-    <p class="muted">Every place this ref has pointed. If a version seems lost, it is probably listed here.</p>
-    <div class="tools"><Select v-model="reflog.reference" label="Which ref" :options="refs" /></div>
+    <p class="muted">Every place this branch or your current position has been. If a version seems lost, it is probably listed here.</p>
+    <div class="tools"><Select v-model="reflog.reference" label="Look at" :options="refs" /></div>
 
     <UndoDialogs />
 
@@ -88,7 +88,7 @@ const first = computed(() => reflog.entries[0]?.index)
   grid-template-columns: 56px minmax(0, 1fr) 160px auto;
   align-items: center;
   gap: var(--space-4);
-  min-height: 52px;
+  min-height: calc(var(--row-h) + var(--space-4));
   padding: var(--space-2) var(--space-5);
   border-bottom: 1px solid var(--border);
 }
