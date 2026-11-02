@@ -26,6 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`fsck` and `verify` checked the wrong storage prefix on cloud-backed
+  repositories.** Run without `--path` (from inside the repository, or with
+  `-C`), they looked under a `repo/` prefix instead of the repository's own
+  name, so a healthy repository on S3/GCS/Azure was reported as missing its
+  commits. The storage namespace now comes from the resolved directory name
+  for every command. Repositories that store `repo_namespace` in their config
+  were not affected.
 - **A passphrase-encrypted repo asked for the passphrase twice on `push`,
   `fetch` and `pull`.** The repo key was unwrapped once for the remote
   compatibility check and again when arming it. It is now unwrapped at most

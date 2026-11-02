@@ -7,6 +7,12 @@
 #
 # Output: $QA.Logs\remote_results.tsv (backend, op, sizeMB, sec, MBps, parity, detail)
 
+# Usage: powershell -File 06_remote.ps1 [-Only gcrace]
+#   -Only gcrace : run ONLY the push+gc race gate (MinIO), skipping the backend matrix.
+param(
+  [string]$Only = ""
+)
+
 . (Join-Path $PSScriptRoot "lib\common.ps1")
 . (Join-Path $PSScriptRoot "lib\remote.ps1")
 
@@ -44,6 +50,7 @@ function New-QaBinaryFixture([string]$Path, [int]$SizeMB, [int]$Seed) {
 # plus generated binaries. STANDARD target ~100-200MB total.
 # ---------------------------------------------------------------------------
 $SRC = Join-Path $QA.Work "remote-src"
+if (-not $Only) {
 if (Test-Path $SRC) { Remove-Item -Recurse -Force $SRC }
 New-Item -ItemType Directory -Path $SRC -Force | Out-Null
 $r = Invoke-MG $null @("init", $SRC) $Phase
@@ -216,6 +223,8 @@ foreach ($backend in $QA.Backends) {
   }
 }
 
+}  # end if (-not $Only): backend matrix
+
 # ---------------------------------------------------------------------------
 # Browse download integrity. `download <full URL>` is a plain GET of the server's browse
 # endpoint (GET /{repo}/files/{path}); the server reassembles the blob from its stored chunks.
@@ -228,6 +237,7 @@ foreach ($backend in $QA.Backends) {
 # bytes (same reason as 05_branching CHK20).
 # ---------------------------------------------------------------------------
 $bsrv = $null
+if (-not $Only) {
 try {
   $bsrv = Start-QaServer -Backend "local" -Phase $Phase
   $bsrc = Join-Path $QA.Work "remote-browse-src"
@@ -275,6 +285,121 @@ try {
   else { Rec "local" "browse-download-corrupt-chunk" "" "" $false "unexpected error: $_" }
 } finally {
   Stop-QaServer $bsrv
+}
+}  # end if (-not $Only): browse integrity
+
+# ---------------------------------------------------------------------------
+# push + gc race on an S3 (MinIO) backed repository.
+#
+# VC-2 fix: gc used to delete fresh unreferenced chunks/manifests/deltas that an
+# in-flight push had uploaded but not yet referenced (the ref only moves at the very
+# end of a push). The fix is a grace window (MEDIAGIT_GC_GRACE_SECS, default 3600).
+# Unit tests cover the window; nothing ran the race on a real S3 backend.
+#
+# WHERE gc RUNS. The server never runs gc itself; gc is a CLI command run against a
+# repository directory. A server repo on S3 is a bare dir whose .mediagit\config.toml
+# carries the [storage] s3 section, so `mediagit -C <server repo dir> gc` operates on
+# exactly the bucket prefix the push is writing to - the operator-cron scenario.
+#
+# SHAPE. Push a large random payload in the background; while it is alive, run
+# `gc -y` on the server-side repo in a loop. Then: push exit, gc overlap (non-vacuity),
+# fsck of the server repo, fresh clone hash parity.
+#
+# BOTH HALVES. MG_QA_GC_RACE_GRACE sets MEDIAGIT_GC_GRACE_SECS for the gc processes
+# only (unset = product default, expected all True). MG_QA_GC_RACE_GRACE=0 re-creates
+# the pre-fix behaviour and must turn at least one gate False - that is the proof this
+# gate can fail. If it does not, the push and gc are not really overlapping.
+# MG_QA_GC_RACE_MB sizes the payload (default 768).
+# ---------------------------------------------------------------------------
+if ((-not $Only) -or ($Only -eq "gcrace")) {
+  $gsrv = $null
+  try {
+    try { $gsrv = Start-QaServer -Backend "minio" -Phase $Phase }
+    catch {
+      if ("$_" -match "^SKIP:") { Write-QaGate $Phase "gcrace-all" "SKIP" "$_" }
+      else { Write-QaGate $Phase "gcrace-all" $false "server unavailable: $_"; $script:AllPass = $false }
+      $gsrv = $null
+    }
+    if ($gsrv) {
+      $gSrvRepo = Join-Path $gsrv.DataDir "repos\$($gsrv.RepoName)"
+      $gMB = [int]$(if ($env:MG_QA_GC_RACE_MB) { $env:MG_QA_GC_RACE_MB } else { 768 })
+      $gGrace = $env:MG_QA_GC_RACE_GRACE   # "" = product default
+      $gTag = "grace=" + $(if ($gGrace) { $gGrace } else { "default" })
+      $gSrc = Join-Path $QA.Work "remote-gcrace-src"
+      $gClone = Join-Path $QA.Work "remote-gcrace-clone"
+      foreach ($d in @($gSrc, $gClone)) { if (Test-Path $d) { Remove-Item -Recurse -Force $d } }
+      New-Item -ItemType Directory -Path $gSrc -Force | Out-Null
+      Invoke-MG $null @("init", $gSrc) $Phase | Out-Null
+      # random 32 MB files: incompressible, so the push is bandwidth/CPU bound and long.
+      $nFiles = [math]::Max(1, [int]($gMB / 32))
+      for ($i = 1; $i -le $nFiles; $i++) { New-QaBinaryFixture (Join-Path $gSrc ("gen\race_{0:d2}.bin" -f $i)) 32 (62000 + $i) }
+      Invoke-MG $gSrc @("add", ".") $Phase -TimeoutSec 3600 | Out-Null
+      Invoke-MG $gSrc @("commit", "-m", "gc race payload") $Phase -TimeoutSec 3600 | Out-Null
+      Invoke-MG $gSrc @("remote", "add", "origin", $gsrv.Url) $Phase | Out-Null
+
+      # --- push in the background, gc in a loop on the server repo while it lives ---
+      $pushOut = Join-Path $QA.Logs "gcrace-push.out.log"
+      $pushErr = Join-Path $QA.Logs "gcrace-push.err.log"
+      $sw = [Diagnostics.Stopwatch]::StartNew()
+      $pp = Start-Process -FilePath $QA.MG -ArgumentList @("-C", "`"$gSrc`"", "push", "origin") `
+        -PassThru -NoNewWindow -RedirectStandardOutput $pushOut -RedirectStandardError $pushErr
+      $null = $pp.Handle   # PS 5.1: ExitCode is $null after exit unless the handle was cached while alive
+      $gcRuns = 0; $gcOverlap = 0; $gcBadExit = 0
+      $savedG = $env:MEDIAGIT_GC_GRACE_SECS
+      try {
+        if ($gGrace) { $env:MEDIAGIT_GC_GRACE_SECS = $gGrace }
+        while (-not $pp.HasExited) {
+          $g = Invoke-MG $gSrvRepo @("gc", "-y") $Phase -TimeoutSec 1200
+          $gcRuns++
+          # overlap = the push was still alive when this gc FINISHED, so it ran wholly inside the push.
+          if (-not $pp.HasExited) { $gcOverlap++ }
+          if ($g.Exit -ne 0) { $gcBadExit++ }
+          Write-QaLog $Phase ("gcrace gc#{0} exit={1} push-alive={2} t={3:n1}s" -f $gcRuns, $g.Exit, (-not $pp.HasExited), $sw.Elapsed.TotalSeconds)
+        }
+      } finally {
+        if ($null -ne $savedG) { $env:MEDIAGIT_GC_GRACE_SECS = $savedG } else { Remove-Item Env:\MEDIAGIT_GC_GRACE_SECS -EA SilentlyContinue }
+      }
+      $pp.WaitForExit()
+      $pushExit = $pp.ExitCode
+      $pushSec = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+      $retryExit = ""
+      if ($pushExit -ne 0) {
+        $rr = Invoke-MG $gSrc @("push", "origin") $Phase -TimeoutSec 3600
+        $retryExit = $rr.Exit
+      }
+      $pushOk = ($pushExit -eq 0) -or ($retryExit -eq 0)
+      Write-QaGate $Phase "gcrace-push" $pushOk ("{0} payload={1}MB push-exit={2} retry-exit={3} push-sec={4}" -f $gTag, ($nFiles * 32), $pushExit, $retryExit, $pushSec)
+      if (-not $pushOk) { $script:AllPass = $false }
+
+      # non-vacuity: gc must have run to completion at least once INSIDE the push window.
+      $ovOk = ($gcOverlap -ge 1)
+      Write-QaGate $Phase "gcrace-overlap" $ovOk ("{0} gc-runs={1} gc-finished-during-push={2} gc-nonzero-exit={3} (must be >=1 overlapped)" -f $gTag, $gcRuns, $gcOverlap, $gcBadExit)
+      if (-not $ovOk) { $script:AllPass = $false }
+
+      # --- the server-side repo must be intact ---
+      $fsck = Invoke-MG $gSrvRepo @("fsck", "--full") $Phase -TimeoutSec 3600
+      $fsckClean = ($fsck.Exit -eq 0) -and ($fsck.Out -notmatch "(?i)corrupt|missing|failed")
+      Write-QaGate $Phase "gcrace-fsck-server" $fsckClean ("{0} fsck-exit={1} {2}" -f $gTag, $fsck.Exit, (($fsck.Out -split "`n" | Where-Object { $_ -match "(?i)corrupt|missing|failed|error" } | Select-Object -First 2) -join " | "))
+      if (-not $fsckClean) { $script:AllPass = $false }
+
+      # --- and a fresh clone must be byte-identical ---
+      $c = Invoke-MG $null @("clone", $gsrv.Url, $gClone) $Phase -TimeoutSec 3600
+      $mism = -1
+      $parity = $false
+      if (($c.Exit -eq 0) -and (Test-Path $gClone)) {
+        $h1 = Get-QaTreeHashes $gSrc; $h2 = Get-QaTreeHashes $gClone
+        $mism = (Compare-Object $h1 $h2 | Measure-Object).Count
+        $parity = ($mism -eq 0) -and ($h1.Count -gt 0)
+      }
+      Write-QaGate $Phase "gcrace-clone-parity" $parity ("{0} clone-exit={1} files={2} mismatches={3}" -f $gTag, $c.Exit, @(Get-QaTreeHashes $gSrc).Count, $mism)
+      if (-not $parity) { $script:AllPass = $false }
+    }
+  } catch {
+    Write-QaGate $Phase "gcrace-all" $false "unexpected error: $_"
+    $script:AllPass = $false
+  } finally {
+    Stop-QaServer $gsrv
+  }
 }
 
 Write-QaLog $Phase "=== 06_remote done: overall=$(if ($script:AllPass) { 'PASS' } else { 'FAIL' }) ==="
