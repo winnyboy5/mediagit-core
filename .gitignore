@@ -246,3 +246,16 @@ graphify-out/
 !docs/adr/**
 
 deck/
+# Desktop app (crates/mediagit-desktop + ui/)
+crates/mediagit-desktop/gen/
+crates/mediagit-desktop/binaries/
+ui/dist/
+ui/test-results/
+ui/playwright-report/
+# impeccable design-skill working files (local only)
+ui/PRODUCT.md
+ui/DESIGN.md
+ui/.impeccable/
+/.impeccable/
+# Low-fi wireframes for view approval (local only)
+ui/wireframes/
