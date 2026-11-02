@@ -542,7 +542,10 @@ fn resolve_repo_namespace(repo_root: &Path, config: &mediagit_config::Config) ->
     {
         return mediagit_storage::sanitize_namespace(ns);
     }
-    let basename = repo_root
+    // Canonicalize first: callers may pass `.` (fsck/verify `--path` default)
+    // or a `..`-ending path, neither of which has a file name.
+    let canonical = dunce::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
+    let basename = canonical
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "repo".to_string());
@@ -882,6 +885,23 @@ mod tests {
         // No .mediagit directory
         let result = find_repo_root_from(temp.path());
         assert!(result.is_err());
+    }
+
+    /// `fsck`/`verify` pass their `--path` default (`.`) straight through, and
+    /// `.`/`..` have no file name. The namespace must still be the directory's
+    /// real name, or the command reads an empty `repo/` prefix in the bucket
+    /// and reports a healthy repository as missing its objects.
+    #[test]
+    fn namespace_fallback_uses_real_dir_name_for_dot_paths() {
+        if std::env::var_os("MEDIAGIT_REPO_NAMESPACE").is_some() {
+            return; // env override wins by design; nothing to check
+        }
+        let temp = TempDir::new().unwrap();
+        let proj = temp.path().join("my-proj");
+        std::fs::create_dir_all(proj.join("sub")).unwrap();
+        let config = mediagit_config::Config::default();
+        let via_dotdot = resolve_repo_namespace(&proj.join("sub").join(".."), &config);
+        assert_eq!(via_dotdot, mediagit_storage::sanitize_namespace("my-proj"));
     }
 
     #[test]
