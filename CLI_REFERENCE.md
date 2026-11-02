@@ -89,6 +89,7 @@ mediagit -C <repo> --machine status
 | `json_unsupported` | The subcommand has no machine output yet | 2 |
 | `needs_input` | A prompt (passphrase, confirmation) was reached; collect the input and re-run with it supplied | 1 |
 | `invalid_args` | Flags combined wrongly (currently `show`: `--output` without `<rev>:<path>`, `--tree` with `<rev>:<path>`) | 1 |
+| `empty_commit` | `cherry-pick` (including `--continue`) or `revert` would create a commit whose tree equals HEAD's; nothing is committed (`revert --no-commit` skips the check) | 1 |
 | `error` | Any other failure; `message` is the full error chain | 1 |
 
 Success exits 0. A panic exits 2 with no envelope.
@@ -118,7 +119,8 @@ account `identity` to compare with lock owners), `key`, `stats`, `gc`, `fsck`,
 `cherry-pick` and `revert` conflicts use the same `status:"conflict"` shape as
 `merge`; `fsck`/`verify`/`gc` that find errors print their report with
 `healthy:false` / non-empty `errors` and exit 1. `config get` of an unset key
-returns `value:null`. `key init` returns the one-time `recovery_code` in its
+returns `value:null`. `rebase` drops a replayed commit that adds nothing unless
+`--keep-empty` is given. `key init` returns the one-time `recovery_code` in its
 envelope: show it once, it is not stored.
 
 **Secrets (`--secret-stdin`).** Passphrases, passwords and recovery codes are

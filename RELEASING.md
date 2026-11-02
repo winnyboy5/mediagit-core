@@ -109,6 +109,21 @@ After the workflow completes:
   - [ ] AUR (Arch User Repository)
   - [ ] Debian/Ubuntu PPA (if needed)
 
+## Desktop App Releases
+
+The desktop app has its own tag series, separate from `v*.*.*`. Pushing a tag
+that matches `desktop-v*` runs `.github/workflows/desktop-release.yml`, which
+builds the CLI, stages it as the Tauri sidecar, builds the NSIS installer and
+attaches it to a GitHub release. Run the workflow manually (`workflow_dispatch`,
+default dry run) to build the installer without publishing.
+
+```bash
+git tag -a desktop-v0.8.0 -m "MediaGit Desktop 0.8.0"
+git push origin desktop-v0.8.0
+```
+
+The installer is not code-signed yet (no certificate); signing is deferred.
+
 ## Versioning
 
 MediaGit follows [Semantic Versioning](https://semver.org/):

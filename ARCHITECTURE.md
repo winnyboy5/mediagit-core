@@ -1249,6 +1249,28 @@ graph LR
   `merge_resolve` extracts the chosen side (`HEAD` or the other commit) with
   `show <rev>:<path> --output` and then runs `add`, both inside one write-lane
   turn. Finishing is `merge --continue`; giving up is `merge --abort`.
+- **Secrets travel on stdin only.** Passphrases, login passwords and recovery
+  codes are never placed in argv, the environment or logs. The engine starts
+  the child with `--secret-stdin`, writes the secret as one line, then closes
+  stdin. In Rust a `Secret` type wraps a zeroizing string, redacts `Debug`,
+  rejects multi-line or NUL input and is wiped on drop. Operations that carry
+  a secret never get a Retry closure, so a secret is not kept for replay.
+  Without `--secret-stdin` the CLI fails `needs_input` and leaves stdin
+  unread.
+- **Session unlock.** A command that fails `needs_input` on an encrypted
+  repository raises one shared unlock dialog and is retried with the
+  passphrase. The passphrase is held in memory per repository for the
+  session, sent only to commands that read objects (never to key, auth,
+  config, version, init or clone), and forgotten by **Lock**, by switching or
+  closing the repository, and when the app closes. Only the CLI's own unlock
+  failure maps to `wrong_passphrase`; other errors pass through rather than
+  re-prompting.
+- **Installer and sidecar.** `tauri.bundle.conf.json` declares the `mediagit`
+  CLI as an `externalBin` sidecar and is merged only for installer builds
+  (`--config`), so `cargo check` and tests need no staged binary. The
+  installed sidecar lands beside the app as `mediagit.exe`, where the
+  engine already looks. `.github/workflows/desktop-release.yml` builds the NSIS
+  installer on `desktop-v*` tags. Code signing is not set up yet.
 - **Why a subprocess, not an in-process ops crate.**
   - One source of truth: the app runs the same binary the CLI test suites and
     QA campaigns exercise, so GUI and CLI cannot drift.

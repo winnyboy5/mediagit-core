@@ -538,6 +538,23 @@ pnpm --dir ui tauri dev                # full app; tauri.conf.json starts `pnpm 
 `tauri dev` runs from `crates/mediagit-desktop`, where `tauri.conf.json` lives;
 if the `tauri` script cannot find it, run `cargo tauri dev` there instead.
 
+### Build a local installer
+
+The NSIS installer bundles the CLI as a sidecar named for the target triple.
+Build the debug CLI, stage it, then run Tauri from `crates/mediagit-desktop`:
+
+```powershell
+cargo build -p mediagit-cli
+New-Item -ItemType Directory -Force crates/mediagit-desktop/binaries | Out-Null
+Copy-Item target/debug/mediagit.exe crates/mediagit-desktop/binaries/mediagit-x86_64-pc-windows-msvc.exe
+cd crates/mediagit-desktop
+../../ui/node_modules/.bin/tauri build --debug --bundles nsis --config tauri.bundle.conf.json
+```
+
+`tauri.bundle.conf.json` is merged only here, which is why plain `cargo`
+builds and tests need no staged binary. `binaries/` is gitignored. CI does the
+same with a release CLI in `.github/workflows/desktop-release.yml`.
+
 ### Regenerate TypeScript types
 
 The `--machine` report structs derive `ts-rs`; `ui/src/api/generated/` is

@@ -76,9 +76,43 @@ In History, the undo menu on a version offers:
 
 Browse the folders and files of a remote at a chosen version without cloning. Select a file to preview it, or **Download to...** to save a single file; the download can be cancelled and does not wait behind other actions on your repository. To get everything, clone from Welcome. Add a remote on the Sync page first.
 
+### Storage
+
+Repository size and statistics (`stats`): how much space your versions use and how much is saved by compression and deduplication.
+
+### Maintenance
+
+- **Clean up** (`gc`) removes data no version needs. It asks for confirmation first because removed data cannot be recovered.
+- **Check** (`fsck`) looks for damaged or missing data.
+- **Verify** (`verify`) runs a quick integrity check: object checksums and references.
+
+Each shows a report and live progress. If a check finds problems the report lists them.
+
+### Security
+
+Sign in to and out of a remote server, manage encryption keys, and unlock an encrypted repository. Creating a key shows a one-time recovery code in a dialog that stays open until you choose **I saved it**; the code is not stored anywhere else. The recovery row reads **Saved** or **Not set up**.
+
+#### Unlocking encrypted repositories
+
+When an action needs the passphrase of an encrypted repository, the app asks for it once and then runs the action. The passphrase is kept in memory for that repository for the rest of the session, so you are not asked again. It is sent to the `mediagit` program on its standard input only, never on the command line or in logs. Choose **Lock** in the sidebar or the Security view to forget it. Switching or closing the repository, or closing the app, also forgets it.
+
+### Advanced
+
+- **Rebase** and **Cherry-pick** replay versions onto the current branch. The cherry-pick picker lists versions from every branch. For conflicts, choose your side or theirs per file, then continue, skip or abort. A cherry-pick or undo that would change nothing is refused with an "empty commit" error.
+- **Bisect** is a guided search for the version that introduced a problem.
+- **Reflog** lists where a branch used to point. **Restore to here** moves the branch back through the same confirmation as the undo menu.
+
+### Settings
+
+Theme (light, dark or follow the system), density, your author name and email, other repository settings (`config`), and sparse-checkout patterns.
+
 ### Activity bar and drawer
 
 Long actions (clone, fetch, pull, push, switching branches) appear in the activity drawer with live progress bars, so you can keep working in another view.
+
+## Installing
+
+Windows builds are distributed as an installer (NSIS) attached to the `desktop-v*` releases on GitHub. It bundles the `mediagit` program, so nothing else is needed. The installer is not code-signed yet, so Windows SmartScreen may warn when you run it.
 
 ## Cancelling and queueing
 

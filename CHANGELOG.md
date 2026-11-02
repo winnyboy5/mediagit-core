@@ -57,6 +57,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   2 with error code `json_unsupported`; a prompt reached in machine mode
   fails with `needs_input` instead of blocking. Report types are exported to
   TypeScript (`ui/src/api/generated`) by `cargo test -p mediagit-cli`.
+- **W3 views.**
+  - **Storage** (stats), **Maintenance** (garbage collection behind a
+    confirmation, integrity check, verify, each with a report and progress),
+    **Security** (sign in and out, encryption keys, unlock), **Advanced**
+    (rebase and cherry-pick with per-file conflict resolution, a bisect
+    wizard, and reflog with "restore to here") and **Settings** (theme,
+    density, author identity, config, sparse patterns).
+  - **Session unlock for encrypted repositories.** When a command fails with
+    `needs_input` on an encrypted repository, the app asks for the passphrase
+    once and retries; concurrent failures share one dialog. The passphrase is
+    kept in memory for that repository for the session and sent on the
+    child's stdin only to commands that read objects (never to key, auth,
+    config, version, init or clone). **Lock** in the sidebar or Security view
+    forgets it; closing or switching the repository does too.
+  - Locks are marked "mine" by matching the signed-in account or author name.
+  - **Windows installer.** `desktop-v*` tags build an NSIS installer with the
+    `mediagit` CLI bundled as a sidecar (`.github/workflows/desktop-release.yml`).
+    It is not code-signed yet. CI gains a Windows desktop job.
+- **`--machine` now also covers** `stats`, `gc`, `fsck`, `verify`, `auth`,
+  `key`, `config`, `sparse-checkout`, `rebase`, `cherry-pick`, `bisect` and
+  `reflog`. New global **`--secret-stdin`** (requires `--machine`) reads each
+  secret prompt (key passphrase, recovery, login password) as one line from
+  stdin; secrets are never accepted from argv or the environment in machine
+  mode. See [CLI_REFERENCE.md](CLI_REFERENCE.md#machine-readable-output---machine).
 - **`show <rev> --tree`** lists every file in a commit's tree (size and path,
   sorted by path), and **`show <rev>:<path> --output <file>`** writes a blob
   to a file; both have `--machine` reports.
@@ -78,6 +102,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`cherry-pick` and `revert` no longer create empty commits.** When the
+  result matches HEAD's tree they stop with error code `empty_commit`, a
+  non-zero exit and no new commit (`revert --no-commit` is exempt). `rebase`
+  drops a replayed commit that adds nothing, as git does, unless
+  `--keep-empty` is given.
+- **A passphrase-protected repository asked for the passphrase twice per
+  process**, so `push`, `fetch` and `pull` failed with a single
+  `--secret-stdin` line. The unwrapped key is now read once per process.
+  `cherry-pick --continue`, `--abort` and `--skip` also no longer demand the
+  commits argument.
 - **`status` listed unchanged files as staged after `reset --soft` or
   `merge --continue`.** Both leave the whole tree in the index; `status` now
   reports an index entry as staged only when it differs from HEAD.
