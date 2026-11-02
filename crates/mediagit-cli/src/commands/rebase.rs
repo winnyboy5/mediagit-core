@@ -388,6 +388,14 @@ impl RebaseCmd {
                 .tree_oid
                 .context("merge produced no tree during rebase")?;
 
+            // The change is already in the new base: replaying it would record
+            // an empty commit. Drop it, as git does, unless --keep-empty.
+            if merged_tree == ours_tree && !self.keep_empty {
+                state.current_commit = None;
+                state.save(repo_root)?;
+                continue;
+            }
+
             // Create new commit with the merged tree and new parent
             let new_commit = Commit {
                 tree: merged_tree,
