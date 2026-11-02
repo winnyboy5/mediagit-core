@@ -195,8 +195,10 @@ test.describe('Security: encryption', () => {
     await expect(dlg.getByRole('button', { name: 'Recover' })).toBeDisabled()
     await expectNoAxeViolations(page)
     await dlg.getByLabel('Recovery code').fill(CODE)
+    await expect(dlg.getByRole('button', { name: 'Recover' })).toBeDisabled() // a new passphrase is required
+    await dlg.getByLabel('New passphrase').fill('new-pass')
     await dlg.getByRole('button', { name: 'Recover' }).click()
-    await expect.poll(async () => (await ipcCalls(page, 'key_recover')).map((c) => c.args)).toEqual([{ repo: '/repos/hero-film', code: CODE, passphrase: null }])
+    await expect.poll(async () => (await ipcCalls(page, 'key_recover')).map((c) => c.args)).toEqual([{ repo: '/repos/hero-film', code: CODE, passphrase: 'new-pass' }])
     await enc(page).getByRole('button', { name: 'Recover with a code…' }).click()
     await expect(page.getByRole('dialog').getByLabel('Recovery code')).toHaveValue('')
     await expectNoTrace(page, CODE)

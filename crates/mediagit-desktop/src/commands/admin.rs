@@ -137,8 +137,13 @@ fn key_init_cmd(passphrase: Option<String>) -> Result<SecretCmd, EngineError> {
     with_passphrase(vec!["key".into(), "init".into()], passphrase)
 }
 
-/// `key recover` with the code on stdin (it is refused in argv), then an optional passphrase.
+/// `key recover` with the code on stdin (it is refused in argv), then the new passphrase.
+/// The code on stdin turns `--secret-stdin` on, so the CLI reads its master passphrase from
+/// the next line and never falls back to the keychain: a missing one would only fail at EOF.
 fn key_recover_cmd(code: String, passphrase: Option<String>) -> Result<SecretCmd, EngineError> {
+    if passphrase.as_deref().is_none_or(str::is_empty) {
+        return Err(invalid("passphrase", "required to recover"));
+    }
     SecretCmd::with(
         vec!["key".into(), "recover".into()],
         vec![Some(code), passphrase],
@@ -831,6 +836,9 @@ mod tests {
         let rec = key_recover_cmd("ABCD-EFGH-IJKL".into(), Some(PASS.into())).unwrap();
         assert_eq!(rec.argv, ["key", "recover"]);
         clean(&rec, &[PASS, "ABCD-EFGH-IJKL"]);
+        for blank in [None, Some(String::new())] {
+            assert!(key_recover_cmd("ABCD-EFGH-IJKL".into(), blank).is_err());
+        }
         // Retrying any object-touching command with the passphrase.
         for argv in [
             vec!["stats".to_owned()],

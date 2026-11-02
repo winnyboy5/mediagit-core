@@ -131,6 +131,10 @@ pub const NO_SESSION_PASSPHRASE: [&str; 6] = ["key", "auth", "config", "version"
 /// The CLI's failure when the master key (or passphrase) cannot open the repository key.
 const UNLOCK_FAILURE: &str = "could not unlock this repository's encryption key";
 
+/// What the CLI's `needs_input` names when the missing answer is the encryption passphrase.
+/// Only that prompt means "locked"; every other prompt is reported as `input_required`.
+const PASSPHRASE_PROMPT: &str = "encryption passphrase";
+
 /// Whether `e` is the CLI saying the supplied (or missing) key did not unlock the repository.
 pub fn is_unlock_failure(e: &EngineError) -> bool {
     matches!(e, EngineError::Cli { message, .. } if message.contains(UNLOCK_FAILURE))
@@ -309,7 +313,7 @@ impl Engine {
         #[cfg(windows)]
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: no console flash
 
-        let mut child = cmd.spawn().map_err(|e| EngineError::Spawn(e.to_string()))?;
+        let mut child = Reaped(cmd.spawn().map_err(|e| EngineError::Spawn(e.to_string()))?);
         if !secrets.is_empty() {
             let mut stdin = child
                 .stdin
@@ -399,6 +403,45 @@ impl Engine {
     }
 }
 
+/// A spawned CLI that cannot outlive its future: a cancelled run drops it, which kills the
+/// process and waits for it to exit, so the repository lane is never released (and the next
+/// write started) while the old command is still dying with files open.
+struct Reaped(tokio::process::Child);
+
+impl std::ops::Deref for Reaped {
+    type Target = tokio::process::Child;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Reaped {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        kill_and_reap(&mut self.0);
+    }
+}
+
+/// Kill `child` if it is still running and wait (bounded, ~2 s) until it has exited.
+/// Blocking on purpose: `Drop` cannot await, and a killed process exits within milliseconds.
+fn kill_and_reap(child: &mut tokio::process::Child) {
+    if !matches!(child.try_wait(), Ok(None)) {
+        return;
+    }
+    let _ = child.start_kill();
+    for _ in 0..200 {
+        if !matches!(child.try_wait(), Ok(None)) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 /// One stderr line as text: invalid UTF-8 is replaced, the line ending dropped.
 fn lossy_line(raw: &[u8]) -> String {
     String::from_utf8_lossy(raw)
@@ -435,10 +478,17 @@ pub fn parse_envelope(stdout: &str) -> Result<Value, EngineError> {
     }
     match (env.ok, env.error) {
         (true, _) => Ok(env.data),
-        (false, Some(err)) => Err(EngineError::Cli {
-            code: err.code,
-            message: err.message,
-        }),
+        (false, Some(err)) => {
+            let code = if err.code == "needs_input" && !err.message.contains(PASSPHRASE_PROMPT) {
+                "input_required".to_owned()
+            } else {
+                err.code
+            };
+            Err(EngineError::Cli {
+                code,
+                message: err.message,
+            })
+        }
         (false, None) => Err(EngineError::Protocol("ok:false without error".into())),
     }
 }
@@ -447,6 +497,25 @@ pub fn parse_envelope(stdout: &str) -> Result<Value, EngineError> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn kill_and_reap_leaves_no_running_child_behind() {
+        #[cfg(windows)]
+        let mut cmd = Command::new("ping");
+        #[cfg(windows)]
+        cmd.args(["-n", "60", "127.0.0.1"]);
+        #[cfg(not(windows))]
+        let mut cmd = Command::new("sleep");
+        #[cfg(not(windows))]
+        cmd.arg("60");
+        let mut child = cmd.stdout(Stdio::null()).spawn().unwrap();
+        assert!(child.try_wait().unwrap().is_none(), "still running");
+        kill_and_reap(&mut child);
+        assert!(
+            child.try_wait().unwrap().is_some(),
+            "exited before returning"
+        );
+    }
 
     #[test]
     fn envelope_ok_returns_data() {
@@ -457,15 +526,28 @@ mod tests {
     #[test]
     fn envelope_error_maps_code() {
         let e = parse_envelope(
-            r#"{"v":1,"ok":false,"error":{"code":"needs_input","message":"passphrase"}}"#,
+            r#"{"v":1,"ok":false,"error":{"code":"needs_input","message":"input required: encryption passphrase"}}"#,
         )
         .unwrap_err();
         assert_eq!(
             e,
             EngineError::Cli {
                 code: "needs_input".into(),
-                message: "passphrase".into()
+                message: "input required: encryption passphrase".into()
             }
+        );
+    }
+
+    #[test]
+    fn only_the_passphrase_prompt_stays_needs_input() {
+        // The UI opens Unlock for `needs_input`; a confirmation must not look like that.
+        let e = parse_envelope(
+            r#"{"v":1,"ok":false,"error":{"code":"needs_input","message":"input required: stash clear confirmation"}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(e, EngineError::Cli { ref code, .. } if code == "input_required"),
+            "{e:?}"
         );
     }
 

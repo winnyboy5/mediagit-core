@@ -161,3 +161,17 @@ describe('unlockRepo (shared prompt)', () => {
     expect(core.invoke).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('concurrent prompts', () => {
+  it('two commands that need a passphrase at once are each asked, one after the other', async () => {
+    const u = useUnlockStore()
+    const a = u.withUnlock(vi.fn().mockRejectedValueOnce(needs).mockResolvedValueOnce('A'))
+    const b = u.withUnlock(vi.fn().mockRejectedValueOnce(needs).mockResolvedValueOnce('B'))
+    await vi.waitFor(() => expect(u.open).toBe(true))
+    u.answer('p1')
+    await vi.waitFor(() => expect(u.open).toBe(true))
+    u.answer('p2')
+    expect(await Promise.all([a, b])).toEqual(['A', 'B'])
+    expect(u.open).toBe(false)
+  }, 2000)
+})

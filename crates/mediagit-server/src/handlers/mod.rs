@@ -1174,26 +1174,34 @@ async fn list_tree_impl(
 
     let (commit_oid, tree) = resolve_path_to_tree(&odb, &refdb, &ref_name, &dir_path).await?;
 
-    // ponytail: sequential size lookups; buffer them if huge flat directories are slow.
-    let mut entries = Vec::new();
-    for entry in tree.iter() {
-        let size = if entry.is_tree() {
-            None
-        } else {
-            odb.get_object_size(&entry.oid).await.ok().map(|s| s as u64)
-        };
-        entries.push(TreeEntryResponse {
-            name: entry.name.clone(),
-            mode: entry.mode.to_string(),
-            oid: entry.oid.to_hex(),
-            entry_type: if entry.is_tree() {
-                "tree".to_string()
-            } else {
-                "blob".to_string()
-            },
-            size,
-        });
-    }
+    // A non-chunked object has no size without reading it, so look sizes up a few at a
+    // time (`buffered` keeps the entries in tree order).
+    let tree_entries: Vec<TreeEntry> = tree.iter().cloned().collect();
+    let entries: Vec<TreeEntryResponse> = futures::stream::iter(tree_entries)
+        .map(|entry| {
+            let odb = odb.clone();
+            async move {
+                let size = if entry.is_tree() {
+                    None
+                } else {
+                    odb.get_object_size(&entry.oid).await.ok().map(|s| s as u64)
+                };
+                TreeEntryResponse {
+                    name: entry.name.clone(),
+                    mode: entry.mode.to_string(),
+                    oid: entry.oid.to_hex(),
+                    entry_type: if entry.is_tree() {
+                        "tree".to_string()
+                    } else {
+                        "blob".to_string()
+                    },
+                    size,
+                }
+            }
+        })
+        .buffered(8)
+        .collect()
+        .await;
 
     Ok(Json(TreeListResponse {
         ref_name,

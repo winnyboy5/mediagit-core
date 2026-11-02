@@ -52,7 +52,7 @@ const recoverOpen = ref(false)
 const code = ref('')
 const recoverPass = ref('')
 async function recover() {
-  if (!code.value) return
+  if (!code.value || !recoverPass.value) return
   const c = code.value
   const p = recoverPass.value
   code.value = recoverPass.value = ''
@@ -191,11 +191,11 @@ const sourceText = (s: string | null) => s ?? 'No key available on this machine'
     <Dialog v-model:open="recoverOpen" title="Recover the key" description="Enter the recovery code you saved when you turned encryption on.">
       <form id="recover-form" class="form" autocomplete="off" @submit.prevent="recover">
         <TextField v-model="code" label="Recovery code" type="password" mono />
-        <TextField v-model="recoverPass" label="New passphrase (optional)" type="password" />
+        <TextField v-model="recoverPass" label="New passphrase" type="password" hint="Protects the recovered key on this computer. Required." />
       </form>
       <template #footer>
         <Button @click="recoverOpen = false">Cancel</Button>
-        <Button type="submit" form="recover-form" variant="primary" :disabled="!code || sec.busy">Recover</Button>
+        <Button type="submit" form="recover-form" variant="primary" :disabled="!code || !recoverPass || sec.busy">Recover</Button>
       </template>
     </Dialog>
 

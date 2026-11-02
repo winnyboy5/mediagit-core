@@ -259,6 +259,24 @@ fn merge_control_argv(action: &str) -> Result<Vec<String>, EngineError> {
     }
 }
 
+/// Refuse `out` when writing it would land outside `repo`: the file itself is a link, or a
+/// folder on the way is a symlink / junction pointing elsewhere. (`repo_relative` only checks
+/// the spelling of the path; the CLI's `File::create` follows links.)
+fn stays_in_repo(repo: &Path, out: &Path) -> Result<(), EngineError> {
+    let escapes = || invalid("path", &out.to_string_lossy());
+    if std::fs::symlink_metadata(out).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(escapes());
+    }
+    // The nearest folder that exists is where the file would really be created.
+    let Some(dir) = out.ancestors().skip(1).find(|d| d.is_dir()) else {
+        return Err(escapes());
+    };
+    match dunce::canonicalize(dir) {
+        Ok(real) if real.starts_with(repo) => Ok(()),
+        _ => Err(escapes()),
+    }
+}
+
 /// `show <rev>:<path> --output <repo>/<path>`: put a file as it was at `rev` into the
 /// working folder. Returns the repo-relative path too, for the follow-up `add`.
 fn file_at_argv(repo: &Path, rev: &str, path: &str) -> Result<(String, Vec<String>), EngineError> {
@@ -268,6 +286,7 @@ fn file_at_argv(repo: &Path, rev: &str, path: &str) -> Result<(String, Vec<Strin
         return Err(invalid("path", path));
     }
     let out = repo.join(&rel);
+    stays_in_repo(repo, &out)?;
     let argv = vec![
         "show".into(),
         format!("{rev}:{rel}"),
@@ -329,6 +348,12 @@ fn stash_entry_argv(sub: &str, index: u32) -> Result<Vec<String>, EngineError> {
         return Err(invalid("stash action", sub));
     }
     Ok(vec!["stash".into(), sub.into(), index.to_string()])
+}
+
+/// `stash clear --force`: the UI has already asked, and under `--machine` the CLI's own
+/// confirmation would fail `needs_input`.
+fn stash_clear_argv() -> Vec<String> {
+    vec!["stash".into(), "clear".into(), "--force".into()]
 }
 
 /// `reset --soft|--mixed|--hard -- <rev>`. The mode is always spelled out.
@@ -1183,13 +1208,7 @@ pub async fn stash_clear(
     repo: String,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    write(
-        &engine,
-        &queues,
-        &repo,
-        &["stash".to_owned(), "clear".into()],
-    )
-    .await
+    write(&engine, &queues, &repo, &stash_clear_argv()).await
 }
 
 /// Move HEAD to `rev`, keeping files (`soft`: staged too; `mixed`: unstaged). Never touches
@@ -1320,8 +1339,25 @@ pub async fn remote_ls_tree(
     .await
 }
 
-/// Download one remote file into the preview folder (cached by ref + path) so the webview
-/// can show it; cancellable. Written under a private name and renamed on success.
+/// Cache key of a remote preview: the repository and the ref it was asked at. Only a full
+/// commit id names fixed content; a branch (or no ref, the server default) moves, so those
+/// get a key no other call shares and are fetched again every time.
+fn remote_preview_key(repo: &Path, git_ref: Option<&str>) -> String {
+    match git_ref {
+        Some(r) if matches!(r.len(), 40 | 64) && r.bytes().all(|b| b.is_ascii_hexdigit()) => {
+            format!("remote:{}:{r}", repo.display())
+        }
+        _ => format!(
+            "remote:{}:fresh:{}:{}",
+            repo.display(),
+            std::process::id(),
+            PART_SEQ.fetch_add(1, Ordering::Relaxed)
+        ),
+    }
+}
+
+/// Download one remote file into the preview folder (cached by repository + commit id + path;
+/// a moving ref is never served from the cache) so the webview can show it; cancellable. Written under a private name and renamed on success.
 #[tauri::command]
 pub async fn repo_download_preview(
     engine: tauri::State<'_, Engine>,
@@ -1334,7 +1370,7 @@ pub async fn repo_download_preview(
 ) -> Result<Extracted, EngineError> {
     let repo = repo_path(&repo)?;
     let dir = preview_dir();
-    let key = format!("remote:{}", git_ref.as_deref().unwrap_or(""));
+    let key = remote_preview_key(&repo, git_ref.as_deref());
     let dest = dir.join(preview_name(&key, &remote_path));
     if let Some(m) = std::fs::metadata(&dest).ok().filter(|m| m.len() > 0) {
         return Ok(Extracted {
@@ -1382,7 +1418,7 @@ pub mod admin;
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     #[allow(clippy::needless_pass_by_value)] // call sites pass temporaries
     fn bad(r: Result<Vec<String>, EngineError>) -> bool {
@@ -1611,6 +1647,7 @@ mod tests {
         for sub in ["show", "apply", "pop", "drop"] {
             assert!(stash_entry_argv(sub, 0).is_ok(), "{sub}");
         }
+        assert_eq!(stash_clear_argv(), ["stash", "clear", "--force"]);
         assert!(bad(stash_entry_argv("clear", 0)));
         assert!(bad(stash_entry_argv("--index", 0)));
     }
@@ -1775,6 +1812,91 @@ mod tests {
         assert!(a.ends_with(".png"), "{a}");
         assert!(!preview_name("abcd", "x/no_ext").contains('.'));
         assert!(!preview_name("abcd", "x/a.we ird").contains(' '));
+    }
+
+    #[test]
+    fn restoring_through_a_link_that_leaves_the_repo_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = repo_path(tmp.path().to_str().unwrap()).unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let outside = elsewhere.path();
+        std::fs::create_dir(repo.join("real")).unwrap();
+        let link = repo.join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside, &link).unwrap();
+        #[cfg(windows)]
+        assert!(
+            std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&link)
+                .arg(outside)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        assert!(file_at_argv(&repo, "HEAD", "real/a.psd").is_ok());
+        assert!(
+            file_at_argv(&repo, "HEAD", "link/a.psd").is_err(),
+            "folder is a link out"
+        );
+    }
+
+    #[test]
+    fn remote_preview_keys_pin_repo_and_commit_and_never_cache_a_moving_ref() {
+        let sha = "a".repeat(64);
+        let (a, b) = (Path::new("/repos/a"), Path::new("/repos/b"));
+        // A commit id is fixed content: shared per repository, never across repositories.
+        assert_eq!(
+            remote_preview_key(a, Some(&sha)),
+            remote_preview_key(a, Some(&sha))
+        );
+        assert_ne!(
+            remote_preview_key(a, Some(&sha)),
+            remote_preview_key(b, Some(&sha))
+        );
+        // A branch, or the server default, can move: each call is fetched afresh.
+        for r in [None, Some("main"), Some("abc123")] {
+            assert_ne!(remote_preview_key(a, r), remote_preview_key(a, r), "{r:?}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancelled_write_finishes_dropping_its_work_before_the_lane_is_free() {
+        // Stands in for a child process that takes a moment to die when its future is dropped.
+        struct SlowDrop(Arc<AtomicBool>);
+        impl Drop for SlowDrop {
+            fn drop(&mut self) {
+                std::thread::sleep(Duration::from_millis(150));
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let q = Arc::new(RepoQueues::default());
+        let gone = Arc::new(AtomicBool::new(false));
+        let first = tokio::spawn({
+            let (q, gone) = (Arc::clone(&q), Arc::clone(&gone));
+            async move {
+                q.write(Path::new("/r/a"), async {
+                    let _slow = SlowDrop(gone);
+                    std::future::pending::<()>().await;
+                })
+                .await;
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let second = tokio::spawn({
+            let (q, gone) = (Arc::clone(&q), Arc::clone(&gone));
+            async move {
+                q.write(Path::new("/r/a"), async { gone.load(Ordering::SeqCst) })
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        first.abort();
+        assert!(
+            second.await.unwrap(),
+            "the next write started while the cancelled one was still dying"
+        );
     }
 
     #[tokio::test]

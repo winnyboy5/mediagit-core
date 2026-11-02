@@ -18,11 +18,20 @@ export const useUnlockStore = defineStore('unlock', () => {
   /** Set when the previous answer did not work. */
   const retry = ref(false)
   let waiting: ((answer: string | null) => void) | null = null
+  /** Prompts run one at a time: a second asker waits its turn instead of replacing the first. */
+  let turn: Promise<unknown> = Promise.resolve()
 
   function ask(again: boolean): Promise<string | null> {
-    retry.value = again
-    open.value = true
-    return new Promise((resolve) => (waiting = resolve))
+    const asked = turn.then(
+      () =>
+        new Promise<string | null>((resolve) => {
+          retry.value = again
+          open.value = true
+          waiting = resolve
+        }),
+    )
+    turn = asked
+    return asked
   }
 
   function answer(passphrase: string | null) {

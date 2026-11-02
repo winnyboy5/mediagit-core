@@ -208,6 +208,41 @@ async fn lists_directory_synthesized_from_flat_prefix() {
 }
 
 #[tokio::test]
+async fn listing_reports_every_file_size_in_name_order() {
+    let names: Vec<String> = (0..20).map(|i| format!("f{i:02}.txt")).collect();
+    let bodies: Vec<Vec<u8>> = (0..20).map(|i| vec![b'x'; i + 1]).collect();
+    let files: Vec<(&str, &[u8])> = names
+        .iter()
+        .zip(&bodies)
+        .map(|(n, b)| (n.as_str(), b.as_slice()))
+        .collect();
+    let (_temp, server_repos) = setup_repo("sizes-repo", &files).await;
+
+    let (base_url, _handle) = start_test_server(server_repos).await;
+    mediagit_protocol::ensure_crypto_provider();
+    let resp = reqwest::Client::new()
+        .get(format!("{}/sizes-repo/tree?ref=main", base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let got: Vec<(String, u64)> = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["name"].as_str().unwrap().to_string(),
+                e["size"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    let want: Vec<(String, u64)> = names.iter().cloned().zip(1..=20).collect();
+    assert_eq!(got, want);
+}
+
+#[tokio::test]
 async fn root_listing_unchanged_for_single_level_repo() {
     let (_temp, server_repos) = setup_repo(
         "flat-repo",
