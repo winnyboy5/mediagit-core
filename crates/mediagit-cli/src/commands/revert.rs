@@ -283,6 +283,15 @@ impl RevertCmd {
             .context("Merge did not produce a tree")?;
 
         if !self.no_commit {
+            // Reverting a change that is already undone would record an empty
+            // commit and report success.
+            if new_tree_oid == head_commit.tree {
+                anyhow::bail!(
+                    "nothing to commit - the change from {} is already reverted on this branch",
+                    &commit_oid.to_hex()[..7]
+                );
+            }
+
             let message = self.message.clone().unwrap_or_else(|| {
                 format!(
                     "Revert \"{}\"\n\nThis reverts commit {}.",

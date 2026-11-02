@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `fetch` and `pull`.** The repo key was unwrapped once for the remote
   compatibility check and again when arming it. It is now unwrapped at most
   once per process (#96).
+- **`cherry-pick` and `revert` recorded an empty commit and reported
+  success** when the change was already on the branch. Both now refuse with
+  "nothing to commit" and a non-zero exit. `rebase` drops a replayed commit
+  that became empty, as git does, unless `--keep-empty` (#97).
 - **`status` listed unchanged files as staged after `reset --soft` or
   `merge --continue`.** Both leave the whole tree in the index; `status` now
   reports an index entry as staged only when it differs from HEAD.
