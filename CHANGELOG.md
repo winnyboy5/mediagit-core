@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A passphrase-encrypted repo asked for the passphrase twice on `push`,
+  `fetch` and `pull`.** The repo key was unwrapped once for the remote
+  compatibility check and again when arming it. It is now unwrapped at most
+  once per process (#96).
 - **`status` listed unchanged files as staged after `reset --soft` or
   `merge --continue`.** Both leave the whole tree in the index; `status` now
   reports an index entry as staged only when it differs from HEAD.
