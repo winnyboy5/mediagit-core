@@ -107,6 +107,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Dependency updates** (lockfile only, within existing version ranges):
+  aws-config 1.12.0, aws-sdk-s3 1.146.1, aws-smithy-http-client 1.5.1,
+  google-cloud-storage 1.20.0 (with opentelemetry 0.33), keyring 4.2.0,
+  sha2 0.11.1, proptest 1.12.0. Verified against live MinIO, AWS S3, GCS
+  and Azure, and the Windows keychain.
 - **`status` no longer re-reads unchanged files** (#94). It used to hash every
   committed file on every run, so its cost grew with the size of the working
   tree (a 500 GB repository re-read 500 GB per `status`). A stat cache
