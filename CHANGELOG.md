@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still decode. RUSTSEC-2026-0387 (`crypto-bigint` 0.5, timing) is ignored
   until 2026-12-01: no `jsonwebtoken` release moves off it yet, and we only
   use HS256, so the affected p256/p384 code never runs.
+- **A forged delta can no longer make the client reserve gigabytes of
+  memory.** A delta's stated output size (and the zstd frame's own size
+  field) came straight from disk or the server and set the decode buffer up
+  front, so a few bytes claiming 16 GiB could exhaust memory. Deltas up to
+  64 MiB (every chunk delta) decode exactly as before; larger ones now grow
+  the buffer only as real bytes are decoded. The output is still checked
+  against the stated size.
 
 ### Fixed
 
