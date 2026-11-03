@@ -956,8 +956,8 @@ pub(crate) fn is_loopback_host(host: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Resolves when the process receives Ctrl+C (all platforms) or SIGTERM
-/// (unix only). Used to drive `.with_graceful_shutdown(...)` so in-flight
+/// Resolves when the process receives Ctrl+C (all platforms), SIGTERM
+/// (unix), or a console close / logoff / shutdown event (Windows). Used to drive `.with_graceful_shutdown(...)` so in-flight
 /// requests (e.g. a multi-GB chunk upload) finish instead of being hard-cut.
 async fn shutdown_signal() {
     let ctrl_c = async {
@@ -974,12 +974,27 @@ async fn shutdown_signal() {
             .await;
     };
 
-    #[cfg(not(unix))]
+    // Windows: console close, logoff and system shutdown (service stop,
+    // `taskkill` without /F) are the SIGTERM equivalents.
+    #[cfg(windows)]
+    let terminate = async {
+        use tokio::signal::windows;
+        let mut close = windows::ctrl_close().expect("failed to install close handler");
+        let mut shutdown = windows::ctrl_shutdown().expect("failed to install shutdown handler");
+        let mut logoff = windows::ctrl_logoff().expect("failed to install logoff handler");
+        tokio::select! {
+            _ = close.recv() => {}
+            _ = shutdown.recv() => {}
+            _ = logoff.recv() => {}
+        }
+    };
+
+    #[cfg(not(any(unix, windows)))]
     let terminate = std::future::pending::<()>();
 
     tokio::select! {
         _ = ctrl_c => tracing::info!("Received Ctrl+C, starting graceful shutdown"),
-        _ = terminate => tracing::info!("Received SIGTERM, starting graceful shutdown"),
+        _ = terminate => tracing::info!("Received termination signal, starting graceful shutdown"),
     }
 }
 

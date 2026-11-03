@@ -49,6 +49,10 @@ tempfile = "3.13"
 roaring = "0.11.4"
 ignore = "0.4"  # gitignore-style pattern matching, reused for sparse-checkout pattern mode
 
+[target.'cfg(windows)'.dependencies]
+# Stat-cache file identity (NTFS file index); already in the tree via walkdir.
+winapi-util = "0.1"
+
 [dev-dependencies]
 # DC-7: `keyed_odb_seals` needs `EncryptionKey` and `envelope::is_sealed` to
 # prove a plain-constructor ObjectDatabase seals once the process is keyed.

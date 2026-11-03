@@ -3728,6 +3728,7 @@ dependencies = [
  "toml",
  "tracing",
  "uuid",
+ "winapi-util",
  "zstd",
 ]
 
