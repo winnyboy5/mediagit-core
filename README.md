@@ -12,11 +12,11 @@
 **Version**: v0.7.0-rc.1 (gc data-safety fixes for concurrent push and add, interrupted-pull recovery, a faster `status`, cherry-pick/revert/rebase empty-commit fixes, Windows fixes; see [CHANGELOG](CHANGELOG.md)). Previous release: v0.6.0-rc.1.
 **Status**: 🚧 **RELEASE CANDIDATE**
 **Features**: 100% complete (all P0–P3 items from the rc.3 feature-completeness sprint implemented — a closed batch, distinct from the forward-looking backlog in [FUTURE_TODOS.md](FUTURE_TODOS.md), which reuses the same P0–P3 labels as effort/impact tiers for planned work)
-**Last Validated**: October 23, 2026 (v0.6.0-rc.1) — SCALE QA campaign `20261022-ga-060rc1-1`, **279 gates: 278 pass, 0 failures, 1 skip**, across MinIO, AWS S3, Azure Blob, GCS and local; a second campaign `20261022-ga-060rc1-2` passed every gate except one GCS server startup probe that timed out (transient; the same build passed it minutes earlier), and phase `06_remote` was then rerun twice on all backends with 36 / 36 pass each. The skip is `A8-disk-full`, which needs an elevated shell to attach a size-capped volume. Previous release v0.5.0-rc.1 was validated on October 20, 2026 by campaigns `ga-050rc1-3` and `ga-050rc1-4` (262 gates each, 0 failures, 1 skip).
+**Last Validated**: November 3, 2026 (v0.7.0-rc.1) — SCALE QA campaign `20261103-ga-070rc1-9`, **292 gates: 291 pass, 0 failures, 1 skip**, across MinIO, AWS S3, Azure Blob, GCS and local. The campaign before it, `20261103-ga-070rc1-8`, passed every gate except the 16-clone MinIO concurrency drill, where every clone timed out while the test machine was short of memory; phase `10_scale` was then rerun on its own and passed 34 / 34. The skip is `A8-disk-full`, which needs an elevated shell to attach a size-capped volume. Previous release v0.6.0-rc.1 was validated on October 23, 2026 by campaigns `ga-060rc1-1` and `ga-060rc1-2` (279 gates, 0 failures, 1 skip).
 **At-rest encryption (DC-7)**: now campaign-covered. Every campaign runs 15 encryption gates — push, clone and byte-for-byte roundtrip against MinIO, AWS S3, Azure Blob and GCS, each asserting every object is actually sealed, plus three key-mismatch drills. (This line previously said encryption had never been in a campaign; that stopped being true and the README did not follow.)
 **🚨 WARNING 🚨**: This project is under active development. Be aware that large breaking changes may happen before 1.0 is reached.
 
-✅ **614/614 deep-tests passing** across MinIO, AWS S3 (ap-south-1), Azure Blob (South India), Google Cloud Storage *(deep-test sweep, June 2026; the current per-campaign gate count is 262 — see Last Validated above)*
+✅ **614/614 deep-tests passing** across MinIO, AWS S3 (ap-south-1), Azure Blob (South India), Google Cloud Storage *(deep-test sweep, June 2026; the current per-campaign gate count is 292 — see Last Validated above)*
 ✅ **32 CLI commands validated end-to-end** — 0 crashes, 0 data corruption across all 4 cloud backends *(that sweep's command count; the CLI now exposes 35 — see [CLI Reference](#cli-reference))*
 ✅ **27+ file types tested** (58 GB dataset) across video, audio, 3D, image, design, ML
 ✅ **26.3–26.5% storage savings** measured on cloud backends (compression + dedup + delta, validated June 2026)
@@ -912,4 +912,4 @@ Special thanks to:
 
 **Made with 🦀 and ❤️ by Aswin Krishnamoorthy**
 
-**Status**: Release Candidate | **Version**: v0.6.0-rc.1 | **Updated**: October 23, 2026 | **Cloud-Validated**: QA campaign `20261022-ga-060rc1-1` 278 pass, 0 failures, 1 skip; `20261022-ga-060rc1-2` plus two `06_remote` reruns (one transient GCS startup probe waived) ✅
+**Status**: Release Candidate | **Version**: v0.7.0-rc.1 | **Updated**: November 3, 2026 | **Cloud-Validated**: QA campaign `20261103-ga-070rc1-9` 291 pass, 0 failures, 1 skip; `20261103-ga-070rc1-8` plus a `10_scale` rerun (34 / 34) ✅
