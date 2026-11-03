@@ -581,6 +581,164 @@ function Check-20-PushRepairHealsPoisonedRemote {
 }
 
 # ============================================================================
+# CHK21-26 - user-visible fixes on feat/release-v0.7.0-rc.1
+# CHK21/22: cherry-pick / revert refuse an empty result (#97, 61fa6a2)
+# CHK23/24: rebase drops a replayed commit that became empty; --keep-empty keeps it (#97)
+# CHK25:    status after reset --soft lists only real changes (f7d960b)
+# CHK26:    status stat cache still sees edits (#94, 7b57b8a)
+# ============================================================================
+function Get-QaHeadOid([string]$Repo) {
+  return ((Invoke-MG $Repo @("log", "--oneline", "-n", "1") $Phase).Out.Trim() -split "\s+")[0]
+}
+
+function Get-QaCommitCount([string]$Repo) {
+  $o = (Invoke-MG $Repo @("log", "--oneline") $Phase).Out
+  return @($o -split "`n" | Where-Object { $_.Trim() }).Count
+}
+
+function Check-21-CherryPickEmptyRefused {
+  $id = "CHK21-cherrypick-empty-refused"
+  if (-not (ShouldRun $id)) { return }
+  $repo = New-SandboxRepo "c21-cp-empty" $Phase
+  New-QaCommit $repo "base.bin" "base" 1 2101
+  Br $repo "feature"; Sw $repo "feature" | Out-Null
+  New-QaCommit $repo "f.bin" "feature adds f.bin" 1 2102
+  $pick = Get-QaHeadOid $repo
+  Sw $repo "main" | Out-Null
+  $r1 = Invoke-MG $repo @("cherry-pick", $pick) $Phase
+  $afterFirst = Get-QaHeadOid $repo
+  $countFirst = Get-QaCommitCount $repo
+  $r2 = Invoke-MG $repo @("cherry-pick", $pick) $Phase
+  $headSame = (Get-QaHeadOid $repo) -eq $afterFirst
+  $countSame = (Get-QaCommitCount $repo) -eq $countFirst
+  $fsckOk = Test-QaFsckClean $repo
+  $pass = ($r1.Exit -eq 0) -and ($r2.Exit -ne 0) -and $headSame -and $countSame -and $fsckOk
+  Rec $id "cherry-pick same commit twice" $pass "first-exit=$($r1.Exit) second-exit=$($r2.Exit) (must be nonzero) head-unchanged=$headSame commits-unchanged=$countSame fsck=$fsckOk msg=$((($r2.Out -split "`n") | Select-Object -Last 1).Trim())"
+}
+
+function Check-22-RevertEmptyRefused {
+  $id = "CHK22-revert-empty-refused"
+  if (-not (ShouldRun $id)) { return }
+  $repo = New-SandboxRepo "c22-revert-empty" $Phase
+  New-QaCommit $repo "a.bin" "first" 1 2201
+  New-QaCommit $repo "b.bin" "add b" 1 2202
+  $addB = Get-QaHeadOid $repo
+  $r1 = Invoke-MG $repo @("revert", $addB) $Phase
+  $afterFirst = Get-QaHeadOid $repo
+  $countFirst = Get-QaCommitCount $repo
+  $r2 = Invoke-MG $repo @("revert", $addB) $Phase
+  $headSame = (Get-QaHeadOid $repo) -eq $afterFirst
+  $countSame = (Get-QaCommitCount $repo) -eq $countFirst
+  $fsckOk = Test-QaFsckClean $repo
+  $pass = ($r1.Exit -eq 0) -and ($r2.Exit -ne 0) -and $headSame -and $countSame -and $fsckOk
+  Rec $id "revert same commit twice" $pass "first-exit=$($r1.Exit) second-exit=$($r2.Exit) (must be nonzero) head-unchanged=$headSame commits-unchanged=$countSame fsck=$fsckOk msg=$((($r2.Out -split "`n") | Select-Object -Last 1).Trim())"
+}
+
+# feature adds same.bin; main adds the byte-identical same.bin; rebase feature onto main.
+function New-QaRebaseEmptyRepo([string]$Name) {
+  $repo = New-SandboxRepo $Name $Phase
+  New-QaCommit $repo "base.bin" "base" 1 2301
+  Br $repo "feature"; Sw $repo "feature" | Out-Null
+  New-QaCommit $repo "same.bin" "feature adds same.bin" 1 2302
+  Sw $repo "main" | Out-Null
+  New-QaCommit $repo "same.bin" "main adds same.bin" 1 2302
+  Sw $repo "feature" | Out-Null
+  return $repo
+}
+
+function Check-23-RebaseDropsEmpty {
+  $id = "CHK23-rebase-drops-empty"
+  if (-not (ShouldRun $id)) { return }
+  $repo = New-QaRebaseEmptyRepo "c23-rebase-empty"
+  $mainOid = ((Invoke-MG $repo @("log", "--oneline", "-n", "1", "main") $Phase).Out.Trim() -split "\s+")[0]
+  $sameHash = Get-QaHash (Join-Path $repo "same.bin")
+  $r = Invoke-MG $repo @("rebase", "main") $Phase
+  $head = Get-QaHeadOid $repo
+  $dropped = ($head -eq $mainOid)
+  $count = Get-QaCommitCount $repo
+  $fileOk = (Get-QaHashOrNull (Join-Path $repo "same.bin")) -eq $sameHash
+  $fsckOk = Test-QaFsckClean $repo
+  $pass = ($r.Exit -eq 0) -and $dropped -and $fileOk -and $fsckOk
+  Rec $id "rebase onto branch that already has the change" $pass "exit=$($r.Exit) head-equals-main=$dropped (feature=$head main=$mainOid) commits=$count file-ok=$fileOk fsck=$fsckOk"
+}
+
+function Check-24-RebaseKeepEmptyKept {
+  $id = "CHK24-rebase-keep-empty-kept"
+  if (-not (ShouldRun $id)) { return }
+  $repo = New-QaRebaseEmptyRepo "c24-rebase-keep-empty"
+  $mainOid = ((Invoke-MG $repo @("log", "--oneline", "-n", "1", "main") $Phase).Out.Trim() -split "\s+")[0]
+  $sameHash = Get-QaHash (Join-Path $repo "same.bin")
+  $r = Invoke-MG $repo @("rebase", "--keep-empty", "main") $Phase
+  $head = Get-QaHeadOid $repo
+  $kept = ($head -ne $mainOid)
+  $count = Get-QaCommitCount $repo
+  $fileOk = (Get-QaHashOrNull (Join-Path $repo "same.bin")) -eq $sameHash
+  $fsckOk = Test-QaFsckClean $repo
+  $pass = ($r.Exit -eq 0) -and $kept -and $fileOk -and $fsckOk
+  Rec $id "rebase --keep-empty" $pass "exit=$($r.Exit) empty-commit-kept=$kept (feature=$head main=$mainOid) commits=$count file-ok=$fileOk fsck=$fsckOk"
+}
+
+function Check-25-StatusAfterSoftReset {
+  $id = "CHK25-status-after-soft-reset"
+  if (-not (ShouldRun $id)) { return }
+  $repo = New-SandboxRepo "c25-status-soft" $Phase
+  New-QaCommit $repo "a.bin" "A" 1 2501
+  New-QaCommit $repo "b.bin" "B" 1 2502
+  $r = Invoke-MG $repo @("reset", "--soft", "HEAD~1") $Phase
+  $s = Invoke-MG $repo @("status", "--porcelain") $Phase
+  $lines = @($s.Out -split "`n" | ForEach-Object { $_.TrimEnd() } | Where-Object { $_ })
+  $bStaged = @($lines | Where-Object { $_ -match '^A\s+b\.bin$' }).Count -eq 1
+  $aListed = @($lines | Where-Object { $_ -match 'a\.bin' }).Count
+  $pass = ($r.Exit -eq 0) -and ($s.Exit -eq 0) -and $bStaged -and ($aListed -eq 0) -and ($lines.Count -eq 1)
+  Rec $id "reset --soft HEAD~1; status --porcelain" $pass "reset-exit=$($r.Exit) b-staged-as-A=$bStaged unchanged-a-listed=$aListed porcelain=[$($lines -join ' | ')]"
+}
+
+# Stat cache (#94): after the cache is warm, a same-size edit and a same-size replace-via-rename that
+# restores the mtime must both still be reported. The cache keys on size+mtime+file id+change time
+# (Windows: creation time), so the rename case changes the creation time and MUST re-hash.
+# Honest scope: a binary WITHOUT the cache (pre-fix) hashes every file, so this passes there too; its
+# value is regression protection for the cache. A cache keyed on size+mtime only would fail the rename case.
+# Documented limit (NOT asserted): an in-place rewrite keeping size AND mtime hits the cache; that probe is
+# reported in the detail only, as evidence the cache is consulted, and is compared with MEDIAGIT_STAT_CACHE=0.
+function Check-26-StatusStatCacheSeesEdits {
+  $id = "CHK26-status-statcache-sees-edits"
+  if (-not (ShouldRun $id)) { return }
+  $repo = New-SandboxRepo "c26-statcache" $Phase
+  foreach ($n in @("a", "b", "c")) { New-QaBinaryFixture (Join-Path $repo "$n.bin") 1 (2600 + [int][char]$n) }
+  Invoke-MG $repo @("add", ".") $Phase | Out-Null
+  Invoke-MG $repo @("commit", "-m", "abc") $Phase | Out-Null
+  $old = (Get-Date).ToUniversalTime().AddHours(-1)
+  foreach ($n in @("a", "b", "c")) { (Get-Item (Join-Path $repo "$n.bin")).LastWriteTimeUtc = $old }
+  $st = { param($off)
+    $saved = $env:MEDIAGIT_STAT_CACHE
+    try { if ($off) { $env:MEDIAGIT_STAT_CACHE = "0" } else { Remove-Item Env:\MEDIAGIT_STAT_CACHE -EA SilentlyContinue }
+      return (Invoke-MG $repo @("status", "--porcelain") $Phase).Out.Trim()
+    } finally { if ($null -ne $saved) { $env:MEDIAGIT_STAT_CACHE = $saved } else { Remove-Item Env:\MEDIAGIT_STAT_CACHE -EA SilentlyContinue } }
+  }
+  $w1 = & $st $false; $w2 = & $st $false        # warm the cache, second run served from it
+  $cacheFile = Test-Path (Join-Path $repo ".mediagit\stat-cache")
+  $warmClean = ($w1 -eq "") -and ($w2 -eq "")
+  # (1) same-size edit, new mtime
+  New-QaBinaryFixture (Join-Path $repo "a.bin") 1 2691
+  # (2) same-size replace via rename, mtime restored to the original
+  $tmp = Join-Path $repo "b.tmp"
+  New-QaBinaryFixture $tmp 1 2692
+  (Get-Item $tmp).LastWriteTimeUtc = $old
+  Move-Item -Force $tmp (Join-Path $repo "b.bin")
+  $on = & $st $false
+  $off = & $st $true
+  $seesA = $on -match 'a\.bin'
+  $seesB = $on -match 'b\.bin'
+  $parity = ($on -eq $off)
+  # informational probe: in-place rewrite, same size, same mtime (documented limit)
+  New-QaBinaryFixture (Join-Path $repo "c.bin") 1 2693
+  (Get-Item (Join-Path $repo "c.bin")).LastWriteTimeUtc = $old
+  $probeOn = (& $st $false) -match 'c\.bin'; $probeOff = (& $st $true) -match 'c\.bin'
+  $pass = $warmClean -and $seesA -and $seesB -and $parity -and $probeOff
+  Rec $id "warm stat cache; same-size edit + rename-replace" $pass "warm-clean=$warmClean cache-file-present=$cacheFile sees-edit=$seesA sees-rename-replace=$seesB parity-with-cache-off=$parity | probe(in-place same size+mtime): cache-on-reports=$probeOn cache-off-reports=$probeOff (on=false,off=true means cache is live; both true is also fine)"
+}
+
+# ============================================================================
 # Generic op matrix: {reset --soft/--mixed/--hard+reflog, revert, stash, switch(dirty),
 # merge --no-ff, cherry-pick, rebase} against a fresh 2-branch binary-file repo each time.
 # ============================================================================
@@ -740,6 +898,12 @@ Check-17-FsckCountsPackedObjects
 Check-18-FsckDetectsPackCorruption
 Check-19-BisectNoPrematureComplete
 Check-20-PushRepairHealsPoisonedRemote
+Check-21-CherryPickEmptyRefused
+Check-22-RevertEmptyRefused
+Check-23-RebaseDropsEmpty
+Check-24-RebaseKeepEmptyKept
+Check-25-StatusAfterSoftReset
+Check-26-StatusStatCacheSeesEdits
 
 Matrix-ResetSoftMixedHard
 Matrix-Revert
