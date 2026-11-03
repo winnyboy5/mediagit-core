@@ -127,13 +127,13 @@ rebase	--keep-empty	no	OK
 rebase	--abort	no	ERROR
 rebase	--continue-rebase	no	ERROR
 rebase	--skip	no	ERROR
-cherry-pick	-(bare invocation)	no	OK
+cherry-pick	-(bare invocation)	no	ERROR
 cherry-pick	--continue-pick	no	ERROR
 cherry-pick	--abort	no	ERROR
 cherry-pick	--skip	no	ERROR
 cherry-pick	-n,--no-commit	no	OK
-cherry-pick	-e,--edit	no	OK
-cherry-pick	-x,--append-message	no	OK
+cherry-pick	-e,--edit	no	ERROR
+cherry-pick	-x,--append-message	no	ERROR
 stash	-(bare invocation)	no	USAGE
 stash push	-(bare invocation)	no	OK
 stash push	-m,--message	yes	OK
