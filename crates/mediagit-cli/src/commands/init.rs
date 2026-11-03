@@ -183,7 +183,9 @@ impl InitCmd {
         // Configure filesystem storage
         let config = Config {
             storage: StorageConfig::FileSystem(FileSystemStorage {
-                base_path: repo_path.join(".mediagit/objects").display().to_string(),
+                // Relative to the repo root, so a copied or moved repo uses its
+                // own objects, not the original's.
+                base_path: ".mediagit/objects".to_string(),
                 create_dirs: true,
                 sync: false,
                 file_permissions: "0644".to_string(),

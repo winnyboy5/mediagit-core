@@ -18,7 +18,7 @@ each entry cites the file it was verified against.
 | # | Item | Priority | Effort | Blocks / Enables |
 |---|------|----------|--------|-----------------|
 | 2 | HTTP/3 via reqwest feature flag | **P3** | 1 day | When reqwest `http3` stabilizes (~2026 Q4) |
-| 3 | Git migration tooling (rewrite filter/install/track) | **P3** | 2-3 wk | Crate deleted in `c5d0a23`; rewrite, not re-integration. `docs/next-set/SAAS-readiness.md` §8 ranks a Git LFS importer as roadmap Phase 1: re-prioritize when started |
+| 3 | Git migration tooling (rewrite filter/install/track) | **P3** | 2-3 wk | Crate deleted in `c5d0a23`; rewrite, not re-integration. The SaaS readiness review ranks a Git LFS importer as roadmap Phase 1: re-prioritize when started |
 | 4 | `mediagit://` URL scheme | **P3** | 1 day | Post-HTTP/3 adoption |
 | 5 | Differential checkout (only changed files) | **P3** | 1-2 wk | 70% branch switch latency reduction |
 | 7 | Pack file format documentation | **P3** | 0.5 day | Book completeness |
@@ -83,7 +83,7 @@ Git/git-LFS import is currently documented as **unsupported**, which is a decisi
 than an omission — MediaGit is a standalone VCS for media.
 
 Trigger: user requests for git/git-LFS → MediaGit migration tooling. **Update 2026-10-26:**
-`docs/next-set/SAAS-readiness.md` §8 makes a one-way Git LFS importer roadmap Phase 1 (the
+The SaaS readiness review makes a one-way Git LFS importer roadmap Phase 1 (the
 on-ramp for LFS users), so this trigger is effectively met once that phase starts. Effort: **2-3 weeks**
 (rewrite + a dependency path that does not reintroduce openssl).
 
