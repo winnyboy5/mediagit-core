@@ -1029,38 +1029,12 @@ fn render(stored: &StoredKey) -> Result<String> {
     ))
 }
 
-/// Owner-only permissions where the OS models them. Best-effort: the file
-/// holds ciphertext, so a permissive mode is a weakened defence rather than an
-/// exposed key — same posture as `config.toml`'s advisory check in `repo.rs`.
-#[cfg(unix)]
+/// Owner-only permissions (0o600 on Unix, owner-only ACL on Windows).
+/// Best-effort with a warning: the file holds ciphertext, so a permissive
+/// ACL weakens a defence rather than exposing the key.
 fn restrict_permissions(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    mediagit_security::fsperm::restrict_to_owner_or_warn(path);
 }
-
-/// Windows has no owner-only mode bit; a freshly created file just inherits
-/// its parent directory's ACL. `icacls /inheritance:r` breaks that
-/// inheritance and `/grant:r "<user>:F"` leaves only the current user with
-/// access — the posture OpenSSH requires of private key files. Shells out to
-/// the built-in `icacls.exe` rather than the raw ACL Win32 APIs: this crate
-/// denies `unsafe_code`, and `icacls` needs none. Best-effort, same posture as
-/// the unix branch: failure here weakens the file's protection, it doesn't
-/// expose the key directly (the file holds ciphertext).
-#[cfg(windows)]
-fn restrict_permissions(path: &Path) {
-    let Ok(user) = std::env::var("USERNAME") else {
-        return;
-    };
-    let _ = std::process::Command::new("icacls")
-        .arg(path)
-        .arg("/inheritance:r")
-        .arg("/grant:r")
-        .arg(format!("{user}:F"))
-        .output();
-}
-
-#[cfg(not(any(unix, windows)))]
-fn restrict_permissions(_path: &Path) {}
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]

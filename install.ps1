@@ -16,8 +16,11 @@ Write-Host "==============================" -ForegroundColor Green
 Write-Host ""
 
 # Detect architecture
+# No native ARM64 Windows build is published; Windows 11 on ARM runs the x86_64
+# build under emulation, so install that rather than a download that 404s.
 $Arch = if ([Environment]::GetEnvironmentVariable("PROCESSOR_ARCHITECTURE") -eq "ARM64") {
-    "aarch64"
+    Write-Host "ARM64 Windows: installing the x86_64 build (runs under emulation)." -ForegroundColor Yellow
+    "x86_64"
 } elseif ([Environment]::Is64BitOperatingSystem) {
     "x86_64"
 } else {
