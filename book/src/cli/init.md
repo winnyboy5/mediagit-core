@@ -85,18 +85,18 @@ After initialization, the `.mediagit` directory contains:
 
 ## Configuration File
 
-The generated `config.toml` contains the full default configuration. Key sections:
+The generated `config.toml` looks like this (values differ per repository):
 
 ```toml
-[app]
-name = "mediagit"
-version = "0.3.0-rc.5"   # matches current binary version
-environment = "development"
-port = 8080
+cdc_seed = 14821730546715821354   # random per repository
+repo_namespace = "my-project"     # the directory name
+layout_version = 2
+repo_id = "a95e89e3a7317b50"
+config_version = 4
 
 [storage]
 backend = "filesystem"
-base_path = "/absolute/path/to/repo/.mediagit/objects"
+base_path = ".mediagit/objects"   # relative to the repository root
 create_dirs = true
 sync = false
 file_permissions = "0644"
@@ -109,6 +109,10 @@ file_permissions = "0644"
 [remotes]
 # Added by: mediagit remote add origin http://server/repo
 ```
+
+`base_path` is relative, so a copied or moved repository uses its own
+objects. Repositories created before v0.7.0-rc.1 store an absolute path
+here; edit it to `.mediagit/objects` before copying one.
 
 All backend fields are at the same level as `backend` in `[storage]` (no nested `[storage.filesystem]` subsection).
 

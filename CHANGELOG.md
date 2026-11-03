@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   64 MiB (every chunk delta) decode exactly as before; larger ones now grow
   the buffer only as real bytes are decoded. The output is still checked
   against the stated size.
+- **Key files were not restricted to their owner on Windows.**
+  The encryption key file got owner-only permissions on Unix (0600) but
+  only inherited folder permissions on Windows, and a failure to restrict
+  it was silently ignored. The CLI and the server now restrict key files to
+  the owner on both platforms (an owner-only ACL on Windows) and warn if
+  that fails.
 
 ### Fixed
 
@@ -104,6 +110,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`status` printed modified, deleted and untracked paths in a random order**
   on every run. All lists are now sorted by path, so `--porcelain` output is
   stable for scripts.
+- **A copied or moved repository kept using the original's objects.**
+  `init` stored the object directory as an absolute path, so a copy of a
+  repository read and wrote the original repository's objects: deleting the
+  original broke the copy, and work in the copy changed the original. `init`
+  and local `clone` now store `.mediagit/objects`, relative to the
+  repository. Repositories created by an earlier `init` still hold the
+  absolute path; a local `clone` of one gets the relative path.
+- **`status` on Windows missed a file replaced by delete-then-rename**
+  (PowerShell `Move-Item -Force` and many application save paths). NTFS
+  gives the new file the old file's creation time, so size, modification
+  time and change time could all match. The stat cache now also compares
+  the NTFS file index.
+- **The server did not shut down cleanly on Windows** when its console was
+  closed, the user logged off, or the system shut down; only Ctrl+C was
+  handled. In-flight requests now finish in all four cases.
+- **`install.ps1` failed on ARM64 Windows.** It asked for an aarch64 Windows
+  build that is not published; it now installs the x86_64 build, which runs
+  under emulation.
 
 ### Changed
 
