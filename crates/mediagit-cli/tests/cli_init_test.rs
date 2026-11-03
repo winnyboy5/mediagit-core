@@ -269,3 +269,60 @@ fn test_init_all_options() {
         .assert()
         .success();
 }
+
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    fs::create_dir_all(to).unwrap();
+    for e in fs::read_dir(from).unwrap() {
+        let e = e.unwrap();
+        let dst = to.join(e.file_name());
+        if e.file_type().unwrap().is_dir() {
+            copy_tree(&e.path(), &dst);
+        } else {
+            fs::copy(e.path(), &dst).unwrap();
+        }
+    }
+}
+
+/// A copied repo must use its own object store. `init` used to write an
+/// absolute `base_path`, so a copy kept reading and writing the original's
+/// objects: it broke when the original was deleted, and it wrote into the
+/// original while that was being copied (QA S3-conflicts fault).
+#[test]
+fn test_copied_repo_uses_its_own_objects() {
+    let temp_dir = TempDir::new().unwrap();
+    let orig = temp_dir.path().join("orig");
+    let copy = temp_dir.path().join("copy");
+    mediagit()
+        .args(["init", "-q"])
+        .arg(&orig)
+        .assert()
+        .success();
+    fs::write(orig.join("a.txt"), "one").unwrap();
+    mediagit()
+        .current_dir(&orig)
+        .args(["add", "a.txt", "-q"])
+        .assert()
+        .success();
+    mediagit()
+        .current_dir(&orig)
+        .args(["commit", "-m", "one", "-q"])
+        .assert()
+        .success();
+
+    copy_tree(&orig, &copy);
+    fs::remove_dir_all(&orig).unwrap();
+
+    fs::write(copy.join("b.txt"), "two").unwrap();
+    mediagit()
+        .current_dir(&copy)
+        .args(["add", "b.txt", "-q"])
+        .assert()
+        .success();
+    mediagit()
+        .current_dir(&copy)
+        .args(["commit", "-m", "two", "-q"])
+        .assert()
+        .success();
+    mediagit().current_dir(&copy).arg("fsck").assert().success();
+    assert!(!orig.exists(), "copy wrote into the original repo's store");
+}
