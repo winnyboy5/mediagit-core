@@ -13,7 +13,7 @@ test.describe.configure({ mode: 'serial' })
 
 const shots = resolve(import.meta.dirname, '..', '..', '..', 'test-results', 'real')
 const ADMIN = 'e2eadmin'
-const ADMIN_PASSWORD = 'E2e-Admin-Pass-9x!' // a test value for this throwaway server
+const ADMIN_PASSWORD = 'Quartz-Lantern-74!' // a test value for this throwaway server
 let st: E2EState
 let browser: Browser
 let page: Page
@@ -90,7 +90,7 @@ test('b. people: add a person, the server lists them', async () => {
   const dlg = page.getByRole('dialog', { name: 'Add person' })
   await dlg.getByLabel('Username').fill('lena')
   await dlg.getByLabel('Email').fill('lena@example.test')
-  await dlg.getByLabel('Starting password').fill('Lena-Start-Pass-3q!')
+  await dlg.getByLabel('Starting password').fill('Harbor-Violet-58!')
   await dlg.getByRole('button', { name: 'Add person' }).click()
   await expect(page.getByTestId('people')).toContainText('lena')
   const users = cliJson('auth', 'admin', 'list-users', `--server=${url}`).users as { username: string; role: string }[]
