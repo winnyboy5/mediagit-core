@@ -33,6 +33,7 @@ pub struct AdminUserInfo {
     pub id: String,
     pub username: String,
     pub role: Role,
+    pub disabled: bool,
 }
 
 impl From<User> for AdminUserInfo {
@@ -41,6 +42,7 @@ impl From<User> for AdminUserInfo {
             id: u.id,
             username: u.username,
             role: u.role,
+            disabled: u.disabled,
         }
     }
 }
@@ -92,6 +94,39 @@ pub async fn list_users(
     let auth_service = state.auth_service().ok_or(StatusCode::NOT_FOUND)?;
     let users = auth_service.credentials_store.list_users().await;
     Ok(Json(users.into_iter().map(AdminUserInfo::from).collect()))
+}
+
+#[derive(Serialize)]
+pub struct UserGrantInfo {
+    pub repo: String,
+    pub level: GrantLevel,
+}
+
+/// GET /auth/users/{id}/grants - that user's per-repo grants, sorted by repo.
+pub async fn list_user_grants(
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    auth_user: Option<Extension<AuthUser>>,
+) -> Result<Json<Vec<UserGrantInfo>>, StatusCode> {
+    check_permission(
+        auth_user.as_deref(),
+        "user:manage",
+        state.is_auth_enabled(),
+        &state.grants,
+        "",
+    )?;
+    let auth_service = state.auth_service().ok_or(StatusCode::NOT_FOUND)?;
+    if auth_service.credentials_store.get_user(&id).await.is_err() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let mut out: Vec<_> = state
+        .grants
+        .list_for_user(&id)
+        .into_iter()
+        .map(|(repo, level)| UserGrantInfo { repo, level })
+        .collect();
+    out.sort_by(|a, b| a.repo.cmp(&b.repo));
+    Ok(Json(out))
 }
 
 /// DELETE /auth/users/{id} — remove a user account and any grants they held.

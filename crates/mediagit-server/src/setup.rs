@@ -54,6 +54,27 @@ pub struct InitArgs {
     pub admin_username: Option<String>,
     #[arg(long)]
     pub admin_email: Option<String>,
+
+    /// Read the admin password as one line from stdin instead of from
+    /// `MEDIAGIT_ADMIN_PASSWORD`. For callers (the desktop app) that must put
+    /// no secret in argv or the environment. Wins over the env variable.
+    #[arg(long, requires = "non_interactive")]
+    pub admin_password_stdin: bool,
+}
+
+/// One line from `reader`, without its line ending; empty input is an error.
+fn read_password_line(
+    mut reader: impl std::io::BufRead,
+) -> Result<mediagit_security::Zeroizing<String>> {
+    let mut line = mediagit_security::Zeroizing::new(String::new());
+    reader
+        .read_line(&mut line)
+        .context("reading the admin password from stdin")?;
+    let trimmed = line.trim_end_matches(['\n', '\r']).to_string();
+    if trimmed.is_empty() {
+        anyhow::bail!("--admin-password-stdin: no password on stdin");
+    }
+    Ok(mediagit_security::Zeroizing::new(trimmed))
 }
 
 pub async fn run_init(args: &InitArgs) -> Result<()> {
@@ -121,9 +142,13 @@ pub async fn run_init(args: &InitArgs) -> Result<()> {
             // where it long outlives the bootstrap it was needed for. An
             // environment variable is readable only by the same user and root,
             // and is how container and CI runners pass secrets anyway.
-            let env_password = std::env::var("MEDIAGIT_ADMIN_PASSWORD")
-                .ok()
-                .filter(|p| !p.is_empty());
+            let env_password = if args.admin_password_stdin {
+                Some(read_password_line(std::io::stdin().lock())?.to_string())
+            } else {
+                std::env::var("MEDIAGIT_ADMIN_PASSWORD")
+                    .ok()
+                    .filter(|p| !p.is_empty())
+            };
             match (&args.admin_username, &args.admin_email, env_password) {
                 (Some(u), Some(e), Some(p)) => Some((u.clone(), e.clone(), p)),
                 _ => {
@@ -495,6 +520,22 @@ mod tests {
         assert_eq!(reloaded.jwt_secret, config.jwt_secret);
         assert!(!reloaded.allow_open_registration);
         assert!(reloaded.enable_rate_limiting);
+    }
+
+    #[test]
+    fn test_read_password_line_strips_eol_and_rejects_empty() {
+        let pw =
+            read_password_line(std::io::Cursor::new(b"s3cret-Pass!\r\nrest".to_vec())).unwrap();
+        assert_eq!(&**pw, "s3cret-Pass!");
+        assert!(
+            read_password_line(std::io::Cursor::new(
+                b"
+"
+                .to_vec()
+            ))
+            .is_err()
+        );
+        assert!(read_password_line(std::io::Cursor::new(Vec::new())).is_err());
     }
 
     #[test]

@@ -858,6 +858,7 @@ where
     }
 }
 
+pub(crate) mod admin;
 pub(crate) mod browse;
 pub mod escrow;
 pub(crate) mod locks;
@@ -866,6 +867,7 @@ pub(crate) mod pull;
 pub(crate) mod push;
 pub(crate) mod transfer;
 
+pub use admin::{DeleteRepoResult, RepoGrant, RepoSummary, UserGrant};
 pub use browse::{TreeListEntry, TreeListing};
 pub use locks::LockInfo;
 

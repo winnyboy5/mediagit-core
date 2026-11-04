@@ -38,6 +38,12 @@ struct Args {
     /// Path to config file
     #[arg(short, long, default_value = "mediagit-server.toml")]
     config: String,
+
+    /// Shut down gracefully when stdin reaches EOF. Lets a parent process
+    /// that cannot send signals (Windows, no unsafe) stop the server by
+    /// dropping the child's stdin pipe.
+    #[arg(long)]
+    exit_on_stdin_eof: bool,
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -137,6 +143,7 @@ async fn main() -> Result<()> {
     // `load_reporting` hands back the "no config file" warning rather than
     // emitting it, because a `tracing::warn!` here would land before the
     // subscriber exists and be dropped. It is logged a few lines down.
+    let exit_on_stdin_eof = args.exit_on_stdin_eof;
     let (mut config, config_warning) = ServerConfig::load_reporting(&args.config)?;
 
     let log_format = config.resolve_log_format()?;
@@ -873,7 +880,7 @@ async fn main() -> Result<()> {
                     mediagit_server::observing_listener(http_listener),
                     app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
                 )
-                .with_graceful_shutdown(shutdown_signal())
+                .with_graceful_shutdown(shutdown_signal(exit_on_stdin_eof))
                 .await
             });
 
@@ -881,7 +888,7 @@ async fn main() -> Result<()> {
             let https_handle = axum_server::Handle::new();
             let https_shutdown_handle = https_handle.clone();
             tokio::spawn(async move {
-                shutdown_signal().await;
+                shutdown_signal(exit_on_stdin_eof).await;
                 https_shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
             });
             let https_server = tokio::spawn(async move {
@@ -936,7 +943,7 @@ async fn main() -> Result<()> {
             mediagit_server::observing_listener(listener),
             app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(exit_on_stdin_eof))
         .await?;
     }
 
@@ -959,7 +966,7 @@ pub(crate) fn is_loopback_host(host: &str) -> bool {
 /// Resolves when the process receives Ctrl+C (all platforms), SIGTERM
 /// (unix), or a console close / logoff / shutdown event (Windows). Used to drive `.with_graceful_shutdown(...)` so in-flight
 /// requests (e.g. a multi-GB chunk upload) finish instead of being hard-cut.
-async fn shutdown_signal() {
+async fn shutdown_signal(exit_on_stdin_eof: bool) {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await
@@ -992,8 +999,24 @@ async fn shutdown_signal() {
     #[cfg(not(any(unix, windows)))]
     let terminate = std::future::pending::<()>();
 
+    let stdin_eof = async move {
+        if !exit_on_stdin_eof {
+            return std::future::pending::<()>().await;
+        }
+        // Detached OS thread, not spawn_blocking: a blocked stdin read must
+        // not hold up runtime/process exit when shutdown comes from elsewhere.
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        std::thread::spawn(move || {
+            let mut sink = [0u8; 256];
+            while matches!(std::io::Read::read(&mut std::io::stdin(), &mut sink), Ok(n) if n > 0) {}
+            let _ = tx.send(());
+        });
+        let _ = rx.await;
+    };
+
     tokio::select! {
         _ = ctrl_c => tracing::info!("Received Ctrl+C, starting graceful shutdown"),
+        _ = stdin_eof => tracing::info!("stdin closed, starting graceful shutdown"),
         _ = terminate => tracing::info!("Received termination signal, starting graceful shutdown"),
     }
 }

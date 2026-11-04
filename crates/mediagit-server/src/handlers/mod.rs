@@ -36,6 +36,7 @@ pub(crate) mod chunks;
 pub(crate) mod escrow;
 pub(crate) mod locks;
 pub(crate) mod repo;
+pub(crate) mod repos_admin;
 pub(crate) mod transfer;
 
 pub use admin::*;
@@ -44,6 +45,7 @@ pub use chunks::*;
 pub use escrow::*;
 pub use locks::*;
 pub use repo::*;
+pub use repos_admin::*;
 pub use transfer::*;
 
 /// Helper function to check if user has required permission.

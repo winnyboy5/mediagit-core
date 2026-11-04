@@ -148,6 +148,9 @@ Both 404 when `[encryption]` is off server-side, so a server without the feature
 | DELETE | `/auth/users/:id/grants` | Admin | Remove a per-repo grant |
 | GET | `/auth/keys` | Admin | List all API keys (metadata only) |
 | DELETE | `/auth/keys/:id` | Admin | Revoke an API key (caller's own, or any as admin) |
+| GET | `/admin/repos` | Admin | List hosted repos: `[{name, size_bytes, object_count, last_modified}]` (size is a bounded dir walk) |
+| POST | `/admin/repos` | Admin | Create an empty repo `{"name"}`; 409 if it exists; names are a single segment |
+| DELETE | `/admin/repos/:name?confirm=<name>[&force=true]` | Admin | 400 if `confirm` differs; 409 if the repo has refs/locks (needs `force`) or active transfers (never overridable); 200 `{deleted, storage_retained, backend}` (retained = non-filesystem backend data kept) |
 
 See [Authentication](./authentication.md) for the auth model, persistence, and grant semantics.
 

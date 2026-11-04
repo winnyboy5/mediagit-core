@@ -111,7 +111,9 @@ pub fn create_admin_router(state: Arc<AppState>) -> Router {
         )
         .route(
             "/auth/users/{id}/grants",
-            post(crate::handlers::upsert_grant).delete(crate::handlers::remove_grant),
+            get(crate::handlers::list_user_grants)
+                .post(crate::handlers::upsert_grant)
+                .delete(crate::handlers::remove_grant),
         )
         .route(
             "/auth/keys",
@@ -121,6 +123,15 @@ pub fn create_admin_router(state: Arc<AppState>) -> Router {
         .route("/auth/keys/{id}", delete(crate::handlers::revoke_key))
         .route("/auth/password", post(crate::handlers::change_password))
         .route("/auth/whoami", get(crate::handlers::whoami))
+        .route(
+            "/admin/repos",
+            get(crate::handlers::list_repos).post(crate::handlers::create_repo),
+        )
+        .route("/admin/repos/{name}", delete(crate::handlers::delete_repo))
+        .route(
+            "/admin/repos/{name}/grants",
+            get(crate::handlers::list_repo_grants),
+        )
         .layer(middleware::from_fn(move |req, next| {
             auth_middleware(Arc::clone(&auth_layer), req, next)
         }))

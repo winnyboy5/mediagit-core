@@ -109,6 +109,11 @@ impl WantCache {
         self.entries.remove(request_id)
     }
 
+    /// True if any pending want entry belongs to `repo` (an active fetch).
+    pub fn mentions_repo(&self, repo: &str) -> bool {
+        self.entries.values().any(|e| e.repo == repo)
+    }
+
     /// Get current entry count
     pub fn len(&self) -> usize {
         self.entries.len()
