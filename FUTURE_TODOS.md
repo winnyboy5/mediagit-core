@@ -4,8 +4,8 @@ Consolidated and **priority-ordered** registry of planned features, code-level T
 known limitations for MediaGit. Items are sourced from documentation and source code;
 each entry cites the file it was verified against.
 
-> Last updated: 2026-10-26 | v0.6.0-rc.1 | Every open item re-verified against code on this date.
-> Closed items (16, 21-24, 26, 27, 29, 32, 33, 34, 37, 41) were removed; their record is in CHANGELOG.md and git history.
+> Last updated: 2026-11-02 | v0.7.0-rc.1 | Every open item re-verified against code on this date.
+> Closed items (6, 16, 21-24, 26, 27, 29, 32, 33, 34, 37, 38, 41) were removed; their record is in CHANGELOG.md and git history.
 
 **Priority levels:**
 - **P0** — Quick win or active blocker — ≤1 day effort, implement immediately
@@ -13,46 +13,14 @@ each entry cites the file it was verified against.
 - **P2** — Medium impact or complex — 2-6 weeks, planned but not urgent
 - **P3** — Low priority / long-term — deferred until triggered by demand
 
-> **Two unrelated P0–P3 batches share this file and the same priority labels —
-> don't conflate them.** The section immediately below is a closed, dated
-> incident-response sprint (2026-07-18, leaked secrets) with its own 3-item P0
-> checklist. The **Quick Reference — Priority Matrix** further down is the
-> forward-looking product backlog (P1–P3, no P0s in it) that a
-> "100% of P0–P3 implemented" claim would actually be about. Both reuse
-> P0/P1/P2/P3 as effort/urgency labels; neither implies the other is done.
-
----
-
-## ⚠ P0 — Security Remediation: leaked secrets in git history (2026-07-18, closed incident sprint)
-
-Secrets (`.mcp.json` Morph key, `enc_key`/`enc_key.pub` SSH pair, an Anthropic API key) were
-scrubbed from git history and force-pushed on all branches; a fresh-clone verification
-confirmed the remote is clean. Both API keys were revoked regardless of the cleanup.
-
-- [ ] Close/regenerate dependabot PRs (all branch hashes changed by the history rewrite) —
-      **checked 2026-10-26 with `gh pr list`:** #56, #57 and #58 (GitHub Actions bumps, opened
-      2026-03-30, before the rewrite) are still open and need closing. The cargo PRs #87–#91
-      were opened after the rewrite and are unaffected.
-- [ ] Request cached-view purge via GitHub Support — public repo: old commits (e.g. `82295e8`,
-      `7177269`) may remain servable by direct SHA URL until purged — **unverified 2026-08-25**,
-      same reason (no GitHub API access; this is an external support request, not something
-      `git log` would show either way). Still unverified 2026-10-26.
-- [ ] Delete the backup mirror `D:\own\saas\mediagit-core-backup-20260718.git` — it is now the
-      **only remaining copy of the secrets on disk**; remote verified clean 2026-07-18 so its
-      rollback purpose is served. **CONFIRMED STILL PRESENT 2026-10-26** — the directory still
-      exists on disk. Still open, not a false positive.
-
----
-
 ## Quick Reference — Priority Matrix
 
 | # | Item | Priority | Effort | Blocks / Enables |
 |---|------|----------|--------|-----------------|
 | 2 | HTTP/3 via reqwest feature flag | **P3** | 1 day | When reqwest `http3` stabilizes (~2026 Q4) |
-| 3 | Git migration tooling (rewrite filter/install/track) | **P3** | 2-3 wk | Crate deleted in `c5d0a23`; rewrite, not re-integration. `docs/next-set/SAAS-readiness.md` §8 ranks a Git LFS importer as roadmap Phase 1: re-prioritize when started |
+| 3 | Git migration tooling (rewrite filter/install/track) | **P3** | 2-3 wk | Crate deleted in `c5d0a23`; rewrite, not re-integration. The SaaS readiness review ranks a Git LFS importer as roadmap Phase 1: re-prioritize when started |
 | 4 | `mediagit://` URL scheme | **P3** | 1 day | Post-HTTP/3 adoption |
 | 5 | Differential checkout (only changed files) | **P3** | 1-2 wk | 70% branch switch latency reduction |
-| 6 | Incremental status scan (inode/mtime cache) | **P3** | 1-2 wk | Repeated `status` performance |
 | 7 | Pack file format documentation | **P3** | 0.5 day | Book completeness |
 | 8 | TOML-configurable similarity thresholds | **P3** | 0.5-3 day | User tunability; ~32 values across 2 tables, not 3 |
 | 9 | Windows ARM64 native binaries | **P3** | — | Blocked on GitHub runner availability |
@@ -115,7 +83,7 @@ Git/git-LFS import is currently documented as **unsupported**, which is a decisi
 than an omission — MediaGit is a standalone VCS for media.
 
 Trigger: user requests for git/git-LFS → MediaGit migration tooling. **Update 2026-10-26:**
-`docs/next-set/SAAS-readiness.md` §8 makes a one-way Git LFS importer roadmap Phase 1 (the
+The SaaS readiness review makes a one-way Git LFS importer roadmap Phase 1 (the
 on-ramp for LFS users), so this trigger is effectively met once that phase starts. Effort: **2-3 weeks**
 (rewrite + a dependency path that does not reintroduce openssl).
 
@@ -146,18 +114,6 @@ repos) claimed here was measured against the pre-skip behaviour, so it is **stal
 estimate** — re-baseline before scoping.
 
 Requires a tree diff engine in `mediagit-versioning`. Effort: **1-2 weeks**.
-
----
-
-### 6. Incremental Status Scan (inode / mtime Cache)
-*Source: `crates/mediagit-cli/src/commands/status.rs` (`scan_working_directory`, called at
-`status.rs:373`)*
-
-Full-tree scan on every `status` invocation. An inode cache / mtime-based incremental scan
-(similar to git's index) would reduce repeated-status overhead significantly for repos with
-large working trees.
-
-Effort: **1-2 weeks**.
 
 ---
 
@@ -256,7 +212,6 @@ None of these shipped in v0.3.0–v0.6.0. Checked 2026-10-26.
 | 3 | P3 | **Git migration CLI** | `mediagit-git` deleted in `c5d0a23` (its clean filter destroyed file content); git/git-LFS import documented unsupported | `c5d0a23` |
 | 4 | P3 | **`mediagit://` scheme** | No native URL scheme; uses `http://` | R&D 2026-03 |
 | 5 | P3 | **Differential checkout** | Unchanged files already skipped by hash; every path still visited + hashed, no tree diff | `checkout.rs:152` |
-| 6 | P3 | **Incremental status** | Full-tree scan on every `status` invocation | `status.rs:373` |
 | 7 | P3 | **Pack file docs** | Pack v3 internal format (header, entries, index, trailer) not documented; only the `packs/` path is | `file-formats.md`, `pack.rs` |
 | 8 | P3 | **Similarity thresholds** | Hardcoded in `similarity.rs` (19 arms) + `odb/mod.rs` (`delta_ratio_threshold`), not configurable via `config.toml` | `similarity.rs` |
 | 9 | P3 | **Windows ARM64** | No native pre-built binary; x64 emulation works but slower | `windows-arm64.md` |
@@ -273,9 +228,10 @@ None of these shipped in v0.3.0–v0.6.0. Checked 2026-10-26.
 | 35 | P3 | **Re-encoded video dedups at ~0%, and that is inherent — do not file it as a chunking bug** | Established by code read 2026-09-14. MediaGit dedups **byte-identical and byte-shifted** content: a re-commit is 100%, and a trim, append or mid-file edit is handled well because that is what CDC exists for. A **re-encode is none of those**. Different quantisation decisions from the first frame mean every subsequent byte differs, so no CDC cut point lands in the same place with the same content and no chunk hash matches. No chunking strategy recovers this — the bytes genuinely are not the same. **Two mechanisms that look like they should help, and do not:** (1) delta encoding runs, but its similarity detector hashes a handful of fixed-size byte samples (`similarity.rs:246`), and two encodes of the same footage share no byte-level samples, so no base is ever selected — and a delta between two encodes would be as large as the content anyway; (2) a `perceptual_hash` field on `ContentChunk` that was never set or read has since been deleted (verified 2026-10-26); perceptual hashes exist only for still images in `mediagit-media` (`image.rs`). **Real re-encode dedup is a different feature**: frame- or GOP-level content addressing, decoding both sides to compare, format-specific and large. Consistent with [[G0]]: ~26.5% is the measured pipeline ceiling and the 46.4% figure in the planning docs is an optimistic synthetic number (real creative-save corpora land 5-25%). | documented limitation, not scheduled |
 | 36 | P2 | **Format-aware container chunking is skipped above 100 MB for MKV/WebM/AVI and 3D formats** | **MP4/MOV are no longer affected:** since 0.5.0-rc.1 they are chunked on frame boundaries at any size by a streaming planner (`mp4_stream::Mp4Plan`, `chunker.rs:277-281`), checked before the cap. The rest of this row applies to the other structure-parsed formats: files with a structure parser (`mkv/webm/avi`, plus the 3D formats) only get the walker when they are **≤ `MEDIAGIT_CONTAINER_CHUNK_CAP_MB`, default 100 MB** (`chunker.rs:479`). Above that they fall back to plain `StreamCDC` with no structural awareness at all — so a 4 GB master, which is the normal case for this product, never gets `ftyp`/`moov`/`mdat` split onto their own boundaries. **The cap is deliberate, not an oversight**, and the reason is documented in place (`chunking/mod.rs:292-301`): the walkers accumulate every `ContentChunk` — each owning a `Vec<u8>` copy of its bytes — into one `Vec` before forwarding any of them, and `fill_coverage_gaps` re-sorts that whole `Vec`, so peak heap scales with file size. **The upgrade path is already written down there**: make `fill_coverage_gaps` track a running cursor instead of re-scanning, then thread a channel sender through the walkers so chunks stream out as found, which removes the cap entirely. **Measure before assuming it pays**: CDC already handles shifted content, so the win is limited to metadata-only edits and container re-wraps where atom alignment matters — quantify that on a real corpus before spending the refactor. Note this is NOT a fix for item 35; re-encodes stay at ~0% either way. | open |
 | 42 | P3 | **gc audit leftovers (2026-10-26), low risk** | Found by the gc audit that fixed the read-error and repack-name bugs; not fixed because each needs an unusual setup. (1) No lock between two gc processes on one repo: auto-gc never repacks and the grace period protects fresh objects, but two explicit runs still race. (2) Legacy `repack` (loose objects into `packs/pack-<hash>.pack`) deletes loose copies right after the `put`, without reading the pack back; `LocalBackend::put` is atomic, so only a pack-writer bug would bite. (3) A lightweight tag that points straight at a tree is walked as a commit, so its files are not protected; the CLI only tags commits today. | open |
-| 38 | P3 | **Delta `result_size` is trusted from the wire up to 16 GiB** | `delta.rs` caps the declared result size at `MAX_DELTA_RESULT_SIZE` and decompresses with that capacity, so a hostile delta can force a huge allocation. Out-of-memory only, never corruption: output is hash-checked. Fix: cap by the target chunk's maximum size, not a global 16 GiB. | open, from the 0.6.0 final review |
 | 39 | P3 | **Stream cuts on pathological PDF/ZIP layouts** | `chunking/stream_cuts.rs`: a file with thousands of tiny streams yields tiny segments. Segments under 64 KiB are merged; confirm the merge bound holds for adversarial layouts. Index size and speed only. | open, from the 0.6.0 final review |
 | 40 | P3 | **safetensors header held in memory up to 100 MB** | `chunking/safetensors_stream.rs` (`MAX_HEADER`). Memory only. | open, from the 0.6.0 final review |
+| 43 | P2 | **Cross-platform alignment (audit 2026-11-03).** Fixed for v0.7.0-rc.1: key-file owner-only ACL on Windows (CLI checked the result nowhere; server did nothing), stat-cache file identity on Windows (NTFS tunnelling), server graceful shutdown on Windows close/logoff/shutdown, `install.ps1` on ARM64. **Still open:** (a) `repo.rs:510` config-credential permission warning is Unix-only; (b) Windows checkout writes a symlink as a plain file without Developer Mode, and a later commit records it as a file; (c) `add` on Windows always records mode 0644, so +x cannot be set from Windows (needs `add --chmod=+x`); (d) keyring unavailable on headless Linux (no D-Bus) falls back silently, should warn once; (e) `commit` editor launch fails when `$EDITOR` has arguments (`code --wait`), all OSes; (f) CI: clippy, MSRV and coverage run on Ubuntu only, so `cfg(windows)` / `cfg(target_os = "macos")` code is never linted; Linux aarch64 tests never run (cross build only); (g) `install.sh` does not detect musl (Alpine); (h) the QA harness is PowerShell-only, so Linux and macOS behaviour is covered by Rust tests alone. | audit 2026-11-03 |
+| 44 | P2 | **Follow-ups from the v0.7.0-rc.1 GA (2026-11-03)** | (a) **Server builds a full pack per clone, with no sharing.** In campaign `20261103-ga-070rc1-8` all 16 concurrent MinIO clones timed out at 300 s while the server spent 2.5-3 min per clone collecting the same 8,576 objects, on a machine with 2.3 GB free. The standalone `10_scale` rerun passed 16/16. Measure server time and memory per concurrent clone before choosing between pack reuse and a bound on concurrent pack builds. (b) **QA harness: an empty clone directory raises ERROR, not False.** `S1-concurrency-clones-converge` passed `$null` to `Compare-Object`; the gate must report a failed comparison. (c) **S4 does not measure server memory** (`serverPrivate=n/a`); the client side peaked at 568 MB against a 1,536 MB gate. (d) Measure the `add` delta-base cache (230-390 MB) before shrinking it. | open |
 | 25 | P3 | **`book/src/cli/` prose — mechanically swept, narrative still unswept** | Four mechanical axes now verified across all 39 pages: (1) all 12 cited `MEDIAGIT_*` variables exist in code; (2) config-section and repo-path claims; (3) claimed output lines checked against string literals in `crates/`; (4) every documented subcommand maps to a clap variant (10 pages with a synopsis, 0 missing). **Two real fabrications found and fixed, both the same root cause — git's behaviour documented as mediagit's:** `add.md`/`quickstart.md` showed `On branch main` where the binary prints `On branch: main` (`status.rs:343`), and `bisect.md` claimed state lived in `.mediagit/BISECT_HEAD`, `BISECT_LOG` and `BISECT_TERMS` — git's files, none of which exists here; mediagit uses a single JSON `.mediagit/BISECT_STATE` (`bisect.rs:595`) deleted on reset (`bisect.rs:320`). **What remains is narrative behavioural prose** — descriptions of what a command *does* — which no mechanical check reaches and which `13_docs` cannot gate, since it compares flag tokens against the binary's own help output only. The `stats.md` "Storage Backend Statistics" block noted here earlier is gone (verified 2026-10-26). | partial, v0.4.0 |
 
 

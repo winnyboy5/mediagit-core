@@ -5,7 +5,150 @@ All notable changes to MediaGit will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v0.7.0-rc.1] - 2026-11-03
+
+### Security
+
+- **Cleared the six `cargo audit` advisories blocking the release (#92).**
+  `zstd` 0.13 to 0.14.3 (with zstd-safe 8.2.0 and zstd-sys 2.1.2) fixes
+  RUSTSEC-2026-0391, -0398, -0403 and -0410; `ctutils` 0.4.2 to 0.4.6 fixes
+  RUSTSEC-2026-0385. The zstd frame format is unchanged, so existing objects
+  still decode. RUSTSEC-2026-0387 (`crypto-bigint` 0.5, timing) is ignored
+  until 2026-12-01: no `jsonwebtoken` release moves off it yet, and we only
+  use HS256, so the affected p256/p384 code never runs.
+- **A forged delta can no longer make the client reserve gigabytes of
+  memory.** A delta's stated output size (and the zstd frame's own size
+  field) came straight from disk or the server and set the decode buffer up
+  front, so a few bytes claiming 16 GiB could exhaust memory. Deltas up to
+  64 MiB (every chunk delta) decode exactly as before; larger ones now grow
+  the buffer only as real bytes are decoded. The output is still checked
+  against the stated size.
+- **Key files were not restricted to their owner on Windows.**
+  The encryption key file got owner-only permissions on Unix (0600) but
+  only inherited folder permissions on Windows, and a failure to restrict
+  it was silently ignored. The CLI and the server now restrict key files to
+  the owner on both platforms (an owner-only ACL on Windows) and warn if
+  that fails.
+
+### Fixed
+
+- **`fsck` and `verify` checked the wrong storage prefix on cloud-backed
+  repositories.** Run without `--path` (from inside the repository, or with
+  `-C`), they looked under a `repo/` prefix instead of the repository's own
+  name, so a healthy repository on S3/GCS/Azure was reported as missing its
+  commits. The storage namespace now comes from the resolved directory name
+  for every command. Repositories that store `repo_namespace` in their config
+  were not affected.
+- **A passphrase-encrypted repo asked for the passphrase twice on `push`,
+  `fetch` and `pull`.** The repo key was unwrapped once for the remote
+  compatibility check and again when arming it. It is now unwrapped at most
+  once per process (#96).
+- **`cherry-pick` and `revert` recorded an empty commit and reported
+  success** when the change was already on the branch. Both now refuse with
+  "nothing to commit" and a non-zero exit. `rebase` drops a replayed commit
+  that became empty, as git does, unless `--keep-empty` (#97).
+- **`status` listed unchanged files as staged after `reset --soft` or
+  `merge --continue`.** Both leave the whole tree in the index; `status` now
+  reports an index entry as staged only when it differs from HEAD.
+- **gc could delete data a concurrent push or `add` was still writing.** The
+  prune grace period (`MEDIAGIT_GC_GRACE_SECS`, default 3600 s) covered only
+  loose objects, and only on the local backend. Orphan chunks, chunk
+  manifests and blob/chunk deltas were deleted the moment they looked
+  unreachable on every backend, and on S3, MinIO, B2/Spaces, GCS and Azure
+  objects of unknown age were deleted too. A push writes chunks before the
+  commit that reaches them, so gc running at that moment could leave the
+  commit pointing at missing chunks. Now every delete list honours the grace
+  period, a recent manifest keeps alive every chunk it names (a push may
+  reuse an old unreferenced chunk instead of uploading it), unknown age keeps
+  the object, and every cloud backend reports object age.
+- **gc could delete an old object that a new commit or tree reused.** A writer
+  that dedups against an existing unreachable object (a new tree naming an old
+  blob, a new commit naming an old tree) only writes the new object. gc kept
+  the new one under the grace period but deleted the old one it named, so the
+  commit could not be checked out. Objects kept by the grace period now act as
+  roots: everything they name is kept, including chunked files' manifests and
+  chunks.
+- **gc could delete the base of a file stored as a delta.** `add` stores a new
+  version of a file as a delta against an earlier version, and that earlier
+  version is named only by the delta's metadata. Once the earlier version was
+  no longer reachable (it was replaced before commit, or history was
+  rewritten) and older than the grace period, gc deleted it, and the newer
+  version could no longer be read. gc now keeps every base on the delta chain
+  of every live file, and of every delta written within the grace period (an
+  `add` still in progress), and aborts without deleting anything if a delta's
+  metadata cannot be read.
+- **A temporary read error during gc could delete files.** While walking
+  history, gc treated any commit or tree it failed to read as absent and went
+  on, so everything under it looked unreachable. On a cloud backend one
+  network blip during gc was enough. gc now tells a missing object (skipped,
+  as before) from one that is present but unreadable, and aborts without
+  deleting anything in the second case.
+- **Two `gc --repack` runs in the same second could lose objects.** Packs of
+  loose objects were named by a unix-second timestamp, so the second repack
+  overwrote the first pack after the first had already deleted its loose
+  copies. Packs are now named by their content hash.
+- **An interrupted `pull` left a ref to a missing commit** (#93). `pull`
+  wrote `refs/remotes/<remote>/<branch>` before downloading the commit it
+  named, so a crash, power loss or cancel in between left `fsck` reporting a
+  ref to a missing commit until the next successful pull. The tracking ref of
+  the branch being pulled is now written only after its objects are stored.
+- **An interrupted `pull` could make every later pull fail** (#95). A pull
+  stopped after the commit and tree were stored but before a large file's
+  manifest was written left the repository unable to pull: on retry the
+  client told the server it already had that commit, the server sent no
+  large files, and checkout failed with "object not found" every time. The
+  tracking ref is no longer written early on retry either, so the next pull
+  downloads what is missing.
+- **On a server without auth, nobody could release their own lock.** `lock
+  create` recorded the owner name the client sent, but `lock unlock` had no
+  identity to compare, so every unlock without `--force` was refused (403),
+  including the desktop app's Unlock button. `unlock` now sends the same
+  identity `create` uses, and a no-auth server compares it with the lock's
+  owner. Servers with auth still use the authenticated user and ignore the
+  supplied name, so a writer cannot release someone else's lock by naming
+  them.
+- **`status` printed modified, deleted and untracked paths in a random order**
+  on every run. All lists are now sorted by path, so `--porcelain` output is
+  stable for scripts.
+- **A copied or moved repository kept using the original's objects.**
+  `init` stored the object directory as an absolute path, so a copy of a
+  repository read and wrote the original repository's objects: deleting the
+  original broke the copy, and work in the copy changed the original. `init`
+  and local `clone` now store `.mediagit/objects`, relative to the
+  repository. Repositories created by an earlier `init` still hold the
+  absolute path; a local `clone` of one gets the relative path.
+- **`status` on Windows missed a file replaced by delete-then-rename**
+  (PowerShell `Move-Item -Force` and many application save paths). NTFS
+  gives the new file the old file's creation time, so size, modification
+  time and change time could all match. The stat cache now also compares
+  the NTFS file index.
+- **The server did not shut down cleanly on Windows** when its console was
+  closed, the user logged off, or the system shut down; only Ctrl+C was
+  handled. In-flight requests now finish in all four cases.
+- **`install.ps1` failed on ARM64 Windows.** It asked for an aarch64 Windows
+  build that is not published; it now installs the x86_64 build, which runs
+  under emulation.
+
+### Changed
+
+- **Dependency updates** (lockfile only, within existing version ranges):
+  aws-config 1.12.0, aws-sdk-s3 1.146.1, aws-smithy-http-client 1.5.1,
+  google-cloud-storage 1.20.0 (with opentelemetry 0.33), keyring 4.2.0,
+  sha2 0.11.1, proptest 1.12.0. Verified against live MinIO, AWS S3, GCS
+  and Azure, and the Windows keychain.
+- **`status` no longer re-reads unchanged files** (#94). It used to hash every
+  committed file on every run, so its cost grew with the size of the working
+  tree (a 500 GB repository re-read 500 GB per `status`). A stat cache
+  (`.mediagit/stat-cache`, local only, never transferred) remembers each
+  tracked file's size, modification time, file id, change time and content
+  hash, and `status` re-hashes a file only when one of those changed or the
+  entry is too recent to trust. Measured on a release build: a second
+  `status` over 4 x 1 GB files takes 25 ms instead of 706 ms; building the
+  cache costs under 3% on the first run. Only `status` uses the cache; the
+  checks that stop switch, merge, rebase, reset and pull from overwriting
+  local edits still hash every file. Known limit, as in Git: on Windows an
+  in-place rewrite that keeps both size and modification time is not seen.
+  `MEDIAGIT_STAT_CACHE=0` turns the cache off.
 
 ### Desktop app (preview, targets v0.8.0)
 

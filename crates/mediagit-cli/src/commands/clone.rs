@@ -140,10 +140,7 @@ impl CloneCmd {
             anyhow::bail!("Destination path '{}' already exists", target_dir.display());
         }
         std::fs::create_dir_all(&target_dir).context("Failed to create target directory")?;
-        // Canonicalize so the fixed-up `base_path` we write below is
-        // absolute (matching how `init` writes it) — a relative path here
-        // gets joined onto `repo_root` a second time by
-        // `create_inner_storage_backend`, doubling the prefix.
+        // Canonicalize so the paths derived from it below are absolute.
         let target_dir =
             dunce::canonicalize(&target_dir).context("Failed to resolve target directory")?;
 
@@ -152,15 +149,15 @@ impl CloneCmd {
             copy_dir_skip(&source_mediagit, &storage_path, Path::new("index"))
                 .context("Failed to copy .mediagit directory")?;
 
-            // The copied config's filesystem `base_path` is still the
-            // SOURCE repo's absolute objects path (baked in at `init`
-            // time) — repoint it at the target's own copy, and record
-            // `origin` as the source we cloned from.
+            // A source made by an older `init` has an absolute `base_path`
+            // pointing at its own objects — repoint it at the target's own
+            // copy (relative, like `init` writes it), and record `origin`
+            // as the source we cloned from.
             let mut config = mediagit_config::Config::load(&target_dir)
                 .await
                 .context("Failed to load copied config")?;
             if let mediagit_config::StorageConfig::FileSystem(ref mut fs) = config.storage {
-                fs.base_path = storage_path.join("objects").display().to_string();
+                fs.base_path = ".mediagit/objects".to_string();
             }
             config.remotes.insert(
                 "origin".to_string(),

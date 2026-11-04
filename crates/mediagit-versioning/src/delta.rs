@@ -286,15 +286,8 @@ impl DeltaDecoder {
                     base.len()
                 );
             }
-            let split = zstd::bulk::decompress(&delta.zstd_data, delta.result_size)
+            let split = decompress_exact(&delta.zstd_data, &[], delta.result_size)
                 .map_err(|e| anyhow::anyhow!("Failed to decompress XP delta: {}", e))?;
-            if split.len() != delta.result_size {
-                anyhow::bail!(
-                    "Delta reconstruction size mismatch: {} != {}",
-                    split.len(),
-                    delta.result_size
-                );
-            }
             let mut out = unplanes(&split, w as usize, phase as usize);
             for (o, b) in out.iter_mut().zip(base) {
                 *o ^= *b;
@@ -302,21 +295,38 @@ impl DeltaDecoder {
             return Ok(out);
         }
 
-        let mut decoder = zstd::bulk::Decompressor::with_dictionary(base)?;
-        let result = decoder
-            .decompress(&delta.zstd_data, delta.result_size)
-            .map_err(|e| anyhow::anyhow!("Failed to decompress zstd-dict delta: {}", e))?;
-
-        if result.len() != delta.result_size {
-            anyhow::bail!(
-                "Delta reconstruction size mismatch: {} != {}",
-                result.len(),
-                delta.result_size
-            );
-        }
-
-        Ok(result)
+        decompress_exact(&delta.zstd_data, base, delta.result_size)
+            .map_err(|e| anyhow::anyhow!("Failed to decompress zstd-dict delta: {}", e))
     }
+}
+
+/// Deltas up to this size decode into a buffer sized from `result_size` up
+/// front (every chunk delta: chunks are at most 32 MiB). Larger claims decode
+/// into a buffer that grows with the bytes actually produced, so a forged
+/// `result_size` (or zstd frame header) cannot make the decoder reserve
+/// gigabytes for a few bytes of payload (FUTURE_TODOS #38).
+const PREALLOC_LIMIT: usize = 64 * 1024 * 1024;
+
+/// Decompress `data` (with `dict`, empty for none) to exactly `result_size` bytes.
+fn decompress_exact(data: &[u8], dict: &[u8], result_size: usize) -> anyhow::Result<Vec<u8>> {
+    let out = if result_size <= PREALLOC_LIMIT {
+        zstd::bulk::Decompressor::with_dictionary(dict)?.decompress(data, result_size)?
+    } else {
+        use std::io::Read;
+        let mut out = Vec::with_capacity(PREALLOC_LIMIT);
+        zstd::stream::read::Decoder::with_dictionary(data, dict)?
+            .take(result_size as u64 + 1)
+            .read_to_end(&mut out)?;
+        out
+    };
+    if out.len() != result_size {
+        anyhow::bail!(
+            "Delta reconstruction size mismatch: {} != {}",
+            out.len(),
+            result_size
+        );
+    }
+    Ok(out)
 }
 
 /// Helper function to encode variable-length integer (u64 to support objects > 4GB)

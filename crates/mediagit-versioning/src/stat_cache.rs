@@ -58,6 +58,7 @@ struct StatEntry {
 #[derive(Debug)]
 pub struct StatCache {
     path: PathBuf,
+    root: PathBuf,
     entries: BTreeMap<String, StatEntry>,
     enabled: bool,
     dirty: bool,
@@ -79,6 +80,7 @@ impl StatCache {
         };
         Self {
             path,
+            root: repo_root.to_path_buf(),
             entries,
             enabled,
             dirty: false,
@@ -92,7 +94,7 @@ impl StatCache {
         let mtime_ns = mtime_ns(meta)?;
         let trusted = entry.size == meta.len()
             && entry.mtime_ns == mtime_ns
-            && entry.file_id == file_id(meta)
+            && Some(entry.file_id) == file_id(&self.root.join(rel_path), meta)
             && entry.change_ns == change_ns(meta)
             && meta.is_file()
             && mtime_ns.saturating_add(RACY_MARGIN_NS) < entry.recorded_ns;
@@ -104,13 +106,15 @@ impl StatCache {
         if !self.enabled || !meta.is_file() {
             return;
         }
-        let Some(mtime_ns) = mtime_ns(meta) else {
+        let (Some(mtime_ns), Some(file_id)) =
+            (mtime_ns(meta), file_id(&self.root.join(rel_path), meta))
+        else {
             return;
         };
         let entry = StatEntry {
             size: meta.len(),
             mtime_ns,
-            file_id: file_id(meta),
+            file_id,
             change_ns: change_ns(meta),
             oid,
             recorded_ns: now_ns(),
@@ -200,17 +204,34 @@ fn change_ns(meta: &Metadata) -> u128 {
 }
 
 #[cfg(unix)]
-fn file_id(meta: &Metadata) -> u64 {
+fn file_id(_path: &Path, meta: &Metadata) -> Option<u64> {
     use std::os::unix::fs::MetadataExt;
-    meta.ino()
+    Some(meta.ino())
 }
 
-// ponytail: Windows file index needs an unstable std API or a new dependency;
-// size + 100 ns NTFS mtime + racy margin carry the check there. Add a file id
-// if a replace-with-identical-size-and-mtime case ever shows up.
-#[cfg(not(unix))]
-fn file_id(_meta: &Metadata) -> u64 {
-    0
+/// NTFS file index. Creation time alone is not enough on Windows: a name
+/// deleted and reused within ~15 s gets the OLD creation time back
+/// ("tunnelling"), so a delete-then-rename replacement with restored size and
+/// mtime would otherwise look unchanged. Costs one handle open per file; an
+/// unreadable file returns None and is simply re-hashed.
+#[cfg(windows)]
+fn file_id(path: &Path, _meta: &Metadata) -> Option<u64> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    // Zero access rights: no sharing violation even if another app holds the file.
+    let file = std::fs::OpenOptions::new()
+        .access_mode(0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .ok()?;
+    winapi_util::file::information(&file)
+        .ok()
+        .map(|i| i.file_index())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn file_id(_path: &Path, _meta: &Metadata) -> Option<u64> {
+    Some(0)
 }
 
 #[cfg(test)]
@@ -329,6 +350,29 @@ mod tests {
         let tmp = d.path().join("a.tmp");
         fs::write(&tmp, b"HELLO").unwrap();
         set_mtime(&tmp, t);
+        fs::rename(&tmp, &p).unwrap();
+        assert_eq!(c.lookup("a.bin", &fs::symlink_metadata(&p).unwrap()), None);
+    }
+
+    #[test]
+    fn deleted_then_recreated_with_same_size_and_mtime_misses() {
+        // Delete-then-rename (PowerShell `Move-Item -Force`, many save paths)
+        // reuses the name within seconds, and NTFS "tunnelling" then hands the
+        // new file the OLD creation time. Size, mtime and creation time all
+        // match; only the file identity reveals the replacement.
+        let d = repo();
+        let p = old_file(d.path(), "a.bin", b"hello");
+        let mut c = StatCache::load(d.path());
+        c.record(
+            "a.bin",
+            &fs::symlink_metadata(&p).unwrap(),
+            Oid::hash(b"hello"),
+        );
+        let t = fs::metadata(&p).unwrap().modified().unwrap();
+        let tmp = d.path().join("a.tmp");
+        fs::write(&tmp, b"HELLO").unwrap();
+        set_mtime(&tmp, t);
+        fs::remove_file(&p).unwrap();
         fs::rename(&tmp, &p).unwrap();
         assert_eq!(c.lookup("a.bin", &fs::symlink_metadata(&p).unwrap()), None);
     }

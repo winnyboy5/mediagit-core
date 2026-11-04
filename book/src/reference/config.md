@@ -138,7 +138,7 @@ file_permissions = "0644"
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `backend` | string | `"filesystem"` | Must be `"filesystem"` |
-| `base_path` | string | `"./data"` | Storage root directory |
+| `base_path` | string | `"./data"` | Storage root directory. A relative path resolves against the repository root; `init` writes `.mediagit/objects` |
 | `create_dirs` | bool | `true` | Auto-create directories |
 | `sync` | bool | `false` | Sync writes to disk (slower, safer) |
 | `file_permissions` | string | `"0644"` | Octal file permission string |

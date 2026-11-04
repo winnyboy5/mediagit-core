@@ -220,6 +220,10 @@ pub fn load_repo_key_bytes(repo_root: &Path) -> Result<Option<Zeroizing<Vec<u8>>
 static UNWRAPPED: std::sync::Mutex<Option<(PathBuf, Zeroizing<Vec<u8>>)>> =
     std::sync::Mutex::new(None);
 
+/// Counts real unwraps (cache misses) so a test can prove the memo works.
+#[cfg(test)]
+static REAL_UNWRAPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn cache_root(repo_root: &Path) -> PathBuf {
     dunce::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf())
 }
@@ -232,6 +236,8 @@ fn unwrap_once(repo_root: &Path, stored: &StoredKey) -> Result<Zeroizing<Vec<u8>
     {
         return Ok(Zeroizing::new(bytes.to_vec()));
     }
+    #[cfg(test)]
+    REAL_UNWRAPS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let (bytes, _master) = unwrap_repo_key_bytes(stored)?;
     *slot = Some((root, Zeroizing::new(bytes.to_vec())));
     Ok(bytes)
@@ -1037,38 +1043,12 @@ fn render(stored: &StoredKey) -> Result<String> {
     ))
 }
 
-/// Owner-only permissions where the OS models them. Best-effort: the file
-/// holds ciphertext, so a permissive mode is a weakened defence rather than an
-/// exposed key — same posture as `config.toml`'s advisory check in `repo.rs`.
-#[cfg(unix)]
+/// Owner-only permissions (0o600 on Unix, owner-only ACL on Windows).
+/// Best-effort with a warning: the file holds ciphertext, so a permissive
+/// ACL weakens a defence rather than exposing the key.
 fn restrict_permissions(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    mediagit_security::fsperm::restrict_to_owner_or_warn(path);
 }
-
-/// Windows has no owner-only mode bit; a freshly created file just inherits
-/// its parent directory's ACL. `icacls /inheritance:r` breaks that
-/// inheritance and `/grant:r "<user>:F"` leaves only the current user with
-/// access — the posture OpenSSH requires of private key files. Shells out to
-/// the built-in `icacls.exe` rather than the raw ACL Win32 APIs: this crate
-/// denies `unsafe_code`, and `icacls` needs none. Best-effort, same posture as
-/// the unix branch: failure here weakens the file's protection, it doesn't
-/// expose the key directly (the file holds ciphertext).
-#[cfg(windows)]
-fn restrict_permissions(path: &Path) {
-    let Ok(user) = std::env::var("USERNAME") else {
-        return;
-    };
-    let _ = std::process::Command::new("icacls")
-        .arg(path)
-        .arg("/inheritance:r")
-        .arg("/grant:r")
-        .arg(format!("{user}:F"))
-        .output();
-}
-
-#[cfg(not(any(unix, windows)))]
-fn restrict_permissions(_path: &Path) {}
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
@@ -1101,6 +1081,27 @@ mod tests {
             format!("{err:#}").contains("newer MediaGit"),
             "got: {err:#}"
         );
+    }
+
+    /// A transfer command asks for the repo key twice (remote pre-flight, then
+    /// `install_armed_key`). With a passphrase master each unwrap is a prompt,
+    /// so the second ask must be served from the per-process memo (#96).
+    #[test]
+    fn the_repo_key_is_unwrapped_once_per_process() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".mediagit")).unwrap();
+        let keyfile = dir.path().join("master.key");
+        std::fs::write(&keyfile, "ab".repeat(KEY_LEN)).unwrap();
+        mediagit_test_utils::set_var(KEYFILE_ENV, &keyfile);
+        init_repo_key(dir.path()).unwrap();
+
+        let before = REAL_UNWRAPS.load(std::sync::atomic::Ordering::SeqCst);
+        let bytes = load_repo_key_bytes(dir.path()).unwrap().unwrap();
+        assert!(load_repo_key(dir.path()).unwrap().is_some());
+        let again = load_repo_key_bytes(dir.path()).unwrap().unwrap();
+        assert_eq!(*bytes, *again);
+        let after = REAL_UNWRAPS.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(after - before, 1, "the master was asked more than once");
     }
 
     fn stored_fixture(fingerprint: Option<String>) -> StoredKey {
