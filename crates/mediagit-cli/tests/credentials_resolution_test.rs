@@ -207,6 +207,66 @@ fn keychain_tier_write_through_and_read_back() {
     assert_eq!(result, Credentials::Bearer("keychain-token".to_string()));
 }
 
+/// Env credentials (`MEDIAGIT_TOKEN` / `MEDIAGIT_API_KEY`) are per-process.
+/// `remember_credentials` must not write them into the keychain: that let a
+/// script pushing with an API key overwrite the user's saved sign-in for the
+/// same server, and revoking that key then locked the user out (found by the
+/// desktop real-app test w5.spec.ts). Opt-in, same reason as the tests above.
+#[test]
+fn env_credentials_are_never_written_to_the_keychain() {
+    if std::env::var_os("MEDIAGIT_TEST_REAL_KEYRING").is_none() {
+        eprintln!(
+            "skipping env_credentials_are_never_written_to_the_keychain: set MEDIAGIT_TEST_REAL_KEYRING=1 to run against the real OS keychain"
+        );
+        return;
+    }
+    let _guard = ENV_LOCK.lock().unwrap();
+    let origin_account = "http://localhost:9997";
+    let config = config_with_remote(RemoteConfig::new(
+        "http://localhost:9997/mediagit-env-not-cached",
+    ));
+    let read = || keyring::Entry::new("mediagit", origin_account).and_then(|e| e.get_password());
+    let cleanup = || {
+        if let Ok(entry) = keyring::Entry::new("mediagit", origin_account) {
+            let _ = entry.delete_credential();
+        }
+    };
+    cleanup();
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("MEDIAGIT_NO_KEYRING") };
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("MEDIAGIT_TOKEN") };
+
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("MEDIAGIT_API_KEY", "env-only-key") };
+    remember_credentials(
+        &config,
+        "origin",
+        &Credentials::ApiKey("env-only-key".to_string()),
+    );
+    let after_env = read();
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("MEDIAGIT_API_KEY") };
+
+    // Without env credentials the write-through still works.
+    remember_credentials(
+        &config,
+        "origin",
+        &Credentials::Bearer("login-token".to_string()),
+    );
+    let after_login = read();
+    cleanup();
+
+    assert!(
+        after_env.is_err(),
+        "an env-sourced credential was written to the keychain: {after_env:?}"
+    );
+    assert!(
+        after_login.is_ok(),
+        "normal write-through must still store the credential"
+    );
+}
+
 /// I11: an explicit `config.toml` token must beat a stale keychain entry --
 /// this is the precise bug the reorder fixes (previously the keychain, a
 /// cache, was checked *before* config, the source of truth). Opt-in, same

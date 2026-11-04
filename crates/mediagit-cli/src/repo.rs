@@ -167,6 +167,18 @@ pub fn resolve_credentials(
     resolve_credentials_tiered(repo_root, config, remote_name).0
 }
 
+/// The env tier: `MEDIAGIT_TOKEN`, then `MEDIAGIT_API_KEY` (blank = unset).
+fn env_credentials() -> Option<mediagit_protocol::Credentials> {
+    let var = |k| {
+        std::env::var(k)
+            .ok()
+            .filter(|v: &String| !v.trim().is_empty())
+    };
+    var("MEDIAGIT_TOKEN")
+        .map(mediagit_protocol::Credentials::Bearer)
+        .or_else(|| var("MEDIAGIT_API_KEY").map(mediagit_protocol::Credentials::ApiKey))
+}
+
 /// Like [`resolve_credentials`], but also returns which tier answered — the
 /// [`CredentialSource`] a caller needs to invalidate the keychain (and only
 /// the keychain) on a 401 via [`invalidate_on_unauthorized`].
@@ -175,23 +187,8 @@ pub fn resolve_credentials_tiered(
     config: &mediagit_config::Config,
     remote_name: &str,
 ) -> (mediagit_protocol::Credentials, CredentialSource) {
-    if let Some(token) = std::env::var("MEDIAGIT_TOKEN")
-        .ok()
-        .filter(|t| !t.trim().is_empty())
-    {
-        return (
-            mediagit_protocol::Credentials::Bearer(token),
-            CredentialSource::Env,
-        );
-    }
-    if let Some(key) = std::env::var("MEDIAGIT_API_KEY")
-        .ok()
-        .filter(|k| !k.trim().is_empty())
-    {
-        return (
-            mediagit_protocol::Credentials::ApiKey(key),
-            CredentialSource::Env,
-        );
+    if let Some(creds) = env_credentials() {
+        return (creds, CredentialSource::Env);
     }
     if let Some(remote) = config.remotes.get(remote_name) {
         if let Some(token) = remote.token.as_deref().filter(|t| !t.trim().is_empty()) {
@@ -339,7 +336,10 @@ pub fn remember_credentials(
     remote_name: &str,
     creds: &mediagit_protocol::Credentials,
 ) {
-    if keyring_disabled() {
+    // Env credentials are per-process (a CI job, a script). Env outranks every
+    // other tier, so if one is set it is what `creds` came from: caching it
+    // would overwrite the user's own sign-in for this server.
+    if keyring_disabled() || env_credentials().is_some() {
         return;
     }
     let Some(payload) = credential_payload(creds) else {
@@ -380,23 +380,8 @@ pub fn remember_credentials_for_origin(origin: &str, creds: &mediagit_protocol::
 pub fn resolve_credentials_for_origin(
     origin: &str,
 ) -> (mediagit_protocol::Credentials, CredentialSource) {
-    if let Some(token) = std::env::var("MEDIAGIT_TOKEN")
-        .ok()
-        .filter(|t| !t.trim().is_empty())
-    {
-        return (
-            mediagit_protocol::Credentials::Bearer(token),
-            CredentialSource::Env,
-        );
-    }
-    if let Some(key) = std::env::var("MEDIAGIT_API_KEY")
-        .ok()
-        .filter(|k| !k.trim().is_empty())
-    {
-        return (
-            mediagit_protocol::Credentials::ApiKey(key),
-            CredentialSource::Env,
-        );
+    if let Some(creds) = env_credentials() {
+        return (creds, CredentialSource::Env);
     }
     if !keyring_disabled()
         && let Some(creds) = keyring_read(origin)
