@@ -1,0 +1,1349 @@
+# GUI parity contract. crates/mediagit-cli/tests/parity_contract_test.rs fails on any CLI
+# command or argument missing here, and on any entry here the CLI no longer has.
+#
+# [cmd."<path>"]       gui = "<View>"            where the command is surfaced
+# [arg."<path> <arg>"] gui = "<View>[/part]"     where the argument is surfaced
+#                      gui = "TODO:<View>"       not exposed yet (counted by the test)
+#                      excluded = "<reason>"     deliberately never in the GUI
+# Global flags are keyed without a command path: [arg."--machine"].
+# Positionals are keyed by their help name: [arg."push REMOTE"].
+
+# ---- global flags ----
+[arg."--color"]
+excluded = "--machine disables colour"
+
+[arg."--log-format"]
+excluded = "diagnostic log rendering for terminals; the GUI uses --machine"
+
+[arg."--machine"]
+excluded = "the engine always passes it; it is the transport, not a feature"
+
+[arg."--quiet"]
+excluded = "the GUI drives output through --machine, which is already silent"
+
+[arg."--repository"]
+excluded = "the engine sets the working directory (-C) for every call"
+
+[arg."--secret-stdin"]
+excluded = "the engine passes it whenever a secret is entered; it is the transport, not a feature"
+
+[arg."--verbose"]
+excluded = "the GUI has no terminal log to make verbose"
+
+[cmd."init"]
+gui = "WelcomeView"
+
+[arg."init PATH"]
+gui = "WelcomeView"
+
+[arg."init --initial-branch"]
+gui = "TODO:WelcomeView"
+
+[arg."init --bare"]
+gui = "TODO:WelcomeView"
+
+[cmd."clone"]
+gui = "WelcomeView"
+
+[arg."clone URL"]
+gui = "TODO:WelcomeView"
+
+[arg."clone DIRECTORY"]
+gui = "TODO:WelcomeView"
+
+[arg."clone --branch"]
+gui = "TODO:WelcomeView"
+
+[cmd."add"]
+gui = "ChangesView"
+
+[arg."add PATHS"]
+gui = "ChangesView"
+
+[arg."add --all"]
+gui = "TODO:ChangesView"
+
+[arg."add --dry-run"]
+gui = "TODO:ChangesView"
+
+[arg."add --force"]
+gui = "TODO:ChangesView"
+
+[arg."add --ignore-removal"]
+gui = "TODO:ChangesView"
+
+[arg."add --update"]
+gui = "TODO:ChangesView"
+
+[arg."add --no-chunking"]
+excluded = "tuning knob for benchmarks; the GUI always uses the repo defaults"
+
+[arg."add --no-delta"]
+excluded = "tuning knob for benchmarks; the GUI always uses the repo defaults"
+
+[arg."add --no-parallel"]
+excluded = "tuning knob for benchmarks; the GUI always uses the repo defaults"
+
+[arg."add --jobs"]
+excluded = "tuning knob; the CLI picks a worker count from the machine"
+
+[cmd."commit"]
+gui = "ChangesView"
+
+[arg."commit --message"]
+gui = "ChangesView"
+
+[arg."commit --edit"]
+excluded = "opens $EDITOR; the GUI has its own message box"
+
+[arg."commit --file"]
+gui = "TODO:ChangesView"
+
+[arg."commit --all"]
+gui = "TODO:ChangesView"
+
+[arg."commit --include"]
+gui = "TODO:ChangesView"
+
+[arg."commit --author"]
+gui = "TODO:ChangesView"
+
+[arg."commit --date"]
+gui = "TODO:ChangesView"
+
+[arg."commit --allow-empty"]
+gui = "TODO:ChangesView"
+
+[arg."commit --signoff"]
+gui = "TODO:ChangesView"
+
+[arg."commit --dry-run"]
+gui = "TODO:ChangesView"
+
+[cmd."config"]
+gui = "SettingsView"
+
+[cmd."config get"]
+gui = "SettingsView"
+
+[arg."config get KEY"]
+gui = "TODO:SettingsView"
+
+[cmd."config set"]
+gui = "SettingsView"
+
+[arg."config set KEY"]
+gui = "TODO:SettingsView"
+
+[arg."config set VALUE"]
+gui = "TODO:SettingsView"
+
+[cmd."config unset"]
+gui = "SettingsView"
+
+[arg."config unset KEY"]
+gui = "TODO:SettingsView"
+
+[cmd."config list"]
+gui = "SettingsView"
+
+[cmd."push"]
+gui = "SyncView"
+
+[arg."push REMOTE"]
+gui = "TODO:SyncView"
+
+[arg."push REFSPEC"]
+gui = "TODO:SyncView"
+
+[arg."push --all"]
+gui = "TODO:SyncView"
+
+[arg."push --tags"]
+gui = "TODO:SyncView"
+
+[arg."push --follow-tags"]
+gui = "TODO:SyncView"
+
+[arg."push --dry-run"]
+gui = "TODO:SyncView"
+
+[arg."push --force"]
+gui = "TODO:SyncView"
+
+[arg."push --force-with-lease"]
+gui = "TODO:SyncView"
+
+[arg."push --delete"]
+gui = "TODO:SyncView"
+
+[arg."push --set-upstream"]
+gui = "TODO:SyncView"
+
+[arg."push --no-track"]
+gui = "TODO:SyncView"
+
+[arg."push --repair"]
+gui = "TODO:SyncView"
+
+[cmd."pull"]
+gui = "SyncView"
+
+[arg."pull REMOTE"]
+gui = "SyncView"
+
+[arg."pull BRANCH"]
+gui = "TODO:SyncView"
+
+[arg."pull --rebase"]
+gui = "TODO:SyncView"
+
+[arg."pull --dry-run"]
+gui = "TODO:SyncView"
+
+[arg."pull --abort"]
+gui = "TODO:SyncView"
+
+[arg."pull --continue"]
+gui = "TODO:SyncView"
+
+[arg."pull --no-commit"]
+gui = "TODO:SyncView"
+
+[arg."pull --strategy"]
+gui = "TODO:SyncView"
+
+[arg."pull --strategy-option"]
+gui = "TODO:SyncView"
+
+[cmd."fetch"]
+gui = "SyncView"
+
+[arg."fetch REMOTE"]
+gui = "TODO:SyncView"
+
+[arg."fetch BRANCH"]
+gui = "TODO:SyncView"
+
+[arg."fetch --all"]
+gui = "TODO:SyncView"
+
+[arg."fetch --prune"]
+gui = "TODO:SyncView"
+
+[cmd."download"]
+gui = "SyncView"
+
+[arg."download REMOTE_PATH"]
+gui = "TODO:SyncView"
+
+[arg."download --ref"]
+gui = "TODO:SyncView"
+
+[arg."download --output"]
+gui = "TODO:SyncView"
+
+[cmd."media"]
+gui = "HistoryView"
+
+[cmd."media info"]
+gui = "HistoryView"
+
+[arg."media info PATH"]
+gui = "HistoryView"
+
+[arg."media info --json"]
+excluded = "legacy per-command JSON; the GUI uses the global --machine envelope"
+
+[cmd."remote"]
+gui = "RemoteView"
+
+[cmd."remote add"]
+gui = "RemoteView"
+
+[arg."remote add NAME"]
+gui = "RemoteView"
+
+[arg."remote add URL"]
+gui = "RemoteView"
+
+[arg."remote add --fetch"]
+gui = "TODO:RemoteView"
+
+[arg."remote add --token"]
+gui = "TODO:RemoteView"
+
+[arg."remote add --token-stdin"]
+gui = "TODO:RemoteView"
+
+[cmd."remote remove"]
+gui = "RemoteView"
+
+[arg."remote remove NAME"]
+gui = "RemoteView"
+
+[cmd."remote list"]
+gui = "RemoteView"
+
+[cmd."remote rename"]
+gui = "RemoteView"
+
+[arg."remote rename OLD_NAME"]
+gui = "TODO:RemoteView"
+
+[arg."remote rename NEW_NAME"]
+gui = "TODO:RemoteView"
+
+[cmd."remote show"]
+gui = "RemoteView"
+
+[arg."remote show NAME"]
+gui = "TODO:RemoteView"
+
+[cmd."remote set-url"]
+gui = "RemoteView"
+
+[arg."remote set-url NAME"]
+gui = "TODO:RemoteView"
+
+[arg."remote set-url URL"]
+gui = "TODO:RemoteView"
+
+[arg."remote set-url --push"]
+gui = "TODO:RemoteView"
+
+[cmd."branch"]
+gui = "BranchesView"
+
+[cmd."branch list"]
+gui = "BranchesView"
+
+[arg."branch list --remote"]
+gui = "TODO:BranchesView"
+
+[arg."branch list --all"]
+gui = "TODO:BranchesView"
+
+[arg."branch list --sort"]
+gui = "TODO:BranchesView"
+
+[cmd."branch create"]
+gui = "BranchesView"
+
+[arg."branch create NAME"]
+gui = "BranchesView"
+
+[arg."branch create START_POINT"]
+gui = "TODO:BranchesView"
+
+[arg."branch create --set-upstream"]
+gui = "TODO:BranchesView"
+
+[arg."branch create --track"]
+gui = "TODO:BranchesView"
+
+[arg."branch create --no-track"]
+gui = "TODO:BranchesView"
+
+[cmd."branch switch"]
+gui = "BranchesView"
+
+[arg."branch switch BRANCH"]
+gui = "TODO:BranchesView"
+
+[arg."branch switch --create"]
+gui = "TODO:BranchesView"
+
+[arg."branch switch --track"]
+gui = "TODO:BranchesView"
+
+[arg."branch switch --force"]
+gui = "TODO:BranchesView"
+
+[arg."branch switch --no-guess"]
+gui = "TODO:BranchesView"
+
+[cmd."branch delete"]
+gui = "BranchesView"
+
+[arg."branch delete BRANCHES"]
+gui = "BranchesView"
+
+[arg."branch delete --force"]
+gui = "BranchesView"
+
+[arg."branch delete --delete-merged"]
+gui = "TODO:BranchesView"
+
+[arg."branch delete --remote"]
+gui = "TODO:BranchesView"
+
+[cmd."branch protect"]
+gui = "BranchesView"
+
+[arg."branch protect BRANCH"]
+gui = "TODO:BranchesView"
+
+[arg."branch protect --require-reviews"]
+gui = "TODO:BranchesView"
+
+[arg."branch protect --unprotect"]
+gui = "TODO:BranchesView"
+
+[cmd."branch rename"]
+gui = "BranchesView"
+
+[arg."branch rename OLD_OR_NEW"]
+gui = "BranchesView"
+
+[arg."branch rename NEW_NAME"]
+gui = "BranchesView"
+
+[arg."branch rename --force"]
+gui = "TODO:BranchesView"
+
+[cmd."branch show"]
+gui = "BranchesView"
+
+[arg."branch show BRANCH"]
+gui = "TODO:BranchesView"
+
+[cmd."tag"]
+gui = "TagsStashView"
+
+[cmd."tag create"]
+gui = "TagsStashView"
+
+[arg."tag create NAME"]
+gui = "TagsStashView"
+
+[arg."tag create COMMIT"]
+gui = "TODO:TagsStashView"
+
+[arg."tag create --annotated"]
+gui = "TODO:TagsStashView"
+
+[arg."tag create --message"]
+gui = "TODO:TagsStashView"
+
+[arg."tag create --tagger"]
+gui = "TODO:TagsStashView"
+
+[arg."tag create --email"]
+gui = "TODO:TagsStashView"
+
+[arg."tag create --force"]
+gui = "TODO:TagsStashView"
+
+[cmd."tag list"]
+gui = "TagsStashView"
+
+[arg."tag list PATTERN"]
+gui = "TODO:TagsStashView"
+
+[arg."tag list --info"]
+gui = "TODO:TagsStashView"
+
+[arg."tag list --sort"]
+gui = "TODO:TagsStashView"
+
+[arg."tag list --reverse"]
+gui = "TODO:TagsStashView"
+
+[cmd."tag delete"]
+gui = "TagsStashView"
+
+[arg."tag delete NAME"]
+gui = "TagsStashView"
+
+[arg."tag delete --force"]
+gui = "TODO:TagsStashView"
+
+[cmd."tag show"]
+gui = "TagsStashView"
+
+[arg."tag show NAME"]
+gui = "TODO:TagsStashView"
+
+[arg."tag show --full"]
+gui = "TODO:TagsStashView"
+
+[cmd."tag verify"]
+gui = "TagsStashView"
+
+[arg."tag verify NAME"]
+gui = "TODO:TagsStashView"
+
+[cmd."lock"]
+gui = "LocksView"
+
+[cmd."lock create"]
+gui = "LocksView"
+
+[arg."lock create PATH"]
+gui = "LocksView"
+
+[arg."lock create --owner"]
+gui = "TODO:LocksView"
+
+[arg."lock create --remote"]
+gui = "TODO:LocksView"
+
+[cmd."lock unlock"]
+gui = "LocksView"
+
+[arg."lock unlock PATH"]
+gui = "TODO:LocksView"
+
+[arg."lock unlock --id"]
+gui = "LocksView"
+
+[arg."lock unlock --force"]
+gui = "LocksView"
+
+[arg."lock unlock --remote"]
+gui = "TODO:LocksView"
+
+[cmd."lock list"]
+gui = "LocksView"
+
+[arg."lock list --json"]
+excluded = "legacy per-command JSON; the GUI uses the global --machine envelope"
+
+[arg."lock list --remote"]
+gui = "TODO:LocksView"
+
+[cmd."auth"]
+gui = "SecurityView"
+
+[cmd."auth login"]
+gui = "SecurityView"
+
+[arg."auth login --server"]
+gui = "TODO:SecurityView"
+
+[arg."auth login --username"]
+gui = "TODO:SecurityView"
+
+[arg."auth login --token"]
+gui = "TODO:SecurityView"
+
+[arg."auth login --api-key"]
+gui = "TODO:SecurityView"
+
+[cmd."auth register"]
+gui = "SecurityView"
+
+[arg."auth register --server"]
+gui = "TODO:SecurityView"
+
+[arg."auth register --username"]
+gui = "TODO:SecurityView"
+
+[arg."auth register --email"]
+gui = "TODO:SecurityView"
+
+[cmd."auth status"]
+gui = "SecurityView"
+
+[arg."auth status --server"]
+gui = "SecurityView"
+
+[cmd."auth logout"]
+gui = "SecurityView"
+
+[arg."auth logout --server"]
+gui = "SecurityView"
+
+[arg."auth logout --all"]
+gui = "SecurityView"
+
+[cmd."auth passwd"]
+gui = "SecurityView"
+
+[arg."auth passwd --server"]
+gui = "TODO:SecurityView"
+
+[cmd."auth whoami"]
+gui = "SecurityView"
+
+[arg."auth whoami --server"]
+gui = "SecurityView"
+
+[cmd."auth key"]
+gui = "SecurityView"
+
+[cmd."auth key create"]
+gui = "SecurityView"
+
+[arg."auth key create --server"]
+gui = "TODO:SecurityView"
+
+[arg."auth key create --name"]
+gui = "TODO:SecurityView"
+
+[arg."auth key create --permissions"]
+gui = "TODO:SecurityView"
+
+[cmd."auth key list"]
+gui = "SecurityView"
+
+[arg."auth key list --server"]
+gui = "TODO:SecurityView"
+
+[cmd."auth key revoke"]
+gui = "SecurityView"
+
+[arg."auth key revoke ID"]
+gui = "TODO:SecurityView"
+
+[arg."auth key revoke --server"]
+gui = "TODO:SecurityView"
+
+[arg."auth key revoke --yes"]
+gui = "TODO:SecurityView"
+
+[cmd."auth admin"]
+gui = "SecurityView"
+
+[cmd."auth admin list-users"]
+gui = "SecurityView"
+
+[arg."auth admin list-users --server"]
+gui = "TODO:SecurityView"
+
+[cmd."auth admin set-role"]
+gui = "SecurityView"
+
+[arg."auth admin set-role USER"]
+gui = "TODO:SecurityView"
+
+[arg."auth admin set-role ROLE"]
+gui = "TODO:SecurityView"
+
+[arg."auth admin set-role --server"]
+gui = "TODO:SecurityView"
+
+[cmd."auth admin create-user"]
+gui = "SecurityView"
+
+[arg."auth admin create-user USER"]
+gui = "TODO:SecurityView"
+
+[arg."auth admin create-user --server"]
+gui = "TODO:SecurityView"
+
+[arg."auth admin create-user --role"]
+gui = "TODO:SecurityView"
+
+[arg."auth admin create-user --email"]
+gui = "TODO:SecurityView"
+
+[cmd."auth admin reset-password"]
+gui = "SecurityView"
+
+[arg."auth admin reset-password USER"]
+gui = "TODO:SecurityView"
+
+[arg."auth admin reset-password --server"]
+gui = "TODO:SecurityView"
+
+[cmd."auth admin grant"]
+gui = "SecurityView"
+
+[arg."auth admin grant USER"]
+gui = "TODO:SecurityView"
+
+[arg."auth admin grant REPO"]
+gui = "TODO:SecurityView"
+
+[arg."auth admin grant LEVEL"]
+gui = "TODO:SecurityView"
+
+[arg."auth admin grant --server"]
+gui = "TODO:SecurityView"
+
+[cmd."auth admin revoke-grant"]
+gui = "SecurityView"
+
+[arg."auth admin revoke-grant USER"]
+gui = "TODO:SecurityView"
+
+[arg."auth admin revoke-grant REPO"]
+gui = "TODO:SecurityView"
+
+[arg."auth admin revoke-grant --server"]
+gui = "TODO:SecurityView"
+
+[arg."auth admin revoke-grant --yes"]
+gui = "TODO:SecurityView"
+
+[cmd."key"]
+gui = "SecurityView"
+
+[cmd."key init"]
+gui = "SecurityView"
+
+[cmd."key status"]
+gui = "SecurityView"
+
+[cmd."key recover"]
+gui = "SecurityView"
+
+[arg."key recover CODE"]
+gui = "SecurityView"
+
+[cmd."key rotate-master"]
+gui = "SecurityView"
+
+[arg."key rotate-master --new-keyfile"]
+gui = "TODO:SecurityView"
+
+[cmd."merge"]
+gui = "MergeView"
+
+[arg."merge BRANCH"]
+gui = "MergeView"
+
+[arg."merge --message"]
+gui = "TODO:MergeView"
+
+[arg."merge --no-ff"]
+gui = "MergeView"
+
+[arg."merge --ff-only"]
+gui = "TODO:MergeView"
+
+[arg."merge --squash"]
+gui = "TODO:MergeView"
+
+[arg."merge --strategy"]
+gui = "MergeView"
+
+[arg."merge --strategy-option"]
+gui = "TODO:MergeView"
+
+[arg."merge --no-commit"]
+gui = "TODO:MergeView"
+
+[arg."merge --abort"]
+gui = "MergeView"
+
+[arg."merge --continue"]
+gui = "MergeView"
+
+[cmd."rebase"]
+gui = "MergeView"
+
+[arg."rebase UPSTREAM"]
+gui = "MergeView"
+
+[arg."rebase BRANCH"]
+gui = "TODO:MergeView"
+
+[arg."rebase --keep-empty"]
+gui = "TODO:MergeView"
+
+[arg."rebase --abort"]
+gui = "TODO:MergeView"
+
+[arg."rebase --skip"]
+gui = "MergeView"
+
+[arg."rebase --autosquash"]
+gui = "TODO:MergeView"
+
+[arg."rebase --continue"]
+gui = "TODO:MergeView"
+
+[arg."rebase --rebase-merges"]
+gui = "TODO:MergeView"
+
+[cmd."cherry-pick"]
+gui = "MergeView"
+
+[arg."cherry-pick COMMITS"]
+gui = "MergeView"
+
+[arg."cherry-pick --abort"]
+gui = "TODO:MergeView"
+
+[arg."cherry-pick --skip"]
+gui = "MergeView"
+
+[arg."cherry-pick --no-commit"]
+gui = "TODO:MergeView"
+
+[arg."cherry-pick --edit"]
+gui = "TODO:MergeView"
+
+[arg."cherry-pick --append-message"]
+gui = "TODO:MergeView"
+
+[arg."cherry-pick --continue"]
+gui = "MergeView"
+
+[cmd."stash"]
+gui = "TagsStashView"
+
+[cmd."stash push"]
+gui = "TagsStashView"
+
+[arg."stash push MESSAGE"]
+gui = "TODO:TagsStashView"
+
+[arg."stash push PATHS"]
+gui = "TODO:TagsStashView"
+
+[arg."stash push --message"]
+gui = "TODO:TagsStashView"
+
+[arg."stash push --include-untracked"]
+gui = "TODO:TagsStashView"
+
+[cmd."stash save"]
+gui = "TagsStashView"
+
+[arg."stash save MESSAGE"]
+gui = "TagsStashView"
+
+[arg."stash save PATHS"]
+gui = "TODO:TagsStashView"
+
+[arg."stash save --message"]
+gui = "TODO:TagsStashView"
+
+[arg."stash save --include-untracked"]
+gui = "TODO:TagsStashView"
+
+[cmd."stash apply"]
+gui = "TagsStashView"
+
+[arg."stash apply STASH"]
+gui = "TagsStashView"
+
+[arg."stash apply --index"]
+gui = "TODO:TagsStashView"
+
+[arg."stash apply --force"]
+gui = "TODO:TagsStashView"
+
+[cmd."stash list"]
+gui = "TagsStashView"
+
+[cmd."stash show"]
+gui = "TagsStashView"
+
+[arg."stash show STASH"]
+gui = "TODO:TagsStashView"
+
+[arg."stash show --patch"]
+gui = "TODO:TagsStashView"
+
+[cmd."stash drop"]
+gui = "TagsStashView"
+
+[arg."stash drop STASH"]
+gui = "TagsStashView"
+
+[cmd."stash pop"]
+gui = "TagsStashView"
+
+[arg."stash pop STASH"]
+gui = "TagsStashView"
+
+[arg."stash pop --index"]
+gui = "TODO:TagsStashView"
+
+[arg."stash pop --force"]
+gui = "TODO:TagsStashView"
+
+[cmd."stash clear"]
+gui = "TagsStashView"
+
+[arg."stash clear --force"]
+gui = "TagsStashView"
+
+[cmd."bisect"]
+gui = "AdvancedView"
+
+[cmd."bisect start"]
+gui = "AdvancedView"
+
+[arg."bisect start BAD"]
+gui = "AdvancedView"
+
+[arg."bisect start GOOD"]
+gui = "TODO:AdvancedView"
+
+[arg."bisect start --reset"]
+gui = "TODO:AdvancedView"
+
+[cmd."bisect good"]
+gui = "AdvancedView"
+
+[arg."bisect good COMMIT"]
+gui = "AdvancedView"
+
+[cmd."bisect bad"]
+gui = "AdvancedView"
+
+[arg."bisect bad COMMIT"]
+gui = "TODO:AdvancedView"
+
+[cmd."bisect skip"]
+gui = "AdvancedView"
+
+[arg."bisect skip COMMIT"]
+gui = "AdvancedView"
+
+[cmd."bisect reset"]
+gui = "AdvancedView"
+
+[arg."bisect reset COMMIT"]
+gui = "TODO:AdvancedView"
+
+[cmd."bisect log"]
+gui = "AdvancedView"
+
+[cmd."bisect replay"]
+gui = "AdvancedView"
+
+[arg."bisect replay LOGFILE"]
+gui = "TODO:AdvancedView"
+
+[cmd."log"]
+gui = "HistoryView"
+
+[arg."log REVISION"]
+gui = "TODO:HistoryView"
+
+[arg."log PATHS"]
+gui = "TODO:HistoryView"
+
+[arg."log --max-count"]
+gui = "HistoryView"
+
+[arg."log --skip"]
+gui = "HistoryView"
+
+[arg."log --oneline"]
+gui = "TODO:HistoryView"
+
+[arg."log --graph"]
+gui = "TODO:HistoryView"
+
+[arg."log --stat"]
+gui = "TODO:HistoryView"
+
+[arg."log --patch"]
+gui = "TODO:HistoryView"
+
+[arg."log --author"]
+gui = "TODO:HistoryView"
+
+[arg."log --grep"]
+gui = "TODO:HistoryView"
+
+[arg."log --since"]
+gui = "TODO:HistoryView"
+
+[arg."log --until"]
+gui = "TODO:HistoryView"
+
+[arg."log --format"]
+gui = "TODO:HistoryView"
+
+[arg."log --all"]
+gui = "HistoryView"
+
+[cmd."diff"]
+gui = "CompareView"
+
+[arg."diff REVISION1"]
+gui = "CompareView"
+
+[arg."diff REVISION2"]
+gui = "TODO:CompareView"
+
+[arg."diff PATHS"]
+gui = "TODO:CompareView"
+
+[arg."diff --cached"]
+gui = "TODO:CompareView"
+
+[arg."diff --stat"]
+gui = "TODO:CompareView"
+
+[arg."diff --summary"]
+gui = "TODO:CompareView"
+
+[arg."diff --unified"]
+gui = "TODO:CompareView"
+
+[arg."diff --word-diff"]
+gui = "TODO:CompareView"
+
+[cmd."show"]
+gui = "HistoryView"
+
+[arg."show OBJECT"]
+gui = "HistoryView"
+
+[arg."show --output"]
+gui = "HistoryView"
+
+[arg."show --patch"]
+gui = "TODO:HistoryView"
+
+[arg."show --pretty"]
+gui = "TODO:HistoryView"
+
+[arg."show --stat"]
+gui = "TODO:HistoryView"
+
+[arg."show --tree"]
+gui = "HistoryView"
+
+[arg."show --unified"]
+gui = "TODO:HistoryView"
+
+[cmd."status"]
+gui = "ChangesView"
+
+[arg."status --tracked"]
+gui = "TODO:ChangesView"
+
+[arg."status --untracked"]
+gui = "TODO:ChangesView"
+
+[arg."status --ignored"]
+gui = "TODO:ChangesView"
+
+[arg."status --short"]
+gui = "TODO:ChangesView"
+
+[arg."status --porcelain"]
+gui = "TODO:ChangesView"
+
+[arg."status --branch"]
+gui = "TODO:ChangesView"
+
+[arg."status --json"]
+excluded = "legacy per-command JSON; the GUI uses the global --machine envelope"
+
+[cmd."gc"]
+gui = "MaintenanceView"
+
+[arg."gc --no-prune"]
+gui = "TODO:MaintenanceView"
+
+[arg."gc --auto"]
+gui = "TODO:MaintenanceView"
+
+[arg."gc --dry-run"]
+gui = "MaintenanceView"
+
+[arg."gc --yes"]
+gui = "MaintenanceView"
+
+[arg."gc --repack"]
+gui = "TODO:MaintenanceView"
+
+[arg."gc --max-pack-size"]
+excluded = "tuning knob; the repo config decides pack size"
+
+[arg."gc --aggressive"]
+gui = "TODO:MaintenanceView"
+
+[cmd."fsck"]
+gui = "MaintenanceView"
+
+[arg."fsck --full"]
+gui = "MaintenanceView"
+
+[arg."fsck --quick"]
+gui = "MaintenanceView"
+
+[arg."fsck --all"]
+gui = "TODO:MaintenanceView"
+
+[arg."fsck --lost-found"]
+gui = "TODO:MaintenanceView"
+
+[arg."fsck --no-dangling"]
+gui = "TODO:MaintenanceView"
+
+[arg."fsck --repair"]
+gui = "TODO:MaintenanceView"
+
+[arg."fsck --dry-run"]
+gui = "TODO:MaintenanceView"
+
+[arg."fsck --max-objects"]
+excluded = "bounded-run knob for scripted checks"
+
+[arg."fsck --path"]
+excluded = "redundant with the global -C/--repository, which the GUI always sets"
+
+[cmd."verify"]
+gui = "MaintenanceView"
+
+[arg."verify COMMIT"]
+gui = "TODO:MaintenanceView"
+
+[arg."verify --file-integrity"]
+gui = "TODO:MaintenanceView"
+
+[arg."verify --checksums"]
+gui = "TODO:MaintenanceView"
+
+[arg."verify --start"]
+gui = "TODO:MaintenanceView"
+
+[arg."verify --end"]
+gui = "TODO:MaintenanceView"
+
+[arg."verify --quick"]
+gui = "MaintenanceView"
+
+[arg."verify --detailed"]
+gui = "TODO:MaintenanceView"
+
+[arg."verify --path"]
+excluded = "redundant with the global -C/--repository, which the GUI always sets"
+
+[cmd."stats"]
+gui = "StorageView"
+
+[arg."stats --storage"]
+gui = "TODO:StorageView"
+
+[arg."stats --files"]
+gui = "TODO:StorageView"
+
+[arg."stats --commits"]
+gui = "TODO:StorageView"
+
+[arg."stats --branches"]
+gui = "TODO:StorageView"
+
+[arg."stats --authors"]
+gui = "TODO:StorageView"
+
+[arg."stats --compression"]
+gui = "TODO:StorageView"
+
+[arg."stats --all"]
+gui = "TODO:StorageView"
+
+[arg."stats --json"]
+excluded = "legacy per-command JSON; the GUI uses the global --machine envelope"
+
+[arg."stats --prometheus"]
+excluded = "metrics export for monitoring systems, not a desktop view"
+
+[cmd."reflog"]
+gui = "HistoryView"
+
+[arg."reflog REF"]
+gui = "TODO:HistoryView"
+
+[arg."reflog --count"]
+gui = "TODO:HistoryView"
+
+[cmd."reflog show"]
+gui = "HistoryView"
+
+[arg."reflog show REF"]
+gui = "TODO:HistoryView"
+
+[arg."reflog show --count"]
+gui = "TODO:HistoryView"
+
+[arg."reflog show --all"]
+gui = "TODO:HistoryView"
+
+[cmd."reflog delete"]
+gui = "HistoryView"
+
+[arg."reflog delete REFERENCE"]
+gui = "TODO:HistoryView"
+
+[arg."reflog delete --yes"]
+gui = "TODO:HistoryView"
+
+[cmd."reflog expire"]
+gui = "HistoryView"
+
+[arg."reflog expire REF"]
+gui = "TODO:HistoryView"
+
+[arg."reflog expire --keep"]
+gui = "TODO:HistoryView"
+
+[arg."reflog expire --yes"]
+gui = "TODO:HistoryView"
+
+[cmd."reset"]
+gui = "ChangesView"
+
+[arg."reset COMMIT"]
+gui = "ChangesView"
+
+[arg."reset PATHS"]
+gui = "TODO:ChangesView"
+
+[arg."reset --soft"]
+gui = "ChangesView"
+
+[arg."reset --hard"]
+gui = "ChangesView"
+
+[arg."reset --mixed"]
+gui = "ChangesView"
+
+[cmd."revert"]
+gui = "HistoryView"
+
+[arg."revert COMMITS"]
+gui = "TODO:HistoryView"
+
+[arg."revert --no-commit"]
+gui = "TODO:HistoryView"
+
+[arg."revert --message"]
+gui = "TODO:HistoryView"
+
+[arg."revert --abort"]
+gui = "TODO:HistoryView"
+
+[arg."revert --skip"]
+gui = "TODO:HistoryView"
+
+[arg."revert --continue"]
+gui = "TODO:HistoryView"
+
+[cmd."sparse-checkout"]
+gui = "AdvancedView"
+
+[cmd."sparse-checkout set"]
+gui = "AdvancedView"
+
+[arg."sparse-checkout set PATTERN"]
+gui = "AdvancedView"
+
+[arg."sparse-checkout set --patterns"]
+gui = "TODO:AdvancedView"
+
+[cmd."sparse-checkout list"]
+gui = "AdvancedView"
+
+[cmd."sparse-checkout disable"]
+gui = "AdvancedView"
+
+[cmd."version"]
+gui = "SettingsView"
+
+[cmd."completions"]
+excluded = "shell completions are a terminal feature"
+
+[arg."completions SHELL"]
+excluded = "shell completions are a terminal feature"
+
+[cmd."__cli-tree"]
+excluded = "hidden helper that prints the clap tree for the parity test"
+
+[cmd."auth admin disable-user"]
+gui = "SecurityView"
+
+[arg."auth admin disable-user USER"]
+gui = "TODO:SecurityView"
+
+[arg."auth admin disable-user --server"]
+gui = "TODO:SecurityView"
+
+[arg."auth admin disable-user --yes"]
+gui = "TODO:SecurityView"
+
+[cmd."auth admin enable-user"]
+gui = "SecurityView"
+
+[arg."auth admin enable-user USER"]
+gui = "TODO:SecurityView"
+
+[arg."auth admin enable-user --server"]
+gui = "TODO:SecurityView"
+
+[cmd."remote ls-tree"]
+gui = "RemoteView"
+
+[arg."remote ls-tree REMOTE"]
+gui = "RemoteView"
+
+[arg."remote ls-tree PATH"]
+gui = "RemoteView"
+
+[arg."remote ls-tree --ref"]
+gui = "RemoteView"
+
+[cmd."auth admin list-grants"]
+gui = "SecurityView"
+
+[arg."auth admin list-grants USER"]
+gui = "TODO:SecurityView"
+
+[arg."auth admin list-grants --server"]
+gui = "TODO:SecurityView"
+
+[cmd."auth admin repo-access"]
+gui = "SecurityView"
+
+[arg."auth admin repo-access REPO"]
+gui = "TODO:SecurityView"
+
+[arg."auth admin repo-access --server"]
+gui = "TODO:SecurityView"
+
+[cmd."remote repos"]
+gui = "RemoteView"
+
+[cmd."remote repos list"]
+gui = "RemoteView"
+
+[arg."remote repos list --remote"]
+gui = "TODO:RemoteView"
+
+[arg."remote repos list --server"]
+gui = "TODO:RemoteView"
+
+[cmd."remote repos create"]
+gui = "RemoteView"
+
+[arg."remote repos create NAME"]
+gui = "TODO:RemoteView"
+
+[arg."remote repos create --remote"]
+gui = "TODO:RemoteView"
+
+[arg."remote repos create --server"]
+gui = "TODO:RemoteView"
+
+[cmd."remote repos delete"]
+gui = "RemoteView"
+
+[arg."remote repos delete NAME"]
+gui = "TODO:RemoteView"
+
+[arg."remote repos delete --remote"]
+gui = "TODO:RemoteView"
+
+[arg."remote repos delete --server"]
+gui = "TODO:RemoteView"
+
+[arg."remote repos delete --force"]
+gui = "TODO:RemoteView"
+
+[arg."remote repos delete --yes"]
+gui = "TODO:RemoteView"
+

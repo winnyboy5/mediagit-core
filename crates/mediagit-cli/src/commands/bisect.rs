@@ -22,12 +22,12 @@ macro_rules! println {
     };
 }
 
-/// `--machine` data for `bisect start|good|bad|skip|reset|log`.
+/// `--machine` data for `bisect start|good|bad|skip|reset|log|replay`.
 #[derive(Debug, Clone, serde::Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
 pub struct BisectReport {
-    /// `start`, `good`, `bad`, `skip`, `reset` or `log`.
+    /// `start`, `good`, `bad`, `skip`, `reset`, `log` or `replay`.
     pub action: String,
     /// `waiting_for_good` (no good commit marked yet), `testing`, `complete`
     /// (`first_bad` is set), `reset` or `log`.
@@ -45,6 +45,11 @@ pub struct BisectReport {
     /// `log` only.
     pub log: Vec<String>,
 }
+
+/// While `replay` runs, `emit_step` parks its report here instead of printing
+/// it, so a replay emits exactly one envelope (the final state).
+static REPLAY_LAST: std::sync::Mutex<Option<BisectReport>> = std::sync::Mutex::new(None);
+static REPLAYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Result of one `advance`.
 #[derive(Default)]
@@ -413,7 +418,31 @@ impl BisectCmd {
     }
 
     async fn replay(&self, opts: &ReplayOpts) -> Result<()> {
-        output::ensure_machine_supported("bisect replay")?;
+        REPLAYING.store(output::machine_mode(), std::sync::atomic::Ordering::Relaxed);
+        let result = self.replay_inner(opts).await;
+        REPLAYING.store(false, std::sync::atomic::Ordering::Relaxed);
+        let last = REPLAY_LAST.lock().unwrap().take();
+        result?;
+        if output::machine_mode() {
+            // A log with no step lines replayed nothing: report the empty session.
+            let mut report = last.unwrap_or(BisectReport {
+                action: "replay".into(),
+                status: "waiting_for_good".into(),
+                current: None,
+                remaining_steps: None,
+                first_bad: None,
+                bad: None,
+                good: Vec::new(),
+                skipped: Vec::new(),
+                log: Vec::new(),
+            });
+            report.action = "replay".into();
+            return output::emit_ok(&report);
+        }
+        Ok(())
+    }
+
+    async fn replay_inner(&self, opts: &ReplayOpts) -> Result<()> {
         let logfile_content =
             // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- local CLI arg (--logfile)
             std::fs::read_to_string(&opts.logfile).context("Failed to read log file")?;
@@ -634,7 +663,7 @@ impl BisectCmd {
         } else {
             "testing"
         };
-        output::emit_ok(&BisectReport {
+        let report = BisectReport {
             action,
             status: status.into(),
             current: state.current.clone(),
@@ -644,7 +673,12 @@ impl BisectCmd {
             good: state.good.clone(),
             skipped: state.skip.clone(),
             log: Vec::new(),
-        })
+        };
+        if REPLAYING.load(std::sync::atomic::Ordering::Relaxed) {
+            *REPLAY_LAST.lock().unwrap() = Some(report);
+            return Ok(());
+        }
+        output::emit_ok(&report)
     }
 
     /// Breadth-first walk of `start` and all its ancestors (parents,

@@ -291,3 +291,27 @@ auth admin revoke-grant	-(bare invocation)	no	EXPECTED-ERR
 key init	-(bare invocation)	no	ERROR
 key status	-(bare invocation)	no	OK
 key recover	-(bare invocation)	no	ERROR
+reflog delete	--yes	no	OK
+reflog expire	--yes	no	OK
+auth register	--username	yes	EXPECTED-ERR
+auth register	--email	yes	EXPECTED-ERR
+auth key revoke	--yes	no	EXPECTED-ERR
+auth admin create-user	--email	yes	EXPECTED-ERR
+auth admin revoke-grant	--yes	no	EXPECTED-ERR
+remote repos list	-(bare invocation)	no	ERROR
+remote repos list	--remote	yes	ERROR
+remote repos list	--server	yes	ERROR
+remote repos create	-(bare invocation)	no	ERROR
+remote repos delete	-(bare invocation)	no	ERROR
+remote repos delete	--force	no	ERROR
+remote repos delete	--yes	no	ERROR
+remote add	--token-stdin	no	ERROR
+auth admin disable-user	-(bare invocation)	no	EXPECTED-ERR
+auth admin disable-user	--server	yes	EXPECTED-ERR
+auth admin disable-user	--yes	no	EXPECTED-ERR
+auth admin enable-user	-(bare invocation)	no	EXPECTED-ERR
+auth admin enable-user	--server	yes	EXPECTED-ERR
+auth admin list-grants	-(bare invocation)	no	EXPECTED-ERR
+auth admin list-grants	--server	yes	EXPECTED-ERR
+auth admin repo-access	-(bare invocation)	no	EXPECTED-ERR
+auth admin repo-access	--server	yes	EXPECTED-ERR

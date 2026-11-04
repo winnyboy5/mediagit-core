@@ -76,7 +76,7 @@ fn status_machine_outside_repo_is_error_envelope() {
 fn unsupported_command_is_json_unsupported_exit_2() {
     let tmp = TempDir::new().unwrap();
     init_repo(tmp.path());
-    let (code, v) = run_machine(tmp.path(), &["reflog", "expire"]);
+    let (code, v) = run_machine(tmp.path(), &["completions", "bash"]);
     assert_eq!(code, 2);
     assert_eq!(v["ok"], false);
     assert_eq!(v["error"]["code"], "json_unsupported");

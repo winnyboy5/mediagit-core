@@ -179,7 +179,7 @@ impl CherryPickCmd {
         // Process each commit to cherry-pick
         let mut picked_commits = Vec::new();
         let mut created = Vec::new();
-        for commit_ref in &self.commits {
+        for (idx, commit_ref) in self.commits.iter().enumerate() {
             let commit_oid = self
                 .resolve_commit(&refdb, repo_root, commit_ref)
                 .await
@@ -205,7 +205,7 @@ impl CherryPickCmd {
                         // produced by the 3-way merge above (not an index
                         // rebuild, which would drop every file not touched
                         // by this commit).
-                        let new_oid = self
+                        let new_oid = match self
                             .create_cherry_pick_commit(
                                 odb.as_ref(),
                                 &refdb,
@@ -213,13 +213,27 @@ impl CherryPickCmd {
                                 &commit_oid,
                                 Some(merged_tree_oid),
                             )
-                            .await?;
+                            .await
+                        {
+                            Ok(oid) => oid,
+                            Err(e) => {
+                                // E.g. `empty_commit` mid-sequence: this pick is
+                                // the current one, so `--skip` moves on to the
+                                // next. With nothing left after it there is
+                                // nothing to continue, so leave no state.
+                                if idx + 1 < self.commits.len() {
+                                    self.save_cherrypick_state(repo_root, &self.commits, idx)
+                                        .await?;
+                                }
+                                return Err(e);
+                            }
+                        };
                         created.push(new_oid.to_hex());
                     }
                 }
                 Err(e) => {
                     // Save cherry-pick state for continuation
-                    self.save_cherrypick_state(repo_root, &self.commits, &picked_commits)
+                    self.save_cherrypick_state(repo_root, &self.commits, idx)
                         .await?;
 
                     if !output::machine_mode() {
@@ -607,15 +621,15 @@ impl CherryPickCmd {
         &self,
         repo_root: &std::path::Path,
         all_commits: &[String],
-        picked_commits: &[Oid],
+        current_idx: usize,
     ) -> Result<()> {
         let mediagit_dir = repo_root.join(".mediagit");
         let refdb = RefDatabase::new(&mediagit_dir);
 
         let original_head = refdb.resolve("HEAD").await?.to_hex();
 
-        let current_commit = all_commits.get(picked_commits.len()).cloned();
-        let remaining_commits = all_commits[picked_commits.len() + 1..].to_vec();
+        let current_commit = all_commits.get(current_idx).cloned();
+        let remaining_commits = all_commits[current_idx + 1..].to_vec();
 
         let state = CherryPickState {
             original_head: Some(original_head),

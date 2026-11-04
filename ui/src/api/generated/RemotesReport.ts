@@ -2,6 +2,6 @@
 import type { RemoteReport } from "./RemoteReport";
 
 /**
- * `--machine` data for `remote list|add|remove`: the resulting remote set.
+ * `--machine` data for `remote list|add|remove|rename|set-url`: the resulting remote set.
  */
 export type RemotesReport = { remotes: Array<RemoteReport>, };

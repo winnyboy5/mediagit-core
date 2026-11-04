@@ -165,7 +165,6 @@ fn fsck_and_verify_machine_healthy_and_unsupported_range() {
     let d = ok(dir, &["verify"]);
     assert_eq!(d["healthy"], true);
 
-    assert_eq!(err(dir, &["verify", "HEAD"]), "json_unsupported");
     // (`fsck` outside a repository "succeeds" with 0 objects: pre-existing.)
     assert_eq!(err(dir, &["fsck", "--max-objects", "abc"]), "invalid_args");
 }
@@ -290,7 +289,6 @@ fn reflog_machine_lists_entries() {
         1
     );
 
-    assert_eq!(err(dir, &["reflog", "expire"]), "json_unsupported");
     assert_eq!(err(no_repo().path(), &["reflog"]), "error");
 }
 
@@ -433,7 +431,7 @@ fn bisect_machine_finds_first_bad_commit() {
     assert_eq!(ok(dir, &["bisect", "reset"])["status"], "reset");
 
     assert_eq!(err(dir, &["bisect", "good"]), "error");
-    assert_eq!(err(dir, &["bisect", "replay", "x.log"]), "json_unsupported");
+    // (bisect replay is covered by cli_machine_w4_test.)
 }
 
 // ---------------------------------------------------------------------------
@@ -616,11 +614,6 @@ async fn auth_machine_status_whoami_logout_with_auth_disabled() {
     assert_eq!(
         err(dir, &["auth", "status", "--server", "http://127.0.0.1:1"]),
         "error"
-    );
-    // Not wired for machine mode.
-    assert_eq!(
-        err(dir, &["auth", "passwd", "--server", &base]),
-        "json_unsupported"
     );
 }
 

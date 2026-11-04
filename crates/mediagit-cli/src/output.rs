@@ -108,18 +108,6 @@ pub fn read_secret_line(
     Ok(Some(line))
 }
 
-/// A subcommand reached in machine mode that has no machine output yet.
-#[derive(Debug)]
-pub struct JsonUnsupported(pub String);
-
-impl std::fmt::Display for JsonUnsupported {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} has no machine output yet", self.0)
-    }
-}
-
-impl std::error::Error for JsonUnsupported {}
-
 /// An error that carries its own envelope code (e.g. `invalid_args`).
 #[derive(Debug)]
 pub struct CodedError {
@@ -162,20 +150,10 @@ impl std::fmt::Display for ConflictStop {
 
 impl std::error::Error for ConflictStop {}
 
-/// Guard for subcommands without machine output: errors in machine mode.
-pub fn ensure_machine_supported(what: &str) -> anyhow::Result<()> {
-    if machine_mode() {
-        return Err(JsonUnsupported(what.to_string()).into());
-    }
-    Ok(())
-}
-
 /// Envelope error code for a failed command.
 pub fn error_code(err: &anyhow::Error) -> &'static str {
     if err.chain().any(|c| c.is::<NeedsInput>()) {
         "needs_input"
-    } else if err.chain().any(|c| c.is::<JsonUnsupported>()) {
-        "json_unsupported"
     } else if let Some(c) = err.chain().find_map(|c| c.downcast_ref::<CodedError>()) {
         c.code
     } else {

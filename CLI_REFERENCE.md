@@ -109,8 +109,13 @@ lines that are not `type:"progress"`.
 `clone`, `merge`, `diff`, `stash`, `reset`, `revert`, `download`. A `merge` or
 `revert` that stops on conflicts prints an `ok:true` envelope with
 `status:"conflict"` and a `conflicts` list, and exits 1. `show <rev> --tree` lists a commit's files; `show <rev>:<path> --output <file>`
-writes a blob to a file. Every other command prints a `json_unsupported`
+writes a blob to a file. `completions` prints a `json_unsupported`
 envelope and exits 2 without running.
+
+W4 completes the set: every subcommand now has machine output (`auth register|passwd|key|admin`,
+`branch protect|show`, `commit --dry-run`, `reflog show --all|delete|expire`, `remote rename|show|set-url`,
+`tag show|verify`, `verify <commit>|--start|--end`, `bisect replay`). Destructive ones (`reflog delete|expire`,
+`auth key revoke`, `auth admin revoke-grant`) need `--yes` in machine mode, else `needs_input`.
 
 W3 adds `auth` (`login|status|whoami|logout`; `whoami`/`status` carry the
 account `identity` to compare with lock owners), `key`, `stats`, `gc`, `fsck`,

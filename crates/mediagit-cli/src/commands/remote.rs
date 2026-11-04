@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use crate::output;
 
-/// `--machine` data for `remote list|add|remove`: the resulting remote set.
+/// `--machine` data for `remote list|add|remove|rename|set-url`: the resulting remote set.
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
@@ -24,6 +24,75 @@ pub struct RemotesReport {
 pub struct RemoteReport {
     pub name: String,
     pub url: String,
+}
+
+/// One hosted repository (`remote repos`).
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct HostedRepoReport {
+    pub name: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub size_bytes: u64,
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub object_count: Option<u64>,
+    /// Unix seconds.
+    #[cfg_attr(test, ts(type = "number"))]
+    pub last_modified: u64,
+}
+
+/// `--machine` data for `remote repos list`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct HostedReposReport {
+    pub server: String,
+    pub repos: Vec<HostedRepoReport>,
+}
+
+/// `--machine` data for `remote repos create|delete`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct HostedRepoActionReport {
+    /// `create` or `delete`.
+    pub action: String,
+    pub server: String,
+    pub name: String,
+    /// `create`: the new repository.
+    pub repo: Option<HostedRepoReport>,
+    /// `delete`: the server unregistered it.
+    pub deleted: bool,
+    /// `delete`: the repository's data was NOT removed from the storage
+    /// backend (bucket-backed servers keep it). Surface this as a warning.
+    pub storage_retained: bool,
+    pub backend: Option<String>,
+}
+
+fn hosted(r: mediagit_protocol::RepoSummary) -> HostedRepoReport {
+    HostedRepoReport {
+        name: r.name,
+        size_bytes: r.size_bytes,
+        object_count: r.object_count,
+        last_modified: r.last_modified,
+    }
+}
+
+/// `--machine` data for `remote show`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct RemoteShowReport {
+    pub name: String,
+    pub fetch_url: String,
+    pub push_url: String,
+    /// The server answered. When `false`, `error` says why and `branches`
+    /// lists only what is cached locally.
+    pub reachable: bool,
+    pub error: Option<String>,
+    pub head_branch: Option<String>,
+    /// Branch names on the remote (short, no `refs/heads/`).
+    pub branches: Vec<String>,
 }
 
 /// `--machine` data for `remote ls-tree`.
@@ -95,8 +164,13 @@ pub enum RemoteSubcommand {
         /// Kept out of the OS keychain deliberately -- an explicit config
         /// token is meant to be an auditable, editable override (I11); use
         /// `mediagit auth login` for the keychain-backed default instead.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "token_stdin")]
         token: Option<String>,
+
+        /// Read the bearer token from stdin instead of argv (needs
+        /// `--machine --secret-stdin`; the GUI's way to add a token remote).
+        #[arg(long)]
+        token_stdin: bool,
     },
 
     /// Remove a remote repository
@@ -146,6 +220,12 @@ pub enum RemoteSubcommand {
         r#ref: Option<String>,
     },
 
+    /// Administer repositories hosted on a server (admin only)
+    Repos {
+        #[command(subcommand)]
+        action: ReposAction,
+    },
+
     /// Set URL for a remote
     SetUrl {
         /// Remote name
@@ -162,23 +242,100 @@ pub enum RemoteSubcommand {
     },
 }
 
+/// Which server `remote repos` talks to.
+#[derive(Parser, Debug)]
+pub struct ReposTarget {
+    /// Remote whose server to administer (default: origin)
+    #[arg(long, value_name = "NAME")]
+    pub remote: Option<String>,
+
+    /// Server URL (scheme://host[:port]); overrides --remote
+    #[arg(long, value_name = "URL")]
+    pub server: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ReposAction {
+    /// List hosted repositories
+    List(ReposTarget),
+
+    /// Create an empty hosted repository
+    Create {
+        #[command(flatten)]
+        target: ReposTarget,
+
+        /// Repository name
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+
+    /// Unregister a hosted repository
+    Delete {
+        #[command(flatten)]
+        target: ReposTarget,
+
+        /// Repository name
+        #[arg(value_name = "NAME")]
+        name: String,
+
+        /// Delete even if the repository is not empty
+        #[arg(long)]
+        force: bool,
+
+        /// Confirm the deletion (required with --machine)
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+impl ReposAction {
+    fn target(&self) -> &ReposTarget {
+        match self {
+            ReposAction::List(t) => t,
+            ReposAction::Create { target, .. } | ReposAction::Delete { target, .. } => target,
+        }
+    }
+}
+
+/// Resolve the server origin and credentials for `remote repos`.
+async fn repos_client(target: &ReposTarget) -> Result<(String, mediagit_protocol::ProtocolClient)> {
+    if let Some(url) = &target.server {
+        let origin = crate::repo::remote_origin(url).ok_or_else(|| {
+            output::CodedError::new(
+                "invalid_args",
+                format!("--server '{url}' is not a valid URL (need scheme://host[:port])"),
+            )
+        })?;
+        let (creds, _) = crate::repo::resolve_credentials_for_origin(&origin);
+        let client = mediagit_protocol::ProtocolClient::new(origin.clone()).with_credentials(creds);
+        return Ok((origin, client));
+    }
+    let repo_root = find_repo_root()?;
+    let config = Config::load(&repo_root).await?;
+    let name = target.remote.as_deref().unwrap_or("origin");
+    let url = config
+        .resolve_remote_url(name)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let origin = crate::repo::remote_origin(&url)
+        .ok_or_else(|| anyhow::anyhow!("remote '{name}' URL '{url}' is not a valid URL"))?;
+    let (creds, _) = crate::repo::resolve_credentials_tiered(&repo_root, &config, name);
+    let client = mediagit_protocol::ProtocolClient::new(origin.clone()).with_credentials(creds);
+    Ok((origin, client))
+}
+
 impl RemoteCmd {
     pub async fn execute(&self) -> Result<()> {
-        if matches!(
-            self.command,
-            RemoteSubcommand::Rename { .. }
-                | RemoteSubcommand::Show { .. }
-                | RemoteSubcommand::SetUrl { .. }
-        ) {
-            output::ensure_machine_supported("remote (only list|add|remove)")?;
-        }
         match &self.command {
             RemoteSubcommand::Add {
                 name,
                 url,
                 fetch,
                 token,
-            } => self.add_remote(name, url, *fetch, token.clone()).await,
+                token_stdin,
+            } => {
+                self.add_remote(name, url, *fetch, token.clone(), *token_stdin)
+                    .await
+            }
             RemoteSubcommand::Remove { name } => self.remove_remote(name).await,
             RemoteSubcommand::List { verbose } => self.list_remotes(*verbose).await,
             RemoteSubcommand::Rename { old_name, new_name } => {
@@ -194,7 +351,80 @@ impl RemoteCmd {
                     .await
             }
             RemoteSubcommand::SetUrl { name, url, push } => self.set_url(name, url, *push).await,
+            RemoteSubcommand::Repos { action } => self.repos(action).await,
         }
+    }
+
+    async fn repos(&self, action: &ReposAction) -> Result<()> {
+        // Deleting a hosted repository cannot be undone: confirm before any I/O.
+        if let ReposAction::Delete {
+            name, yes: false, ..
+        } = action
+        {
+            output::ensure_interactive("repository delete confirmation (pass --yes)")?;
+            if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                anyhow::bail!("stdin is not a terminal; pass --yes to delete '{name}'");
+            }
+            let confirmed = dialoguer::Confirm::new()
+                .with_prompt(format!("Delete hosted repository '{name}'?"))
+                .default(false)
+                .interact()?;
+            if !confirmed {
+                anyhow::bail!("cancelled");
+            }
+        }
+        let (origin, client) = repos_client(action.target()).await?;
+        match action {
+            ReposAction::List(_) => {
+                let repos = client.list_repos().await?;
+                if output::machine_mode() {
+                    return output::emit_ok(&HostedReposReport {
+                        server: origin,
+                        repos: repos.into_iter().map(hosted).collect(),
+                    });
+                }
+                for r in &repos {
+                    println!("{}\t{}\t{}", r.name, r.size_bytes, r.last_modified);
+                }
+            }
+            ReposAction::Create { name, .. } => {
+                let repo = client.create_repo(name).await?;
+                if output::machine_mode() {
+                    return output::emit_ok(&HostedRepoActionReport {
+                        action: "create".into(),
+                        server: origin,
+                        name: repo.name.clone(),
+                        repo: Some(hosted(repo)),
+                        deleted: false,
+                        storage_retained: false,
+                        backend: None,
+                    });
+                }
+                println!("{} Created repository '{}'", style("✓").green(), repo.name);
+            }
+            ReposAction::Delete { name, force, .. } => {
+                let res = client.delete_repo(name, *force).await?;
+                if output::machine_mode() {
+                    return output::emit_ok(&HostedRepoActionReport {
+                        action: "delete".into(),
+                        server: origin,
+                        name: name.clone(),
+                        repo: None,
+                        deleted: res.deleted,
+                        storage_retained: res.storage_retained,
+                        backend: Some(res.backend),
+                    });
+                }
+                println!("{} Deleted repository '{}'", style("✓").green(), name);
+                if res.storage_retained {
+                    output::warning(&format!(
+                        "the {} storage backend keeps the repository's data; remove it there to reclaim space",
+                        res.backend
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn add_remote(
@@ -203,8 +433,30 @@ impl RemoteCmd {
         url: &str,
         fetch: bool,
         token: Option<String>,
+        token_stdin: bool,
     ) -> Result<()> {
         let repo_root = find_repo_root()?;
+
+        // A token on argv shows up in process listings; machine mode takes
+        // secrets from stdin only (`mediagit auth login --secret-stdin`).
+        if output::machine_mode() && token.is_some() {
+            return Err(output::CodedError::new(
+                "invalid_args",
+                "--token puts a secret in argv; use --token-stdin with --secret-stdin instead",
+            )
+            .into());
+        }
+        let token = if token_stdin {
+            match output::read_secret_line("remote token")? {
+                Some(t) => Some(t.to_string()),
+                None => {
+                    output::ensure_interactive("remote token (--machine --secret-stdin)")?;
+                    anyhow::bail!("--token-stdin needs --machine and --secret-stdin");
+                }
+            }
+        } else {
+            token
+        };
 
         // Validate remote name
         if name.is_empty() {
@@ -366,6 +618,10 @@ impl RemoteCmd {
         // Save config
         config.save(&repo_root)?;
 
+        if output::machine_mode() {
+            return emit_remotes(&config);
+        }
+
         println!(
             "{} Renamed remote '{}' → '{}'",
             style("✓").green(),
@@ -385,6 +641,45 @@ impl RemoteCmd {
             .remotes
             .get(name)
             .ok_or_else(|| anyhow::anyhow!("No such remote: '{}'", name))?;
+
+        if output::machine_mode() {
+            let remote_url = remote.url.clone();
+            let mut report = RemoteShowReport {
+                name: name.to_string(),
+                fetch_url: remote.fetch.clone().unwrap_or_else(|| remote.url.clone()),
+                push_url: remote.push.clone().unwrap_or_else(|| remote.url.clone()),
+                reachable: false,
+                error: None,
+                head_branch: None,
+                branches: Vec::new(),
+            };
+            match self
+                .fetch_remote_info(&repo_root, &config, name, &remote_url)
+                .await
+            {
+                Ok((head, branches)) => {
+                    report.reachable = true;
+                    report.head_branch = head;
+                    report.branches = branches
+                        .iter()
+                        .map(|b| b.strip_prefix("refs/heads/").unwrap_or(b).to_string())
+                        .collect();
+                }
+                Err(e) => {
+                    report.error = Some(format!("{e:#}"));
+                    let dir = repo_root.join(".mediagit/refs/remotes").join(name);
+                    // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- local CLI arg (remote name)
+                    if let Ok(entries) = std::fs::read_dir(&dir) {
+                        report.branches = entries
+                            .flatten()
+                            .filter_map(|e| e.file_name().to_str().map(str::to_string))
+                            .collect();
+                        report.branches.sort();
+                    }
+                }
+            }
+            return output::emit_ok(&report);
+        }
 
         // Display remote information
         println!("{}", style(format!("* remote {}", name)).yellow().bold());
@@ -589,27 +884,36 @@ impl RemoteCmd {
             .ok_or_else(|| anyhow::anyhow!("No such remote: '{}'", name))?;
 
         // Update URL
+        let human = !output::machine_mode();
         if push {
             remote.push = Some(url.to_string());
-            println!(
-                "{} Changed push URL for '{}' → {}",
-                style("✓").green(),
-                style(name).yellow(),
-                style(url).cyan()
-            );
+            if human {
+                println!(
+                    "{} Changed push URL for '{}' → {}",
+                    style("✓").green(),
+                    style(name).yellow(),
+                    style(url).cyan()
+                );
+            }
         } else {
             remote.fetch = Some(url.to_string());
             remote.url = url.to_string(); // Also update main URL
-            println!(
-                "{} Changed fetch URL for '{}' → {}",
-                style("✓").green(),
-                style(name).yellow(),
-                style(url).cyan()
-            );
+            if human {
+                println!(
+                    "{} Changed fetch URL for '{}' → {}",
+                    style("✓").green(),
+                    style(name).yellow(),
+                    style(url).cyan()
+                );
+            }
         }
 
         // Save config
         config.save(&repo_root)?;
+
+        if output::machine_mode() {
+            return emit_remotes(&config);
+        }
 
         Ok(())
     }

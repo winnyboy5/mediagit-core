@@ -114,6 +114,7 @@ $posMap = @{
   "remote rename" = @("origin", "origin2"); "remote set-url" = @("origin", $DEAD_URL)
   "remote show" = @("origin"); "remote" = @()
   "remote ls-tree" = @("origin")
+  "remote repos list" = @(); "remote repos create" = @("mx-repo"); "remote repos delete" = @("mx-repo")
   # auth: every subcommand is server-bound; --server keeps it from needing a repo remote.
   "auth login" = @("--server", $DEAD_URL); "auth register" = @("--server", $DEAD_URL)
   "auth status" = @("--server", $DEAD_URL); "auth logout" = @("--server", $DEAD_URL)
@@ -126,6 +127,7 @@ $posMap = @{
   "auth admin reset-password" = @("--server", $DEAD_URL, "mxuser")
   "auth admin grant" = @("--server", $DEAD_URL, "mxuser", "mxrepo", "read")
   "auth admin revoke-grant" = @("--server", $DEAD_URL, "mxuser", "mxrepo")
+  "auth admin disable-user" = @("--server", $DEAD_URL, "mxuser"); "auth admin enable-user" = @("--server", $DEAD_URL, "mxuser"); "auth admin list-grants" = @("--server", $DEAD_URL, "mxuser"); "auth admin repo-access" = @("--server", $DEAD_URL, "mxrepo")
 }
 $valMap = @(
   # --server must be a REACHABLE-SHAPED url that nothing answers, not the generic

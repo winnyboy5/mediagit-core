@@ -16,6 +16,34 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
+// In machine mode stdout carries only the envelope: silence every human
+// `println!` in this module.
+macro_rules! println {
+    ($($t:tt)*) => {
+        if !crate::output::machine_mode() {
+            std::println!($($t)*)
+        }
+    };
+}
+
+/// `--machine` data for `verify <COMMIT>` / `--start` / `--end`.
+#[derive(Debug, Clone, serde::Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct VerifyRangeReport {
+    /// `None` when the range starts at the root.
+    pub start: Option<String>,
+    pub end: String,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub commits: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub verified: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub errors: u64,
+    /// One line per commit that failed; any entry also fails the command.
+    pub problems: Vec<String>,
+}
+
 /// Verify repository integrity with quick checks
 ///
 /// The verify command performs a fast integrity check focusing on:
@@ -96,10 +124,6 @@ impl VerifyCmd {
         let repo_path_str = self.path.as_deref().unwrap_or(".");
         let repo_path = std::path::PathBuf::from(repo_path_str);
         let mediagit_dir = repo_path.join(".mediagit");
-
-        if self.commit.is_some() || self.start.is_some() || self.end.is_some() {
-            crate::output::ensure_machine_supported("verify (only whole-repository verify)")?;
-        }
 
         if !self.quiet && !crate::output::machine_mode() {
             println!(
@@ -285,6 +309,7 @@ impl VerifyCmd {
         // Verify each commit
         let mut errors = 0;
         let mut verified = 0;
+        let mut problems: Vec<String> = Vec::new();
 
         for commit_oid in &commits_in_range {
             // Verify commit object exists and is valid
@@ -308,6 +333,8 @@ impl VerifyCmd {
                             // Verify tree exists
                             if odb.read(&commit.tree).await.is_err() {
                                 errors += 1;
+                                problems
+                                    .push(format!("{commit_oid}: missing tree {}", commit.tree));
                                 if !self.quiet {
                                     println!(
                                         "  {} {} missing tree {}",
@@ -320,6 +347,7 @@ impl VerifyCmd {
                         }
                         Err(e) => {
                             errors += 1;
+                            problems.push(format!("{commit_oid}: invalid commit: {e}"));
                             if !self.quiet {
                                 println!(
                                     "  {} {} invalid commit: {}",
@@ -333,6 +361,7 @@ impl VerifyCmd {
                 }
                 Err(e) => {
                     errors += 1;
+                    problems.push(format!("{commit_oid}: missing or corrupt: {e}"));
                     if !self.quiet {
                         println!(
                             "  {} {} missing or corrupt: {}",
@@ -343,6 +372,22 @@ impl VerifyCmd {
                     }
                 }
             }
+        }
+
+        if crate::output::machine_mode() {
+            // Failures are data here, not just an exit code.
+            crate::output::emit_ok(&VerifyRangeReport {
+                start: start_oid.map(|o| o.to_hex()),
+                end: end_oid.to_hex(),
+                commits: commits_in_range.len() as u64,
+                verified,
+                errors,
+                problems,
+            })?;
+            if errors > 0 {
+                std::process::exit(1);
+            }
+            return Ok(());
         }
 
         // Summary

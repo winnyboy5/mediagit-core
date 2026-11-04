@@ -81,6 +81,81 @@ pub struct AuthGrant {
     pub level: String,
 }
 
+/// `--machine` data for `auth register|passwd|key *|admin *`.
+#[derive(Debug, Clone, Default, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct AuthOpReport {
+    /// `passwd`, `key-create`, `key-list`, `key-revoke`, `list-users`,
+    /// `set-role`, `create-user`, `reset-password`, `disable-user`,
+    /// `enable-user`, `list-grants`, `repo-access`, `grant` or `revoke-grant`.
+    pub action: String,
+    pub server: String,
+    /// Key id or user id the action concerned.
+    pub id: Option<String>,
+    /// Key name or username.
+    pub name: Option<String>,
+    pub role: Option<String>,
+    /// `disable-user`/`enable-user`: the account state after the call.
+    pub disabled: Option<bool>,
+    /// `grant`/`revoke-grant`: the repo.
+    pub repo: Option<String>,
+    /// `grant`: `read`, `write` or `admin`.
+    pub level: Option<String>,
+    /// `key-create`: the new API key. Shown exactly once.
+    pub key: Option<String>,
+    pub permissions: Vec<String>,
+    pub keys: Vec<AuthKeyInfo>,
+    pub users: Vec<AuthUserInfo>,
+    /// `list-grants`: the user's grants.
+    pub grants: Vec<AuthGrant>,
+    /// `repo-access`: who can reach `repo`.
+    pub access: Vec<AuthRepoAccess>,
+    /// Server caveat worth showing the user.
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct AuthKeyInfo {
+    pub id: String,
+    pub name: String,
+    /// Unix seconds.
+    #[cfg_attr(test, ts(type = "number"))]
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct AuthUserInfo {
+    pub id: String,
+    pub username: String,
+    pub role: String,
+    pub disabled: bool,
+}
+
+/// One account's access to a repo (`auth admin repo-access`).
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct AuthRepoAccess {
+    pub user_id: String,
+    /// Empty when the account no longer exists.
+    pub username: String,
+    /// `read`, `write` or `admin`.
+    pub level: String,
+}
+
+fn op_report(action: &str, target: &ServerTarget) -> AuthOpReport {
+    AuthOpReport {
+        action: action.into(),
+        server: target.origin().to_string(),
+        ..Default::default()
+    }
+}
+
 fn auth_report(action: &str, server: Option<&str>) -> AuthReport {
     AuthReport {
         action: action.into(),
@@ -108,7 +183,7 @@ pub enum AuthSubcommand {
     /// Register a new account on a MediaGit server
     ///
     /// Reads username/email/password line-by-line from stdin when piped.
-    Register(ServerOpts),
+    Register(RegisterOpts),
 
     /// Show which credential tier is active and the server's auth mode
     Status(ServerOpts),
@@ -138,6 +213,21 @@ pub struct ServerOpts {
     /// `origin` remote when omitted.
     #[arg(long, value_name = "URL")]
     pub server: Option<String>,
+}
+
+/// `mediagit auth register`
+#[derive(Parser, Debug)]
+pub struct RegisterOpts {
+    #[arg(long, value_name = "URL")]
+    pub server: Option<String>,
+
+    /// Username for the new account; prompted for if omitted
+    #[arg(long)]
+    pub username: Option<String>,
+
+    /// Email for the new account; prompted for if omitted
+    #[arg(long)]
+    pub email: Option<String>,
 }
 
 /// `mediagit auth login`
@@ -211,6 +301,10 @@ pub struct KeyRevokeOpts {
 
     /// Key id, as shown by `auth key list`
     pub id: String,
+
+    /// Confirm the revocation (required with --machine)
+    #[arg(long)]
+    pub yes: bool,
 }
 
 /// `mediagit auth admin <subcommand>`
@@ -241,6 +335,22 @@ pub enum AdminSubcommand {
     /// Reads the new password line-by-line from stdin when piped.
     #[command(name = "reset-password")]
     ResetPassword(UserOpts),
+
+    /// Suspend a user's account (sessions stop working on their next request)
+    #[command(name = "disable-user")]
+    DisableUser(DisableUserOpts),
+
+    /// Restore a suspended account
+    #[command(name = "enable-user")]
+    EnableUser(UserOpts),
+
+    /// List the repos a user has grants on
+    #[command(name = "list-grants")]
+    ListGrants(UserOpts),
+
+    /// List who has access to a repo
+    #[command(name = "repo-access")]
+    RepoAccess(RepoAccessOpts),
 
     /// Grant a user access to a repo
     Grant(GrantOpts),
@@ -273,6 +383,10 @@ pub struct CreateUserOpts {
     /// Role: read|write|admin
     #[arg(long)]
     pub role: String,
+
+    /// Email for the new account; prompted for if omitted
+    #[arg(long)]
+    pub email: Option<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -282,6 +396,28 @@ pub struct UserOpts {
 
     /// Username or user id
     pub user: String,
+}
+
+#[derive(Parser, Debug)]
+pub struct RepoAccessOpts {
+    #[arg(long, value_name = "URL")]
+    pub server: Option<String>,
+
+    /// Repo name
+    pub repo: String,
+}
+
+#[derive(Parser, Debug)]
+pub struct DisableUserOpts {
+    #[arg(long, value_name = "URL")]
+    pub server: Option<String>,
+
+    /// Username or user id
+    pub user: String,
+
+    /// Confirm the suspension (required with --machine)
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -309,6 +445,10 @@ pub struct RevokeGrantOpts {
 
     /// Repo name
     pub repo: String,
+
+    /// Confirm the revocation (required with --machine)
+    #[arg(long)]
+    pub yes: bool,
 }
 
 /// Message printed (never as a raw HTTP error) whenever a 404 on `/auth/*`
@@ -318,15 +458,6 @@ const AUTH_DISABLED_MSG: &str = "this server has authentication disabled - no lo
 
 impl AuthCmd {
     pub async fn execute(&self) -> Result<()> {
-        if !matches!(
-            self.subcommand,
-            AuthSubcommand::Login(_)
-                | AuthSubcommand::Status(_)
-                | AuthSubcommand::Whoami(_)
-                | AuthSubcommand::Logout(_)
-        ) {
-            output::ensure_machine_supported("auth (only login|status|whoami|logout)")?;
-        }
         match &self.subcommand {
             AuthSubcommand::Login(opts) => login(opts).await,
             AuthSubcommand::Register(opts) => register(opts).await,
@@ -357,6 +488,17 @@ impl AdminCmd {
             AdminSubcommand::SetRole(opts) => admin_set_role(opts).await,
             AdminSubcommand::CreateUser(opts) => admin_create_user(opts).await,
             AdminSubcommand::ResetPassword(opts) => admin_reset_password(opts).await,
+            AdminSubcommand::DisableUser(opts) => {
+                if !opts.yes {
+                    output::ensure_interactive("disable-user confirmation (pass --yes)")?;
+                }
+                admin_set_disabled(&opts.server, &opts.user, true).await
+            }
+            AdminSubcommand::EnableUser(opts) => {
+                admin_set_disabled(&opts.server, &opts.user, false).await
+            }
+            AdminSubcommand::ListGrants(opts) => admin_list_grants(opts).await,
+            AdminSubcommand::RepoAccess(opts) => admin_repo_access(opts).await,
             AdminSubcommand::Grant(opts) => admin_grant(opts).await,
             AdminSubcommand::RevokeGrant(opts) => admin_revoke_grant(opts).await,
         }
@@ -845,12 +987,18 @@ fn direct_credentials(token: Option<&str>, api_key: Option<&str>) -> Option<Cred
     None
 }
 
-async fn register(opts: &ServerOpts) -> Result<()> {
+async fn register(opts: &RegisterOpts) -> Result<()> {
     let target = resolve_server_target(&opts.server).await?;
     let client = auth_http_client();
 
-    let username = read_value("Username", false, None)?;
-    let email = read_value("Email", false, None)?;
+    let username = match &opts.username {
+        Some(u) => Zeroizing::new(u.clone()),
+        None => read_value("Username", false, None)?,
+    };
+    let email = match &opts.email {
+        Some(e) => Zeroizing::new(e.clone()),
+        None => read_value("Email", false, None)?,
+    };
     let password = read_value(
         "Password",
         true,
@@ -878,6 +1026,12 @@ async fn register(opts: &ServerOpts) -> Result<()> {
 
     if resp.status().as_u16() == 404 {
         output::info(AUTH_DISABLED_MSG);
+        if output::machine_mode() {
+            return output::emit_ok(&AuthReport {
+                auth_enabled: false,
+                ..auth_report("register", Some(target.origin()))
+            });
+        }
         return Ok(());
     }
     if !resp.status().is_success() {
@@ -890,6 +1044,19 @@ async fn register(opts: &ServerOpts) -> Result<()> {
     let creds = Credentials::Bearer(auth.tokens.access_token.clone());
     target.remember(&creds);
 
+    if output::machine_mode() {
+        set_login_author(&auth.user.username, &auth.user.email).await;
+        return output::emit_ok(&AuthReport {
+            logged_in: true,
+            identity: Some(AuthIdentity {
+                username: auth.user.username.clone(),
+                email: auth.user.email.clone(),
+                role: format!("{:?}", auth.user.role).to_lowercase(),
+                grants: Vec::new(),
+            }),
+            ..auth_report("register", Some(target.origin()))
+        });
+    }
     output::success(&format!(
         "Registered and logged in as {}",
         auth.user.username
@@ -1085,6 +1252,12 @@ async fn passwd(opts: &ServerOpts) -> Result<()> {
         .json()
         .await
         .context("failed to parse password-change response")?;
+    if output::machine_mode() {
+        return output::emit_ok(&AuthOpReport {
+            note: Some(body.note),
+            ..op_report("passwd", &target)
+        });
+    }
     output::success("Password changed");
     output::info(&body.note);
     Ok(())
@@ -1139,6 +1312,15 @@ async fn key_create(opts: &KeyCreateOpts) -> Result<()> {
         .await
         .context("failed to parse key-creation response")?;
 
+    if output::machine_mode() {
+        return output::emit_ok(&AuthOpReport {
+            id: Some(body.id),
+            name: Some(body.name),
+            key: Some(body.key),
+            permissions: body.permissions,
+            ..op_report("key-create", &target)
+        });
+    }
     output::success(&format!("Created key '{}' (id {})", body.name, body.id));
     output::warning("Store this key now - it will not be shown again:");
     println!("{}", body.key);
@@ -1174,6 +1356,19 @@ async fn key_list(opts: &ServerOpts) -> Result<()> {
         .json()
         .await
         .context("failed to parse key list response")?;
+    if output::machine_mode() {
+        return output::emit_ok(&AuthOpReport {
+            keys: keys
+                .into_iter()
+                .map(|k| AuthKeyInfo {
+                    id: k.id,
+                    name: k.name,
+                    created_at: k.created_at,
+                })
+                .collect(),
+            ..op_report("key-list", &target)
+        });
+    }
     if keys.is_empty() {
         output::info("No API keys");
         return Ok(());
@@ -1185,6 +1380,9 @@ async fn key_list(opts: &ServerOpts) -> Result<()> {
 }
 
 async fn key_revoke(opts: &KeyRevokeOpts) -> Result<()> {
+    if !opts.yes {
+        output::ensure_interactive("key revoke confirmation (pass --yes)")?;
+    }
     let target = resolve_server_target(&opts.server).await?;
     let (creds, _source) = target.resolve_credentials();
     let client = auth_http_client();
@@ -1208,6 +1406,12 @@ async fn key_revoke(opts: &KeyRevokeOpts) -> Result<()> {
     if !resp.status().is_success() {
         anyhow::bail!("key revocation failed: {}", error_message(resp).await);
     }
+    if output::machine_mode() {
+        return output::emit_ok(&AuthOpReport {
+            id: Some(opts.id.clone()),
+            ..op_report("key-revoke", &target)
+        });
+    }
     output::success(&format!("Revoked key {}", opts.id));
     Ok(())
 }
@@ -1221,6 +1425,8 @@ struct AdminUserInfo {
     id: String,
     username: String,
     role: Role,
+    #[serde(default)]
+    disabled: bool,
 }
 
 /// Resolve a CLI-supplied `<user>` argument (username or literal user id) to
@@ -1275,6 +1481,20 @@ async fn admin_list_users(opts: &ServerOpts) -> Result<()> {
     let client = auth_http_client();
 
     let users = fetch_users(&client, target.origin(), &creds).await?;
+    if output::machine_mode() {
+        return output::emit_ok(&AuthOpReport {
+            users: users
+                .iter()
+                .map(|u| AuthUserInfo {
+                    id: u.id.clone(),
+                    username: u.username.clone(),
+                    role: format!("{:?}", u.role).to_lowercase(),
+                    disabled: u.disabled,
+                })
+                .collect(),
+            ..op_report("list-users", &target)
+        });
+    }
     for u in &users {
         println!("{}\t{}\t{:?}", u.id, u.username, u.role);
     }
@@ -1322,6 +1542,15 @@ async fn admin_set_role(opts: &SetRoleOpts) -> Result<()> {
         .json()
         .await
         .context("failed to parse role-change response")?;
+    if output::machine_mode() {
+        return output::emit_ok(&AuthOpReport {
+            id: Some(id),
+            name: Some(opts.user.clone()),
+            role: Some(format!("{:?}", body.role).to_lowercase()),
+            note: Some(body.note),
+            ..op_report("set-role", &target)
+        });
+    }
     output::success(&format!("Set {}'s role to {:?}", opts.user, body.role));
     output::info(&body.note);
     Ok(())
@@ -1333,7 +1562,10 @@ async fn admin_create_user(opts: &CreateUserOpts) -> Result<()> {
     let role = parse_role(&opts.role)?;
     let client = auth_http_client();
 
-    let email = read_value("Email", false, None)?;
+    let email = match &opts.email {
+        Some(e) => Zeroizing::new(e.clone()),
+        None => read_value("Email", false, None)?,
+    };
     let password = read_value(
         "Password",
         true,
@@ -1379,6 +1611,14 @@ async fn admin_create_user(opts: &CreateUserOpts) -> Result<()> {
         .json()
         .await
         .context("failed to parse user-creation response")?;
+    if output::machine_mode() {
+        return output::emit_ok(&AuthOpReport {
+            id: Some(body.id),
+            name: Some(body.username),
+            role: Some(format!("{:?}", body.role).to_lowercase()),
+            ..op_report("create-user", &target)
+        });
+    }
     output::success(&format!(
         "Created user {} (id {}, role {:?})",
         body.username, body.id, body.role
@@ -1422,14 +1662,187 @@ async fn admin_reset_password(opts: &UserOpts) -> Result<()> {
     if !resp.status().is_success() {
         anyhow::bail!("password reset failed: {}", error_message(resp).await);
     }
+    const RESET_NOTE: &str = "This does not invalidate the user's existing sessions - any active \
+         token remains valid until it expires (up to 24h).";
+    if output::machine_mode() {
+        return output::emit_ok(&AuthOpReport {
+            id: Some(id),
+            name: Some(opts.user.clone()),
+            note: Some(RESET_NOTE.into()),
+            ..op_report("reset-password", &target)
+        });
+    }
     output::success(&format!("Password reset for {}", opts.user));
     // reset_password returns a bare 204 with no body, unlike the
     // self-service change (`ChangePasswordResponse.note`) -- state the same
     // no-revocation caveat client-side so the operator isn't misled either way.
-    output::info(
-        "This does not invalidate the user's existing sessions - any active token \
-         remains valid until it expires (up to 24h).",
-    );
+    output::info(RESET_NOTE);
+    Ok(())
+}
+
+async fn admin_list_grants(opts: &UserOpts) -> Result<()> {
+    let target = resolve_server_target(&opts.server).await?;
+    let (creds, _source) = target.resolve_credentials();
+    let client = auth_http_client();
+
+    let id = resolve_user_id(&client, target.origin(), &creds, &opts.user).await?;
+
+    #[derive(Deserialize)]
+    struct Grant {
+        repo: String,
+        level: String,
+    }
+
+    let url = format!("{}/auth/users/{}/grants", target.origin(), id);
+    let resp = attach_credentials(client.get(&url), &creds)
+        .send()
+        .await
+        .with_context(|| format!("failed to reach {url}"))?;
+    if resp.status().as_u16() == 404 {
+        anyhow::bail!("user not found (may have been removed)");
+    }
+    if resp.status().as_u16() == 403 {
+        anyhow::bail!("administrator access required (user:manage permission)");
+    }
+    if !resp.status().is_success() {
+        anyhow::bail!("listing grants failed: {}", error_message(resp).await);
+    }
+    let grants: Vec<Grant> = resp
+        .json()
+        .await
+        .context("failed to parse grants response")?;
+    if output::machine_mode() {
+        return output::emit_ok(&AuthOpReport {
+            id: Some(id),
+            name: Some(opts.user.clone()),
+            grants: grants
+                .into_iter()
+                .map(|g| AuthGrant {
+                    repo: g.repo,
+                    level: g.level.to_lowercase(),
+                })
+                .collect(),
+            ..op_report("list-grants", &target)
+        });
+    }
+    for g in &grants {
+        println!("{}\t{}", g.repo, g.level);
+    }
+    Ok(())
+}
+
+async fn admin_repo_access(opts: &RepoAccessOpts) -> Result<()> {
+    let target = resolve_server_target(&opts.server).await?;
+    let (creds, _source) = target.resolve_credentials();
+    let client = auth_http_client();
+
+    #[derive(Deserialize)]
+    struct Access {
+        user_id: String,
+        username: String,
+        level: String,
+    }
+
+    let url = format!("{}/admin/repos/{}/grants", target.origin(), opts.repo);
+    let resp = attach_credentials(client.get(&url), &creds)
+        .send()
+        .await
+        .with_context(|| format!("failed to reach {url}"))?;
+    if resp.status().as_u16() == 404 {
+        anyhow::bail!("repository '{}' not found", opts.repo);
+    }
+    if resp.status().as_u16() == 403 {
+        anyhow::bail!("administrator access required (user:manage permission)");
+    }
+    if !resp.status().is_success() {
+        anyhow::bail!("listing repo access failed: {}", error_message(resp).await);
+    }
+    let access: Vec<Access> = resp
+        .json()
+        .await
+        .context("failed to parse repo access response")?;
+    if output::machine_mode() {
+        return output::emit_ok(&AuthOpReport {
+            repo: Some(opts.repo.clone()),
+            access: access
+                .into_iter()
+                .map(|a| AuthRepoAccess {
+                    user_id: a.user_id,
+                    username: a.username,
+                    level: a.level.to_lowercase(),
+                })
+                .collect(),
+            ..op_report("repo-access", &target)
+        });
+    }
+    for a in &access {
+        println!("{}\t{}\t{}", a.user_id, a.username, a.level);
+    }
+    Ok(())
+}
+
+async fn admin_set_disabled(server: &Option<String>, user: &str, disabled: bool) -> Result<()> {
+    let target = resolve_server_target(server).await?;
+    let (creds, _source) = target.resolve_credentials();
+    let client = auth_http_client();
+
+    let id = resolve_user_id(&client, target.origin(), &creds, user).await?;
+
+    #[derive(Serialize)]
+    struct Body {
+        disabled: bool,
+    }
+    #[derive(Deserialize)]
+    struct Resp {
+        disabled: bool,
+        note: String,
+    }
+
+    let url = format!("{}/auth/users/{}/disabled", target.origin(), id);
+    let resp = attach_credentials(client.patch(&url), &creds)
+        .json(&Body { disabled })
+        .send()
+        .await
+        .with_context(|| format!("failed to reach {url}"))?;
+
+    if resp.status().as_u16() == 404 {
+        anyhow::bail!("user not found (may have been removed)");
+    }
+    if resp.status().as_u16() == 409 {
+        anyhow::bail!("cannot disable the last remaining admin");
+    }
+    if resp.status().as_u16() == 403 {
+        anyhow::bail!("administrator access required (user:manage permission)");
+    }
+    if !resp.status().is_success() {
+        anyhow::bail!("account change failed: {}", error_message(resp).await);
+    }
+    let body: Resp = resp
+        .json()
+        .await
+        .context("failed to parse disable-user response")?;
+    if output::machine_mode() {
+        return output::emit_ok(&AuthOpReport {
+            id: Some(id),
+            name: Some(user.to_string()),
+            disabled: Some(body.disabled),
+            note: Some(body.note),
+            ..op_report(
+                if disabled {
+                    "disable-user"
+                } else {
+                    "enable-user"
+                },
+                &target,
+            )
+        });
+    }
+    output::success(&format!(
+        "{} {}",
+        if body.disabled { "Disabled" } else { "Enabled" },
+        user
+    ));
+    output::info(&body.note);
     Ok(())
 }
 
@@ -1466,6 +1879,15 @@ async fn admin_grant(opts: &GrantOpts) -> Result<()> {
     if !resp.status().is_success() {
         anyhow::bail!("grant failed: {}", error_message(resp).await);
     }
+    if output::machine_mode() {
+        return output::emit_ok(&AuthOpReport {
+            id: Some(id),
+            name: Some(opts.user.clone()),
+            repo: Some(opts.repo.clone()),
+            level: Some(format!("{:?}", level).to_lowercase()),
+            ..op_report("grant", &target)
+        });
+    }
     output::success(&format!(
         "Granted {} {:?} on '{}'",
         opts.user, level, opts.repo
@@ -1474,6 +1896,9 @@ async fn admin_grant(opts: &GrantOpts) -> Result<()> {
 }
 
 async fn admin_revoke_grant(opts: &RevokeGrantOpts) -> Result<()> {
+    if !opts.yes {
+        output::ensure_interactive("revoke-grant confirmation (pass --yes)")?;
+    }
     let target = resolve_server_target(&opts.server).await?;
     let (creds, _source) = target.resolve_credentials();
     let client = auth_http_client();
@@ -1500,6 +1925,14 @@ async fn admin_revoke_grant(opts: &RevokeGrantOpts) -> Result<()> {
     }
     if !resp.status().is_success() {
         anyhow::bail!("grant revocation failed: {}", error_message(resp).await);
+    }
+    if output::machine_mode() {
+        return output::emit_ok(&AuthOpReport {
+            id: Some(id),
+            name: Some(opts.user.clone()),
+            repo: Some(opts.repo.clone()),
+            ..op_report("revoke-grant", &target)
+        });
     }
     output::success(&format!("Revoked {}'s grant on '{}'", opts.user, opts.repo));
     Ok(())

@@ -25,6 +25,30 @@ pub struct ReflogReport {
     pub entries: Vec<ReflogEntryReport>,
 }
 
+/// `--machine` data for `reflog show --all`: the newest entries of every ref.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct ReflogAllReport {
+    pub refs: Vec<ReflogReport>,
+}
+
+/// `--machine` data for `reflog delete` and `reflog expire`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct ReflogMaintainReport {
+    /// `delete` or `expire`.
+    pub action: String,
+    /// `delete`: whether the reflog existed. `expire`: whether anything went.
+    pub changed: bool,
+    /// `expire`: entries removed.
+    #[cfg_attr(test, ts(type = "number"))]
+    pub expired: u64,
+    /// Refs the action touched.
+    pub refs: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
@@ -106,6 +130,10 @@ pub enum ReflogAction {
         /// Reference to delete reflog for
         #[arg(required = true)]
         reference: String,
+
+        /// Confirm the deletion (required with --machine)
+        #[arg(long)]
+        yes: bool,
     },
 
     /// Prune/expire old reflog entries
@@ -117,18 +145,39 @@ pub enum ReflogAction {
         /// Number of entries to keep
         #[arg(long, default_value = "90")]
         keep: usize,
+
+        /// Confirm the expiry (required with --machine)
+        #[arg(long)]
+        yes: bool,
     },
+}
+
+fn entry_report(ref_name: &str, entries: &[mediagit_versioning::ReflogEntry]) -> ReflogReport {
+    ReflogReport {
+        reference: ref_name.to_string(),
+        entries: entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| ReflogEntryReport {
+                index: i as u64,
+                old_oid: e.old_oid.to_hex(),
+                new_oid: e.new_oid.to_hex(),
+                message: e.message.clone(),
+                time: e.committer.timestamp.timestamp(),
+                committer: e.committer.name.clone(),
+            })
+            .collect(),
+    }
 }
 
 impl ReflogCmd {
     pub async fn execute(&self) -> Result<()> {
-        if matches!(
-            self.action,
-            Some(ReflogAction::Delete { .. })
-                | Some(ReflogAction::Expire { .. })
-                | Some(ReflogAction::Show { all: true, .. })
-        ) {
-            output::ensure_machine_supported("reflog (only the entries of one ref)")?;
+        // Deleting or expiring reflog entries cannot be undone.
+        if let Some(
+            ReflogAction::Delete { yes: false, .. } | ReflogAction::Expire { yes: false, .. },
+        ) = &self.action
+        {
+            output::ensure_interactive("reflog confirmation (pass --yes)")?;
         }
         let repo_root = find_repo_root()?;
         let storage_path = repo_root.join(".mediagit");
@@ -141,16 +190,18 @@ impl ReflogCmd {
                 all,
             }) => {
                 if *all {
-                    self.show_all(&reflog).await
+                    self.show_all(&reflog, *count).await
                 } else {
                     let ref_name = reference.as_deref().unwrap_or("HEAD");
                     self.show_reflog(&reflog, ref_name, *count).await
                 }
             }
-            Some(ReflogAction::Delete { reference }) => {
+            Some(ReflogAction::Delete { reference, .. }) => {
                 self.delete_reflog(&reflog, reference).await
             }
-            Some(ReflogAction::Expire { reference, keep }) => {
+            Some(ReflogAction::Expire {
+                reference, keep, ..
+            }) => {
                 self.expire_reflog(&reflog, reference.as_deref(), *keep)
                     .await
             }
@@ -171,21 +222,7 @@ impl ReflogCmd {
         let entries = reflog.read(ref_name, limit).await?;
 
         if output::machine_mode() {
-            return output::emit_ok(&ReflogReport {
-                reference: ref_name.to_string(),
-                entries: entries
-                    .iter()
-                    .enumerate()
-                    .map(|(i, e)| ReflogEntryReport {
-                        index: i as u64,
-                        old_oid: e.old_oid.to_hex(),
-                        new_oid: e.new_oid.to_hex(),
-                        message: e.message.clone(),
-                        time: e.committer.timestamp.timestamp(),
-                        committer: e.committer.name.clone(),
-                    })
-                    .collect(),
-            });
+            return output::emit_ok(&entry_report(ref_name, &entries));
         }
 
         if entries.is_empty() {
@@ -224,8 +261,17 @@ impl ReflogCmd {
         Ok(())
     }
 
-    async fn show_all(&self, reflog: &Reflog) -> Result<()> {
+    async fn show_all(&self, reflog: &Reflog, count: Option<usize>) -> Result<()> {
         let refs = reflog.list_refs().await?;
+
+        if output::machine_mode() {
+            let mut out = Vec::new();
+            for ref_name in refs {
+                let entries = reflog.read(&ref_name, count).await?;
+                out.push(entry_report(&ref_name, &entries));
+            }
+            return output::emit_ok(&ReflogAllReport { refs: out });
+        }
 
         if refs.is_empty() {
             println!("{} No reflogs found", style("ℹ").cyan());
@@ -271,7 +317,20 @@ impl ReflogCmd {
     }
 
     async fn delete_reflog(&self, reflog: &Reflog, ref_name: &str) -> Result<()> {
-        if reflog.delete(ref_name).await? {
+        let existed = reflog.delete(ref_name).await?;
+        if output::machine_mode() {
+            return output::emit_ok(&ReflogMaintainReport {
+                action: "delete".into(),
+                changed: existed,
+                expired: 0,
+                refs: if existed {
+                    vec![ref_name.to_string()]
+                } else {
+                    Vec::new()
+                },
+            });
+        }
+        if existed {
             println!("{} Deleted reflog for {}", style("✓").green(), ref_name);
         } else {
             println!("{} No reflog found for {}", style("ℹ").cyan(), ref_name);
@@ -285,6 +344,27 @@ impl ReflogCmd {
         ref_name: Option<&str>,
         keep: usize,
     ) -> Result<()> {
+        if output::machine_mode() {
+            let targets = match ref_name {
+                Some(r) => vec![r.to_string()],
+                None => reflog.list_refs().await?,
+            };
+            let mut total = 0u64;
+            let mut touched = Vec::new();
+            for r in targets {
+                let n = reflog.expire(&r, keep).await? as u64;
+                if n > 0 {
+                    total += n;
+                    touched.push(r);
+                }
+            }
+            return output::emit_ok(&ReflogMaintainReport {
+                action: "expire".into(),
+                changed: total > 0,
+                expired: total,
+                refs: touched,
+            });
+        }
         if let Some(ref_name) = ref_name {
             let expired = reflog.expire(ref_name, keep).await?;
             if expired > 0 {

@@ -63,11 +63,7 @@ struct Cli {
 
     /// Machine-readable mode for GUI/automation: one JSON envelope on stdout,
     /// NDJSON progress on stderr, prompts fail with `needs_input`.
-    /// Supported by: status, version, log, show, branch, tag (list|create|delete),
-    /// add, commit, init, media, remote (list|add|remove|ls-tree), lock, fetch,
-    /// pull, push, clone, merge, diff, stash, reset, revert, download, auth
-    /// (login|status|whoami|logout), key, stats, gc, fsck, verify, config,
-    /// sparse-checkout, rebase, cherry-pick, bisect, reflog.
+    /// Supported by every subcommand except `completions`.
     #[arg(long, global = true)]
     machine: bool,
 
@@ -184,6 +180,10 @@ enum Commands {
     /// Show version information
     Version,
 
+    /// Print the clap tree as JSON (parity_contract_test reads it)
+    #[command(name = "__cli-tree", hide = true)]
+    CliTree,
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -280,7 +280,8 @@ fn preprocess_args(args: Vec<String>) -> Vec<String> {
             "remote" => Some((
                 "remote",
                 &[
-                    "list", "add", "remove", "rename", "show", "set-url", "ls-tree", "help",
+                    "list", "add", "remove", "rename", "show", "set-url", "ls-tree", "repos",
+                    "help",
                 ][..],
                 "list",
             )),
@@ -753,6 +754,10 @@ async fn async_main(cli: Cli) -> Result<()> {
             print_version();
             Ok(())
         }
+        Some(Commands::CliTree) => {
+            println!("{}", cli_tree(&Cli::command()));
+            Ok(())
+        }
         Some(Commands::Completions { shell }) => {
             generate_completions(shell)?;
             Ok(())
@@ -807,6 +812,34 @@ fn print_version() {
     println!("mediagit {}", env!("CARGO_PKG_VERSION"));
     println!("rust-version: {}", env!("CARGO_PKG_RUST_VERSION"));
     println!("license: {}", env!("CARGO_PKG_LICENSE"));
+}
+
+/// The clap tree as JSON: `{name, hidden, args: [{id, value_name, long, short, positional,
+/// takes_value, possible_values, help, hidden, global}], subcommands: [...]}`.
+fn cli_tree(cmd: &clap::Command) -> serde_json::Value {
+    let args: Vec<_> = cmd
+        .get_arguments()
+        .map(|a| {
+            serde_json::json!({
+                "id": a.get_id().as_str(),
+                "value_name": a.get_value_names().and_then(|v| v.first()).map(|v| v.to_string()),
+                "long": a.get_long(),
+                "short": a.get_short().map(String::from),
+                "positional": a.is_positional(),
+                "takes_value": a.get_action().takes_values(),
+                "possible_values": a.get_possible_values().iter().map(|v| v.get_name().to_string()).collect::<Vec<_>>(),
+                "help": a.get_help().map(|h| h.to_string()),
+                "hidden": a.is_hide_set(),
+                "global": a.is_global_set(),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "name": cmd.get_name(),
+        "hidden": cmd.is_hide_set(),
+        "args": args,
+        "subcommands": cmd.get_subcommands().map(cli_tree).collect::<Vec<_>>(),
+    })
 }
 
 fn generate_completions(shell: Shell) -> Result<()> {
@@ -866,7 +899,7 @@ mod tests {
             // Plumbing, not workflow: `help` and `completions` are clap's,
             // and `version` is reachable as `--version`, which clap already
             // advertises in its own help output.
-            if matches!(name, "help" | "completions" | "version") {
+            if matches!(name, "help" | "completions" | "version") || sub.is_hide_set() {
                 continue;
             }
             if !listed.iter().any(|l| l == name) {

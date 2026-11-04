@@ -45,6 +45,38 @@ pub struct TagActionReport {
     pub missing: Vec<String>,
 }
 
+/// `--machine` data for `tag show`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct TagShowReport {
+    pub name: String,
+    /// Object the tag points at (an annotated tag's target commit).
+    pub oid: String,
+    pub annotated: bool,
+    /// Full message of an annotated tag.
+    pub message: Option<String>,
+    pub tagger_name: Option<String>,
+    pub tagger_email: Option<String>,
+    /// RFC 3339 tag time.
+    pub date: Option<String>,
+    pub signed: bool,
+}
+
+/// `--machine` data for `tag verify` (an invalid signature is an error).
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct TagVerifyReport {
+    pub name: String,
+    pub oid: String,
+    pub annotated: bool,
+    pub signed: bool,
+    /// Signer key fingerprint of a valid signature. Proves the contents are
+    /// intact, not who owns the key.
+    pub fingerprint: Option<String>,
+}
+
 /// Manage tags
 #[derive(Parser, Debug)]
 pub struct TagCmd {
@@ -176,12 +208,6 @@ pub struct VerifyOpts {
 impl TagCmd {
     /// Execute tag command
     pub async fn execute(&self, repo_path: PathBuf) -> Result<()> {
-        if !matches!(
-            self.subcommand,
-            TagSubcommand::List(_) | TagSubcommand::Create(_) | TagSubcommand::Delete(_)
-        ) {
-            crate::output::ensure_machine_supported("tag (only list|create|delete)")?;
-        }
         match &self.subcommand {
             TagSubcommand::Create(opts) => self.create(repo_path, opts).await,
             TagSubcommand::List(opts) => self.list(repo_path, opts).await,
@@ -612,6 +638,20 @@ impl TagCmd {
         let storage = create_storage_backend(&repo_path).await?;
         let odb = ObjectDatabase::with_smart_compression(storage, 1000);
 
+        if crate::output::machine_mode() {
+            let tag = self.read_tag_object(&odb, &oid).await;
+            return crate::output::emit_ok(&TagShowReport {
+                name: opts.name.clone(),
+                oid: tag.as_ref().map_or(oid, |t| t.target).to_hex(),
+                annotated: tag.is_some(),
+                message: tag.as_ref().map(|t| t.message.clone()),
+                tagger_name: tag.as_ref().map(|t| t.tagger.name.clone()),
+                tagger_email: tag.as_ref().map(|t| t.tagger.email.clone()),
+                date: tag.as_ref().map(|t| t.tagger.timestamp.to_rfc3339()),
+                signed: tag.as_ref().is_some_and(|t| t.signature.is_some()),
+            });
+        }
+
         println!("Tag:     {}", opts.name);
 
         match self.read_tag_object(&odb, &oid).await {
@@ -684,7 +724,29 @@ impl TagCmd {
             }
         };
 
-        match data.as_deref().and_then(|d| Tag::deserialize(d).ok()) {
+        let machine = crate::output::machine_mode();
+        let parsed = data.as_deref().and_then(|d| Tag::deserialize(d).ok());
+        let mut report = TagVerifyReport {
+            name: opts.name.clone(),
+            oid: parsed.as_ref().map_or(oid, |t| t.target).to_hex(),
+            annotated: parsed.is_some(),
+            signed: parsed.as_ref().is_some_and(|t| t.signature.is_some()),
+            fingerprint: None,
+        };
+        match parsed {
+            Some(tag) if machine => {
+                if let Some(signature) = &tag.signature {
+                    let payload = tag.signing_payload()?;
+                    match mediagit_security::sign::verify_embedded(&payload, signature)? {
+                        Some(fp) => report.fingerprint = Some(fp.to_string()),
+                        None => anyhow::bail!(
+                            "Tag '{}': INVALID signature — contents do not match signature",
+                            opts.name
+                        ),
+                    }
+                }
+            }
+            None if machine => {}
             Some(tag) => {
                 if opts.verbose {
                     println!("Tag '{}' ref is valid (annotated)", opts.name);
@@ -729,6 +791,10 @@ impl TagCmd {
                     println!("Tag '{}' is valid", opts.name);
                 }
             }
+        }
+
+        if machine {
+            return crate::output::emit_ok(&report);
         }
 
         Ok(())

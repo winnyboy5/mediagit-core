@@ -25,6 +25,23 @@ pub struct CommitReport {
     pub summary: String,
 }
 
+/// `--machine` data for `commit --dry-run`: what a real commit would record.
+#[derive(Debug, Clone, serde::Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct CommitDryRunReport {
+    /// `false` when nothing is staged and `--allow-empty` is absent: a real
+    /// commit would fail with "nothing to commit".
+    pub would_commit: bool,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub staged: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub deleted: u64,
+    pub staged_paths: Vec<String>,
+    /// First line of the commit message.
+    pub summary: String,
+}
+
 /// Record changes to the repository
 ///
 /// Creates a new commit containing the currently staged changes. The commit
@@ -157,7 +174,22 @@ impl CommitCmd {
         // Defer actual appending until after author_name/email are resolved
 
         if self.dry_run {
-            output::ensure_machine_supported("commit --dry-run")?;
+            if output::machine_mode() {
+                let index = Index::load(&repo_root)?;
+                let mut staged_paths: Vec<String> = index
+                    .entries()
+                    .map(|e| e.path.to_string_lossy().replace('\\', "/"))
+                    .filter(|p| !mediagit_versioning::is_stage_debris_key(p))
+                    .collect();
+                staged_paths.sort();
+                return output::emit_ok(&CommitDryRunReport {
+                    would_commit: !index.is_empty() || self.allow_empty,
+                    staged: staged_paths.len() as u64,
+                    deleted: index.deleted_count() as u64,
+                    staged_paths,
+                    summary: message.lines().next().unwrap_or("").to_string(),
+                });
+            }
             output::info("Running in dry-run mode");
             return Ok(());
         }

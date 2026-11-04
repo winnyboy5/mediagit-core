@@ -62,6 +62,19 @@ pub struct BranchDeleteReport {
     pub deleted: Vec<String>,
 }
 
+/// `--machine` data for `branch protect`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct BranchProtectReport {
+    pub name: String,
+    /// Protection in force after the command.
+    pub protected: bool,
+    /// `false` when `--unprotect` found nothing to remove.
+    pub changed: bool,
+    pub require_reviews: bool,
+}
+
 fn short_ref(name: &str) -> String {
     name.replace('\\', "/")
         .trim_start_matches("refs/heads/")
@@ -315,14 +328,6 @@ pub struct ShowOpts {
 
 impl BranchCmd {
     pub async fn execute(&self) -> Result<()> {
-        if matches!(
-            self.subcommand,
-            BranchSubcommand::Protect(_) | BranchSubcommand::Show(_)
-        ) {
-            crate::output::ensure_machine_supported(
-                "branch (only list|create|switch|delete|rename)",
-            )?;
-        }
         match &self.subcommand {
             BranchSubcommand::List(opts) => self.list(opts).await,
             BranchSubcommand::Create(opts) => self.create(opts).await,
@@ -1063,7 +1068,19 @@ impl BranchCmd {
 
         if opts.unprotect {
             // Remove protection
-            if config.unprotect_branch(&branch_name).is_some() {
+            let removed = config.unprotect_branch(&branch_name).is_some();
+            if output::machine_mode() {
+                if removed {
+                    config.save(&repo_root)?;
+                }
+                return output::emit_ok(&BranchProtectReport {
+                    name: branch_name,
+                    protected: false,
+                    changed: removed,
+                    require_reviews: false,
+                });
+            }
+            if removed {
                 config.save(&repo_root)?;
                 if !opts.quiet {
                     output::success(&format!("Removed protection from branch '{}'", branch_name));
@@ -1081,6 +1098,14 @@ impl BranchCmd {
 
             config.protect_branch_with(&branch_name, protection);
             config.save(&repo_root)?;
+            if output::machine_mode() {
+                return output::emit_ok(&BranchProtectReport {
+                    name: branch_name,
+                    protected: true,
+                    changed: true,
+                    require_reviews: opts.require_reviews,
+                });
+            }
 
             if !opts.quiet {
                 let mut rules = vec!["prevent force-push", "prevent deletion"];
@@ -1215,6 +1240,29 @@ impl BranchCmd {
             .read(&branch_ref_name)
             .await
             .context(format!("Branch '{}' not found", branch_name))?;
+
+        if output::machine_mode() {
+            let storage = create_storage_backend(&repo_root).await?;
+            let odb = ObjectDatabase::with_smart_compression(storage, 1000);
+            let config = mediagit_config::Config::load(&repo_root).await?;
+            let up = super::status::resolve_upstream(
+                &config,
+                &refdb,
+                &odb,
+                &branch_name,
+                branch_ref.oid,
+            )
+            .await;
+            return output::emit_ok(&BranchEntryReport {
+                protected: config.get_branch_protection(&branch_name).is_some(),
+                oid: branch_ref.oid.map(|o| o.to_hex()),
+                remote: false,
+                upstream: up.as_ref().map(|u| u.name.clone()),
+                ahead: up.as_ref().and_then(|u| u.ahead),
+                behind: up.as_ref().and_then(|u| u.behind),
+                name: branch_name,
+            });
+        }
 
         output::header(&format!("Branch: {}", branch_name));
 
