@@ -1,0 +1,109 @@
+.pane {
+  display: grid;
+  gap: var(--space-4);
+  align-content: start;
+  padding-top: var(--space-4);
+}
+.bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+.bar p,
+.muted {
+  margin: 0;
+  color: var(--text-muted);
+}
+.card {
+  display: grid;
+  gap: var(--space-3);
+  justify-items: start;
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+}
+.card h2 {
+  margin: 0;
+  font-size: var(--fs-lg);
+}
+.banner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-control);
+  background: var(--danger-soft);
+}
+.banner.note {
+  border-color: var(--modified);
+  background: var(--modified-soft);
+}
+.banner span {
+  flex: 1;
+}
+.form {
+  display: grid;
+  gap: var(--space-3);
+}
+.btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  font-size: var(--fs-md);
+}
+.table th,
+.table td {
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: middle;
+}
+.table tbody tr:last-child > * {
+  border-bottom: 0;
+}
+.table thead th {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+}
+.table tbody th {
+  color: var(--text);
+  font-size: inherit;
+  font-weight: 600;
+}
+.table td.act {
+  text-align: right;
+  white-space: nowrap;
+}
+.chip {
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--surface-3);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+.mono {
+  overflow-wrap: anywhere;
+}
+.secret {
+  padding: var(--space-4);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  background: var(--surface-2);
+  font-size: var(--fs-lg);
+  overflow-wrap: anywhere;
+  user-select: all;
+}

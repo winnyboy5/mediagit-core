@@ -12,6 +12,7 @@ import {
   History as HistoryIcon,
   Lock,
   RefreshCw,
+  Server,
   Settings,
   ShieldCheck,
   Tag,
@@ -66,6 +67,7 @@ const more = [
   { to: '/storage', label: 'Storage', icon: HardDrive },
   { to: '/maintenance', label: 'Maintenance', icon: Wrench },
   { to: '/security', label: 'Security', icon: ShieldCheck },
+  { to: '/server', label: 'Server', icon: Server },
   { to: '/advanced', label: 'Advanced', icon: Wand2 },
   { to: '/settings', label: 'Settings', icon: Settings },
 ] as const

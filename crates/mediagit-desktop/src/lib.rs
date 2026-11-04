@@ -5,6 +5,7 @@
 
 mod commands;
 pub mod engine;
+pub mod server_manager;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -335,6 +336,11 @@ pub fn run() {
         .manage(engine)
         .manage(Ops::default())
         .manage(RepoQueues::default())
+        .setup(|app| {
+            let root = app.path().app_data_dir()?.join("server");
+            app.manage(server_manager::ServerManager::new(root));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             engine_info,
             repo_status,
@@ -408,7 +414,29 @@ pub fn run() {
             commands::admin::bisect_mark,
             commands::admin::bisect_reset,
             commands::admin::bisect_log,
-            commands::admin::reflog_list
+            commands::admin::reflog_list,
+            commands::server_admin::server_users_list,
+            commands::server_admin::server_user_create,
+            commands::server_admin::server_user_set_role,
+            commands::server_admin::server_user_reset_password,
+            commands::server_admin::server_user_disable,
+            commands::server_admin::server_user_enable,
+            commands::server_admin::server_user_grants,
+            commands::server_admin::server_repo_access,
+            commands::server_admin::server_grant_set,
+            commands::server_admin::server_grant_remove,
+            commands::server_admin::server_keys_list,
+            commands::server_admin::server_key_create,
+            commands::server_admin::server_key_revoke,
+            commands::server_admin::server_repos_list,
+            commands::server_admin::server_repo_create,
+            commands::server_admin::server_repo_delete,
+            commands::server_admin::server_local_status,
+            commands::server_admin::server_local_setup,
+            commands::server_admin::server_local_start,
+            commands::server_admin::server_local_stop,
+            commands::server_admin::server_local_log,
+            commands::server_admin::server_local_set_network
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| panic!("failed to start MediaGit desktop: {e}"));
@@ -419,8 +447,12 @@ pub fn run() {
             api, code: None, ..
         } = event
         {
+            // Only a server this app started is ever stopped (`stop_owned`).
+            let server_up = tauri::async_runtime::block_on(
+                app.state::<server_manager::ServerManager>().is_running(),
+            );
             let ops = app.state::<Ops>();
-            if ops.is_idle() {
+            if ops.is_idle() && !server_up {
                 return;
             }
             api.prevent_exit();
@@ -428,6 +460,7 @@ pub fn run() {
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
                 let _ = tokio::time::timeout(EXIT_GRACE, app.state::<Ops>().idle()).await;
+                commands::server_admin::stop_on_exit(&app).await;
                 app.exit(0);
             });
         }

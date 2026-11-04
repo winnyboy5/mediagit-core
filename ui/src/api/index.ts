@@ -39,6 +39,10 @@ import type {
   TagActionReport,
   StatusReport,
   TagListReport,
+  AuthOpReport,
+  HostedRepoActionReport,
+  HostedReposReport,
+  LocalServerStatus,
 } from './types'
 
 export type * from './types'
@@ -214,6 +218,40 @@ export const api = {
     rawInvoke<AuthReport>('auth_login', { repo, server, username, password }),
   authRun: (repo: string | null, action: 'status' | 'whoami' | 'logout', server: string | null, all = false) =>
     invoke<AuthReport>('auth_run', { repo, action, server, all }),
+  // Server panel. `server` is an origin (http(s)://host[:port]); passwords are one call's argument.
+  serverLocalStatus: () => rawInvoke<LocalServerStatus>('server_local_status'),
+  serverLocalSetup: (username: string, email: string, password: string) =>
+    rawInvoke<LocalServerStatus>('server_local_setup', { username, email, password }),
+  serverLocalStart: () => rawInvoke<LocalServerStatus>('server_local_start'),
+  serverLocalStop: () => rawInvoke<LocalServerStatus>('server_local_stop'),
+  serverLocalLog: (lines: number) => rawInvoke<string>('server_local_log', { lines }),
+  serverLocalSetNetwork: (enabled: boolean) => rawInvoke<LocalServerStatus>('server_local_set_network', { enabled }),
+  serverWhoami: (server: string) => rawInvoke<AuthReport>('auth_run', { repo: null, action: 'status', server, all: false }),
+  serverLogin: (server: string, username: string, password: string) =>
+    rawInvoke<AuthReport>('auth_login', { repo: null, server, username, password }),
+  serverUsers: (server: string) => rawInvoke<AuthOpReport>('server_users_list', { server }),
+  serverUserCreate: (server: string, user: string, email: string, role: string, password: string) =>
+    rawInvoke<AuthOpReport>('server_user_create', { server, user, email, role, password }),
+  serverUserSetRole: (server: string, user: string, role: string) => rawInvoke<AuthOpReport>('server_user_set_role', { server, user, role }),
+  serverUserResetPassword: (server: string, user: string, password: string) =>
+    rawInvoke<AuthOpReport>('server_user_reset_password', { server, user, password }),
+  serverUserDisable: (server: string, user: string) => rawInvoke<AuthOpReport>('server_user_disable', { server, user, confirm: true }),
+  serverUserEnable: (server: string, user: string) => rawInvoke<AuthOpReport>('server_user_enable', { server, user }),
+  serverUserGrants: (server: string, user: string) => rawInvoke<AuthOpReport>('server_user_grants', { server, user }),
+  serverRepoAccess: (server: string, repo: string) => rawInvoke<AuthOpReport>('server_repo_access', { server, repo }),
+  serverGrantSet: (server: string, user: string, repo: string, level: string) =>
+    rawInvoke<AuthOpReport>('server_grant_set', { server, user, repo, level }),
+  serverGrantRemove: (server: string, user: string, repo: string) =>
+    rawInvoke<AuthOpReport>('server_grant_remove', { server, user, repo, confirm: true }),
+  serverKeys: (server: string) => rawInvoke<AuthOpReport>('server_keys_list', { server }),
+  serverKeyCreate: (server: string, name: string, permissions: string[]) =>
+    rawInvoke<AuthOpReport>('server_key_create', { server, name, permissions }),
+  serverKeyRevoke: (server: string, id: string) => rawInvoke<AuthOpReport>('server_key_revoke', { server, id, confirm: true }),
+  serverRepos: (server: string) => rawInvoke<HostedReposReport>('server_repos_list', { server }),
+  serverRepoCreate: (server: string, name: string) => rawInvoke<HostedRepoActionReport>('server_repo_create', { server, name }),
+  serverRepoDelete: (server: string, name: string, typedName: string, force: boolean) =>
+    rawInvoke<HostedRepoActionReport>('server_repo_delete', { server, name, typedName, force, confirm: true }),
+
   keyStatus: (repo: string, passphrase?: string) => invoke<KeyReport>('key_status', { repo, passphrase: passphrase ?? null }),
   keyInit: (repo: string, passphrase: string | null) => rawInvoke<KeyReport>('key_init', { repo, passphrase }),
   keyRecover: (repo: string, code: string, passphrase: string | null) => rawInvoke<KeyReport>('key_recover', { repo, code, passphrase }),

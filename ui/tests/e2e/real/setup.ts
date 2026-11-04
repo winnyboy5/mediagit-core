@@ -170,6 +170,9 @@ export default async function globalSetup() {
     const wvData = join(root, 'webview2')
     start(exe, [], 'desktop', {
       MEDIAGIT_DESKTOP_CLI: cli,
+      // W5: the app starts its own local server from an isolated data folder.
+      MEDIAGIT_DESKTOP_SERVER: server,
+      MEDIAGIT_DESKTOP_SERVER_DIR: join(root, 'app-server'),
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${cdpPort}`,
       WEBVIEW2_USER_DATA_FOLDER: wvData,
     })

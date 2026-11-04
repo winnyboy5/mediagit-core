@@ -161,6 +161,11 @@ impl Secret {
         Self(Zeroizing::new(self.0.as_str().to_owned()))
     }
 
+    /// The secret's text, for writing to a child's stdin (never argv or env).
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+
     /// Whether `needle` is this secret (for tests that check it never leaks elsewhere).
     pub fn is(&self, needle: &str) -> bool {
         self.0.as_str() == needle

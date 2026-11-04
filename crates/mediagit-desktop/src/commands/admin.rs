@@ -25,7 +25,7 @@ pub struct SecretCmd {
 }
 
 impl SecretCmd {
-    fn plain(argv: Vec<String>) -> Self {
+    pub(super) fn plain(argv: Vec<String>) -> Self {
         Self {
             argv,
             secrets: Vec::new(),
@@ -33,7 +33,10 @@ impl SecretCmd {
     }
 
     /// `secrets` are the answers to the command's prompts, in order; blanks are skipped.
-    fn with(argv: Vec<String>, secrets: Vec<Option<String>>) -> Result<Self, EngineError> {
+    pub(super) fn with(
+        argv: Vec<String>,
+        secrets: Vec<Option<String>>,
+    ) -> Result<Self, EngineError> {
         let secrets = secrets
             .into_iter()
             .flatten()
@@ -43,11 +46,25 @@ impl SecretCmd {
     }
 }
 
+#[cfg(test)]
+impl SecretCmd {
+    pub(super) fn argv(&self) -> &[String] {
+        &self.argv
+    }
+    pub(super) fn secret_count(&self) -> usize {
+        self.secrets.len()
+    }
+}
+
 fn optional_repo(repo: Option<&str>) -> Result<Option<PathBuf>, EngineError> {
     repo.map(repo_path).transpose()
 }
 
-async fn run(engine: &Engine, repo: Option<&Path>, cmd: &SecretCmd) -> Result<Value, EngineError> {
+pub(super) async fn run(
+    engine: &Engine,
+    repo: Option<&Path>,
+    cmd: &SecretCmd,
+) -> Result<Value, EngineError> {
     engine
         .run_with(repo, &as_args(&cmd.argv), &cmd.secrets, |_| {})
         .await
@@ -88,11 +105,11 @@ fn verify_argv(quick: bool) -> Vec<String> {
 }
 
 /// An http(s) server address.
-fn server_ok(url: &str) -> bool {
+pub(super) fn server_ok(url: &str) -> bool {
     (url.starts_with("http://") || url.starts_with("https://")) && clone_source_ok(url)
 }
 
-fn server_flag(argv: &mut Vec<String>, server: Option<&str>) -> Result<(), EngineError> {
+pub(super) fn server_flag(argv: &mut Vec<String>, server: Option<&str>) -> Result<(), EngineError> {
     if let Some(s) = server.filter(|s| !s.is_empty()) {
         if !server_ok(s) {
             return Err(invalid("server address", s));

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { FolderOpen, FolderPlus, GitFork, X } from 'lucide-vue-next'
+import { useRouter } from 'vue-router'
+import { FolderOpen, FolderPlus, GitFork, Server, X } from 'lucide-vue-next'
 import Wordmark from '@/components/Wordmark.vue'
 import { toApiError, type ApiError } from '@/api'
 import { api } from '@/api'
@@ -15,6 +16,7 @@ import { useOpsStore } from '@/stores/ops'
 import { useRecentStore } from '@/stores/recent'
 import CloneDialog from './welcome/CloneDialog.vue'
 
+const router = useRouter()
 const recent = useRecentStore()
 const ops = useOpsStore()
 const { openPath, pickAndOpen } = useOpenRepo()
@@ -94,6 +96,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       <Button variant="primary" :loading="opening" @click="openFolder"><FolderOpen :size="18" aria-hidden="true" />Open folder…</Button>
       <Button @click="cloneOpen = true"><GitFork :size="18" aria-hidden="true" />Clone…</Button>
       <Button :loading="initBusy" @click="newRepo"><FolderPlus :size="18" aria-hidden="true" />New repository (init)</Button>
+      <Button variant="ghost" @click="router.push('/server')"><Server :size="18" aria-hidden="true" />Host a server…</Button>
     </div>
 
     <ErrorState v-if="error" class="fail" :code="error.code" :message="error.message" @retry="retry?.()" />

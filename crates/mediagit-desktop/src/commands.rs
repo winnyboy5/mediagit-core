@@ -1413,6 +1413,7 @@ pub async fn repo_download_preview(
 }
 
 pub mod admin;
+pub mod server_admin;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]

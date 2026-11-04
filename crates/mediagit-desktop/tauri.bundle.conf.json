@@ -1,5 +1,5 @@
 {
   "bundle": {
-    "externalBin": ["binaries/mediagit"]
+    "externalBin": ["binaries/mediagit", "binaries/mediagit-server"]
   }
 }

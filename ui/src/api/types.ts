@@ -79,3 +79,80 @@ export interface Extracted {
 
 /** `media info` data: the parser's own struct, different per file type. */
 export type MediaInfo = Record<string, unknown>
+
+// -- Server panel -----------------------------------------------------------
+// Mirrors the CLI's `auth admin|key` (AuthOpReport) and `remote repos` reports and the
+// desktop's LocalStatus (server_manager.rs). Swap for src/api/generated/ once exported.
+
+/** The local server as the app sees it. `elsewhere`: something answers, but this app did not start it. */
+export interface LocalServerStatus {
+  state: 'not_set_up' | 'stopped' | 'running' | 'elsewhere'
+  url: string | null
+  port: number | null
+  pid: number | null
+  data_dir: string
+  log_path: string
+  lan: boolean
+}
+
+export type ServerRole = 'read' | 'write' | 'admin'
+
+export interface ServerUser {
+  id: string
+  username: string
+  role: ServerRole
+  /** Cannot sign in; the account is kept. */
+  disabled?: boolean
+}
+
+export interface ServerKey {
+  id: string
+  name: string
+  /** Unix seconds. */
+  created_at: number
+}
+
+/** `auth admin *` and `auth key *` data. */
+export interface AuthOpReport {
+  action: string
+  server: string
+  id: string | null
+  name: string | null
+  role: string | null
+  repo: string | null
+  level: string | null
+  /** `key-create`: the new key, shown once. */
+  key: string | null
+  permissions: string[]
+  keys: ServerKey[]
+  users: ServerUser[]
+  /** `list-grants`: what one person can reach. */
+  grants?: { repo: string; level: string }[]
+  /** `repo-access`: who can reach one repository. */
+  access?: { user_id: string; username: string; level: string }[]
+  note: string | null
+}
+
+export interface HostedRepo {
+  name: string
+  size_bytes: number
+  object_count: number | null
+  /** Unix seconds. */
+  last_modified: number
+}
+
+export interface HostedReposReport {
+  server: string
+  repos: HostedRepo[]
+}
+
+export interface HostedRepoActionReport {
+  action: 'create' | 'delete'
+  server: string
+  name: string
+  repo: HostedRepo | null
+  deleted: boolean
+  /** The storage bucket still holds the repository's data. */
+  storage_retained: boolean
+  backend: string | null
+}
