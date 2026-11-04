@@ -1,0 +1,7 @@
+# rust-analyzer project settings (applies to every editor and to the Claude LSP plugin).
+# Check only the crate being edited, not all 13 workspace crates: smaller, faster
+# background cargo check. Cross-crate breakage is still caught by cargo check / clippy
+# and the pre-commit hook. Global-only knobs (cachePriming, numThreads) cannot live
+# here; set them in your editor settings if wanted.
+[check]
+workspace = false
