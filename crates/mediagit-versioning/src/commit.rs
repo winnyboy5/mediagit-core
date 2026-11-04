@@ -236,7 +236,7 @@ impl Commit {
 
     /// Deserialize commit from bytes
     pub fn deserialize(data: &[u8]) -> anyhow::Result<Self> {
-        crate::format::deserialize(data)
+        crate::format::deserialize_exact(data)
             .map_err(|e| anyhow::anyhow!("Commit deserialization failed: {}", e))
     }
 

@@ -670,7 +670,7 @@ impl GarbageCollector {
             };
 
             // Try to deserialize as commit
-            if let Ok(commit) = mediagit_versioning::format::deserialize::<Commit>(&data) {
+            if let Ok(commit) = mediagit_versioning::format::deserialize_exact::<Commit>(&data) {
                 // Traverse tree to mark tree + all blobs as reachable
                 self.traverse_tree(&commit.tree, reachable).await?;
 
@@ -708,7 +708,7 @@ impl GarbageCollector {
             };
 
             // Deserialize tree
-            let tree = match mediagit_versioning::format::deserialize::<Tree>(&data) {
+            let tree = match mediagit_versioning::format::deserialize_exact::<Tree>(&data) {
                 Ok(t) => t,
                 Err(e) => {
                     debug!("Failed to deserialize tree {}: {}", tree_oid, e);
@@ -908,13 +908,13 @@ impl GarbageCollector {
         let Some(data) = self.read_for_walk(oid).await? else {
             return Ok(());
         };
-        if let Ok(commit) = mediagit_versioning::format::deserialize::<Commit>(&data) {
+        if let Ok(commit) = mediagit_versioning::format::deserialize_exact::<Commit>(&data) {
             self.traverse_tree(&commit.tree, reachable).await?;
             for parent in &commit.parents {
                 self.traverse_commit_chain(parent, reachable).await?;
             }
         }
-        if let Ok(tree) = mediagit_versioning::format::deserialize::<Tree>(&data) {
+        if let Ok(tree) = mediagit_versioning::format::deserialize_exact::<Tree>(&data) {
             for entry in tree.entries.values() {
                 if entry.mode == FileMode::Directory {
                     self.traverse_tree(&entry.oid, reachable).await?;

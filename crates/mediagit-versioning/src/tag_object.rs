@@ -98,7 +98,7 @@ impl Tag {
 
     /// Deserialize tag from bytes
     pub fn deserialize(data: &[u8]) -> anyhow::Result<Self> {
-        crate::format::deserialize(data)
+        crate::format::deserialize_exact(data)
             .map_err(|e| anyhow::anyhow!("Tag deserialization failed: {}", e))
     }
 
@@ -132,6 +132,39 @@ mod tests {
             "alice@example.com".to_string(),
             Utc::now(),
         )
+    }
+
+    /// Graph walkers (reachability, gc, push) find an object's type by trying
+    /// Commit, then Tree, then Tag. A tag whose target OID starts with 0x00
+    /// used to parse as an EMPTY tree (postcard ignored the trailing bytes),
+    /// so the tagged commit was never walked: ~1 tag in 256, and gc could
+    /// prune a commit reachable only through that tag.
+    #[test]
+    fn tag_is_never_mistaken_for_a_tree_or_commit() {
+        for first in [0u8, 1, 2] {
+            let mut raw = [0x5a_u8; 32];
+            raw[0] = first;
+            let tag = Tag::new(
+                Oid::from_bytes(raw),
+                ObjectType::Commit,
+                "v1.0.0".to_string(),
+                tagger(),
+                "release".to_string(),
+            );
+            let bytes = tag.serialize().unwrap();
+            assert!(
+                crate::Tree::deserialize(&bytes).is_err(),
+                "tag bytes (target starts {first:#04x}) parsed as a Tree"
+            );
+            assert!(
+                crate::Commit::deserialize(&bytes).is_err(),
+                "tag bytes (target starts {first:#04x}) parsed as a Commit"
+            );
+            assert_eq!(
+                Tag::deserialize(&bytes).unwrap().target,
+                Oid::from_bytes(raw)
+            );
+        }
     }
 
     #[test]

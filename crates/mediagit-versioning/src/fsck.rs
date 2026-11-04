@@ -1033,7 +1033,7 @@ impl FsckChecker {
             // Routed through the ODB (pack-aware, decompresses) rather than raw
             // storage, so dangling detection isn't fooled by packed objects.
             if let Ok(data) = self.odb.read(oid).await {
-                match crate::format::deserialize::<Commit>(&data) {
+                match crate::format::deserialize_exact::<Commit>(&data) {
                     Ok(commit) => {
                         referenced.insert(commit.tree);
                         // Recurse into the tree itself (not just record its oid)
@@ -1048,7 +1048,7 @@ impl FsckChecker {
                         }
                     }
                     _ => {
-                        match crate::format::deserialize::<Tag>(&data) {
+                        match crate::format::deserialize_exact::<Tag>(&data) {
                             Ok(tag) => {
                                 referenced.insert(tag.target);
                                 if tag.target_type == ObjectType::Commit {
@@ -1062,7 +1062,7 @@ impl FsckChecker {
                                 }
                             }
                             _ => {
-                                if let Ok(tree) = crate::format::deserialize::<Tree>(&data) {
+                                if let Ok(tree) = crate::format::deserialize_exact::<Tree>(&data) {
                                     for (name, entry) in &tree.entries {
                                         // A chunked blob's pack members are its chunks, which are
                                         // referenced via the blob's manifest — expand it here or

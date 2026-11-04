@@ -44,9 +44,10 @@ pub async fn stage_files_for_commit(paths: &[String], repo_root: &std::path::Pat
         let mut files = std::collections::HashMap::new();
         if let Ok(head_oid) = refdb.resolve("HEAD").await
             && let Ok(commit_data) = odb.read(&head_oid).await
-            && let Ok(commit) = mediagit_versioning::format::deserialize::<Commit>(&commit_data)
+            && let Ok(commit) =
+                mediagit_versioning::format::deserialize_exact::<Commit>(&commit_data)
             && let Ok(tree_data) = odb.read(&commit.tree).await
-            && let Ok(tree) = mediagit_versioning::format::deserialize::<Tree>(&tree_data)
+            && let Ok(tree) = mediagit_versioning::format::deserialize_exact::<Tree>(&tree_data)
         {
             for entry in tree.iter() {
                 files.insert(std::path::PathBuf::from(&entry.name), entry.oid);
@@ -319,9 +320,10 @@ impl AddCmd {
             let mut files = HashMap::new();
             if let Ok(head_oid) = refdb.resolve("HEAD").await
                 && let Ok(commit_data) = odb.read(&head_oid).await
-                && let Ok(commit) = mediagit_versioning::format::deserialize::<Commit>(&commit_data)
+                && let Ok(commit) =
+                    mediagit_versioning::format::deserialize_exact::<Commit>(&commit_data)
                 && let Ok(tree_data) = odb.read(&commit.tree).await
-                && let Ok(tree) = mediagit_versioning::format::deserialize::<Tree>(&tree_data)
+                && let Ok(tree) = mediagit_versioning::format::deserialize_exact::<Tree>(&tree_data)
             {
                 for entry in tree.iter() {
                     files.insert(PathBuf::from(&entry.name), entry.oid);

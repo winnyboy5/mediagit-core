@@ -445,7 +445,7 @@ impl ProtocolClient {
                     match obj_type {
                         ObjectType::Commit => {
                             if let Ok(commit) =
-                                mediagit_versioning::format::deserialize::<Commit>(&obj_data)
+                                mediagit_versioning::format::deserialize_exact::<Commit>(&obj_data)
                             {
                                 if visited.insert(commit.tree) {
                                     have_queue.push_back((commit.tree, ObjectType::Tree));
@@ -459,7 +459,7 @@ impl ProtocolClient {
                         }
                         ObjectType::Tree => {
                             if let Ok(tree) =
-                                mediagit_versioning::format::deserialize::<Tree>(&obj_data)
+                                mediagit_versioning::format::deserialize_exact::<Tree>(&obj_data)
                             {
                                 for entry in tree.entries.values() {
                                     if visited.insert(entry.oid) {

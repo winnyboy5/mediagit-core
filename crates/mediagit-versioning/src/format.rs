@@ -15,3 +15,18 @@ pub fn serialize<T: serde::Serialize>(value: &T) -> anyhow::Result<Vec<u8>> {
 pub fn deserialize<T: for<'de> serde::Deserialize<'de>>(data: &[u8]) -> anyhow::Result<T> {
     postcard::from_bytes(data).map_err(|e| anyhow::anyhow!("Deserialization error: {}", e))
 }
+
+/// Deserialize a value that must consume `data` completely.
+///
+/// Used for commit, tree and tag objects. Graph walkers detect an object's
+/// type by trying each decoder in turn, and postcard's `from_bytes` accepts a
+/// prefix: a tag whose target OID starts with 0x00 decoded as an empty tree.
+/// Rejecting leftover bytes makes each decoder accept only its own type.
+pub fn deserialize_exact<T: for<'de> serde::Deserialize<'de>>(data: &[u8]) -> anyhow::Result<T> {
+    let (value, rest) = postcard::take_from_bytes(data)
+        .map_err(|e| anyhow::anyhow!("Deserialization error: {}", e))?;
+    if !rest.is_empty() {
+        anyhow::bail!("Deserialization error: {} trailing bytes", rest.len());
+    }
+    Ok(value)
+}
