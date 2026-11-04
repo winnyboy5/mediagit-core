@@ -72,10 +72,6 @@ fn grace_period() -> std::time::Duration {
 /// Clean up repository and optimize storage
 #[derive(Parser, Debug)]
 pub struct GcCmd {
-    /// Aggressive optimization (not yet implemented)
-    #[arg(long, hide = true)]
-    pub aggressive: bool,
-
     /// Skip pruning unreachable objects (by default, gc prunes)
     #[arg(long)]
     pub no_prune: bool,
@@ -116,11 +112,6 @@ pub struct GcCmd {
 /// through clap.
 #[derive(Debug, Clone, Default)]
 pub struct GcOptions {
-    /// Reserved for future "aggressive" mode (currently a no-op CLI flag).
-    /// Kept on the struct so the flag is wired end-to-end the moment its
-    /// behavior is implemented; suppress the unused warning until then.
-    #[allow(dead_code)]
-    pub aggressive: bool,
     pub no_prune: bool,
     pub auto: bool,
     pub dry_run: bool,
@@ -134,7 +125,6 @@ pub struct GcOptions {
 impl From<&GcCmd> for GcOptions {
     fn from(cmd: &GcCmd) -> Self {
         Self {
-            aggressive: cmd.aggressive,
             no_prune: cmd.no_prune,
             auto: cmd.auto,
             dry_run: cmd.dry_run,
@@ -1583,11 +1573,6 @@ impl GarbageCollector {
 
 impl GcCmd {
     pub async fn execute(&self) -> Result<()> {
-        // UX-5: declared but never read; the struct comment already admitted
-        // it was "a no-op CLI flag".
-        if self.aggressive {
-            anyhow::bail!("gc --aggressive is not yet implemented.");
-        }
         if crate::output::machine_mode() {
             let opts = GcOptions::from(self);
             let s = run_gc_stats(&opts).await?;

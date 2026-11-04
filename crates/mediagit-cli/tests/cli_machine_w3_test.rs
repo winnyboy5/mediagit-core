@@ -146,7 +146,7 @@ fn gc_machine_dry_run_and_real() {
     assert_eq!(d["dry_run"], false);
     assert_eq!(d["objects_deleted"], 0);
 
-    assert_eq!(err(dir, &["gc", "--aggressive"]), "error");
+    assert_eq!(err(dir, &["gc", "--aggressive"]), "invalid_args");
     assert_eq!(err(no_repo().path(), &["gc"]), "error");
 }
 

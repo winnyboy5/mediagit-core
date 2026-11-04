@@ -79,14 +79,6 @@ pub struct PullCmd {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Quit if conflicts occur (not yet implemented)
-    #[arg(long, hide = true)]
-    pub no_commit: bool,
-
-    /// Abort pull (not yet implemented; use `mediagit merge --abort`)
-    #[arg(long, hide = true)]
-    pub abort: bool,
-
     /// Continue after resolving conflicts
     #[arg(long = "continue", alias = "continue-pull", hide = true)]
     pub continue_pull: bool,
@@ -111,17 +103,6 @@ impl PullCmd {
     }
 
     pub async fn execute(&self) -> Result<()> {
-        // UX-5: both declared, neither read — `--abort` in particular looked
-        // like a way out of a bad pull and did nothing at all.
-        if self.abort {
-            anyhow::bail!(
-                "pull --abort is not yet implemented. A pull that stopped in \
-                    conflict left a merge in progress: use `mediagit merge --abort`."
-            );
-        }
-        if self.no_commit {
-            anyhow::bail!("pull --no-commit is not yet implemented.");
-        }
         reject_dead_pull_flags(
             self.continue_pull,
             self.strategy.as_deref(),
@@ -593,9 +574,7 @@ impl PullCmd {
                     let rebase_cmd = RebaseCmd {
                         upstream: Some(upstream_name),
                         branch: None, // Rebase current branch
-                        rebase_merges: false,
                         keep_empty: false,
-                        autosquash: false,
                         abort: false,
                         continue_rebase: false,
                         skip: false,
@@ -816,14 +795,12 @@ async fn fast_forward_to(
 
 /// Refuse `--continue`, `-s` and `-X` rather than accepting and ignoring them.
 ///
-/// UX-5 already caught `--abort` and `--no-commit` here: declared, never read,
-/// and bailing now. These three survived that pass because they are `hide =
-/// true` and so appear in no `--help` output anyone reads - `continue_pull`,
-/// `strategy` and `strategy_option` are each read exactly zero times in this
-/// file.
+/// These three are `hide = true` and so appear in no `--help` output anyone
+/// reads - `continue_pull`, `strategy` and `strategy_option` are each read
+/// exactly zero times in this file. (`--abort` and `--no-commit` were the same
+/// kind of stub and have been removed outright.)
 ///
-/// `--continue` is the dangerous one. `--abort` at least did nothing visible;
-/// `pull --continue` after a conflicted pull performed an ordinary *new* pull
+/// `--continue` is the dangerous one: `pull --continue` after a conflicted pull performed an ordinary *new* pull
 /// and reported success, so the user believes they resumed the operation they
 /// were in the middle of. The failure is silent and the state is wrong.
 ///

@@ -80,29 +80,22 @@ fn test_gc_basic() {
     println!("GC duration: {:?}", start.elapsed());
 }
 
+/// `gc --aggressive` was an accepted no-op and has been removed with the other
+/// unbuilt stub flags (pull --abort/--no-commit, rebase --autosquash/
+/// --rebase-merges, diff --word-diff, show --stat/--patch/--pretty/--unified).
+/// clap now rejects them all the same way; one flag stands for the lot.
 #[test]
-fn test_gc_aggressive() {
+fn removed_stub_flag_is_a_usage_error() {
     let temp_dir = TempDir::new().unwrap();
     init_repo(temp_dir.path());
 
-    for i in 1..=3 {
-        add_and_commit(
-            temp_dir.path(),
-            &format!("file{}.txt", i),
-            &format!("Content {}", i),
-            &format!("Commit {}", i),
-        );
-    }
-
-    // UX-5: `--aggressive` was never read — this asserted `.success()` and
-    // passed only because the flag was a silent no-op. It is now hidden and
-    // refuses, so the honest assertion is that it says so.
     mediagit()
         .arg("gc")
         .arg("--aggressive")
         .current_dir(temp_dir.path())
         .assert()
-        .failure();
+        .code(2)
+        .stderr(predicates::str::contains("unexpected argument"));
 }
 
 #[test]
@@ -550,21 +543,6 @@ fn test_verify_basic() {
 
     mediagit()
         .arg("verify")
-        .current_dir(temp_dir.path())
-        .assert()
-        .success();
-}
-
-#[test]
-fn test_verify_file_integrity() {
-    let temp_dir = TempDir::new().unwrap();
-    init_repo(temp_dir.path());
-
-    add_and_commit(temp_dir.path(), "file.txt", "Content", "Initial commit");
-
-    mediagit()
-        .arg("verify")
-        .arg("--file-integrity")
         .current_dir(temp_dir.path())
         .assert()
         .success();

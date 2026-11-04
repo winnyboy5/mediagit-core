@@ -33,17 +33,9 @@ pub struct RebaseCmd {
     #[arg(value_name = "BRANCH")]
     pub branch: Option<String>,
 
-    /// Rebase merge commits (not yet implemented)
-    #[arg(short = 'm', long, hide = true)]
-    pub rebase_merges: bool,
-
     /// Keep empty commits
     #[arg(long)]
     pub keep_empty: bool,
-
-    /// Autosquash - automatically apply fixup/squash (not yet implemented)
-    #[arg(long, hide = true)]
-    pub autosquash: bool,
 
     /// Abort rebase
     #[arg(long)]
@@ -181,11 +173,6 @@ impl RebaseCmd {
         // Check if rebase already in progress
         if RebaseState::in_progress(&repo_root) {
             anyhow::bail!("A rebase is already in progress. Use --continue, --skip, or --abort.");
-        }
-
-        // Merge rebases not yet supported
-        if self.rebase_merges {
-            anyhow::bail!("Rebase with merge commits not yet implemented.");
         }
 
         let storage_path = repo_root.join(".mediagit");
@@ -959,17 +946,15 @@ mod tests {
         assert!(parse(&["main", "--interactive"]).is_err());
     }
 
-    #[tokio::test]
-    async fn execute_rebase_merges_is_not_implemented_error() {
-        let temp = TempDir::new().unwrap();
-        init_repo_with_commit(temp.path()).await;
-
-        let cmd = parse(&["main", "--rebase-merges"]).unwrap();
-        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("Rebase with merge commits not yet implemented")
-        );
+    #[test]
+    fn unbuilt_flags_are_rejected_at_parse_time() {
+        for flag in ["--rebase-merges", "-m", "--autosquash"] {
+            let err = parse(&["main", flag]).unwrap_err();
+            assert!(
+                err.to_string().contains("unexpected argument"),
+                "{flag}: {err}"
+            );
+        }
     }
 
     #[tokio::test]

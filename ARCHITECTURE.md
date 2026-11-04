@@ -1151,7 +1151,7 @@ flowchart TD
 
 - `--dry-run` mode reports what would be deleted without touching data
 - Chunks are **content-addressed** — a chunk stays alive if ANY reachable manifest references it
-- A hidden `--aggressive` flag exists on the struct (reserved for a future deeper-sweep/recompaction mode) but is **not implemented**: passing it makes `gc` fail immediately with "gc --aggressive is not yet implemented." Use `--repack` for pack recompaction today.
+- There is no `--aggressive` mode. Use `--repack` for pack recompaction.
 
 ---
 

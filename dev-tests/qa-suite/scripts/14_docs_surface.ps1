@@ -141,9 +141,9 @@ foreach ($f in $docs) {
 # HIDDEN FLAGS ARE STILL REAL FLAGS.
 #
 # `--help` is the primary source of truth but not a complete one: clap's
-# `hide = true` keeps a working flag out of the listing. `reset --mixed`,
-# `cherry-pick --continue` and `show --stat` are all real, all accepted by the
-# binary, and all absent from `--help`. A gate that trusted `--help` alone
+# `hide = true` keeps a working flag out of the listing. `reset --mixed`
+# and `cherry-pick --continue` are both real, both accepted by the
+# binary, and both absent from `--help`. A gate that trusted `--help` alone
 # would report them as invented forever, and the only way to silence it would
 # be to inflate the baseline - which is how a ratchet quietly stops ratcheting.
 #

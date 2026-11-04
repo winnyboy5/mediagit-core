@@ -24,4 +24,8 @@ files_updated: number | null,
 /**
  * `list` (all entries, newest first) and `show` (the one entry).
  */
-stashes: Array<StashEntryReport>, };
+stashes: Array<StashEntryReport>, 
+/**
+ * `save`: the paths that went into the stash, sorted.
+ */
+paths: Array<string>, };

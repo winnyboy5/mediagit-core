@@ -49,8 +49,6 @@ push	--no-track	no	EXPECTED-ERR
 pull	-(bare invocation)	no	EXPECTED-ERR
 pull	-r,--rebase	no	EXPECTED-ERR
 pull	--dry-run	no	EXPECTED-ERR
-pull	--no-commit	no	EXPECTED-ERR
-pull	--abort	no	EXPECTED-ERR
 pull	--continue-pull	no	EXPECTED-ERR
 pull	-s,--strategy	yes	EXPECTED-ERR
 pull	-X,--strategy-option	yes	EXPECTED-ERR
@@ -80,7 +78,6 @@ branch list	-(bare invocation)	no	OK
 branch list	-r,--remote	no	OK
 branch list	-a,--all	no	OK
 branch list	-v,--verbose	no	OK
-branch list	--sort	yes	OK
 branch create	-(bare invocation)	no	OK
 branch create	-u,--set-upstream	yes	ERROR
 branch create	--track	no	OK
@@ -93,7 +90,6 @@ branch switch	-(bare invocation)	no	OK
 branch switch	-c,--create	no	ERROR
 branch switch	--track	no	OK
 branch switch	-f,--force	no	OK
-branch switch	--no-guess	no	OK
 branch rename	-(bare invocation)	no	OK
 branch rename	-f,--force	no	OK
 branch show	-(bare invocation)	no	OK
@@ -171,7 +167,6 @@ log	--skip	yes	USAGE
 log	--oneline	no	OK
 log	--graph	no	OK
 log	--stat	no	OK
-log	-p,--patch	no	OK
 log	--author	yes	OK
 log	--grep	yes	OK
 log	--since	yes	ERROR
@@ -180,12 +175,9 @@ log	--format	yes	OK
 log	--all	no	OK
 diff	-(bare invocation)	no	OK
 diff	--cached	no	OK
-diff	--word-diff	no	ERROR
 diff	--stat	no	OK
 diff	--summary	no	OK
-diff	-U,--unified	yes	USAGE
 show	-(bare invocation)	no	OK
-show	--stat	no	ERROR
 show	--tree	no	OK
 show	--output	yes	ERROR
 status	-(bare invocation)	no	OK
@@ -197,7 +189,6 @@ status	--porcelain	no	OK
 status	-b,--branch	no	OK
 status	--json	no	OK
 gc	-(bare invocation)	no	OK
-gc	--aggressive	no	ERROR
 gc	--no-prune	no	OK
 gc	--auto	no	OK
 gc	--dry-run	no	OK
@@ -214,7 +205,6 @@ fsck	--repair	no	OK
 fsck	--dry-run	no	OK
 fsck	--max-objects	yes	OK
 verify	-(bare invocation)	no	OK
-verify	--file-integrity	no	OK
 verify	--checksums	no	OK
 verify	--start	yes	OK
 verify	--end	yes	ERROR

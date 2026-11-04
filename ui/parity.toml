@@ -40,7 +40,7 @@ gui = "WelcomeView"
 gui = "TODO:WelcomeView"
 
 [arg."init --bare"]
-gui = "TODO:WelcomeView"
+excluded = "documented compat alias for git users; the GUI always creates a normal repository"
 
 [cmd."clone"]
 gui = "WelcomeView"
@@ -127,7 +127,7 @@ gui = "SettingsView"
 gui = "SettingsView"
 
 [arg."config get KEY"]
-gui = "TODO:SettingsView"
+excluded = "presentation only: the GUI renders this information itself"
 
 [cmd."config set"]
 gui = "SettingsView"
@@ -201,13 +201,7 @@ gui = "TODO:SyncView"
 [arg."pull --dry-run"]
 gui = "TODO:SyncView"
 
-[arg."pull --abort"]
-gui = "TODO:SyncView"
-
 [arg."pull --continue"]
-gui = "TODO:SyncView"
-
-[arg."pull --no-commit"]
 gui = "TODO:SyncView"
 
 [arg."pull --strategy"]
@@ -319,13 +313,10 @@ gui = "BranchesView"
 gui = "BranchesView"
 
 [arg."branch list --remote"]
-gui = "TODO:BranchesView"
+excluded = "presentation only: the GUI renders this information itself"
 
 [arg."branch list --all"]
-gui = "TODO:BranchesView"
-
-[arg."branch list --sort"]
-gui = "TODO:BranchesView"
+excluded = "presentation only: the GUI renders this information itself"
 
 [cmd."branch create"]
 gui = "BranchesView"
@@ -358,9 +349,6 @@ gui = "TODO:BranchesView"
 gui = "TODO:BranchesView"
 
 [arg."branch switch --force"]
-gui = "TODO:BranchesView"
-
-[arg."branch switch --no-guess"]
 gui = "TODO:BranchesView"
 
 [cmd."branch delete"]
@@ -442,13 +430,13 @@ gui = "TagsStashView"
 gui = "TODO:TagsStashView"
 
 [arg."tag list --info"]
-gui = "TODO:TagsStashView"
+excluded = "presentation only: the GUI renders this information itself"
 
 [arg."tag list --sort"]
-gui = "TODO:TagsStashView"
+excluded = "presentation only: the GUI renders this information itself"
 
 [arg."tag list --reverse"]
-gui = "TODO:TagsStashView"
+excluded = "presentation only: the GUI renders this information itself"
 
 [cmd."tag delete"]
 gui = "TagsStashView"
@@ -466,7 +454,7 @@ gui = "TagsStashView"
 gui = "TODO:TagsStashView"
 
 [arg."tag show --full"]
-gui = "TODO:TagsStashView"
+excluded = "presentation only: the GUI renders this information itself"
 
 [cmd."tag verify"]
 gui = "TagsStashView"
@@ -520,10 +508,10 @@ gui = "SecurityView"
 gui = "SecurityView"
 
 [arg."auth login --server"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [arg."auth login --username"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [arg."auth login --token"]
 gui = "TODO:SecurityView"
@@ -577,10 +565,10 @@ gui = "SecurityView"
 gui = "SecurityView"
 
 [arg."auth key create --server"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [arg."auth key create --name"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [arg."auth key create --permissions"]
 gui = "TODO:SecurityView"
@@ -589,19 +577,19 @@ gui = "TODO:SecurityView"
 gui = "SecurityView"
 
 [arg."auth key list --server"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [cmd."auth key revoke"]
 gui = "SecurityView"
 
 [arg."auth key revoke ID"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [arg."auth key revoke --server"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [arg."auth key revoke --yes"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [cmd."auth admin"]
 gui = "SecurityView"
@@ -610,73 +598,73 @@ gui = "SecurityView"
 gui = "SecurityView"
 
 [arg."auth admin list-users --server"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [cmd."auth admin set-role"]
 gui = "SecurityView"
 
 [arg."auth admin set-role USER"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [arg."auth admin set-role ROLE"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [arg."auth admin set-role --server"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [cmd."auth admin create-user"]
 gui = "SecurityView"
 
 [arg."auth admin create-user USER"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [arg."auth admin create-user --server"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [arg."auth admin create-user --role"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [arg."auth admin create-user --email"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [cmd."auth admin reset-password"]
 gui = "SecurityView"
 
 [arg."auth admin reset-password USER"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [arg."auth admin reset-password --server"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [cmd."auth admin grant"]
 gui = "SecurityView"
 
 [arg."auth admin grant USER"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [arg."auth admin grant REPO"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [arg."auth admin grant LEVEL"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [arg."auth admin grant --server"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [cmd."auth admin revoke-grant"]
 gui = "SecurityView"
 
 [arg."auth admin revoke-grant USER"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [arg."auth admin revoke-grant REPO"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [arg."auth admin revoke-grant --server"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [arg."auth admin revoke-grant --yes"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [cmd."key"]
 gui = "SecurityView"
@@ -750,13 +738,7 @@ gui = "TODO:MergeView"
 [arg."rebase --skip"]
 gui = "MergeView"
 
-[arg."rebase --autosquash"]
-gui = "TODO:MergeView"
-
 [arg."rebase --continue"]
-gui = "TODO:MergeView"
-
-[arg."rebase --rebase-merges"]
 gui = "TODO:MergeView"
 
 [cmd."cherry-pick"]
@@ -788,9 +770,6 @@ gui = "TagsStashView"
 
 [cmd."stash push"]
 gui = "TagsStashView"
-
-[arg."stash push MESSAGE"]
-gui = "TODO:TagsStashView"
 
 [arg."stash push PATHS"]
 gui = "TODO:TagsStashView"
@@ -838,7 +817,7 @@ gui = "TagsStashView"
 gui = "TODO:TagsStashView"
 
 [arg."stash show --patch"]
-gui = "TODO:TagsStashView"
+excluded = "presentation only: the GUI renders this information itself"
 
 [cmd."stash drop"]
 gui = "TagsStashView"
@@ -928,16 +907,13 @@ gui = "HistoryView"
 gui = "HistoryView"
 
 [arg."log --oneline"]
-gui = "TODO:HistoryView"
+excluded = "presentation only: the GUI renders this information itself"
 
 [arg."log --graph"]
-gui = "TODO:HistoryView"
+excluded = "presentation only: the GUI renders this information itself"
 
 [arg."log --stat"]
-gui = "TODO:HistoryView"
-
-[arg."log --patch"]
-gui = "TODO:HistoryView"
+excluded = "presentation only: the GUI renders this information itself"
 
 [arg."log --author"]
 gui = "TODO:HistoryView"
@@ -952,7 +928,7 @@ gui = "TODO:HistoryView"
 gui = "TODO:HistoryView"
 
 [arg."log --format"]
-gui = "TODO:HistoryView"
+excluded = "presentation only: the GUI renders this information itself"
 
 [arg."log --all"]
 gui = "HistoryView"
@@ -973,16 +949,10 @@ gui = "TODO:CompareView"
 gui = "TODO:CompareView"
 
 [arg."diff --stat"]
-gui = "TODO:CompareView"
+excluded = "presentation only: the GUI renders this information itself"
 
 [arg."diff --summary"]
-gui = "TODO:CompareView"
-
-[arg."diff --unified"]
-gui = "TODO:CompareView"
-
-[arg."diff --word-diff"]
-gui = "TODO:CompareView"
+excluded = "presentation only: the GUI renders this information itself"
 
 [cmd."show"]
 gui = "HistoryView"
@@ -993,41 +963,29 @@ gui = "HistoryView"
 [arg."show --output"]
 gui = "HistoryView"
 
-[arg."show --patch"]
-gui = "TODO:HistoryView"
-
-[arg."show --pretty"]
-gui = "TODO:HistoryView"
-
-[arg."show --stat"]
-gui = "TODO:HistoryView"
-
 [arg."show --tree"]
 gui = "HistoryView"
-
-[arg."show --unified"]
-gui = "TODO:HistoryView"
 
 [cmd."status"]
 gui = "ChangesView"
 
 [arg."status --tracked"]
-gui = "TODO:ChangesView"
+excluded = "presentation only: the GUI renders this information itself"
 
 [arg."status --untracked"]
-gui = "TODO:ChangesView"
+excluded = "presentation only: the GUI renders this information itself"
 
 [arg."status --ignored"]
-gui = "TODO:ChangesView"
+excluded = "presentation only: the GUI renders this information itself"
 
 [arg."status --short"]
-gui = "TODO:ChangesView"
+excluded = "presentation only: the GUI renders this information itself"
 
 [arg."status --porcelain"]
-gui = "TODO:ChangesView"
+excluded = "presentation only: the GUI renders this information itself"
 
 [arg."status --branch"]
-gui = "TODO:ChangesView"
+excluded = "presentation only: the GUI renders this information itself"
 
 [arg."status --json"]
 excluded = "legacy per-command JSON; the GUI uses the global --machine envelope"
@@ -1052,9 +1010,6 @@ gui = "TODO:MaintenanceView"
 
 [arg."gc --max-pack-size"]
 excluded = "tuning knob; the repo config decides pack size"
-
-[arg."gc --aggressive"]
-gui = "TODO:MaintenanceView"
 
 [cmd."fsck"]
 gui = "MaintenanceView"
@@ -1092,9 +1047,6 @@ gui = "MaintenanceView"
 [arg."verify COMMIT"]
 gui = "TODO:MaintenanceView"
 
-[arg."verify --file-integrity"]
-gui = "TODO:MaintenanceView"
-
 [arg."verify --checksums"]
 gui = "TODO:MaintenanceView"
 
@@ -1117,25 +1069,25 @@ excluded = "redundant with the global -C/--repository, which the GUI always sets
 gui = "StorageView"
 
 [arg."stats --storage"]
-gui = "TODO:StorageView"
+excluded = "presentation only: the GUI renders this information itself"
 
 [arg."stats --files"]
-gui = "TODO:StorageView"
+excluded = "presentation only: the GUI renders this information itself"
 
 [arg."stats --commits"]
-gui = "TODO:StorageView"
+excluded = "presentation only: the GUI renders this information itself"
 
 [arg."stats --branches"]
-gui = "TODO:StorageView"
+excluded = "presentation only: the GUI renders this information itself"
 
 [arg."stats --authors"]
-gui = "TODO:StorageView"
+excluded = "presentation only: the GUI renders this information itself"
 
 [arg."stats --compression"]
-gui = "TODO:StorageView"
+excluded = "presentation only: the GUI renders this information itself"
 
 [arg."stats --all"]
-gui = "TODO:StorageView"
+excluded = "presentation only: the GUI renders this information itself"
 
 [arg."stats --json"]
 excluded = "legacy per-command JSON; the GUI uses the global --machine envelope"
@@ -1150,7 +1102,7 @@ gui = "HistoryView"
 gui = "TODO:HistoryView"
 
 [arg."reflog --count"]
-gui = "TODO:HistoryView"
+excluded = "presentation only: the GUI renders this information itself"
 
 [cmd."reflog show"]
 gui = "HistoryView"
@@ -1159,7 +1111,7 @@ gui = "HistoryView"
 gui = "TODO:HistoryView"
 
 [arg."reflog show --count"]
-gui = "TODO:HistoryView"
+excluded = "presentation only: the GUI renders this information itself"
 
 [arg."reflog show --all"]
 gui = "TODO:HistoryView"
@@ -1258,22 +1210,22 @@ excluded = "hidden helper that prints the clap tree for the parity test"
 gui = "SecurityView"
 
 [arg."auth admin disable-user USER"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [arg."auth admin disable-user --server"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [arg."auth admin disable-user --yes"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [cmd."auth admin enable-user"]
 gui = "SecurityView"
 
 [arg."auth admin enable-user USER"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [arg."auth admin enable-user --server"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [cmd."remote ls-tree"]
 gui = "RemoteView"
@@ -1291,19 +1243,19 @@ gui = "RemoteView"
 gui = "SecurityView"
 
 [arg."auth admin list-grants USER"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [arg."auth admin list-grants --server"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [cmd."auth admin repo-access"]
 gui = "SecurityView"
 
 [arg."auth admin repo-access REPO"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [arg."auth admin repo-access --server"]
-gui = "TODO:SecurityView"
+gui = "ServerView"
 
 [cmd."remote repos"]
 gui = "RemoteView"
@@ -1312,38 +1264,38 @@ gui = "RemoteView"
 gui = "RemoteView"
 
 [arg."remote repos list --remote"]
-gui = "TODO:RemoteView"
+excluded = "GUI targets servers by URL (--server); remote-name targeting is a CLI convenience"
 
 [arg."remote repos list --server"]
-gui = "TODO:RemoteView"
+gui = "ServerView"
 
 [cmd."remote repos create"]
 gui = "RemoteView"
 
 [arg."remote repos create NAME"]
-gui = "TODO:RemoteView"
+gui = "ServerView"
 
 [arg."remote repos create --remote"]
-gui = "TODO:RemoteView"
+excluded = "GUI targets servers by URL (--server); remote-name targeting is a CLI convenience"
 
 [arg."remote repos create --server"]
-gui = "TODO:RemoteView"
+gui = "ServerView"
 
 [cmd."remote repos delete"]
 gui = "RemoteView"
 
 [arg."remote repos delete NAME"]
-gui = "TODO:RemoteView"
+gui = "ServerView"
 
 [arg."remote repos delete --remote"]
-gui = "TODO:RemoteView"
+excluded = "GUI targets servers by URL (--server); remote-name targeting is a CLI convenience"
 
 [arg."remote repos delete --server"]
-gui = "TODO:RemoteView"
+gui = "ServerView"
 
 [arg."remote repos delete --force"]
-gui = "TODO:RemoteView"
+gui = "ServerView"
 
 [arg."remote repos delete --yes"]
-gui = "TODO:RemoteView"
+gui = "ServerView"
 

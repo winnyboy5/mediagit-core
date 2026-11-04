@@ -1095,3 +1095,75 @@ async fn remote_repos_list_create_delete() {
             .any(|x| x["name"] == "art")
     );
 }
+
+// ---------------------------------------------------------------------------
+// stash push/save [PATHS]
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stash_push_with_paths_stashes_only_those() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_repo(dir);
+    fs::create_dir(dir.join("sub")).unwrap();
+    commit_file(dir, "a.txt", b"a0", "a");
+    commit_file(dir, "b.txt", b"b0", "b");
+    commit_file(dir, "sub/c.txt", b"c0", "c");
+    fs::write(dir.join("a.txt"), "a1").unwrap();
+    fs::write(dir.join("b.txt"), "b1").unwrap();
+    fs::write(dir.join("sub/c.txt"), "c1").unwrap();
+    fs::write(dir.join("new.txt"), "n").unwrap();
+
+    // Stash a file and a directory; b.txt and new.txt stay untouched.
+    let d = ok(dir, &["stash", "push", "-m", "partial", "a.txt", "sub"]);
+    assert_eq!(d["message"], "partial");
+    assert_eq!(d["paths"], serde_json::json!(["a.txt", "sub/c.txt"]), "{d}");
+    assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "a0");
+    assert_eq!(fs::read_to_string(dir.join("sub/c.txt")).unwrap(), "c0");
+    assert_eq!(fs::read_to_string(dir.join("b.txt")).unwrap(), "b1");
+    assert_eq!(fs::read_to_string(dir.join("new.txt")).unwrap(), "n");
+
+    // Pop brings the stashed paths back.
+    ok(dir, &["stash", "pop"]);
+    assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "a1");
+    assert_eq!(fs::read_to_string(dir.join("sub/c.txt")).unwrap(), "c1");
+    assert_eq!(fs::read_to_string(dir.join("b.txt")).unwrap(), "b1");
+
+    // `save "msg" <path>` takes paths after the message.
+    let d = ok(dir, &["stash", "save", "second", "b.txt"]);
+    assert_eq!(d["paths"], serde_json::json!(["b.txt"]), "{d}");
+    assert_eq!(fs::read_to_string(dir.join("b.txt")).unwrap(), "b0");
+    assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "a1");
+}
+
+#[test]
+fn stash_push_with_unknown_path_is_a_clear_error() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_repo(dir);
+    commit_file(dir, "a.txt", b"a0", "a");
+    fs::write(dir.join("a.txt"), "a1").unwrap();
+
+    assert_eq!(err(dir, &["stash", "push", "nope.txt"]), "invalid_args");
+    // Nothing was stashed.
+    assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "a1");
+    assert_eq!(
+        ok(dir, &["stash", "list"])["stashes"],
+        serde_json::json!([])
+    );
+}
+
+#[test]
+fn stash_push_without_paths_still_stashes_everything() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_repo(dir);
+    commit_file(dir, "a.txt", b"a0", "a");
+    commit_file(dir, "b.txt", b"b0", "b");
+    fs::write(dir.join("a.txt"), "a1").unwrap();
+    fs::write(dir.join("b.txt"), "b1").unwrap();
+    let d = ok(dir, &["stash", "push"]);
+    assert_eq!(d["paths"], serde_json::json!(["a.txt", "b.txt"]), "{d}");
+    assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "a0");
+    assert_eq!(fs::read_to_string(dir.join("b.txt")).unwrap(), "b0");
+}

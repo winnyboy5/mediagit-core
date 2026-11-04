@@ -7,9 +7,9 @@ Create, list, rename, protect, and delete branches.
 ```bash
 mediagit branch <subcommand> [options]
 
-mediagit branch list [-r|--remote] [-a|--all] [-v|--verbose] [--sort <key>]
+mediagit branch list [-r|--remote] [-a|--all] [-v|--verbose]
 mediagit branch create <name> [<start-point>] [-u <upstream>] [--track|--no-track]
-mediagit branch switch <branch> [-c|--create] [--track] [-f|--force] [--no-guess]
+mediagit branch switch <branch> [-c|--create] [--track] [-f|--force]
 mediagit branch delete <branches>... [-D|--force] [-d|--delete-merged] [-r|--remote]
 mediagit branch rename [<old-name>] <new-name> [-f|--force]
 mediagit branch show [<branch>] [-v|--verbose]
@@ -39,7 +39,6 @@ List branches. This is the default when `branch` is run with no arguments.
 | `-a`, `--all` | List all branches (local and remote) |
 | `-v`, `--verbose` | Show verbose output |
 | `-q`, `--quiet` | Quiet mode |
-| `--sort <key>` | Sort branches |
 
 ### `create <name> [<start-point>]`
 
@@ -60,7 +59,6 @@ Switch to a branch, updating the working tree.
 | `-c`, `--create` | Create and switch to a new branch |
 | `--track` | With `--create` and a `<remote>/<name>` argument, create local `<name>` from the tracking ref and set it to track the remote branch |
 | `-f`, `--force` | Switch even with local changes |
-| `--no-guess` | Don't check out files |
 | `-q`, `--quiet` | Quiet mode |
 
 ### `delete <branches>...`

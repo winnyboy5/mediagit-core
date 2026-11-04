@@ -56,9 +56,6 @@ Draw ASCII graph showing branch and merge history.
 #### `--stat`
 Show file change statistics for each commit.
 
-#### `--patch`, `-p`
-Show patch (diff) for each commit.
-
 ## Format Placeholders
 
 Custom format strings support these placeholders:

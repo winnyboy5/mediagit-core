@@ -491,24 +491,6 @@ fn test_show_head() {
 }
 
 #[test]
-fn test_show_stat() {
-    let temp_dir = TempDir::new().unwrap();
-    init_repo(temp_dir.path());
-
-    add_and_commit(temp_dir.path(), "file.txt", "Content", "Initial commit");
-
-    // UX-5: `show --stat` was never read — this asserted `.success()` and
-    // passed only because the flag did nothing. It now refuses and points at
-    // `diff --stat`, which does work.
-    mediagit()
-        .arg("show")
-        .arg("--stat")
-        .current_dir(temp_dir.path())
-        .assert()
-        .failure();
-}
-
-#[test]
 fn test_show_quiet() {
     let temp_dir = TempDir::new().unwrap();
     init_repo(temp_dir.path());

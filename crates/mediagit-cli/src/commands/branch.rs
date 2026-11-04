@@ -182,10 +182,6 @@ pub struct ListOpts {
     /// Quiet mode
     #[arg(short, long)]
     pub quiet: bool,
-
-    /// Sort branches
-    #[arg(long, value_name = "KEY")]
-    pub sort: Option<String>,
 }
 
 /// Create a new branch
@@ -237,10 +233,6 @@ pub struct SwitchOpts {
     /// Force switch even if local changes
     #[arg(short = 'f', long)]
     pub force: bool,
-
-    /// Don't check out files
-    #[arg(long)]
-    pub no_guess: bool,
 
     /// Quiet mode
     #[arg(short, long)]

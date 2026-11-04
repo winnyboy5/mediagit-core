@@ -270,7 +270,7 @@ mediagit add env_courtyard.hdr
 mediagit merge --continue
 
 # shelve an in-progress edit without committing
-mediagit stash push wip-relight
+mediagit stash push -m wip-relight
 
 # approved build: signed tag, push to cloud, verify after sync
 MEDIAGIT_SIGN=1 MEDIAGIT_SIGN_KEY=~/.ssh/id_ed25519 \

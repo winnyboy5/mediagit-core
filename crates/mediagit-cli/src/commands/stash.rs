@@ -32,6 +32,8 @@ pub struct StashReport {
     pub files_updated: Option<u64>,
     /// `list` (all entries, newest first) and `show` (the one entry).
     pub stashes: Vec<StashEntryReport>,
+    /// `save`: the paths that went into the stash, sorted.
+    pub paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -47,6 +49,12 @@ pub struct StashEntryReport {
     pub timestamp: String,
 }
 
+/// `path` is `spec` itself or lies under it (both repo-relative, `/`-separated).
+fn selected_by(path: &Path, spec: &str) -> bool {
+    let p = path.to_string_lossy().replace('\\', "/");
+    p == spec || p.starts_with(&format!("{spec}/"))
+}
+
 fn stash_report(action: &str) -> StashReport {
     StashReport {
         action: action.into(),
@@ -55,6 +63,7 @@ fn stash_report(action: &str) -> StashReport {
         message: None,
         files_updated: None,
         stashes: Vec::new(),
+        paths: Vec::new(),
     }
 }
 
@@ -81,8 +90,8 @@ pub struct StashCmd {
 
 #[derive(Subcommand, Debug)]
 pub enum StashSubcommand {
-    /// Save changes to stash (git-compatible alias for `save`)
-    Push(SaveOpts),
+    /// Save changes to stash, optionally only for the given paths
+    Push(PushOpts),
 
     /// Save changes to stash
     Save(SaveOpts),
@@ -106,6 +115,26 @@ pub enum StashSubcommand {
     Clear(ClearOpts),
 }
 
+/// `stash push`: git's shape, where every positional is a path.
+#[derive(Parser, Debug)]
+pub struct PushOpts {
+    /// Stash message
+    #[arg(short = 'm', long = "message", value_name = "MESSAGE")]
+    pub message: Option<String>,
+
+    /// Include untracked files
+    #[arg(short = 'u', long)]
+    pub include_untracked: bool,
+
+    /// Stash only these paths (files or directories); everything else is left alone
+    #[arg(value_name = "PATHS")]
+    pub paths: Vec<PathBuf>,
+
+    /// Quiet mode
+    #[arg(short, long)]
+    pub quiet: bool,
+}
+
 #[derive(Parser, Debug)]
 pub struct SaveOpts {
     /// Stash message (flag form, e.g. -m "WIP")
@@ -120,7 +149,7 @@ pub struct SaveOpts {
     #[arg(short = 'u', long)]
     pub include_untracked: bool,
 
-    /// Stash only specific paths
+    /// Stash only these paths (files or directories); everything else is left alone
     #[arg(value_name = "PATHS")]
     pub paths: Vec<PathBuf>,
 
@@ -221,7 +250,16 @@ fn hash_worktree_file(path: &Path) -> Option<Oid> {
 impl StashCmd {
     pub async fn execute(&self) -> Result<()> {
         match &self.command {
-            StashSubcommand::Push(opts) => self.save(opts).await,
+            StashSubcommand::Push(opts) => {
+                self.save(&SaveOpts {
+                    message_flag: opts.message.clone(),
+                    message_positional: None,
+                    include_untracked: opts.include_untracked,
+                    paths: opts.paths.clone(),
+                    quiet: opts.quiet,
+                })
+                .await
+            }
             StashSubcommand::Save(opts) => self.save(opts).await,
             StashSubcommand::Apply(opts) => self.apply(opts).await,
             StashSubcommand::List(opts) => self.list(opts).await,
@@ -263,9 +301,33 @@ impl StashCmd {
 
         // Build HEAD file map (path -> oid)
         let mut head_files: HashMap<PathBuf, Oid> = HashMap::new();
+        let mut head_modes: HashMap<PathBuf, mediagit_versioning::FileMode> = HashMap::new();
         for entry in head_tree.iter() {
             head_files.insert(PathBuf::from(&entry.name), entry.oid);
+            head_modes.insert(PathBuf::from(&entry.name), entry.mode);
         }
+
+        // `stash push <paths>`: only these (files or directories) are stashed.
+        let specs: Vec<String> = opts
+            .paths
+            .iter()
+            .map(|p| {
+                p.to_string_lossy()
+                    .replace('\\', "/")
+                    .trim_start_matches("./")
+                    .trim_end_matches('/')
+                    .to_string()
+            })
+            .collect();
+        let whole_tree = specs.is_empty() || specs.iter().any(|s| s.is_empty() || s == ".");
+        let selected = |p: &Path| {
+            whole_tree || {
+                let p = p.to_string_lossy().replace('\\', "/");
+                specs
+                    .iter()
+                    .any(|s| p == *s || p.starts_with(&format!("{s}/")))
+            }
+        };
 
         // Scan working directory for modifications against HEAD
         let working_files = self.scan_working_directory(&repo_root)?;
@@ -300,8 +362,28 @@ impl StashCmd {
             }
         }
 
+        // A path that names nothing mediagit knows is a typo, not "no changes".
+        if !whole_tree {
+            for s in &specs {
+                let known = head_files.keys().any(|p| selected_by(p, s))
+                    || working_files.iter().any(|p| selected_by(p, s))
+                    || index.entries().any(|e| selected_by(&e.path, s));
+                if !known {
+                    return Err(output::CodedError::new(
+                        "invalid_args",
+                        format!("pathspec '{s}' did not match any file known to mediagit"),
+                    )
+                    .into());
+                }
+            }
+        }
+        working_tree_changes.retain(|(p, _)| selected(p));
+        untracked_changes.retain(|(p, _)| selected(p));
+        let staged: Vec<&mediagit_versioning::IndexEntry> =
+            index.entries().filter(|e| selected(&e.path)).collect();
+
         // BUG-3 fix: Check index, working-tree changes, AND untracked files
-        if index.is_empty() && working_tree_changes.is_empty() && untracked_changes.is_empty() {
+        if staged.is_empty() && working_tree_changes.is_empty() && untracked_changes.is_empty() {
             if !quiet(opts.quiet) {
                 println!("{} No changes to stash", style("ℹ").blue());
             }
@@ -355,13 +437,27 @@ impl StashCmd {
         }
 
         // 3. Override with index entries (staged changes take priority)
-        for entry in index.entries() {
+        for entry in &staged {
             tree.add_entry(mediagit_versioning::TreeEntry::new(
                 entry.path.to_string_lossy().to_string(),
                 mediagit_versioning::FileMode::Regular,
                 entry.oid,
             ));
         }
+
+        // What went into the stash, for the report and for the partial cleanup.
+        let mut stashed: Vec<PathBuf> = working_tree_changes
+            .iter()
+            .map(|(p, _)| p.clone())
+            .chain(untracked_changes.iter().map(|(p, _)| p.clone()))
+            .chain(
+                staged
+                    .iter()
+                    .map(|e| PathBuf::from(e.path.to_string_lossy().replace('\\', "/"))),
+            )
+            .collect();
+        stashed.sort();
+        stashed.dedup();
 
         let tree_oid = tree.write(&odb).await?;
 
@@ -401,12 +497,29 @@ impl StashCmd {
 
         // Clean working directory
         let mut index = Index::load(&repo_root)?;
-        index.clear();
-        index.save(&repo_root)?;
-
-        // Restore to HEAD state
         let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
-        checkout_mgr.checkout_commit(&current_oid).await?;
+        if whole_tree {
+            index.clear();
+            index.save(&repo_root)?;
+
+            // Restore to HEAD state
+            checkout_mgr.checkout_commit(&current_oid).await?;
+        } else {
+            // Only the stashed paths go back to HEAD; every other change stays.
+            for path in &stashed {
+                match (head_files.get(path), head_modes.get(path)) {
+                    (Some(oid), Some(mode)) => {
+                        checkout_mgr.materialize_file(path, oid, *mode).await?;
+                    }
+                    // New file: it exists only in the stash now.
+                    _ => {
+                        let _ = std::fs::remove_file(repo_root.join(path));
+                    }
+                }
+                index.remove_entry(path);
+            }
+            index.save(&repo_root)?;
+        }
 
         if !quiet(opts.quiet) {
             println!(
@@ -421,6 +534,10 @@ impl StashCmd {
                 index: Some(0),
                 oid: Some(commit_oid.to_hex()),
                 message: Some(message),
+                paths: stashed
+                    .iter()
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+                    .collect(),
                 ..stash_report("save")
             });
         }
@@ -483,8 +600,19 @@ impl StashCmd {
 
         // Apply stash tree on top of current working directory (overlay, not replace).
         // checkout_commit would wipe files not in the stash tree.
+        // Only paths the stash changed relative to where it was taken: a
+        // partial stash's tree also carries every untouched file at its HEAD
+        // content, and writing those back would destroy later edits to them.
         let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
-        let files_updated = checkout_mgr.apply_tree_overlay(&stash_oid).await?;
+        let changed = Self::stash_changes(&repo_root, &odb, &stash_oid).await?;
+        let files_updated = checkout_mgr
+            .write_entries(
+                changed
+                    .into_iter()
+                    .map(|(path, (oid, mode))| (path, oid, mode))
+                    .collect(),
+            )
+            .await?;
 
         if !quiet(opts.quiet) {
             println!("{} Applied stash entry {}", style("✓").green(), stash_index);
@@ -494,6 +622,23 @@ impl StashCmd {
         }
 
         Ok((stash_index, files_updated as usize, stash_entry))
+    }
+
+    /// Files whose content in the stash differs from the commit it was taken on.
+    async fn stash_changes(
+        repo_root: &Path,
+        odb: &ObjectDatabase,
+        stash_oid: &Oid,
+    ) -> Result<HashMap<PathBuf, (Oid, mediagit_versioning::FileMode)>> {
+        let mgr = CheckoutManager::new(odb, repo_root);
+        let mut files = mgr.tracked_files_at(stash_oid).await?;
+        let stash_commit = Commit::read(odb, stash_oid).await?;
+        if let Some(parent) = stash_commit.parents.first()
+            && let Ok(base) = mgr.tracked_files_at(parent).await
+        {
+            files.retain(|path, (oid, _)| base.get(path).map(|(o, _)| o) != Some(oid));
+        }
+        Ok(files)
     }
 
     /// WT-7: stashed paths whose working copy holds unsaved work that the
@@ -515,9 +660,7 @@ impl StashCmd {
         stash_oid: &Oid,
     ) -> Result<Vec<PathBuf>> {
         let stash_commit = Commit::read(odb, stash_oid).await?;
-        let stash_files = CheckoutManager::new(odb, repo_root)
-            .tracked_files_at(stash_oid)
-            .await?;
+        let stash_files = Self::stash_changes(repo_root, odb, stash_oid).await?;
 
         // HEAD content for the same paths, to tell "unsaved work" from "clean".
         let refdb = RefDatabase::new(repo_root.join(".mediagit"));
@@ -870,11 +1013,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_push_alias_with_positional_message() {
-        let cmd = parse(&["push", "WIP message", "-u"]).unwrap();
+    fn parse_push_positionals_are_paths() {
+        let cmd = parse(&["push", "-m", "WIP", "a.txt", "dir", "-u"]).unwrap();
         match cmd.command {
             StashSubcommand::Push(opts) => {
-                assert_eq!(opts.message_positional.as_deref(), Some("WIP message"));
+                assert_eq!(opts.message.as_deref(), Some("WIP"));
+                assert_eq!(opts.paths, [PathBuf::from("a.txt"), PathBuf::from("dir")]);
                 assert!(opts.include_untracked);
             }
             _ => panic!("expected Push"),

@@ -81,10 +81,6 @@ pub struct VerifyCmd {
     #[arg(value_name = "COMMIT")]
     pub commit: Option<String>,
 
-    /// Verify file integrity (checksums)
-    #[arg(long)]
-    pub file_integrity: bool,
-
     /// Verify all checksums
     #[arg(long)]
     pub checksums: bool,

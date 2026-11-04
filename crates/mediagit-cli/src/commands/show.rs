@@ -77,22 +77,6 @@ pub struct ShowCmd {
     #[arg(value_name = "OBJECT")]
     pub object: Option<String>,
 
-    /// Show patch (not yet implemented)
-    #[arg(short = 'p', long, hide = true)]
-    pub patch: bool,
-
-    /// Show file change statistics (not yet implemented)
-    #[arg(long, hide = true)]
-    pub stat: bool,
-
-    /// Show pretty format (not yet implemented)
-    #[arg(long, value_name = "FORMAT", hide = true)]
-    pub pretty: Option<String>,
-
-    /// Number of context lines (not yet implemented)
-    #[arg(short = 'U', long, value_name = "NUM", hide = true)]
-    pub unified: Option<usize>,
-
     /// With `<rev>:<path>`: write the blob to FILE instead of stdout
     /// (required under `--machine`, where stdout carries only the envelope)
     #[arg(long, value_name = "FILE")]
@@ -113,12 +97,6 @@ pub struct ShowCmd {
 
 impl ShowCmd {
     pub async fn execute(&self) -> Result<()> {
-        // UX-5: declared but never read. `diff --stat` does work.
-        if self.stat {
-            anyhow::bail!(
-                "show --stat is not yet implemented. Use `mediagit diff --stat` instead."
-            );
-        }
         if self.quiet && !crate::output::machine_mode() {
             return Ok(());
         }

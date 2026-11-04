@@ -33,9 +33,6 @@ Start of a commit range to verify (verify commits from this point forward).
 #### `--end <COMMIT>`
 End of a commit range to verify (inclusive). Defaults to HEAD when `--start` is given.
 
-#### `--file-integrity`
-Verify file checksums (BLAKE3) for all stored objects.
-
 #### `--checksums`
 Verify all stored object checksums.
 

@@ -67,10 +67,6 @@ pub struct LogCmd {
     #[arg(long)]
     pub stat: bool,
 
-    /// Show patches
-    #[arg(short = 'p', long)]
-    pub patch: bool,
-
     /// Show commits by author
     #[arg(long, value_name = "PATTERN")]
     pub author: Option<String>,
