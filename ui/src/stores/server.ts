@@ -7,6 +7,7 @@ import {
   type AuthReport,
   type HostedRepo,
   type LocalServerStatus,
+  type StorageOpts,
   type ServerKey,
   type ServerUser,
 } from '@/api'
@@ -55,6 +56,7 @@ export const useServerStore = defineStore('server', () => {
 
   const local = ref<LocalServerStatus | null>(null)
   const localError = ref<ApiError | null>(null)
+  const folderError = ref<ApiError | null>(null)
   const log = ref('')
   const saved = ref<string[]>(load<string[]>('mg.servers', []))
   const remotes = ref<string[]>([])
@@ -189,9 +191,9 @@ export const useServerStore = defineStore('server', () => {
   }
 
   /** First run: create the server and its first admin, start it, and sign that admin in. */
-  async function setUp(username: string, email: string, password: string) {
+  async function setUp(username: string, email: string, password: string, storage?: StorageOpts) {
     const st = await run(async () => {
-      await api.serverLocalSetup(username, email, password)
+      await api.serverLocalSetup(username, email, password, storage)
       const up = await api.serverLocalStart()
       local.value = up
       // The CLI keeps the credential; this store keeps nothing.
@@ -201,6 +203,27 @@ export const useServerStore = defineStore('server', () => {
     await refreshLocal()
     if (st) await Promise.all([refreshMe(), refreshLog()])
     return !!st
+  }
+
+  /** Move the local server to another folder (no path = the default). Errors land in `folderError`. */
+  async function setFolder(path?: string) {
+    folderError.value = null
+    const st = await run(() => api.serverLocalSetFolder(path), () => 'Server folder changed')
+    if (st) local.value = st
+    else {
+      folderError.value = actionError.value
+      actionError.value = null
+    }
+    return !!st
+  }
+
+  /** Try the storage credentials. The result never throws: failures come back as `{ok:false}`. */
+  async function testStorage(storage: StorageOpts) {
+    try {
+      return await api.serverStorageTest(storage)
+    } catch (e) {
+      return { ok: false, error: toApiError(e).message }
+    }
   }
 
   async function start() {
@@ -306,7 +329,7 @@ export const useServerStore = defineStore('server', () => {
   }
 
   return {
-    local, localError, log, selected, targets, target, isLocal, url, access,
+    local, localError, folderError, setFolder, testStorage, log, selected, targets, target, isLocal, url, access,
     me, meError, users, keys, repos, userGrants, repoAccess, busy, actionError, newKey, retainedNote,
     init, select, addServer, forgetServer, refreshLocal, refreshLog, setUp, start, stop, setNetwork,
     refreshMe, login, loadUsers, loadKeys, loadRepos, loadUserGrants, loadRepoAccess,

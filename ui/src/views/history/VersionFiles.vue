@@ -45,7 +45,7 @@ function select(path: string) {
   const node = rows.value.find((r) => r.node.path === path)?.node
   if (!node || node.isDir) return
   clearTimeout(timer)
-  timer = setTimeout(() => emit('pick', { path, size: node.size, status: node.status }), 200)
+  timer = setTimeout(() => emit('pick', { path, size: node.size, status: node.status ?? 'modified' }), 200)
 }
 onBeforeUnmount(() => clearTimeout(timer))
 </script>

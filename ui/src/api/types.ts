@@ -104,6 +104,30 @@ export interface LocalServerStatus {
   lan: boolean
 }
 
+export type StorageKind = 'filesystem' | 's3' | 'gcs' | 'azure'
+
+/** Where a server keeps repository data. The secret fields travel in one call and are never kept. */
+export interface StorageOpts {
+  kind: StorageKind
+  bucket?: string
+  region?: string
+  endpoint?: string
+  prefix?: string
+  container?: string
+  account?: string
+  project?: string
+  access_key_id?: string
+  secret_access_key?: string
+  account_key?: string
+  connection_string?: string
+  credentials_path?: string
+}
+
+export interface StorageTestResult {
+  ok: boolean
+  error?: string
+}
+
 export type ServerRole = 'read' | 'write' | 'admin'
 
 export interface ServerUser {

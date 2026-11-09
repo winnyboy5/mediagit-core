@@ -20,7 +20,7 @@ async function boot(page: Page, tab: string, commands: Record<string, unknown> =
     storage: REPO,
   })
   await page.goto('/#/advanced', { waitUntil: 'domcontentloaded' })
-  await expect(page.getByRole('heading', { name: 'Advanced', level: 1 })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Advanced', level: 2 })).toBeVisible()
   if (tab !== 'Rebase') await page.getByRole('tab', { name: tab }).click()
 }
 

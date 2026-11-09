@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs'
 import { test, type Page } from '@playwright/test'
 import { healthy, mockIpc } from './ipc-mock'
+import { openSection } from './nav'
 
 // W5 review screenshots: `SHOTS=1 pnpm e2e w5shots`. Skipped in normal runs.
 // Output: ui/.impeccable/review/w5-<state>-<w>-<theme>.png. Every state is its own test (fresh page).
@@ -56,9 +57,8 @@ async function shot(page: Page, name: string, theme: string, w: number) {
 
 async function open(page: Page, commands: Record<string, unknown>, tab?: string, storage?: Record<string, string>) {
   await mockIpc(page, { commands: healthy(commands), storage })
-  await page.goto('/#/server', { waitUntil: 'domcontentloaded' })
-  await page.getByRole('heading', { name: 'Server', level: 1 }).waitFor()
-  if (tab) await page.getByRole('tab', { name: tab }).click()
+  await openSection(page, 'team/server', 'Server')
+  if (tab) await page.getByRole('navigation', { name: 'Server pages' }).getByRole('button', { name: tab }).click()
 }
 
 const DISABLED = {

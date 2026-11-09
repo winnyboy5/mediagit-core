@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { Archive, Info, RefreshCw, Tag, Trash2 } from 'lucide-vue-next'
+import { Archive, Ellipsis, Tag } from 'lucide-vue-next'
+import DropdownMenu from '@/components/DropdownMenu.vue'
 import AlertDialog from '@/components/AlertDialog.vue'
 import Button from '@/components/Button.vue'
 import Checkbox from '@/components/Checkbox.vue'
@@ -21,9 +22,12 @@ import { primaryBar } from '@/stores/ops'
 import { useRepoStore } from '@/stores/repo'
 import { useTagsStashStore } from '@/stores/tagsStash'
 
+// Which half this page shows: Tags lives in History, Stash in Branches.
+const props = defineProps<{ only?: 'tags' | 'stash' }>()
 const ts = useTagsStashStore()
 const repo = useRepoStore()
-onMounted(() => void ts.refresh())
+// The shell already loads these for the section counts; do not ask twice while that is in flight.
+onMounted(() => !ts.loading && void ts.refresh())
 
 const message = ref('')
 const includeUntracked = ref<boolean | 'indeterminate'>(false)
@@ -136,6 +140,10 @@ function restore(remove: boolean) {
   restoreOpen.value = false
   void (remove ? ts.pop(restoring.value, opts) : ts.apply(restoring.value, opts))
 }
+const TAG_MENU = [
+  { id: 'details', label: 'Details…' },
+  { id: 'delete', label: 'Delete tag…', danger: true, separated: true },
+]
 const tagDeleting = ref<string | null>(null)
 const tagDeleteOpen = ref(false)
 function askDeleteTag(name: string) {
@@ -156,13 +164,7 @@ const when = (iso: string) => (Number.isNaN(Date.parse(iso)) ? '' : timeAgo(Date
 
 <template>
   <section class="ts" :aria-busy="ts.busy || undefined">
-    <header class="head">
-      <div class="ttl">
-        <h1>Tags &amp; Stash</h1>
-        <p>name versions, park unfinished work</p>
-      </div>
-      <IconButton label="Refresh tags and stash" variant="secondary" :disabled="ts.loading" @click="ts.refresh()"><RefreshCw :size="18" /></IconButton>
-    </header>
+    <h2 v-if="!props.only" class="pt">Tags &amp; Stash</h2>
 
     <div v-if="ts.actionError" class="banner" role="alert">
       <code class="mono">{{ ts.actionError.code }}</code>
@@ -171,8 +173,8 @@ const when = (iso: string) => (Number.isNaN(Date.parse(iso)) ? '' : timeAgo(Date
     </div>
 
     <div class="grid">
-      <section class="card" aria-labelledby="tags-h">
-        <h2 id="tags-h">Tags</h2>
+      <section v-if="props.only !== 'stash'" class="card" :class="{ bare: props.only }" aria-labelledby="tags-h">
+        <h2 id="tags-h" class="sr-only">Tags</h2>
         <TextField v-if="ts.tags.length || ts.filter" v-model="ts.filter" label="Show only tags matching" placeholder="e.g. v1.*" hint="Use * for any letters, like v1.*" mono @update:model-value="onFilter" />
         <div v-if="!ts.tagsLoaded && !ts.tagsError"><SkeletonRows :count="3" /></div>
         <ErrorState v-else-if="ts.tagsError" :code="ts.tagsError.code" :message="ts.tagsError.message" @retry="ts.refresh()" />
@@ -185,10 +187,12 @@ const when = (iso: string) => (Number.isNaN(Date.parse(iso)) ? '' : timeAgo(Date
             <TagPill :name="t.name" />
             <span class="nm">{{ t.message || (t.annotated ? '' : 'Plain tag') }}</span>
             <span class="oid mono">{{ shortOid(t.oid) }}</span>
-            <IconButton :label="`Details of tag ${t.name}`" size="sm" @click="ts.showTag(t.name)"><Info :size="16" /></IconButton>
-            <IconButton :label="`Delete tag ${t.name}`" size="sm" :disabled="ts.busy" @click="askDeleteTag(t.name)"><Trash2 :size="16" /></IconButton>
+            <DropdownMenu :items="TAG_MENU" @select="(id) => (id === 'details' ? ts.showTag(t.name) : askDeleteTag(t.name))">
+              <IconButton :label="`Actions for tag ${t.name}`" size="sm" :disabled="ts.busy"><Ellipsis :size="16" /></IconButton>
+            </DropdownMenu>
           </li>
         </ul>
+        <MoreOptions label="New tag" data-testid="new-tag">
         <form class="save" @submit.prevent="createTag">
           <TextField v-model="tagName" label="Tag name" placeholder="e.g. v1.0" :error="tagError ?? undefined" mono />
           <TextField v-model="tagNote" label="Note (optional)" placeholder="e.g. Final delivery" />
@@ -198,13 +202,14 @@ const when = (iso: string) => (Number.isNaN(Date.parse(iso)) ? '' : timeAgo(Date
             <TextField v-model="taggerEmail" label="Tagger email" type="email" :disabled="!hasNote" :hint="hasNote ? 'Leave empty to use your own email.' : 'Add a note first to set these.'" flag="--email" />
             <OptionCheck v-model="replace" label="Replace the tag if the name is taken" flag="--force" danger />
           </MoreOptions>
-          <Button type="submit" :variant="replace === true && taken ? 'danger' : 'primary'" :disabled="!canTag" :loading="ts.busy && !ts.running">
+          <Button type="submit" class="end" :variant="replace === true && taken ? 'danger' : 'secondary'" :disabled="!canTag" :loading="ts.busy && !ts.running">
             {{ replace === true && taken ? 'Replace tag…' : tagCommit.trim() ? 'Tag this version' : 'Tag the latest version' }}
           </Button>
         </form>
+        </MoreOptions>
       </section>
 
-      <section class="card" aria-labelledby="stash-h">
+      <section v-if="props.only !== 'tags'" class="card" aria-labelledby="stash-h">
         <div class="card-head">
           <h2 id="stash-h">Stash</h2>
           <Button v-if="ts.stashes.length" size="sm" variant="secondary" class="dtxt" :disabled="ts.busy" @click="clearOpen = true">Remove all</Button>
@@ -222,7 +227,7 @@ const when = (iso: string) => (Number.isNaN(Date.parse(iso)) ? '' : timeAgo(Date
             <p v-else class="hint">No changed files.</p>
             <p v-if="changed.length > SHOWN" class="hint">Showing the first {{ SHOWN }} of {{ changed.length }} files.</p>
           </MoreOptions>
-          <Button type="submit" variant="primary" :disabled="!stashable || ts.busy" :loading="ts.busy && !ts.running">{{ saveLabel }}</Button>
+          <Button type="submit" variant="secondary" class="end" :disabled="!stashable || ts.busy" :loading="ts.busy && !ts.running">{{ saveLabel }}</Button>
           <p v-if="!stashable" class="hint">You have no unsaved changes to set aside.</p>
         </form>
 
@@ -343,20 +348,16 @@ const when = (iso: string) => (Number.isNaN(Date.parse(iso)) ? '' : timeAgo(Date
   padding: var(--space-5) var(--space-6);
   overflow-y: auto;
 }
-.head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-4);
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
 }
-.ttl {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-3);
-}
-h1 {
+.pt {
   margin: 0;
-  font-size: var(--fs-2xl);
+  font-size: var(--fs-xl);
 }
 h2 {
   margin: 0;
@@ -394,6 +395,16 @@ h2 {
   border: 1px solid var(--border);
   border-radius: var(--radius-panel);
   background: var(--surface);
+}
+/* Form buttons keep their natural width, at the right edge. */
+.save .end {
+  justify-self: end;
+}
+/* On its own page the list is the section body, not a card inside it. */
+.card.bare {
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 .card .dtxt {
   color: var(--danger);

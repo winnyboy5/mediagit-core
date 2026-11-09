@@ -53,6 +53,8 @@ enum Cmd {
     Init(setup::InitArgs),
     /// Manage users in the auth store without starting the server.
     Admin(setup::AdminArgs),
+    /// Check storage credentials by writing, reading and deleting a probe object.
+    StorageTest(setup::StorageTestArgs),
 }
 
 /// How long the startup probe may spend validating storage backends.
@@ -129,6 +131,7 @@ async fn main() -> Result<()> {
         return match cmd {
             Cmd::Init(init_args) => setup::run_init(&init_args).await,
             Cmd::Admin(admin_args) => setup::run_admin(&admin_args).await,
+            Cmd::StorageTest(a) => setup::run_storage_test(&a).await,
         };
     }
 
@@ -193,7 +196,7 @@ async fn main() -> Result<()> {
         config.repos_dir = data_dir;
     }
 
-    tracing::info!("Server configuration: {:?}", config);
+    tracing::info!("Server configuration: {:?}", config.redacted());
 
     // Startup summary banner — operators should see at a glance what's wired.
     let bind_addr = if config.enable_tls {
@@ -312,7 +315,8 @@ async fn main() -> Result<()> {
             )?
             .with_presigned_ttl(config.presigned_url_ttl_seconds)
             .with_verify_chunks_on_complete(config.verify_content_on_complete)
-            .with_encryption_master(encryption_master.clone()),
+            .with_encryption_master(encryption_master.clone())
+            .with_default_storage(config.default_storage.clone()),
             metrics_registry.clone(),
         ));
 
@@ -374,7 +378,8 @@ async fn main() -> Result<()> {
             AppState::new(config.repos_dir.clone())
                 .with_presigned_ttl(config.presigned_url_ttl_seconds)
                 .with_verify_chunks_on_complete(config.verify_content_on_complete)
-                .with_encryption_master(encryption_master.clone()),
+                .with_encryption_master(encryption_master.clone())
+                .with_default_storage(config.default_storage.clone()),
             metrics_registry.clone(),
         ))
     };

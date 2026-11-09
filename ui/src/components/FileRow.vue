@@ -24,7 +24,7 @@ const name = computed(() => props.path.slice(slash.value + 1))
     <FileIcon :path="path" />
     <span class="path" :title="path"><span class="dir">{{ dir }}</span><span class="name">{{ name }}</span></span>
     <ProgressBar v-if="progress !== undefined" class="mini" size="sm" :label="`Processing ${name}`" :value="progress" :max="100" />
-    <span v-if="size != null" class="size mono">{{ formatBytes(size) }}</span>
+    <span v-if="size != null" class="size">{{ formatBytes(size) }}</span>
     <StatusBadge v-if="status" :status="status" />
   </div>
 </template>

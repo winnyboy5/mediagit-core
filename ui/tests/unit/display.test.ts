@@ -52,17 +52,16 @@ describe('TransferStats', () => {
 
 describe('StatusBadge', () => {
   it.each([
-    ['added', 'A', 'Added'],
-    ['modified', 'M', 'Modified'],
-    ['deleted', 'D', 'Deleted'],
-    ['locked', 'L', 'Locked'],
-    ['untracked', 'U', 'Untracked'],
-    ['conflict', '!', 'Conflict'],
-  ] as const)('%s has letter, icon and accessible name', (status, letter, word) => {
+    ['added', 'New'],
+    ['modified', 'Edited'],
+    ['deleted', 'Deleted'],
+    ['locked', 'Locked'],
+    ['untracked', 'New'],
+    ['conflict', 'Conflict'],
+  ] as const)('%s is an icon and a plain word, never a letter code', (status, word) => {
     const w = mount(StatusBadge, { props: { status } })
-    expect(w.text()).toBe(letter)
+    expect(w.text()).toBe(word)
     expect(w.find('svg').exists()).toBe(true)
-    expect(w.attributes('aria-label')).toBe(word)
   })
 })
 

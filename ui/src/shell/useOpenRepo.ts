@@ -16,7 +16,7 @@ export function useOpenRepo() {
 
   async function openPath(dir: string): Promise<ApiError | null> {
     if (await repo.open(dir)) {
-      await router.push('/changes')
+      await router.push('/files/all')
       return null
     }
     return repo.error ?? { code: 'unknown', message: 'Could not open this folder.' }

@@ -32,7 +32,7 @@ test.describe('Welcome', () => {
     await expectFocusRing(page)
     await page.getByRole('button', { name: /^hero-film/ }).focus()
     await page.keyboard.press('Enter')
-    await expect(page).toHaveURL(/#\/changes$/)
+    await expect(page).toHaveURL(/#\/files\/all$/)
     expect((await ipcCalls(page, 'repo_status'))[0]!.args).toEqual({ repo: '/repos/hero-film' })
   })
 
@@ -40,7 +40,7 @@ test.describe('Welcome', () => {
     await mockIpc(page, { commands: healthy(), dialog: '/repos/picked' })
     await page.goto('/#/welcome')
     await page.getByRole('button', { name: /Open folder/ }).click()
-    await expect(page).toHaveURL(/#\/changes$/)
+    await expect(page).toHaveURL(/#\/files\/all$/)
     expect((await ipcCalls(page, 'repo_status'))[0]!.args).toEqual({ repo: '/repos/picked' })
   })
 
@@ -87,7 +87,7 @@ test.describe('Welcome', () => {
     await page.goto('/#/welcome')
     await page.getByRole('button', { name: /New repository/ }).click()
     await page.getByRole('dialog').getByRole('button', { name: 'Create', exact: true }).click()
-    await expect(page).toHaveURL(/#\/changes$/)
+    await expect(page).toHaveURL(/#\/files\/all$/)
   })
 })
 
@@ -161,7 +161,7 @@ test.describe('Clone dialog', () => {
     await expect(dlg.getByRole('progressbar', { name: 'Connecting to server' })).toHaveCount(0)
     await ipcRelease(page)
     await ipcRelease(page)
-    await expect(page).toHaveURL(/#\/changes$/)
+    await expect(page).toHaveURL(/#\/files\/all$/)
     expect((await ipcCalls(page, 'repo_clone'))[0]!.args).toMatchObject({ url: 'https://studio.example/hero-film', dest: '/repos/hero-film' })
   })
 
@@ -195,4 +195,16 @@ test.describe('Clone dialog', () => {
     await expect(page.getByLabel('Repository URL')).toBeVisible()
     await expect(page.getByRole('dialog').getByRole('alert')).toHaveCount(0) // cancelling is not an error
   })
+})
+
+test('with a repository open, the repo menu leads to create and to clone separately', async ({ page }) => {
+  await mockIpc(page, {
+    commands: healthy({ branch_list: fixture('branches') }),
+    storage: { 'mg.repo': JSON.stringify('/repos/hero-film'), 'mg.recent': RECENT },
+  })
+  await page.goto('/#/changes', { waitUntil: 'domcontentloaded' })
+  await page.getByTestId('repo-switcher').click()
+  await page.getByRole('menuitem', { name: 'Clone a repository…' }).click()
+  await expect(page).toHaveURL(/#\/welcome\?action=clone$/)
+  await expect(page.getByRole('dialog', { name: /clone/i })).toBeVisible()
 })

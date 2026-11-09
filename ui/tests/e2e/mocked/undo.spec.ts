@@ -6,7 +6,7 @@ const REPO = { 'mg.repo': JSON.stringify('/repos/hero-film'), 'mg.recent': RECEN
 const SECOND = '0001000100010001000100010001000100010001'
 
 const detail = (page: Page) => page.getByTestId('commit-detail')
-const undoMenu = (page: Page) => detail(page).getByRole('button', { name: 'Undo…' })
+const undoMenu = (page: Page) => detail(page).getByRole('button', { name: 'Undo this version' })
 
 async function boot(page: Page, route: string, heading: string, commands: Record<string, unknown> = {}, scripts: Record<string, unknown[]> = {}) {
   await mockIpc(page, {
@@ -24,7 +24,7 @@ async function boot(page: Page, route: string, heading: string, commands: Record
     storage: REPO,
   })
   await page.goto(`/#${route}`, { waitUntil: 'domcontentloaded' })
-  await expect(page.getByRole('heading', { name: heading, level: 1 })).toBeVisible()
+  await expect(page.getByRole('heading', { name: heading, level: 2, exact: true })).toBeVisible()
 }
 
 /** History with the second version selected, so the undo target differs from HEAD. */
@@ -173,7 +173,7 @@ test.describe('Undo: menu and dialogs', () => {
 test.describe('Undo: restore one file', () => {
   async function pickFile(page: Page) {
     await history(page)
-    await page.getByRole('tab', { name: 'Files at this version' }).click()
+    await page.getByText('Files at this version', { exact: true }).click()
     await page.getByRole('tree', { name: 'Files at this version' }).getByRole('treeitem', { name: /hero_preview/ }).click()
     await expect(page.getByTestId('picked-file')).toContainText('art/hero_preview.png')
   }

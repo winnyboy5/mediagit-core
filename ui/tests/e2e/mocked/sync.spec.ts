@@ -3,13 +3,13 @@ import { expectFocusRing, expectNoAxeViolations } from './helpers'
 import { fixture, healthy, ipcCalls, ipcRelease, mockIpc, RECENT } from './ipc-mock'
 
 const REPO = { 'mg.repo': JSON.stringify('/repos/hero-film'), 'mg.recent': RECENT }
-const bar = (page: Page) => page.locator('[data-activity-bar]')
+const toggle = (page: Page) => page.getByRole('navigation', { name: 'Main' }).getByRole('button', { name: /^Activity/ })
 const run = (page: Page) => page.getByTestId('transfer-progress')
 
 async function boot(page: Page, commands: Record<string, unknown> = {}, scripts: Record<string, unknown[]> = {}) {
   await mockIpc(page, { commands: healthy({ remote_list: fixture('remotes'), ...commands }), storage: REPO, scripts: scripts as never })
   await page.goto('/#/sync', { waitUntil: 'domcontentloaded' })
-  await expect(page.getByRole('heading', { name: 'Sync', level: 1 })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Sync', level: 2, exact: true })).toBeVisible()
 }
 
 test.describe('Sync: states', () => {
@@ -21,7 +21,8 @@ test.describe('Sync: states', () => {
     await expect(state.getByLabel('3 versions to send')).toBeVisible()
     await expect(state.getByLabel('0 versions to get')).toBeVisible()
     await expect(state).toContainText('Not yet from this app')
-    for (const n of ['Fetch', 'Get latest', 'Send']) await expect(page.getByRole('button', { name: n, exact: true })).toBeEnabled()
+    // Fetch is on the page; Get latest / Send are the hub header's (with a count when there is one).
+    for (const n of ['Fetch', 'Get latest', 'Send']) await expect(page.getByRole('button', { name: new RegExp(`^${n}( \\d+)?$`) })).toBeEnabled()
     await expect(page.locator('[data-remote="origin"]')).toContainText('https://mediagit.studio.example/hero-film')
     await expectNoAxeViolations(page)
   })
@@ -60,7 +61,7 @@ test.describe('Sync: states', () => {
 test.describe('Sync: transfers', () => {
   test('send: indeterminate first, then determinate bytes with rate/ETA unknown until measured; cancel stops it', async ({ page }) => {
     await boot(page, {}, { repo_push: fixture('push_progress') })
-    await page.getByRole('button', { name: 'Send', exact: true }).click()
+    await page.getByRole('button', { name: /^Send( \d+)?$/ }).click()
     await expect(run(page)).toContainText('Send origin')
     const preparing = run(page).getByRole('progressbar', { name: 'Preparing' })
     await expect(preparing).toBeVisible()
@@ -77,23 +78,23 @@ test.describe('Sync: transfers', () => {
     await expect(run(page)).toHaveCount(0)
     await expect(page.getByRole('alert')).toHaveCount(0) // cancelling is not an error
     expect(await ipcCalls(page, 'cancel_op')).toHaveLength(1)
-    await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeEnabled()
+    await expect(page.getByRole('button', { name: /^Send( \d+)?$/ })).toBeEnabled()
   })
 
   test('get latest (pull) shows progress and can be cancelled (issues 93, 95)', async ({ page }) => {
     await boot(page, {}, { repo_pull: [{ progress: { id: 1, msg: 'Downloading media', pos: 10, len: 100, unit: 'bytes', done: false } }, { hold: true }, { resolve: { remote: 'origin', result: 'up_to_date', objects_received: 0, bytes_downloaded: 0 } }] })
-    await page.getByRole('button', { name: 'Get latest', exact: true }).click()
+    await page.getByRole('button', { name: /^Get latest( \d+)?$/ }).click()
     await expect(run(page)).toContainText('Downloading media')
     await run(page).getByRole('button', { name: 'Cancel' }).click()
     await expect(run(page)).toHaveCount(0)
     await expect(page.getByRole('alert')).toHaveCount(0) // cancelling is not an error
     expect(await ipcCalls(page, 'cancel_op')).toHaveLength(1)
-    await expect(page.getByRole('button', { name: 'Get latest', exact: true })).toBeEnabled()
+    await expect(page.getByRole('button', { name: /^Get latest( \d+)?$/ })).toBeEnabled()
   })
 
   test('send to completion toasts a summary and stamps last synced', async ({ page }) => {
     await boot(page, {}, { repo_push: fixture('push_progress') })
-    await page.getByRole('button', { name: 'Send', exact: true }).click()
+    await page.getByRole('button', { name: /^Send( \d+)?$/ }).click()
     for (let i = 0; i < 3; i++) {
       await page.waitForTimeout(150)
       await ipcRelease(page)
@@ -105,9 +106,9 @@ test.describe('Sync: transfers', () => {
 
   test('failure: message in a banner and a Retry row in the activity drawer', async ({ page }) => {
     await boot(page, {}, { repo_push: fixture('push_fail') })
-    await page.getByRole('button', { name: 'Send', exact: true }).click()
+    await page.getByRole('button', { name: /^Send( \d+)?$/ }).click()
     await expect(page.getByRole('alert')).toContainText('The server refused the push: main is protected.')
-    await bar(page).getByRole('button', { name: 'Activity' }).click()
+    await toggle(page).click()
     const drawer = page.getByTestId('activity-drawer')
     await expect(drawer.getByRole('heading', { name: 'Failed' })).toBeVisible()
     await drawer.getByRole('button', { name: 'Retry' }).click()
@@ -118,7 +119,7 @@ test.describe('Sync: transfers', () => {
     await boot(page, { repo_fetch: fixture('fetch_ok'), repo_pull: { remote: 'origin', result: 'up_to_date', objects_received: 0, bytes_downloaded: 0 } })
     await page.getByRole('button', { name: 'Fetch', exact: true }).click()
     await expect(page.getByText('Fetched 1 update, 3.2 MB').first()).toBeVisible()
-    await page.getByRole('button', { name: 'Get latest', exact: true }).click()
+    await page.getByRole('button', { name: /^Get latest( \d+)?$/ }).click()
     await expect(page.getByText('Already up to date').first()).toBeVisible()
     expect(await ipcCalls(page, 'repo_fetch')).toHaveLength(1)
     expect(await ipcCalls(page, 'repo_pull')).toHaveLength(1)

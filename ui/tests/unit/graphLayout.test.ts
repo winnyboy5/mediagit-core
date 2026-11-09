@@ -92,3 +92,22 @@ describe('graph layout', () => {
     expect(rows).toHaveLength(commits.length)
   })
 })
+
+describe('graph layout with HEAD reserved in lane 0', () => {
+  it('keeps the HEAD chain in lane 0 and draws nothing above HEAD for newer branches', () => {
+    // t is a newer tip on another branch; h is HEAD; both descend from a.
+    const rows = createGraphLayout('h').push([c('t', 'a'), c('h', 'a'), c('a')])
+    expect(cols(rows)).toEqual([1, 0, 0])
+    // lane 0 is reserved but silent on the first row, and nothing arrives from above HEAD
+    expect(rows[0]!.segments.some((s) => s.from === 0 && s.to === 0)).toBe(false)
+    expect(rows[1]!.segments.some((s) => s.half === 'top' && s.from === 0 && s.to === 0)).toBe(false)
+    expect(rows[1]!.segments).toContainEqual({ from: 1, to: 1, half: 'top' })
+    // the other branch joins HEAD's lane at the fork point
+    expect(rows[2]!.segments).toContainEqual({ from: 1, to: 0, half: 'top' })
+  })
+
+  it('matches the unseeded layout when HEAD is the newest commit', () => {
+    const commits = [c('h', 'b'), c('b', 'a'), c('a')]
+    expect(createGraphLayout('h').push(commits)).toEqual(createGraphLayout().push(commits))
+  })
+})

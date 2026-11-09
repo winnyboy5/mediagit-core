@@ -86,3 +86,25 @@ async fn unconverted_command_is_refused_not_run() {
         "{err:?}"
     );
 }
+
+#[tokio::test]
+async fn add_streams_items_progress_to_the_callback() {
+    let engine = engine();
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo(&engine, tmp.path());
+    for i in 0..3 {
+        std::fs::write(tmp.path().join(format!("f{i}.bin")), vec![i; 2048]).unwrap();
+    }
+    let mut seen = Vec::new();
+    engine
+        .run(Some(tmp.path()), &["add", "--", "."], |p| seen.push(p))
+        .await
+        .unwrap();
+    let items = seen
+        .iter()
+        .rev()
+        .find(|p| p.unit == "items")
+        .expect("items");
+    assert_eq!((items.pos, items.len), (3, Some(3)));
+    assert!(seen.iter().any(|p| p.unit == "bytes"));
+}

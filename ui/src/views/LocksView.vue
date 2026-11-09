@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { Lock, LockOpen, RefreshCw } from 'lucide-vue-next'
+import { Lock, LockOpen } from 'lucide-vue-next'
+import { useFocusRefresh } from '@/lib/focusRefresh'
 import AlertDialog from '@/components/AlertDialog.vue'
 import Button from '@/components/Button.vue'
 import Dialog from '@/components/Dialog.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import ErrorState from '@/components/ErrorState.vue'
 import FileIcon from '@/components/FileIcon.vue'
-import IconButton from '@/components/IconButton.vue'
 import MoreOptions from '@/components/MoreOptions.vue'
 import Select from '@/components/Select.vue'
 import SegmentedControl from '@/components/SegmentedControl.vue'
@@ -27,6 +27,8 @@ onMounted(() => {
   void locks.refresh()
   void identity.refresh()
 })
+
+useFocusRefresh(() => locks.refresh())
 
 const FILTERS = [
   { value: 'all', label: 'All' },
@@ -85,14 +87,12 @@ function askForce(l: LockReport) {
   <section class="locks" :aria-busy="!!locks.busy || undefined">
     <header class="head">
       <div class="ttl">
-        <h1>Locks</h1>
-        <p>who is working on which file</p>
+        <h2 class="pt sr-only">Locks</h2>
       </div>
       <div class="tools">
         <Select v-if="sync.remotes.length > 1" v-model="remotePick" label="Remote" :options="remoteOptions" />
         <SegmentedControl v-model="filter" label="Whose locks" :options="FILTERS" />
-        <IconButton label="Refresh locks" variant="secondary" :disabled="locks.loading" @click="locks.refresh()"><RefreshCw :size="18" /></IconButton>
-        <Button variant="primary" :disabled="!!locks.busy" @click="openLock"><Lock :size="16" aria-hidden="true" /> Lock a file</Button>
+        <Button variant="secondary" :disabled="!!locks.busy" @click="openLock"><Lock :size="16" aria-hidden="true" /> Lock a file</Button>
       </div>
     </header>
 
@@ -192,9 +192,9 @@ function askForce(l: LockReport) {
   align-items: baseline;
   gap: var(--space-3);
 }
-h1 {
+.pt {
   margin: 0;
-  font-size: var(--fs-2xl);
+  font-size: var(--fs-xl);
 }
 .ttl p {
   margin: 0;
@@ -239,11 +239,9 @@ th {
   border-bottom: 1px solid var(--border);
   background: var(--surface-2);
   color: var(--text-muted);
-  font-size: var(--fs-xs);
+  font-size: var(--fs-sm);
   font-weight: 600;
-  letter-spacing: 0.04em;
   text-align: left;
-  text-transform: uppercase;
 }
 td {
   height: 56px;

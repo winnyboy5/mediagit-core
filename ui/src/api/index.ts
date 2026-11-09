@@ -51,16 +51,20 @@ import type {
   HostedRepoActionReport,
   HostedReposReport,
   LocalServerStatus,
+  StorageOpts,
+  StorageTestResult,
 } from './types'
 
 import type { AddOpts, CommitOpts, FetchOpts, PullOpts, PushOpts } from './options'
 import type { AddReport } from './generated/AddReport'
+import type { LsFilesReport } from './generated/LsFilesReport'
 import type { CommitDryRunReport } from './generated/CommitDryRunReport'
 import type { RemoteShowReport } from './generated/RemoteShowReport'
 
 export type * from './types'
 export type * from './options'
-export type { AddReport, CommitDryRunReport, RemoteShowReport }
+export type { AddReport, CommitDryRunReport, LsFilesReport, RemoteShowReport }
+export type { LsFilesEntry } from './generated/LsFilesEntry'
 
 /** Contract version this UI was written against (engine.rs CONTRACT_VERSION). */
 export const CONTRACT_VERSION = 1
@@ -202,7 +206,12 @@ export type MergeStrategy = 'recursive' | 'ours' | 'theirs'
 export const api = {
   engineInfo: () => invoke<EngineInfo>('engine_info'),
   repoStatus: (repo: string) => invoke<StatusReport>('repo_status', { repo }),
-  add: (repo: string, paths: string[], opts?: AddOpts) => invoke<AddReport>('repo_add', { repo, paths, opts: opts ?? null }),
+  /** Streams two bars: bytes and items (files done / total). */
+  add: (repo: string, paths: string[], opts?: AddOpts, onProgress?: Report) =>
+    invoke<AddReport>('repo_add', { repo, paths, opts: opts ?? null, onProgress: channel(onProgress) }),
+  /** Every file of the working folder with its status; `ignored` adds the files the ignore list skips. */
+  lsFiles: (repo: string, ignored = false, paths?: string[]) =>
+    invoke<LsFilesReport>('repo_ls_files', { repo, paths: paths ?? null, ignored }),
   /** Take paths out of the staging area (`reset`); the files are not touched. */
   unstage: (repo: string, paths: string[]) => invoke<unknown>('repo_unstage', { repo, paths }),
   commit: (repo: string, message: string, opts?: CommitOpts) =>
@@ -337,8 +346,11 @@ export const api = {
     invoke<AuthReport>('auth_run', { repo, action, server, all }),
   // Server panel. `server` is an origin (http(s)://host[:port]); passwords are one call's argument.
   serverLocalStatus: () => rawInvoke<LocalServerStatus>('server_local_status'),
-  serverLocalSetup: (username: string, email: string, password: string) =>
-    rawInvoke<LocalServerStatus>('server_local_setup', { username, email, password }),
+  serverLocalSetup: (username: string, email: string, password: string, storage?: StorageOpts) =>
+    rawInvoke<LocalServerStatus>('server_local_setup', { username, email, password, storage }),
+  /** No path = the default folder. */
+  serverLocalSetFolder: (path?: string) => rawInvoke<LocalServerStatus>('server_local_set_folder', { path }),
+  serverStorageTest: (storage: StorageOpts) => rawInvoke<StorageTestResult>('server_storage_test', { storage }),
   serverLocalStart: () => rawInvoke<LocalServerStatus>('server_local_start'),
   serverLocalStop: () => rawInvoke<LocalServerStatus>('server_local_stop'),
   serverLocalLog: (lines: number) => rawInvoke<string>('server_local_log', { lines }),

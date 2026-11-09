@@ -16,7 +16,7 @@ async function boot(page: Page, opts: { commands?: Record<string, unknown>; hand
     storage: REPO,
   })
   await page.goto('/#/history', { waitUntil: 'domcontentloaded' })
-  await expect(page.getByRole('heading', { name: 'History', level: 1 })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'History', level: 2 })).toBeVisible()
 }
 
 test.describe('History: states', () => {
@@ -32,7 +32,9 @@ test.describe('History: states', () => {
     await expect(detail).toContainText('Merge of 2 versions')
     await expect(detail).toContainText('Shot 010 and 020 now match the reference.')
     await expect(detail.getByRole('list', { name: 'Names pointing at this version' })).toContainText('main')
-    await expect(detail.getByRole('tab', { name: /Changes in this version · 4/ })).toBeVisible()
+    await expect(detail.getByRole('heading', { name: /Changes in this version\s+4/ })).toBeVisible()
+    await expect(detail.getByRole('list', { name: 'Files this version changed' }).getByRole('listitem')).toHaveCount(4)
+    for (const name of ['Compare with previous', 'Tag this version', 'Undo this version']) await expect(detail.getByRole('button', { name })).toBeVisible()
     await expectNoAxeViolations(page)
   })
 
@@ -65,7 +67,8 @@ test.describe('History: states', () => {
   test('busy: the list stays visible and marked busy while a refresh runs', async ({ page }) => {
     await boot(page)
     await expect(rowsOf(page)).toHaveCount(11)
-    await page.getByRole('button', { name: 'Refresh history' }).click()
+    // No refresh button: coming back to the window re-reads the list.
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')))
     await expect.poll(async () => (await ipcCalls(page, 'repo_log')).length).toBe(2)
     await expect(rowsOf(page)).toHaveCount(11)
   })
@@ -135,7 +138,7 @@ test.describe('History: interaction', () => {
   test('files at this version: lazy tree, folders, pick a file to preview it', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 1500 })
     await boot(page, { scripts: { repo_extract: [{ resolve: { path: '/tmp/mediagit-desktop-preview/p.png', size: 1363148 } }] } })
-    await page.getByRole('tab', { name: 'Files at this version' }).click()
+    await page.getByText('Files at this version', { exact: true }).click()
     const tree = page.getByRole('tree', { name: 'Files at this version' })
     // the list is virtualized: not every row is in the DOM, but the set size says how many exist
     await expect(tree.getByRole('treeitem').first()).toHaveAttribute('aria-setsize', String(8 + 5)) // 5 folders + 8 files
@@ -154,7 +157,7 @@ test.describe('History: interaction', () => {
   test('a large file shows determinate extraction progress in the inspector', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 1500 })
     await boot(page, { scripts: { repo_extract: fixture('extract_big') } })
-    await page.getByRole('tab', { name: 'Files at this version' }).click()
+    await page.getByText('Files at this version', { exact: true }).click()
     await page.getByRole('tree', { name: 'Files at this version' }).getByRole('treeitem', { name: /shot_010/ }).click()
     const prev = page.getByTestId('preview')
     await expect(prev).toContainText('Getting shot_010.mp4 from history')
@@ -171,9 +174,10 @@ test.describe('History: interaction', () => {
   test('a deleted file says so instead of previewing', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 1500 })
     await boot(page)
-    await page.getByRole('tree', { name: 'Files this version changed' }).getByRole('treeitem', { name: /vo_take1/ }).click()
+    await page.getByRole('list', { name: 'Files this version changed' }).getByRole('button', { name: /vo_take1/ }).click()
     await expect(page.getByTestId('preview')).toContainText('deleted here')
-    expect(await ipcCalls(page, 'repo_extract')).toHaveLength(0)
+    // other changed files may extract thumbnails; the deleted one never does
+    expect((await ipcCalls(page, 'repo_extract')).filter((c) => String(c.args.path).includes('vo_take1'))).toHaveLength(0)
   })
 
   test('a branch name on the version offers a switch, confirmed in a dialog', async ({ page }) => {

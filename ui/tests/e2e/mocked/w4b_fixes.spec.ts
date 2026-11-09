@@ -29,7 +29,7 @@ async function open(page: Page, route: string, heading: string, commands: Record
     storage: REPO,
   })
   await page.goto(`/#${route}`, { waitUntil: 'domcontentloaded' })
-  await expect(page.getByRole('heading', { name: heading, level: 1 })).toBeVisible()
+  await expect(page.getByRole('heading', { name: heading, level: 2, exact: true })).toBeVisible()
 }
 
 test.describe('Sync: push options', () => {
@@ -58,7 +58,8 @@ test.describe('Sync: push options', () => {
 test.describe('Branches: delete dialog', () => {
   test('the description follows "delete even if not merged"', async ({ page }) => {
     await open(page, '/branches', 'Branches')
-    await page.locator('[data-branch="feature/grade"]').getByRole('button', { name: 'Delete feature/grade' }).click()
+    await page.locator('[data-branch="feature/grade"]').getByRole('button', { name: 'Actions for feature/grade' }).click()
+    await page.getByRole('menuitem', { name: 'Delete…' }).click()
     const dlg = page.getByRole('dialog', { name: 'Delete feature/grade?' })
     await expect(dlg).toContainText('already part of another branch')
     await dlg.getByText('More options').click()
@@ -73,7 +74,7 @@ test.describe('Undo: revert dialog', () => {
     await open(page, '/history', 'History')
     await expect(page.getByRole('option')).toHaveCount(11)
     await page.getByRole('option').nth(1).click()
-    await page.getByTestId('commit-detail').getByRole('button', { name: 'Undo…' }).click()
+    await page.getByTestId('commit-detail').getByRole('button', { name: 'Undo this version' }).click()
     await page.getByRole('menuitem', { name: 'Undo this version (adds a new one)' }).click()
     const dlg = page.getByRole('dialog')
     await expect(dlg.getByRole('button', { name: 'Undo this version' })).toBeVisible()
@@ -106,7 +107,7 @@ test.describe('Maintenance: verify result', () => {
 
 test.describe('Settings: plain labels and unsaved changes', () => {
   test('friendly label, env var only on the key line, Not saved, and a leave warning', async ({ page }) => {
-    await open(page, '/settings', 'Settings')
+    await open(page, '/settings', 'General')
     const cfg = page.getByTestId('config')
     await expect(cfg.getByLabel('Files sent at once')).toBeVisible()
     const row = cfg.locator('[data-key="performance.upload_concurrency"]')
@@ -115,20 +116,21 @@ test.describe('Settings: plain labels and unsaved changes', () => {
     await expect(row).not.toContainText('Not saved')
     await row.getByLabel('Files sent at once').fill('3')
     await expect(row).toContainText('Not saved')
-    await page.getByRole('link', { name: 'Changes' }).first().click()
+    await page.getByRole('link', { name: /^Files/ }).first().click()
     const dlg = page.getByRole('alertdialog', { name: 'Leave without saving?' })
     await expect(dlg).toBeVisible()
     await dlg.getByRole('button', { name: 'Keep editing' }).click()
-    await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible()
-    await page.getByRole('link', { name: 'Changes' }).first().click()
+    await expect(page.getByRole('heading', { name: 'General', level: 2 })).toBeVisible()
+    await page.getByRole('link', { name: /^Files/ }).first().click()
     await page.getByRole('alertdialog').getByRole('button', { name: 'Leave and discard' }).click()
-    await expect(page.getByRole('heading', { name: 'Changes', level: 1 })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'All files', level: 2 })).toBeVisible()
   })
 })
 
 test.describe('Tags: disabled Tagger fields', () => {
   test('look disabled and say why', async ({ page }) => {
-    await open(page, '/tags', 'Tags & Stash')
+    await open(page, '/tags-stash', 'Tags & Stash')
+    await page.getByText('New tag', { exact: true }).click()
     await page.locator('form.save').getByText('More options').click()
     const f = page.getByLabel('Tagger name')
     await expect(f).toBeDisabled()

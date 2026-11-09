@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { FolderOpen, FolderPlus, GitFork, Server, X } from 'lucide-vue-next'
 import Wordmark from '@/components/Wordmark.vue'
 import { toApiError, type ApiError } from '@/api'
@@ -21,6 +21,7 @@ import { useRecentStore } from '@/stores/recent'
 import CloneDialog from './welcome/CloneDialog.vue'
 
 const router = useRouter()
+const route = useRoute()
 const recent = useRecentStore()
 const ops = useOpsStore()
 const { openPath, pickAndOpen } = useOpenRepo()
@@ -92,6 +93,9 @@ function onKey(e: KeyboardEvent) {
 }
 onMounted(async () => {
   window.addEventListener('keydown', onKey)
+  // The repository switcher sends people here to create or clone.
+  if (route.query.action === 'clone') cloneOpen.value = true
+  else if (route.query.action === 'create') void newRepo()
   try {
     const info = await api.engineInfo()
     version.value = `mediagit ${info.version} · engine contract v${info.contract}`
@@ -114,7 +118,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       <Button variant="primary" :loading="opening" @click="openFolder"><FolderOpen :size="18" aria-hidden="true" />Open folder…</Button>
       <Button @click="cloneOpen = true"><GitFork :size="18" aria-hidden="true" />Clone…</Button>
       <Button :loading="initBusy" @click="newRepo"><FolderPlus :size="18" aria-hidden="true" />New repository (init)</Button>
-      <Button variant="ghost" @click="router.push('/server')"><Server :size="18" aria-hidden="true" />Host a server…</Button>
+      <Button variant="ghost" @click="router.push('/team/server')"><Server :size="18" aria-hidden="true" />Host a server…</Button>
     </div>
 
     <ErrorState v-if="error" class="fail" :code="error.code" :message="error.message" @retry="retry?.()" />
@@ -203,10 +207,8 @@ h2 {
   padding: var(--space-3) var(--space-4);
   border-bottom: 1px solid var(--border);
   color: var(--text-muted);
-  font-size: var(--fs-xs);
+  font-size: var(--fs-sm);
   font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
 }
 .recent {
   border: 1px solid var(--border);

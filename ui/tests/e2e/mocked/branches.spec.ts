@@ -5,10 +5,16 @@ import { fixture, healthy, ipcCalls, ipcRelease, mockIpc, RECENT } from './ipc-m
 const REPO = { 'mg.repo': JSON.stringify('/repos/hero-film'), 'mg.recent': RECENT }
 const row = (page: Page, name: string) => page.locator(`[data-branch="${name}"]`)
 
+/** Row actions live in one "Actions for NAME" menu. */
+async function act(page: Page, name: string, item: string | RegExp) {
+  await row(page, name).getByRole('button', { name: `Actions for ${name}` }).click()
+  await page.getByRole('menuitem', { name: item }).click()
+}
+
 async function boot(page: Page, commands: Record<string, unknown> = {}, scripts: Record<string, unknown[]> = {}) {
   await mockIpc(page, { commands: healthy({ branch_list: fixture('branches'), ...commands }), storage: REPO, scripts: scripts as never })
   await page.goto('/#/branches', { waitUntil: 'domcontentloaded' })
-  await expect(page.getByRole('heading', { name: 'Branches', level: 1 })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Branches', level: 2 })).toBeVisible()
 }
 
 test.describe('Branches: states', () => {
@@ -22,8 +28,12 @@ test.describe('Branches: states', () => {
     await expect(row(page, 'review/cut-2').getByLabel('0 ahead, 3 behind origin/review/cut-2')).toBeVisible()
     await expect(row(page, 'feature/grade')).toContainText('Not shared yet')
     await expect(main.getByRole('button', { name: 'Switch to', exact: true })).toHaveCount(0)
-    await expect(main.getByRole('button', { name: /Delete main/ })).toBeDisabled()
-    await expect(row(page, 'feature/grade').getByRole('button', { name: 'Delete feature/grade' })).toBeEnabled()
+    await main.getByRole('button', { name: 'Actions for main' }).click()
+    await expect(page.getByRole('menuitem', { name: /Delete/ })).toHaveAttribute('aria-disabled', 'true')
+    await page.keyboard.press('Escape')
+    await row(page, 'feature/grade').getByRole('button', { name: 'Actions for feature/grade' }).click()
+    await expect(page.getByRole('menuitem', { name: 'Delete…' })).not.toHaveAttribute('aria-disabled', 'true')
+    await page.keyboard.press('Escape')
     await expectNoAxeViolations(page)
   })
 
@@ -118,7 +128,7 @@ test.describe('Branches: actions', () => {
 
   test('rename: same name refused, new name sent', async ({ page }) => {
     await boot(page)
-    await row(page, 'feature/grade').getByRole('button', { name: 'Rename feature/grade' }).click()
+    await act(page, 'feature/grade', 'Rename…')
     const dlg = page.getByRole('dialog', { name: 'Rename feature/grade' })
     await expect(dlg.getByLabel('New name')).toHaveValue('feature/grade')
     await expect(dlg).toContainText('Choose a different name')
@@ -132,14 +142,14 @@ test.describe('Branches: actions', () => {
 
   test('delete asks first and explains; cancel changes nothing', async ({ page }) => {
     await boot(page)
-    const del = row(page, 'feature/grade').getByRole('button', { name: 'Delete feature/grade' })
-    await del.click()
+    const del = () => act(page, 'feature/grade', 'Delete…')
+    await del()
     const dlg = page.getByRole('dialog', { name: 'Delete feature/grade?' })
     await expect(dlg).toContainText('already part of another branch')
     await expectNoAxeViolations(page)
     await dlg.getByRole('button', { name: 'Cancel' }).click()
     expect(await ipcCalls(page, 'branch_delete')).toHaveLength(0)
-    await del.click()
+    await del()
     await page.getByRole('dialog', { name: 'Delete feature/grade?' }).getByRole('button', { name: 'Delete branch' }).click()
     await expect.poll(async () => (await ipcCalls(page, 'branch_delete')).map((c) => c.args)).toEqual([
       { repo: '/repos/hero-film', name: 'feature/grade', opts: { mergedOnly: true } },
@@ -151,7 +161,7 @@ test.describe('Branches: actions', () => {
     await row(page, 'feature/grade').getByRole('button', { name: 'Switch to', exact: true }).focus()
     await expectFocusRing(page)
     await page.keyboard.press('Tab')
-    await expect(row(page, 'feature/grade').getByRole('button', { name: 'Details of feature/grade' })).toBeFocused()
+    await expect(row(page, 'feature/grade').getByRole('button', { name: 'Actions for feature/grade' })).toBeFocused()
     await expectFocusRing(page)
   })
 })

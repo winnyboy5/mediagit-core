@@ -6,14 +6,14 @@ const REPO = { 'mg.repo': JSON.stringify('/repos/hero-film'), 'mg.recent': RECEN
 const status = fixture<{ modified: string[] }>('status_populated')
 const withImage = { ...status, modified: [...status.modified, 'art/hero_preview.png'] }
 
-const unstaged = (page: Page) => page.getByRole('tree', { name: 'Files not staged' })
-const staged = (page: Page) => page.getByRole('tree', { name: 'Staged files' })
+const unstaged = (page: Page) => page.getByRole('tree', { name: 'Changes' })
+const staged = (page: Page) => page.getByRole('tree', { name: 'Changes' })
 const insp = (page: Page) => page.getByTestId('inspector')
 
 async function boot(page: Page, extra: Record<string, unknown> = {}, handlers: Record<string, string> = {}) {
   await mockIpc(page, { commands: healthy({ repo_status: withImage, ...extra }), storage: REPO, handlers })
   await page.goto('/#/changes', { waitUntil: 'domcontentloaded' })
-  await expect(page.getByRole('heading', { name: 'Changes', level: 1 })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Changes', level: 2 })).toBeVisible()
 }
 
 test.describe('Inspector', () => {
@@ -101,7 +101,7 @@ test.describe('Inspector', () => {
     await boot(page, { repo_log: fixture('log_graph') }, { repo_show: `() => (${JSON.stringify(fixture('show_commit'))})` })
     await staged(page).getByRole('treeitem', { name: /hero\.psd/ }).click()
     await insp(page).getByTestId('file-history').getByRole('button', { name: /Final grade on shot_010/ }).click()
-    await expect(page).toHaveURL(/#\/history$/)
+    await expect(page).toHaveURL(/#\/history\/versions$/)
     await expect.poll(async () => (await ipcCalls(page, 'repo_show')).map((c) => c.args.rev)).toContain('0002'.repeat(10))
   })
 

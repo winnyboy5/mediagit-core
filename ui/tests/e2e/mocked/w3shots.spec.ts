@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs'
 import { expect, test, type Page } from '@playwright/test'
 import { fixture, healthy, ipcRelease, mockIpc, RECENT } from './ipc-mock'
+import { openSection } from './nav'
 
 // W3 review screenshots: `SHOTS=1 pnpm e2e w3shots`. Skipped in normal runs.
 // Output: ui/.impeccable/review/w3-<view>-<state>-<w>-<theme>.png. Every state is its own test (fresh page).
@@ -43,6 +44,7 @@ async function open(page: Page, route: string, heading: string, b: Boot = {}) {
       auth_run: fixture('auth_in'),
       key_status: fixture('key_on'),
       config_list: fixture('config_list'),
+      config_schema: fixture('config_schema'),
       sparse_list: fixture('sparse_on'),
       reflog_list: fixture('reflog'),
       ...b.commands,
@@ -51,8 +53,7 @@ async function open(page: Page, route: string, heading: string, b: Boot = {}) {
     scripts: b.scripts as never,
     storage: REPO,
   })
-  await page.goto(`/#${route}`, { waitUntil: 'domcontentloaded' })
-  if (heading) await expect(page.getByRole('heading', { name: heading, level: 1 })).toBeVisible()
+  await openSection(page, route, heading)
 }
 
 for (const { w, h } of SIZES) {
@@ -178,7 +179,7 @@ for (const { w, h } of SIZES) {
       await dlg.getByLabel('Passphrase').fill(PASS)
       await dlg.getByRole('button', { name: 'Unlock' }).click()
       await expect(dlg).toHaveCount(0)
-      await page.goto('/#/security')
+      await openSection(page, 'security')
       await expect(page.getByTestId('unlocked')).toBeVisible()
       await shot(page, 'V13-security-unlocked', t, w)
     })
@@ -278,34 +279,34 @@ for (const { w, h } of SIZES) {
 
     // V15 Settings
     T('V15 populated', async (page, t) => {
-      await open(page, '/settings', 'Settings')
-      await expect(page.getByTestId('config')).toContainText('author.name')
+      await open(page, '/settings', 'General')
+      await expect(page.getByTestId('config').getByLabel('Files sent at once')).toHaveValue('8')
       await shot(page, 'V15-settings-populated', t, w)
     })
     T('V15 loading', async (page, t) => {
-      await open(page, '/settings', 'Settings', { scripts: { config_list: [{ hold: true }, { resolve: fixture('config_list') }] } })
-      await expect(page.getByRole('status', { name: 'Loading' })).toBeVisible()
+      await open(page, '/settings', 'General', { scripts: { config_list: [{ hold: true }, { resolve: fixture('config_list') }] } })
+      await expect(page.getByRole('status', { name: 'Loading' }).first()).toBeVisible()
       await shot(page, 'V15-settings-loading', t, w)
     })
     T('V15 empty', async (page, t) => {
-      await open(page, '/settings', 'Settings', { commands: { config_list: fixture('config_empty'), sparse_list: fixture('sparse_off') } })
-      await expect(page.getByText('Nothing has been changed from the defaults.')).toBeVisible()
+      await open(page, '/settings', 'General', { commands: { config_list: fixture('config_empty'), sparse_list: fixture('sparse_off') } })
+      await expect(page.getByTestId('config').getByLabel('Files sent at once')).toHaveValue('')
       await shot(page, 'V15-settings-empty', t, w)
     })
     T('V15 error', async (page, t) => {
-      await open(page, '/settings', 'Settings', { commands: { config_list: { __error: { code: 'error', message: 'Cannot read the configuration.' } } } })
+      await open(page, '/settings', 'General', { commands: { config_list: { __error: { code: 'error', message: 'Cannot read the configuration.' } } } })
       await expect(page.getByTestId('identity').getByRole('alert')).toBeVisible()
       await shot(page, 'V15-settings-error', t, w)
     })
     T('V15 sparse busy', async (page, t) => {
-      await open(page, '/settings', 'Settings', { scripts: { sparse_set: fixture('sparse_progress') } })
+      await open(page, '/settings', 'General', { scripts: { sparse_set: fixture('sparse_progress') } })
       await page.getByRole('button', { name: 'Apply…' }).click()
       await page.getByRole('alertdialog').getByRole('button', { name: 'Apply' }).click()
       await expect(page.getByTestId('sparse-progress')).toBeVisible()
       await shot(page, 'V15-settings-sparse-busy', t, w)
     })
     T('V15 compact dark', async (page, t) => {
-      await open(page, '/settings', 'Settings')
+      await open(page, '/settings', 'General')
       await page.getByRole('button', { name: 'Compact' }).click()
       await page.getByRole('button', { name: 'Dark' }).click()
       await shot(page, 'V15-settings-compact-dark', t, w)

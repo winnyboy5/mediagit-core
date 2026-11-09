@@ -24,6 +24,7 @@
   - [add](./cli/add.md)
   - [commit](./cli/commit.md)
   - [status](./cli/status.md)
+  - [ls-files](./cli/ls-files.md)
   - [log](./cli/log.md)
   - [diff](./cli/diff.md)
   - [show](./cli/show.md)

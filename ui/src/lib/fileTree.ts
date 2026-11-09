@@ -2,8 +2,12 @@ import type { FileStatus } from '@/components/StatusBadge.vue'
 
 export interface FileEntry {
   path: string
-  status: FileStatus
+  /** null = no change (an unchanged or ignored file in the explorer). */
+  status: FileStatus | null
   size?: number | null
+  /** Staged for the next version (the Changes list's Include checkbox). */
+  included?: boolean
+  ignored?: boolean
 }
 
 export interface TreeNode {
@@ -13,9 +17,14 @@ export interface TreeNode {
   isDir: boolean
   depth: number
   /** Own status for files; the shared status for folders, or 'modified' when mixed. */
-  status: FileStatus
+  status: FileStatus | null
   /** Files below (1 for a file). */
   count: number
+  /** Changed files below (status set). */
+  changed: number
+  /** Included files below. */
+  included: number
+  ignored: boolean
   /** Sum of known sizes below; null when none known. */
   size: number | null
   children: TreeNode[]
@@ -46,6 +55,9 @@ export function buildTree(entries: FileEntry[]): TreeNode[] {
       if (i === parts.length - 1) {
         const leaf = mk(path, name, false, i, e.status)
         leaf.count = 1
+        leaf.changed = e.status ? 1 : 0
+        leaf.included = e.included ? 1 : 0
+        leaf.ignored = !!e.ignored
         leaf.size = e.size ?? null
         cur.kids.set(name, leaf)
         return
@@ -61,8 +73,8 @@ export function buildTree(entries: FileEntry[]): TreeNode[] {
   return finish(root).children
 }
 
-function mk(path: string, name: string, isDir: boolean, depth: number, status: FileStatus): TreeNode {
-  return { path, name, isDir, depth, status, count: 0, size: null, children: [] }
+function mk(path: string, name: string, isDir: boolean, depth: number, status: FileStatus | null): TreeNode {
+  return { path, name, isDir, depth, status, count: 0, changed: 0, included: 0, ignored: false, size: null, children: [] }
 }
 
 // Post-order: sort, then aggregate count / size / status.
@@ -72,16 +84,20 @@ function finish(d: Dir): TreeNode {
   kids.sort((a, b) => Number(b.isDir) - Number(a.isDir) || cmp(a.name, b.name))
   n.children = kids
   n.count = 0
+  n.changed = 0
+  n.included = 0
   n.size = null
   let status: FileStatus | null = null
   let mixed = false
   for (const k of kids) {
     n.count += k.count
+    n.changed += k.changed
+    n.included += k.included
     if (k.size != null) n.size = (n.size ?? 0) + k.size
     if (status === null) status = k.status
     else if (status !== k.status) mixed = true
   }
-  if (kids.length) n.status = mixed ? 'modified' : (status as FileStatus)
+  if (kids.length) n.status = mixed ? 'modified' : status
   return n
 }
 
@@ -112,7 +128,7 @@ export function flatRows(entries: FileEntry[]): Row[] {
     .map((e) => ({ e, k: e.path.toLowerCase() }))
     .sort((a, b) => (a.k < b.k ? -1 : a.k > b.k ? 1 : a.e.path < b.e.path ? -1 : a.e.path > b.e.path ? 1 : 0))
     .map(({ e }) => ({
-      node: { path: e.path, name: e.path, isDir: false, depth: 0, status: e.status, count: 1, size: e.size ?? null, children: [] },
+      node: { path: e.path, name: e.path, isDir: false, depth: 0, status: e.status, count: 1, changed: e.status ? 1 : 0, included: e.included ? 1 : 0, ignored: !!e.ignored, size: e.size ?? null, children: [] },
       expanded: false,
     }))
 }

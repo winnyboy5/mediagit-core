@@ -5,14 +5,21 @@ import { fixture, healthy, ipcCalls, ipcRelease, mockIpc, RECENT } from './ipc-m
 const REPO = { 'mg.repo': JSON.stringify('/repos/hero-film'), 'mg.recent': RECENT }
 const stash = (page: Page, i: number) => page.locator(`[data-stash="${i}"]`)
 
+/** The tag form sits behind a "New tag" disclosure; tag actions in one "Actions for tag NAME" menu. */
+const newTag = (page: Page) => page.getByText('New tag', { exact: true }).click()
+async function tagMenu(page: Page, name: string, item: string) {
+  await page.locator(`[data-tag="${name}"]`).getByRole('button', { name: `Actions for tag ${name}` }).click()
+  await page.getByRole('menuitem', { name: item }).click()
+}
+
 async function boot(page: Page, commands: Record<string, unknown> = {}, scripts: Record<string, unknown[]> = {}) {
   await mockIpc(page, {
     commands: healthy({ tag_list: fixture('tags'), stash_list: fixture('stash_list'), ...commands }),
     scripts: scripts as never,
     storage: REPO,
   })
-  await page.goto('/#/tags', { waitUntil: 'domcontentloaded' })
-  await expect(page.getByRole('heading', { name: 'Tags & Stash', level: 1 })).toBeVisible()
+  await page.goto('/#/tags-stash', { waitUntil: 'domcontentloaded' })
+  await expect(page.getByRole('heading', { name: 'Tags & Stash', level: 2 })).toBeVisible()
 }
 
 test.describe('Tags & Stash: states', () => {
@@ -70,6 +77,7 @@ test.describe('Tags & Stash: tags', () => {
 
   test('create: validates the name, then tags the latest version with the note', async ({ page }) => {
     await boot(page, { tag_create: created })
+    await newTag(page)
     const create = page.getByRole('button', { name: 'Tag the latest version' })
     await expect(create).toBeDisabled()
     await page.getByLabel('Tag name').fill('bad name')
@@ -90,6 +98,7 @@ test.describe('Tags & Stash: tags', () => {
 
   test('a failed create is shown plainly', async ({ page }) => {
     await boot(page, { tag_create: { __error: { code: 'error', message: 'Tag v1.0 already exists.' } } })
+    await newTag(page)
     await page.getByLabel('Tag name').fill('v1.0')
     await page.getByRole('button', { name: 'Tag the latest version' }).click()
     await expect(page.getByRole('alert')).toContainText('Tag v1.0 already exists.')
@@ -98,14 +107,14 @@ test.describe('Tags & Stash: tags', () => {
 
   test('delete asks first and explains; cancel changes nothing', async ({ page }) => {
     await boot(page, { tag_delete: { action: 'delete', created: null, deleted: ['v0.2'], missing: [] } })
-    await page.getByRole('button', { name: 'Delete tag v0.2' }).click()
+    await tagMenu(page, 'v0.2', 'Delete tag…')
     const dlg = page.getByRole('alertdialog')
     await expect(dlg).toContainText('Delete tag v0.2?')
     await expect(dlg).toContainText('Only the name is removed.')
     await expectNoAxeViolations(page)
     await dlg.getByRole('button', { name: 'Cancel' }).click()
     expect(await ipcCalls(page, 'tag_delete')).toHaveLength(0)
-    await page.getByRole('button', { name: 'Delete tag v0.2' }).click()
+    await tagMenu(page, 'v0.2', 'Delete tag…')
     await page.getByRole('alertdialog').getByRole('button', { name: 'Delete tag' }).click()
     await expect.poll(async () => (await ipcCalls(page, 'tag_delete')).map((c) => c.args)).toEqual([{ repo: '/repos/hero-film', name: 'v0.2' }])
   })

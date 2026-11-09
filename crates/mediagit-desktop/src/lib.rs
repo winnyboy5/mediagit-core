@@ -250,10 +250,12 @@ async fn repo_status(engine: tauri::State<'_, Engine>, repo: String) -> Result<V
 #[tauri::command]
 async fn repo_add(
     engine: tauri::State<'_, Engine>,
+    ops: tauri::State<'_, Ops>,
     queues: tauri::State<'_, RepoQueues>,
     repo: String,
     paths: Vec<String>,
     opts: Option<commands::views_a::AddOpts>,
+    on_progress: Channel<Progress>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
     let mut argv = add_argv(&repo, &paths)?;
@@ -261,10 +263,17 @@ async fn repo_add(
         1..1,
         commands::views_a::add_flags(&opts.unwrap_or_default()),
     );
-    let args: Vec<&str> = argv.iter().map(String::as_str).collect();
-    queues
-        .write(&repo, engine.run(Some(&repo), &args, |_| {}))
-        .await
+    commands::stream(
+        &engine,
+        &ops,
+        &queues,
+        &repo,
+        &argv,
+        "",
+        false,
+        &on_progress,
+    )
+    .await
 }
 
 /// Save a version (`mediagit commit`).
@@ -371,6 +380,7 @@ pub fn run() {
             commands::repo_show,
             commands::repo_extract,
             commands::media_info,
+            commands::repo_ls_files,
             commands::branch_list,
             commands::branch_create,
             commands::branch_switch,
@@ -469,7 +479,9 @@ pub fn run() {
             commands::server_admin::server_local_start,
             commands::server_admin::server_local_stop,
             commands::server_admin::server_local_log,
-            commands::server_admin::server_local_set_network
+            commands::server_admin::server_local_set_network,
+            commands::server_admin::server_local_set_folder,
+            commands::server_admin::server_storage_test
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| panic!("failed to start MediaGit desktop: {e}"));

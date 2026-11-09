@@ -23,13 +23,16 @@ struct Fx {
 }
 
 async fn fixture() -> Fx {
+    fixture_with(None).await
+}
+
+async fn fixture_with(default_storage: Option<mediagit_config::StorageConfig>) -> Fx {
     let repos_dir = TempDir::new().unwrap().keep();
     let secret = "test-secret-key-for-admin-repos";
-    let state = Arc::new(AppState::new_with_auth(
-        repos_dir.clone(),
-        secret,
-        Arc::new(ApiKeyAuth::new()),
-    ));
+    let state = Arc::new(
+        AppState::new_with_auth(repos_dir.clone(), secret, Arc::new(ApiKeyAuth::new()))
+            .with_default_storage(default_storage),
+    );
     for (id, role) in [("admin-user", Role::Admin), ("write-user", Role::Write)] {
         let user = User::new(id.into(), id.into(), format!("{id}@example.com"), role);
         state
@@ -390,4 +393,38 @@ async fn user_listing_reports_disabled() {
     };
     assert_eq!(by("write-user"), true);
     assert_eq!(by("admin-user"), false);
+}
+
+fn fs_storage(path: &std::path::Path) -> mediagit_config::StorageConfig {
+    mediagit_config::StorageConfig::FileSystem(mediagit_config::FileSystemStorage {
+        base_path: path.to_string_lossy().into_owned(),
+        ..Default::default()
+    })
+}
+
+fn repo_storage(fx: &Fx, name: &str) -> mediagit_config::StorageConfig {
+    let path = fx.repos_dir.join(name).join(".mediagit/config.toml");
+    let toml = std::fs::read_to_string(path).unwrap();
+    toml::from_str::<mediagit_config::Config>(&toml)
+        .unwrap()
+        .storage
+}
+
+#[tokio::test]
+async fn create_writes_server_default_storage_and_request_override_wins() {
+    let (dflt, other) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    let fx = fixture_with(Some(fs_storage(dflt.path()))).await;
+
+    assert_eq!(create(&fx, "plain").await, StatusCode::CREATED);
+    assert_eq!(repo_storage(&fx, "plain"), fs_storage(dflt.path()));
+
+    let body = serde_json::json!({ "name": "custom", "storage": fs_storage(other.path()) });
+    let r = req(
+        "POST",
+        "/admin/repos",
+        Some(&fx.admin),
+        Some(&body.to_string()),
+    );
+    assert_eq!(call(&fx, r).await.0, StatusCode::CREATED);
+    assert_eq!(repo_storage(&fx, "custom"), fs_storage(other.path()));
 }

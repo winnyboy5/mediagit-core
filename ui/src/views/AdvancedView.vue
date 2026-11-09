@@ -27,8 +27,7 @@ const tab = ref('rebase')
   <section class="adv">
     <header class="head">
       <div class="ttl">
-        <h1>Advanced</h1>
-        <p>rewrite, copy and search history</p>
+        <h2 class="pt sr-only">Advanced</h2>
       </div>
     </header>
     <Tabs v-model="tab" label="Advanced tools" :items="TABS">
@@ -57,9 +56,9 @@ const tab = ref('rebase')
   align-items: baseline;
   gap: var(--space-3);
 }
-h1 {
+.pt {
   margin: 0;
-  font-size: var(--fs-2xl);
+  font-size: var(--fs-xl);
 }
 .ttl p {
   margin: 0;

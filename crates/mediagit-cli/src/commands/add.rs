@@ -365,12 +365,15 @@ impl AddCmd {
         };
 
         // Create progress bar
-        let progress_bar = if !self.dry_run && total_files > 0 {
-            let tracker = ProgressTracker::new(self.quiet);
+        // The tracker must outlive the work: dropping it stops the `--machine`
+        // progress sampler.
+        let tracker = ProgressTracker::new(self.quiet);
+        let (progress_bar, items_bar) = if !self.dry_run && total_files > 0 {
             let pb = tracker.add_bar(&format!("0/{} files", total_files), total_bytes);
-            Some(Arc::new(pb))
+            let ib = tracker.object_bar("files", total_files);
+            (Some(Arc::new(pb)), Some(Arc::new(ib)))
         } else {
-            None
+            (None, None)
         };
 
         // Atomic counters for thread-safe progress
@@ -423,6 +426,7 @@ impl AddCmd {
                     let progress_bytes = progress_bytes.clone();
                     let progress_files = progress_files.clone();
                     let progress_bar = progress_bar.clone();
+                    let items_bar = items_bar.clone();
                     let skipped = skipped.clone();
 
                     file_tasks.spawn(async move {
@@ -471,6 +475,9 @@ impl AddCmd {
                         match result {
                             Ok((Some(file_result), _)) => {
                                 let done = progress_files.fetch_add(1, Ordering::Relaxed) + 1;
+                                if let Some(ref ib) = items_bar {
+                                    ib.set_position(done);
+                                }
                                 if let Some(ref pb) = progress_bar {
                                     pb.set_message(format!("{}/{} files", done, total_files));
                                 }
@@ -479,6 +486,9 @@ impl AddCmd {
                             Ok((None, _)) => {
                                 skipped.fetch_add(1, Ordering::Relaxed);
                                 let done = progress_files.fetch_add(1, Ordering::Relaxed) + 1;
+                                if let Some(ref ib) = items_bar {
+                                    ib.set_position(done);
+                                }
                                 if let Some(ref pb) = progress_bar {
                                     pb.set_message(format!("{}/{} files", done, total_files));
                                 }
@@ -579,12 +589,18 @@ impl AddCmd {
                             added_count += 1;
 
                             let done = progress_files.fetch_add(1, Ordering::Relaxed) + 1;
+                            if let Some(ref ib) = items_bar {
+                                ib.set_position(done);
+                            }
                             if let Some(ref pb) = progress_bar {
                                 pb.set_message(format!("{}/{} files", done, total_files));
                             }
                         }
                         Ok((None, _)) => {
                             let done = progress_files.fetch_add(1, Ordering::Relaxed) + 1;
+                            if let Some(ref ib) = items_bar {
+                                ib.set_position(done);
+                            }
                             if let Some(ref pb) = progress_bar {
                                 pb.set_message(format!("{}/{} files", done, total_files));
                             }
@@ -685,6 +701,10 @@ impl AddCmd {
         if let Some(pb) = progress_bar {
             pb.finish_and_clear();
         }
+        if let Some(ib) = items_bar {
+            ib.finish_and_clear();
+        }
+        drop(tracker);
 
         // Save the index
         if !self.dry_run {

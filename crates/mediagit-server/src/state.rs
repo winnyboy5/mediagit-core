@@ -277,9 +277,19 @@ pub struct AppState {
     /// must stay completely silent: a server with encryption off behaves
     /// exactly as it did before DC-7.
     pub encryption_master: Option<mediagit_security::encryption::EncryptionKey>,
+
+    /// Storage written into each repo created through `POST /admin/repos` when
+    /// the request names none. `None` keeps the repo on its own filesystem.
+    pub default_storage: Option<mediagit_config::StorageConfig>,
 }
 
 impl AppState {
+    /// Storage for repos created without one (`default_storage`).
+    pub fn with_default_storage(mut self, storage: Option<mediagit_config::StorageConfig>) -> Self {
+        self.default_storage = storage;
+        self
+    }
+
     /// Supply the at-rest encryption master key read from `[encryption]`.
     ///
     /// A builder rather than a constructor parameter for the same reason
@@ -323,6 +333,7 @@ impl AppState {
             bitmap_hits: AtomicU64::new(0),
             metrics: None,
             encryption_master: None,
+            default_storage: None,
         }
     }
 
@@ -364,6 +375,7 @@ impl AppState {
             bitmap_hits: AtomicU64::new(0),
             metrics: None,
             encryption_master: None,
+            default_storage: None,
         }
     }
 
@@ -426,6 +438,7 @@ impl AppState {
             bitmap_hits: AtomicU64::new(0),
             metrics: None,
             encryption_master: None,
+            default_storage: None,
         })
     }
 

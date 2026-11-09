@@ -3,23 +3,23 @@ import { CircleDashed, Lock, Minus, Pencil, Plus, TriangleAlert } from 'lucide-v
 
 export type FileStatus = 'added' | 'modified' | 'deleted' | 'locked' | 'untracked' | 'conflict'
 
-// Letter + icon + hue: status is never colour-only.
+// Icon + plain word + hue: status is never colour-only, and never a letter code.
 const META = {
-  added: { letter: 'A', word: 'Added', icon: Plus },
-  modified: { letter: 'M', word: 'Modified', icon: Pencil },
-  deleted: { letter: 'D', word: 'Deleted', icon: Minus },
-  locked: { letter: 'L', word: 'Locked', icon: Lock },
-  untracked: { letter: 'U', word: 'Untracked', icon: CircleDashed },
-  conflict: { letter: '!', word: 'Conflict', icon: TriangleAlert },
+  added: { word: 'New', icon: Plus },
+  modified: { word: 'Edited', icon: Pencil },
+  deleted: { word: 'Deleted', icon: Minus },
+  locked: { word: 'Locked', icon: Lock },
+  untracked: { word: 'New', icon: CircleDashed },
+  conflict: { word: 'Conflict', icon: TriangleAlert },
 } as const
 
 defineProps<{ status: FileStatus }>()
 </script>
 
 <template>
-  <span class="badge" :class="status" role="img" :aria-label="META[status].word" :title="META[status].word">
+  <span class="badge" :class="status">
     <component :is="META[status].icon" :size="12" :stroke-width="2.5" aria-hidden="true" />
-    <span aria-hidden="true">{{ META[status].letter }}</span>
+    {{ META[status].word }}
   </span>
 </template>
 
@@ -28,12 +28,12 @@ defineProps<{ status: FileStatus }>()
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 3px;
-  min-width: 36px;
+  gap: 4px;
   height: 22px;
   padding: 0 var(--space-2);
   border-radius: var(--radius-pill);
-  font: 600 var(--fs-xs) / 1 var(--font-mono);
+  font: 600 var(--fs-xs) / 1 var(--font-sans);
+  white-space: nowrap;
 }
 .added {
   background: var(--added-soft);

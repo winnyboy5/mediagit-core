@@ -1,0 +1,17 @@
+{
+  "files": [
+    { "path": "art/hero.psd", "status": "modified", "staged": true, "size": 412000 },
+    { "path": "art/hero_preview.png", "status": "unchanged", "staged": false, "size": 98000 },
+    { "path": "art/floor_c.jpg", "status": "unchanged", "staged": false, "size": 210000 },
+    { "path": "audio/vo_take1.wav", "status": "deleted", "staged": false, "size": null },
+    { "path": "audio/vo_take3.wav", "status": "new", "staged": false, "size": 5200000 },
+    { "path": "char/rig.fbx", "status": "modified", "staged": true, "size": 8800000 },
+    { "path": "char/rig_lod1.fbx", "status": "modified", "staged": false, "size": 3100000 },
+    { "path": "env/sky_hdri.exr", "status": "new", "staged": true, "size": 42000000 },
+    { "path": "env/fog_vol.vdb", "status": "new", "staged": false, "size": 17000000 },
+    { "path": "video/shot_010.mp4", "status": "new", "staged": false, "size": 90000000 },
+    { "path": "video/shot_020.mp4", "status": "modified", "staged": false, "size": 95000000 },
+    { "path": "video/shot_005.mp4", "status": "unchanged", "staged": false, "size": 70000000 },
+    { "path": ".cache/thumbs.db", "status": "ignored", "staged": false, "size": 1200 }
+  ]
+}

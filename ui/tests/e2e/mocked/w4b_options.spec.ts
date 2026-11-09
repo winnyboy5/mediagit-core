@@ -15,13 +15,23 @@ const more = (scope: ReturnType<Page['locator']>) => scope.locator('summary').cl
 async function boot(page: Page, route: string, heading: string, commands: Record<string, unknown> = {}, handlers: Record<string, string> = {}) {
   await mockIpc(page, { commands: healthy(commands), handlers, storage: REPO })
   await page.goto(`/#/${route}`, { waitUntil: 'domcontentloaded' })
-  await expect(page.getByRole('heading', { name: heading, level: 1 })).toBeVisible()
+  await expect(page.getByRole('heading', { name: heading, level: 2, exact: true })).toBeVisible()
 }
 
 const tagsBoot = (page: Page, extra: Record<string, unknown> = {}, handlers: Record<string, string> = {}) =>
-  boot(page, 'tags', 'Tags & Stash', { tag_list: fixture('tags'), stash_list: fixture('stash_list'), ...extra }, handlers)
+  boot(page, 'tags-stash', 'Tags & Stash', { tag_list: fixture('tags'), stash_list: fixture('stash_list'), ...extra }, handlers)
 
-const CREATED = { action: 'create', created: null, deleted: [], missing: [] }
+// The create form sits behind a "New tag" disclosure; tag actions are in one "Actions for tag NAME" menu.
+async function tagsBootNew(page: Page, extra: Record<string, unknown> = {}) {
+  await tagsBoot(page, extra)
+  await page.getByText('New tag', { exact: true }).click()
+}
+async function tagDetails(page: Page) {
+  await page.locator('[data-tag="v0.3"]').getByRole('button', { name: 'Actions for tag v0.3' }).click()
+  await page.getByRole('menuitem', { name: 'Details…' }).click()
+}
+
+const CREATED ={ action: 'create', created: null, deleted: [], missing: [] }
 const SHOWN = { name: 'v0.3', oid: '0000000000000000000000000000000000000000', annotated: true, message: 'Rig v2 export', tagger_name: 'Mira O', tagger_email: 'mira@studio.example', date: '2026-11-01T10:00:00+00:00', signed: true }
 
 test.describe('Tags: options', () => {
@@ -41,7 +51,7 @@ test.describe('Tags: options', () => {
 
   test('details: note, tagger, date, signature; check signature', async ({ page }) => {
     await tagsBoot(page, { tag_show: SHOWN, tag_verify: { name: 'v0.3', oid: SHOWN.oid, annotated: true, signed: true, fingerprint: 'AB12 CD34' } })
-    await page.getByRole('button', { name: 'Details of tag v0.3' }).click()
+    await tagDetails(page)
     const dlg = page.getByRole('dialog', { name: 'Tag v0.3' })
     await expect(dlg.getByTestId('tag-detail')).toContainText('Rig v2 export')
     await expect(dlg.getByTestId('tag-detail')).toContainText('Mira O (mira@studio.example)')
@@ -57,7 +67,7 @@ test.describe('Tags: options', () => {
 
   test('an unsigned tag says there is nothing to check; a bad signature is an error', async ({ page }) => {
     await tagsBoot(page, { tag_show: { ...SHOWN, signed: false }, tag_verify: { name: 'v0.3', oid: SHOWN.oid, annotated: true, signed: false, fingerprint: null } })
-    await page.getByRole('button', { name: 'Details of tag v0.3' }).click()
+    await tagDetails(page)
     const dlg = page.getByRole('dialog', { name: 'Tag v0.3' })
     await dlg.getByRole('button', { name: 'Check signature' }).click()
     await expect(dlg).toContainText('not signed, so there is nothing to check')
@@ -65,12 +75,12 @@ test.describe('Tags: options', () => {
 
   test('details that cannot be read show the reason', async ({ page }) => {
     await tagsBoot(page, { tag_show: { __error: { code: 'error', message: 'Tag v0.3 is damaged.' } } })
-    await page.getByRole('button', { name: 'Details of tag v0.3' }).click()
+    await tagDetails(page)
     await expect(page.getByRole('dialog', { name: 'Tag v0.3' }).getByRole('alert')).toContainText('damaged')
   })
 
   test('more options: version, tagger and email reach tag create; tagger needs a note', async ({ page }) => {
-    await tagsBoot(page, { tag_create: CREATED })
+    await tagsBootNew(page, { tag_create: CREATED })
     const form = page.locator('form', { has: page.getByLabel('Tag name') })
     await more(form)
     await expect(form.getByLabel('Tagger name')).toBeDisabled()
@@ -89,7 +99,7 @@ test.describe('Tags: options', () => {
   })
 
   test('a version id that is not one is refused before sending', async ({ page }) => {
-    await tagsBoot(page, { tag_create: CREATED })
+    await tagsBootNew(page, { tag_create: CREATED })
     const form = page.locator('form', { has: page.getByLabel('Tag name') })
     await more(form)
     await page.getByLabel('Tag name').fill('v1.0')
@@ -99,7 +109,7 @@ test.describe('Tags: options', () => {
   })
 
   test('replacing a tag: danger button, a dialog that says what is lost, force only after confirm', async ({ page }) => {
-    await tagsBoot(page, { tag_create: CREATED })
+    await tagsBootNew(page, { tag_create: CREATED })
     const form = page.locator('form', { has: page.getByLabel('Tag name') })
     await more(form)
     await page.getByLabel('Tag name').fill('v0.3')
@@ -120,7 +130,7 @@ test.describe('Tags: options', () => {
   })
 
   test('replace ticked but the name is free: no force is sent', async ({ page }) => {
-    await tagsBoot(page, { tag_create: CREATED })
+    await tagsBootNew(page, { tag_create: CREATED })
     const form = page.locator('form', { has: page.getByLabel('Tag name') })
     await more(form)
     await page.getByLabel('Tag name').fill('v9')

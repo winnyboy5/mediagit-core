@@ -186,6 +186,8 @@ status	-s,--short	no	OK
 status	--porcelain	no	OK
 status	-b,--branch	no	OK
 status	--json	no	OK
+ls-files	-(bare invocation)	no	OK
+ls-files	--ignored	no	OK
 gc	-(bare invocation)	no	OK
 gc	--no-prune	no	OK
 gc	--auto	no	OK

@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs'
 import { test, type Page } from '@playwright/test'
 import { fixture, healthy, mockIpc, RECENT } from './ipc-mock'
+import { openSection } from './nav'
 
 // W4b review screenshots: `SHOTS=1 pnpm e2e w4bshots`. Skipped in normal runs.
 // Output: ui/.impeccable/review/w4b-<view>-<state>-<w>-<theme>.png. Every state is its own test.
@@ -23,8 +24,7 @@ async function shot(page: Page, name: string, theme: string, w: number) {
 
 async function open(page: Page, route: string, heading: string, commands: Record<string, unknown>) {
   await mockIpc(page, { commands: healthy(commands), storage: REPO })
-  await page.goto(`/#/${route}`, { waitUntil: 'domcontentloaded' })
-  await page.getByRole('heading', { name: heading, level: 1 }).waitFor()
+  await openSection(page, route, heading)
 }
 
 type Step = (p: Page) => Promise<void>
@@ -66,14 +66,18 @@ const cases: [string, string, string, Record<string, unknown>, Step?][] = [
     await row.scrollIntoViewIfNeeded()
   }],
   ['tags', 'tags-more', 'Tags & Stash', tags, async (p) => {
+    await p.getByText('New tag', { exact: true }).click()
     const f = p.locator('form', { has: p.getByLabel('Tag name') })
     await f.locator('summary').click()
     await p.getByLabel('Tag name').fill('v0.3')
     await f.getByRole('checkbox', { name: /Replace the tag/ }).click()
   }],
-  ['tags', 'tags-detail', 'Tags & Stash', tags, async (p) => void (await p.getByRole('button', { name: 'Details of tag v0.3' }).click())],
-  ['tags', 'stash-files', 'Tags & Stash', tags, open1((p) => p.locator('section[aria-labelledby="stash-h"] details'))],
-  ['tags', 'stash-options', 'Tags & Stash', tags, async (p) => {
+  ['tags', 'tags-detail', 'Tags & Stash', tags, async (p) => {
+    await p.getByRole('button', { name: 'Actions for tag v0.3' }).click()
+    await p.getByRole('menuitem', { name: 'Details…' }).click()
+  }],
+  ['tags-stash', 'stash-files', 'Tags & Stash', tags, open1((p) => p.locator('section[aria-labelledby="stash-h"] details'))],
+  ['tags-stash', 'stash-options', 'Tags & Stash', tags, async (p) => {
     await p.getByRole('button', { name: 'Options for stash 0' }).click()
     await p.getByRole('checkbox', { name: /Overwrite my current changes/ }).click()
   }],

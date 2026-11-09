@@ -21,7 +21,7 @@ const cli = (cwd: string, ...args: string[]) => execFileSync(st.cli, args, { cwd
 const shot = (name: string) => page.screenshot({ path: join(shots, `${name}.png`) })
 const go = async (view: string, heading: string) => {
   await page.evaluate((v) => { window.location.hash = `#/${v}` }, view)
-  await expect(page.getByRole('heading', { name: heading, level: 1 })).toBeVisible()
+  await expect(page.getByRole('heading', { name: heading, level: 2 })).toBeVisible()
 }
 const refresh = () => page.evaluate(() => window.dispatchEvent(new Event('focus')))
 const unstaged = () => page.getByRole('tree', { name: 'Files not staged' })

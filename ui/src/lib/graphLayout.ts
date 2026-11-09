@@ -28,9 +28,15 @@ export interface GraphLayout {
   push(commits: GraphCommit[]): GraphRow[]
 }
 
-export function createGraphLayout(): GraphLayout {
+/** Lane colour index: lane 0 is ink (HEAD), the rest cycle 1..7. */
+export const laneIndex = (col: number) => (col === 0 ? 0 : 1 + ((col - 1) % 7))
+
+/** `headOid` reserves lane 0 for the current branch: its first-parent chain claims it. */
+export function createGraphLayout(headOid?: string | null): GraphLayout {
   // lanes[i] = oid the line in lane i is heading towards, or null if free.
-  const lanes: (string | null)[] = []
+  const lanes: (string | null)[] = headOid ? [headOid] : []
+  // The seeded lane draws nothing until HEAD itself arrives (nothing comes from above it).
+  let headPending = !!headOid
 
   const used = () => {
     let n = lanes.length
@@ -56,6 +62,10 @@ export function createGraphLayout(): GraphLayout {
     // was heading for this commit, bends into the node and its lane frees up.
     lanes.forEach((target, j) => {
       if (target === null) return
+      if (headPending && j === 0) {
+        if (target === oid) headPending = false
+        return
+      }
       if (target === oid) {
         segments.push({ from: j, to: col, half: 'top' })
         if (j !== col) lanes[j] = null
@@ -78,7 +88,7 @@ export function createGraphLayout(): GraphLayout {
     }
 
     lanes.forEach((target, k) => {
-      if (target === null) return
+      if (target === null || (headPending && k === 0)) return
       if (joined.has(k) || !parentLanes.has(k)) segments.push({ from: k, to: k, half: 'bottom' })
       if (parentLanes.has(k)) segments.push({ from: col, to: k, half: 'bottom' })
     })

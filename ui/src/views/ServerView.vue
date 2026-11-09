@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { Plus } from 'lucide-vue-next'
 import Button from '@/components/Button.vue'
 import Dialog from '@/components/Dialog.vue'
 import Select from '@/components/Select.vue'
-import Tabs from '@/components/Tabs.vue'
+import SideList from '@/components/SideList.vue'
 import TextField from '@/components/TextField.vue'
 import { useServerStore } from '@/stores/server'
 import AccessTab from './server/AccessTab.vue'
@@ -23,7 +24,13 @@ const TABS = [
   { value: 'keys', label: 'API keys' },
   { value: 'repos', label: 'Repositories' },
 ]
-const tab = ref('overview')
+// The page lives in the URL (/team/server/:sub) so it can be bookmarked and Alt-linked.
+const route = useRoute()
+const router = useRouter()
+const tab = computed({
+  get: () => TABS.find((t) => t.value === route.params.sub)?.value ?? 'overview',
+  set: (v: string) => void router.push(`/team/server/${v}`),
+})
 
 const options = computed(() => server.targets.map((t) => ({ value: t.id, label: t.label })))
 const selected = computed({
@@ -48,12 +55,11 @@ function add() {
   <section class="srv" :aria-busy="server.busy || undefined">
     <header class="head">
       <div class="ttl">
-        <h1>Server</h1>
-        <p>people, access and repositories</p>
+        <h2 class="pt sr-only">Server</h2>
       </div>
       <div class="pick">
         <Select v-model="selected" label="Managing" :options="options" />
-        <Button size="sm" @click="addOpen = true"><Plus :size="14" aria-hidden="true" /> Add server…</Button>
+        <Button @click="addOpen = true"><Plus :size="14" aria-hidden="true" /> Add server…</Button>
       </div>
     </header>
 
@@ -63,7 +69,7 @@ function add() {
       <Button size="sm" variant="ghost" @click="server.actionError = null">Dismiss</Button>
     </div>
 
-    <Tabs v-model="tab" label="Server sections" :items="TABS">
+    <SideList v-model="tab" label="Server pages" :items="TABS">
       <template #default="{ value }">
         <OverviewTab v-if="value === 'overview'" />
         <PeopleTab v-else-if="value === 'people'" @overview="tab = 'overview'" />
@@ -71,7 +77,7 @@ function add() {
         <KeysTab v-else-if="value === 'keys'" @overview="tab = 'overview'" />
         <ReposTab v-else @overview="tab = 'overview'" />
       </template>
-    </Tabs>
+    </SideList>
 
     <Dialog v-model:open="addOpen" title="Add a server" description="Another MediaGit server you can manage, like your studio's.">
       <form id="add-server" class="form" autocomplete="off" @submit.prevent="add">
@@ -99,7 +105,7 @@ function add() {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-end;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: var(--space-4);
 }
 .ttl {
@@ -107,9 +113,9 @@ function add() {
   align-items: baseline;
   gap: var(--space-3);
 }
-h1 {
+.pt {
   margin: 0;
-  font-size: var(--fs-2xl);
+  font-size: var(--fs-xl);
 }
 .ttl p {
   margin: 0;

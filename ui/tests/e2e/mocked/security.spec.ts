@@ -13,7 +13,7 @@ async function boot(page: Page, commands: Record<string, unknown> = {}, scripts:
     storage: REPO,
   })
   await page.goto('/#/security', { waitUntil: 'domcontentloaded' })
-  await expect(page.getByRole('heading', { name: 'Security', level: 1 })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Security', level: 2 })).toBeVisible()
 }
 
 const account = (page: Page) => page.getByTestId('account')

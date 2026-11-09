@@ -12,7 +12,7 @@ async function boot(page: Page, commands: Record<string, unknown> = {}, scripts:
     storage: REPO,
   })
   await page.goto('/#/settings', { waitUntil: 'domcontentloaded' })
-  await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'General', level: 2 })).toBeVisible()
 }
 const root = (page: Page, attr: string) => page.evaluate((a) => document.documentElement.getAttribute(a), attr)
 
@@ -68,7 +68,7 @@ test.describe('Settings: appearance', () => {
     await expect(page.locator('body')).toHaveCSS('background-color', /rgb\(\d+, \d+, \d+\)/)
     await expectNoAxeViolations(page)
     await page.reload()
-    await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'General', level: 2 })).toBeVisible()
     expect(await root(page, 'data-theme')).toBe('dark')
     await card(page, 'appearance').getByRole('button', { name: 'Light' }).click()
     expect(await root(page, 'data-theme')).toBe('light')
@@ -77,10 +77,10 @@ test.describe('Settings: appearance', () => {
     expect(await root(page, 'data-theme')).toBeNull()
   })
 
-  test('compact density makes rows 28px and comfortable returns them to 36px', async ({ page }) => {
+  test('compact density makes rows 28px and comfortable returns them to 40px', async ({ page }) => {
     await boot(page)
     const rowH = () => page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--row-h').trim())
-    expect(await rowH()).toBe('36px')
+    expect(await rowH()).toBe('40px')
     await card(page, 'appearance').getByRole('button', { name: 'Compact' }).click()
     expect(await root(page, 'data-density')).toBe('compact')
     expect(await rowH()).toBe('28px')
@@ -88,7 +88,7 @@ test.describe('Settings: appearance', () => {
     await expectNoAxeViolations(page)
     await card(page, 'appearance').getByRole('button', { name: 'Comfortable' }).click()
     expect(await root(page, 'data-density')).toBeNull()
-    expect(await rowH()).toBe('36px')
+    expect(await rowH()).toBe('40px')
   })
 })
 

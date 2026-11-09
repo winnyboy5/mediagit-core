@@ -152,6 +152,9 @@ enum Commands {
     /// Show working tree status
     Status(StatusCmd),
 
+    /// List every file in the working folder with its status
+    LsFiles(LsFilesCmd),
+
     /// Clean up repository and optimize storage
     Gc(GcCmd),
 
@@ -464,6 +467,7 @@ fn main() {
         if !matches!(
             sub,
             "status"
+                | "ls-files"
                 | "version"
                 | "log"
                 | "show"
@@ -736,6 +740,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         Some(Commands::Diff(cmd)) => cmd.execute().await,
         Some(Commands::Show(cmd)) => cmd.execute().await,
         Some(Commands::Status(cmd)) => cmd.execute().await,
+        Some(Commands::LsFiles(cmd)) => cmd.execute().await,
         Some(Commands::Gc(cmd)) => cmd.execute().await,
         Some(Commands::Fsck(cmd)) => cmd.execute().await,
         Some(Commands::Verify(cmd)) => cmd.execute().await,
@@ -790,6 +795,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             println!("  diff         Show changes between commits");
             println!("  show         Show object information");
             println!("  status       Show working tree status");
+            println!("  ls-files     List every file in the working folder with its status");
             println!("  reflog       Show history of ref updates");
             println!("  reset        Reset current HEAD to a given state");
             println!("  revert       Revert existing commits");

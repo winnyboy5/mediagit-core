@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, watch } from 'vue'
 import { RouterLink } from 'vue-router'
-import { ChevronRight, Cloud, File, Folder, RefreshCw } from 'lucide-vue-next'
+import { ChevronRight, Cloud, File, Folder } from 'lucide-vue-next'
+import { useFocusRefresh } from '@/lib/focusRefresh'
 import { api, toApiError } from '@/api'
 import { formatBytes } from '@/components/format'
 import Button from '@/components/Button.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import ErrorState from '@/components/ErrorState.vue'
-import IconButton from '@/components/IconButton.vue'
 import ProgressBar from '@/components/ProgressBar.vue'
 import Select from '@/components/Select.vue'
 import SkeletonRows from '@/components/SkeletonRows.vue'
@@ -32,6 +32,8 @@ onMounted(async () => {
   if (!sync.loaded) await sync.refresh()
   if (rb.remote && !rb.listing && !rb.loading) void rb.load()
 })
+
+useFocusRefresh(() => rb.remote && !rb.loading && rb.open(rb.path))
 
 const remoteOptions = computed(() => sync.remotes.map((r) => ({ value: r.name, label: r.name })))
 const remoteValue = computed({ get: () => rb.remote?.name, set: (v: string | undefined) => v && (rb.remoteName = v) })
@@ -68,13 +70,11 @@ const open = (e: { kind: string; path: string }) => void (e.kind === 'dir' ? rb.
   <section class="rv" :aria-busy="rb.loading || undefined">
     <header class="head">
       <div class="ttl">
-        <h1>Remote Browser</h1>
-        <p>look inside a server repository without cloning</p>
+        <h2 class="pt sr-only">Remote Browser</h2>
       </div>
       <div class="tools">
         <Select v-model="remoteValue" label="Remote" :options="remoteOptions" :disabled="!sync.remotes.length" />
         <Select v-model="rb.ref" label="Version" :options="refOptions" :disabled="!sync.remotes.length" />
-        <IconButton label="Reload listing" variant="secondary" :disabled="rb.loading || !rb.remote" @click="rb.open(rb.path)"><RefreshCw :size="18" /></IconButton>
       </div>
     </header>
 
@@ -85,7 +85,7 @@ const open = (e: { kind: string; path: string }) => void (e.kind === 'dir' ? rb.
     <div v-else-if="noRemote" class="pad">
       <EmptyState title="No remote configured" description="Add your studio server on the Sync page to browse its folders here.">
         <template #icon><Cloud :size="24" /></template>
-        <RouterLink to="/sync" class="link">Go to Sync</RouterLink>
+        <RouterLink to="/branches/sync" class="link">Go to Sync</RouterLink>
       </EmptyState>
     </div>
     <div v-else-if="rb.error && !rb.listing" class="pad">
@@ -180,9 +180,9 @@ const open = (e: { kind: string; path: string }) => void (e.kind === 'dir' ? rb.
   align-items: baseline;
   gap: var(--space-3);
 }
-h1 {
+.pt {
   margin: 0;
-  font-size: var(--fs-2xl);
+  font-size: var(--fs-xl);
 }
 h2 {
   margin: 0;

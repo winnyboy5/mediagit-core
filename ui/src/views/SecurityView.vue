@@ -151,8 +151,7 @@ const sourceText = (s: string | null) => s ?? 'No key available on this machine'
   <section class="sec" :aria-busy="sec.busy || undefined">
     <header class="head">
       <div class="ttl">
-        <h1>Security</h1>
-        <p>sign-in and encryption</p>
+        <h2 class="pt sr-only">Security</h2>
       </div>
     </header>
 
@@ -344,9 +343,9 @@ const sourceText = (s: string | null) => s ?? 'No key available on this machine'
   align-items: baseline;
   gap: var(--space-3);
 }
-h1 {
+.pt {
   margin: 0;
-  font-size: var(--fs-2xl);
+  font-size: var(--fs-xl);
 }
 h2 {
   margin: 0;

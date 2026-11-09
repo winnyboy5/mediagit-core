@@ -56,7 +56,9 @@ export const useCompareStore = defineStore('compare', () => {
       if (root !== repo.path) return
       commits.value = r.commits
       commitsLoaded.value = true
-      if (!from.value) from.value = r.commits[0]?.oid ?? ''
+      // A picked `from` (Compare with previous) will not trigger the watcher below.
+      if (from.value) void compare()
+      else from.value = r.commits[0]?.oid ?? ''
     } catch (e) {
       commitsError.value = toApiError(e)
     }
@@ -76,8 +78,9 @@ export const useCompareStore = defineStore('compare', () => {
     try {
       const r = working.value ? await api.diff(root, null, null, staged.value) : await api.diff(root, from.value, to.value)
       if (mine !== token) return
-      report.value = r
-      if (!r.files.some((f) => f.path === selectedPath.value)) selectedPath.value = null
+      // A null report means nothing differs.
+      report.value = r ?? { mode: working.value ? 'working' : 'commits', from: from.value, to: to.value, files: [] }
+      if (!report.value.files.some((f) => f.path === selectedPath.value)) selectedPath.value = null
     } catch (e) {
       if (mine === token) error.value = toApiError(e)
     } finally {

@@ -98,6 +98,12 @@ pub struct ServerConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jwt_secret: Option<String>,
 
+    /// Storage written into every repo created via `POST /admin/repos` that does
+    /// not name its own. Absent = each repo keeps its own filesystem storage.
+    /// Holds credentials: log it only through [`ServerConfig::redacted`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_storage: Option<mediagit_config::StorageConfig>,
+
     /// Whether `POST /auth/register` is open to anonymous callers. Defaults
     /// to `false` (AU-3): an open endpoint on a server with no grants recorded
     /// let any caller register and read every repository. Bootstrap the first
@@ -283,6 +289,37 @@ fn default_verify_content_on_complete() -> bool {
     true
 }
 
+/// `StorageConfig` with every credential replaced, safe to log.
+pub fn redact_storage(s: &mediagit_config::StorageConfig) -> mediagit_config::StorageConfig {
+    use mediagit_config::{AzureAuth, StorageConfig};
+    const R: &str = "<redacted>";
+    let mut s = s.clone();
+    match &mut s {
+        StorageConfig::S3(c) => {
+            c.access_key_id = c.access_key_id.as_ref().map(|_| R.into());
+            c.secret_access_key = c.secret_access_key.as_ref().map(|_| R.into());
+        }
+        StorageConfig::Azure(c) => {
+            if matches!(&c.auth, Some(a) if !matches!(a, AzureAuth::Emulator)) {
+                c.auth = Some(AzureAuth::ConnectionString { value: R.into() });
+            }
+            c.legacy = Default::default();
+        }
+        _ => {}
+    }
+    s
+}
+
+impl ServerConfig {
+    /// A copy that is safe to write to a log.
+    pub fn redacted(&self) -> Self {
+        let mut c = self.clone();
+        c.jwt_secret = c.jwt_secret.map(|_| "<redacted>".into());
+        c.default_storage = c.default_storage.as_ref().map(redact_storage);
+        c
+    }
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -298,6 +335,7 @@ impl Default for ServerConfig {
             tls_min_version: None,
             enable_auth: false,
             jwt_secret: None,
+            default_storage: None,
             allow_open_registration: default_allow_open_registration(),
             log_format: default_log_format(),
             presigned_url_ttl_seconds: default_presigned_url_ttl(),

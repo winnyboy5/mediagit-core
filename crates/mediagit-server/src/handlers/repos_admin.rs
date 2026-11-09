@@ -29,6 +29,9 @@ pub struct AdminRepoInfo {
 #[derive(Deserialize)]
 pub struct CreateRepoRequest {
     pub name: String,
+    /// Overrides the server's `default_storage` for this repo.
+    #[serde(default)]
+    pub storage: Option<mediagit_config::StorageConfig>,
 }
 
 #[derive(Deserialize)]
@@ -208,6 +211,24 @@ pub async fn create_repo(
         tokio::fs::create_dir_all(repo_path.join(".mediagit"))
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if let Some(storage) = req
+            .storage
+            .clone()
+            .or_else(|| state.default_storage.clone())
+        {
+            let cfg = mediagit_config::Config {
+                storage,
+                ..Default::default()
+            };
+            let dir = repo_path.clone();
+            tokio::task::spawn_blocking(move || cfg.save(dir))
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .map_err(|e| {
+                    tracing::error!("writing repo storage config: {e}");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+        }
         get_or_init_storage(&state, &repo_path).await.map(|_| ())
     }
     .await;

@@ -12,7 +12,7 @@
 //! Layout under the app data dir: `server/{mediagit-server.toml, repos/, auth/, desktop.json,
 //! server.log}`.
 
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
@@ -77,18 +77,48 @@ struct Running {
 
 /// The one local server this app may own.
 pub struct ServerManager {
-    root: PathBuf,
+    root: std::sync::RwLock<PathBuf>,
+    /// Where the chosen folder is remembered; `None` = the folder cannot be changed.
+    located: Option<Located>,
     /// Explicit server binary (tests); else [`ServerManager::locate_bin`].
     bin: Option<PathBuf>,
     running: Mutex<Option<Running>>,
 }
 
+/// The app data dir: home of the saved folder choice, and a folder the server must not swallow.
+struct Located {
+    app_data: PathBuf,
+}
+
+impl Located {
+    fn file(&self) -> PathBuf {
+        self.app_data.join("server-location.json")
+    }
+
+    fn saved_folder(&self) -> Option<PathBuf> {
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(self.file()).ok()?).ok()?;
+        v["path"].as_str().map(PathBuf::from)
+    }
+}
+
 impl ServerManager {
-    /// `default_root` is `<app data>/server`; [`SERVER_DIR_ENV`] overrides it.
+    /// `default_root` is `<app data>/server`. [`SERVER_DIR_ENV`] overrides it and pins it;
+    /// otherwise a folder saved by [`ServerManager::set_folder`] wins.
     pub fn new(default_root: PathBuf) -> Self {
-        let root = std::env::var_os(SERVER_DIR_ENV).map_or(default_root, PathBuf::from);
+        let pinned = std::env::var_os(SERVER_DIR_ENV).map(PathBuf::from);
+        let located = default_root
+            .parent()
+            .map(|p| Located {
+                app_data: p.to_path_buf(),
+            })
+            .filter(|_| pinned.is_none());
+        let root = pinned
+            .or_else(|| located.as_ref().and_then(Located::saved_folder))
+            .unwrap_or(default_root);
         Self {
-            root,
+            root: root.into(),
+            located,
             bin: None,
             running: Mutex::new(None),
         }
@@ -97,10 +127,55 @@ impl ServerManager {
     /// Use `bin` as the server instead of looking for the bundled one.
     pub fn with_bin(root: PathBuf, bin: PathBuf) -> Self {
         Self {
-            root,
+            root: root.into(),
+            located: None,
             bin: Some(bin),
             running: Mutex::new(None),
         }
+    }
+
+    /// Allow [`ServerManager::set_folder`], remembering the choice under `app_data`.
+    #[must_use]
+    pub fn located(mut self, app_data: PathBuf) -> Self {
+        self.located = Some(Located { app_data });
+        self
+    }
+
+    fn root(&self) -> PathBuf {
+        self.root
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Move the server to another folder (`None` = back to `<app data>/server`).
+    ///
+    /// The folder must be absolute, writable, empty or already a server folder, outside any
+    /// repository, and must not contain the app data dir. Refused while the server runs.
+    pub async fn set_folder(&self, path: Option<&str>) -> Result<LocalStatus, EngineError> {
+        let loc = self
+            .located
+            .as_ref()
+            .ok_or_else(|| err("pinned", "the server folder is fixed for this session"))?;
+        if self.is_running().await {
+            return Err(err("running", "stop the server before changing its folder"));
+        }
+        let new_root = if let Some(p) = path {
+            let dir = PathBuf::from(p);
+            check_server_folder(&dir, &loc.app_data)?;
+            std::fs::create_dir_all(&loc.app_data).map_err(|e| err("io", e.to_string()))?;
+            std::fs::write(loc.file(), serde_json::json!({ "path": dir }).to_string())
+                .map_err(|e| err("io", e.to_string()))?;
+            dir
+        } else {
+            let _ = std::fs::remove_file(loc.file());
+            loc.app_data.join("server")
+        };
+        *self
+            .root
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = new_root;
+        Ok(self.status().await)
     }
 
     fn server_bin(&self) -> Result<PathBuf, EngineError> {
@@ -108,13 +183,13 @@ impl ServerManager {
     }
 
     fn config_path(&self) -> PathBuf {
-        self.root.join("mediagit-server.toml")
+        self.root().join("mediagit-server.toml")
     }
     fn saved_path(&self) -> PathBuf {
-        self.root.join("desktop.json")
+        self.root().join("desktop.json")
     }
     fn log_path(&self) -> PathBuf {
-        self.root.join("server.log")
+        self.root().join("server.log")
     }
 
     fn saved(&self) -> Option<Saved> {
@@ -174,7 +249,7 @@ impl ServerManager {
                 .map(|p| format!("http://127.0.0.1:{p}")),
             port,
             pid,
-            data_dir: self.root.display().to_string(),
+            data_dir: self.root().display().to_string(),
             log_path: self.log_path().display().to_string(),
             lan: saved.is_some_and(|s| s.lan),
         }
@@ -187,6 +262,7 @@ impl ServerManager {
         username: &str,
         email: &str,
         password: &Secret,
+        storage: Option<&StorageOpts>,
     ) -> Result<LocalStatus, EngineError> {
         if self.config_path().exists() {
             return Err(err("already_set_up", "the local server is already set up"));
@@ -196,8 +272,10 @@ impl ServerManager {
                 return Err(EngineError::InvalidArgument(format!("bad {what}")));
             }
         }
+        let (storage_argv, storage_lines) =
+            storage.map_or_else(|| Ok((vec![], vec![])), StorageOpts::to_args)?;
         let bin = self.server_bin()?;
-        std::fs::create_dir_all(&self.root).map_err(|e| err("io", e.to_string()))?;
+        std::fs::create_dir_all(self.root()).map_err(|e| err("io", e.to_string()))?;
         let port = free_port().await?;
         let mut cmd = Command::new(bin);
         cmd.arg("init")
@@ -211,8 +289,9 @@ impl ServerManager {
             .args(["--host", "127.0.0.1", "--port"])
             .arg(port.to_string())
             .arg("--data-dir")
-            .arg(self.root.join("repos"))
+            .arg(self.root().join("repos"))
             .args(["--admin-username", username, "--admin-email", email])
+            .args(storage_argv)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -223,6 +302,11 @@ impl ServerManager {
             // A closed pipe means init died early; its exit status says why.
             let _ = stdin.write_all(password.as_bytes()).await;
             let _ = stdin.write_all(b"\n").await;
+            // Storage credentials follow the password line, as `name=value` lines.
+            for line in &storage_lines {
+                let _ = stdin.write_all(line.as_bytes()).await;
+                let _ = stdin.write_all(b"\n").await;
+            }
         }
         let out = child
             .wait_with_output()
@@ -430,3 +514,142 @@ async fn terminate(r: &mut Running) {
         let _ = r.child.wait().await;
     }
 }
+
+/// Why `dir` cannot be the server folder; creates it when it is fine.
+fn check_server_folder(dir: &Path, app_data: &Path) -> Result<(), EngineError> {
+    let bad = |m: &str| EngineError::InvalidArgument(m.into());
+    if !dir.is_absolute() || dir.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err(bad("the server folder must be an absolute path"));
+    }
+    if app_data.starts_with(dir) {
+        return Err(bad("that folder contains the app's own data"));
+    }
+    if dir.ancestors().any(|a| a.join(".mediagit").is_dir()) {
+        return Err(bad("that folder is inside a repository"));
+    }
+    if dir.exists() && !dir.is_dir() {
+        return Err(bad("that path is not a folder"));
+    }
+    let is_server = dir.join("mediagit-server.toml").is_file();
+    let empty = std::fs::read_dir(dir).is_ok_and(|mut d| d.next().is_none());
+    if dir.exists() && !is_server && !empty {
+        return Err(err(
+            "not_empty",
+            "that folder is not empty and is not a server folder",
+        ));
+    }
+    std::fs::create_dir_all(dir).map_err(|e| err("not_writable", e.to_string()))?;
+    let probe = dir.join(".write-test");
+    std::fs::write(&probe, b"").map_err(|e| err("not_writable", e.to_string()))?;
+    let _ = std::fs::remove_file(probe);
+    Ok(())
+}
+
+/// Where the server keeps repository data. Secrets travel on stdin, never argv.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[allow(missing_docs)] // field names are the documentation
+pub struct StorageOpts {
+    /// `filesystem` (default), `s3`, `gcs` or `azure`.
+    pub kind: String,
+    pub bucket: Option<String>,
+    pub region: Option<String>,
+    pub endpoint: Option<String>,
+    pub prefix: Option<String>,
+    pub container: Option<String>,
+    pub account: Option<String>,
+    pub project: Option<String>,
+    pub access_key_id: Option<String>,
+    pub secret_access_key: Option<String>,
+    pub account_key: Option<String>,
+    pub connection_string: Option<String>,
+    pub credentials_path: Option<String>,
+}
+
+impl StorageOpts {
+    /// `(argv, stdin lines)` for `mediagit-server init|storage-test`. Empty for the filesystem default.
+    fn to_args(&self) -> Result<(Vec<String>, Vec<String>), EngineError> {
+        if !["filesystem", "s3", "gcs", "azure"].contains(&self.kind.as_str()) {
+            return Err(EngineError::InvalidArgument("unknown storage kind".into()));
+        }
+        if self.kind == "filesystem" {
+            return Ok((vec![], vec![]));
+        }
+        let clean = |what: &str, v: &Option<String>| -> Result<Option<String>, EngineError> {
+            match v.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                Some(s) if s.chars().any(char::is_control) => {
+                    Err(EngineError::InvalidArgument(format!("bad {what}")))
+                }
+                s => Ok(s.map(str::to_owned)),
+            }
+        };
+        let mut argv = vec![format!("--storage={}", self.kind)];
+        for (flag, v) in [
+            ("bucket", &self.bucket),
+            ("region", &self.region),
+            ("endpoint", &self.endpoint),
+            ("prefix", &self.prefix),
+            ("container", &self.container),
+            ("account", &self.account),
+            ("project", &self.project),
+        ] {
+            if let Some(v) = clean(flag, v)? {
+                argv.push(format!("--storage-{flag}={v}"));
+            }
+        }
+        let mut lines = vec![];
+        for (name, v) in [
+            ("access-key-id", &self.access_key_id),
+            ("secret-access-key", &self.secret_access_key),
+            ("account-key", &self.account_key),
+            ("connection-string", &self.connection_string),
+            ("credentials-path", &self.credentials_path),
+        ] {
+            if let Some(v) = clean(name, v)? {
+                lines.push(format!("{name}={v}"));
+            }
+        }
+        if !lines.is_empty() {
+            argv.push("--storage-secret-stdin".into());
+        }
+        Ok((argv, lines))
+    }
+}
+
+impl ServerManager {
+    /// Check the storage credentials: the server writes, reads and deletes a probe object.
+    /// Returns `{ok, error?}`.
+    pub async fn storage_test(&self, opts: &StorageOpts) -> Result<serde_json::Value, EngineError> {
+        let (argv, lines) = opts.to_args()?;
+        if argv.is_empty() {
+            return Err(EngineError::InvalidArgument(
+                "pick S3, Google Cloud or Azure storage to test".into(),
+            ));
+        }
+        let mut cmd = Command::new(self.server_bin()?);
+        cmd.arg("storage-test")
+            .args(argv)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        hide_window(&mut cmd);
+        let mut child = cmd.spawn().map_err(|e| EngineError::Spawn(e.to_string()))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(lines.join("\n").as_bytes()).await;
+        }
+        let out = tokio::time::timeout(STORAGE_TEST_BUDGET, child.wait_with_output())
+            .await
+            .map_err(|_| err("storage_test_timeout", "the storage did not answer in time"))?
+            .map_err(|e| EngineError::Spawn(e.to_string()))?;
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        serde_json::from_str(stdout.lines().last().unwrap_or_default()).map_err(|_| {
+            err(
+                "storage_test_failed",
+                last_lines(&String::from_utf8_lossy(&out.stderr), 5),
+            )
+        })
+    }
+}
+
+/// How long `storage_test` may take (cloud retries are slow to give up).
+const STORAGE_TEST_BUDGET: Duration = Duration::from_secs(120);

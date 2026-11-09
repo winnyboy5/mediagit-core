@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs'
 import { expect, test, type Page } from '@playwright/test'
 import { fixture, healthy, ipcRelease, mockIpc, RECENT, showHandler } from './ipc-mock'
+import { openSection } from './nav'
 
 // W1 review screenshots: `SHOTS=1 pnpm e2e w1shots`. Skipped in normal runs.
 // Output: ui/.impeccable/review/w1-<view>-<state>-<w>-<theme>.png
@@ -33,8 +34,7 @@ async function open(page: Page, route: string, heading: string, extra: Record<st
     scripts: scripts as never,
     storage: REPO,
   })
-  await page.goto(`/#${route}`, { waitUntil: "domcontentloaded" })
-  await expect(page.getByRole('heading', { name: heading, level: 1 })).toBeVisible()
+  await openSection(page, route, heading)
 }
 
 for (const { w, h } of SIZES) {
@@ -46,7 +46,7 @@ for (const { w, h } of SIZES) {
       await open(page, '/history', 'History', {}, { repo_extract: [{ resolve: { path: '/tmp/p.png', size: 1363148 } }] })
       await expect(page.getByRole('option')).toHaveCount(11)
       await shot(page, 'V3-history-populated', theme, w)
-      await page.getByRole('tab', { name: 'Files at this version' }).click()
+      await page.getByText('Files at this version', { exact: true }).click()
       await page.getByRole('tree', { name: 'Files at this version' }).getByRole('treeitem', { name: /hero_preview/ }).click()
       if (w >= 1200) await expect(page.getByRole('img', { name: /Preview of/ })).toBeVisible()
       await shot(page, 'V3-history-tree', theme, w)
@@ -63,12 +63,12 @@ for (const { w, h } of SIZES) {
     test('V4 inspector', async ({ page }, info) => {
       const s = fixture<{ modified: string[] }>('status_populated')
       await open(page, '/changes', 'Changes', { repo_status: { ...s, modified: [...s.modified, 'art/hero_preview.png'] } })
-      await page.getByRole('tree', { name: 'Files not staged' }).getByRole('treeitem', { name: /hero_preview/ }).click()
+      await page.getByRole('tree', { name: 'Changes' }).getByRole('treeitem', { name: /hero_preview/ }).click()
       if (w < 1200) await page.getByRole('button', { name: 'Show details panel' }).click()
       await expect(page.getByTestId('media-details')).toContainText('1920')
       await shot(page, 'V4-inspector-image', info.project.name, w)
       if (w < 1200) await page.keyboard.press('Escape')
-      await page.getByRole('tree', { name: 'Staged files' }).getByRole('treeitem', { name: /hero\.psd/ }).click()
+      await page.getByRole('tree', { name: 'Changes' }).getByRole('treeitem', { name: /hero\.psd/ }).click()
       if (w < 1200) await page.getByRole('button', { name: 'Show details panel' }).click()
       await expect(page.getByTestId('preview')).toContainText('No preview')
       await shot(page, 'V4-inspector-psd', info.project.name, w)
@@ -116,7 +116,7 @@ for (const { w, h } of SIZES) {
       await open(page, '/sync', 'Sync', {}, { repo_push: fixture('push_progress') })
       await expect(page.getByTestId('sync-state')).toBeVisible()
       await shot(page, 'V7-sync-populated', theme, w)
-      await page.getByRole('button', { name: 'Send', exact: true }).click()
+      await page.getByRole('button', { name: /^Send( \d+)?$/ }).click()
       await ipcRelease(page)
       await expect(page.getByRole('progressbar', { name: 'Uploading media' })).toBeVisible()
       await shot(page, 'V7-sync-busy', theme, w)
@@ -124,7 +124,7 @@ for (const { w, h } of SIZES) {
 
     test('V7 sync failure', async ({ page }, info) => {
       await open(page, '/sync', 'Sync', {}, { repo_push: fixture('push_fail') })
-      await page.getByRole('button', { name: 'Send', exact: true }).click()
+      await page.getByRole('button', { name: /^Send( \d+)?$/ }).click()
       await expect(page.getByRole('alert')).toBeVisible()
       await shot(page, 'V7-sync-error', info.project.name, w)
     })

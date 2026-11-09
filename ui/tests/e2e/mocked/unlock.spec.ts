@@ -49,7 +49,7 @@ test.describe('Unlock: a W1 command (History)', () => {
 
 test.describe('Unlock: a W2 command (Tags & Stash)', () => {
   test('two commands failing together share one prompt and both run again', async ({ page }) => {
-    await boot(page, '/tags', { tag_list: gate(fixture('tags')), stash_list: gate(fixture('stash_list')) })
+    await boot(page, '/tags-stash', { tag_list: gate(fixture('tags')), stash_list: gate(fixture('stash_list')) })
     await expect(dialog(page)).toHaveCount(1)
     await dialog(page).getByLabel('Passphrase').fill('nope')
     await dialog(page).getByRole('button', { name: 'Unlock' }).click()
@@ -81,9 +81,10 @@ test.describe('Unlock: session and lock', () => {
     await dialog(page).getByRole('button', { name: 'Unlock' }).click()
     await expect(page.getByRole('list', { name: 'Storage summary' })).toBeVisible()
     const chip = page.getByTestId('unlocked-chip')
-    await expect(chip).toContainText('Unlocked')
+    await expect(chip).toContainText('unlocked')
     await expectNoAxeViolations(page)
-    await page.getByRole('link', { name: 'Security' }).click()
+    await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Settings' }).click()
+    await page.getByRole('navigation', { name: 'Section' }).getByRole('button', { name: 'Security' }).click()
     await expect(page.getByTestId('unlocked')).toContainText('Unlocked for this session')
     await page.getByRole('button', { name: 'Lock now' }).click()
     await expect(chip).toHaveCount(0)

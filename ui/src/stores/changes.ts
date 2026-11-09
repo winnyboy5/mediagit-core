@@ -4,6 +4,7 @@ import { api, toApiError, type ApiError, type StatusReport } from '@/api'
 import type { FileStatus } from '@/components/StatusBadge.vue'
 import { buildTree, flatRows, flattenTree, type FileEntry, type Row, type TreeNode } from '@/lib/fileTree'
 import { load, save } from '@/lib/persist'
+import { includeAction, mergeChanges, ProgressJoin, tickOf } from '@/lib/staging'
 import { useOpsStore } from './ops'
 import { useRepoStore } from './repo'
 
@@ -13,8 +14,9 @@ export type ViewMode = 'tree' | 'flat'
 /** A file the inspector can describe. */
 export interface SelectedFile {
   path: string
-  status: FileStatus
-  group: Group
+  /** Absent for a file with no change. */
+  status?: FileStatus
+  group?: Group
   size: number | null
 }
 
@@ -40,7 +42,9 @@ export function batchPaths(paths: string[]): string[][] {
   return out
 }
 
-export const rowKey = (group: Group, path: string) => `${group}:${path}`
+/** The Changes list is one list: selection keys carry this prefix. */
+const LIST = 'changes'
+export const rowKey = (path: string) => `${LIST}:${path}`
 
 function entriesOf(s: StatusReport | null): Record<Group, FileEntry[]> {
   if (!s) return { staged: [], unstaged: [] }
@@ -60,7 +64,7 @@ export const useChangesStore = defineStore('changes', () => {
   const ops = useOpsStore()
 
   const mode = ref<ViewMode>(load<ViewMode>('mg.changes.mode', 'tree'))
-  const collapsed = ref<Record<Group, Set<string>>>({ staged: new Set(), unstaged: new Set() })
+  const collapsed = ref<ReadonlySet<string>>(new Set())
   const selected = shallowRef<ReadonlySet<string>>(new Set())
   const anchor = ref<string | null>(null)
   const message = ref('')
@@ -75,17 +79,10 @@ export const useChangesStore = defineStore('changes', () => {
   watch(mode, (m) => save('mg.changes.mode', m))
 
   const entries = computed(() => entriesOf(repo.status))
-  const trees = computed<Record<Group, TreeNode[]>>(() => ({
-    staged: buildTree(entries.value.staged),
-    unstaged: buildTree(entries.value.unstaged),
-  }))
-
-  function rowsFor(group: Group): Row[] {
-    return mode.value === 'tree'
-      ? flattenTree(trees.value[group], collapsed.value[group])
-      : flatRows(entries.value[group])
-  }
-  const rows = computed<Record<Group, Row[]>>(() => ({ staged: rowsFor('staged'), unstaged: rowsFor('unstaged') }))
+  /** Staged and not-staged files as one list; `included` = staged. */
+  const list = computed(() => mergeChanges(entries.value.staged, entries.value.unstaged))
+  const rows = computed<Row[]>(() => (mode.value === 'tree' ? flattenTree(buildTree(list.value), collapsed.value) : flatRows(list.value)))
+  const includedCount = computed(() => list.value.filter((e) => e.included).length)
 
   const counts = computed(() => ({
     staged: entries.value.staged.length,
@@ -96,17 +93,17 @@ export const useChangesStore = defineStore('changes', () => {
   // Selection ------------------------------------------------------------
 
   /** Click semantics: plain = only this row, Ctrl = toggle, Shift = range from the anchor. */
-  function select(group: Group, path: string, mods: { ctrl?: boolean; shift?: boolean } = {}) {
-    const key = rowKey(group, path)
-    const list = rows.value[group]
+  function select(path: string, mods: { ctrl?: boolean; shift?: boolean } = {}) {
+    const key = rowKey(path)
+    const list = rows.value
     const next = new Set(selected.value)
     const anchorKey = anchor.value
-    if (mods.shift && anchorKey?.startsWith(group + ':')) {
-      const a = list.findIndex((r) => rowKey(group, r.node.path) === anchorKey)
-      const b = list.findIndex((r) => rowKey(group, r.node.path) === key)
+    if (mods.shift && anchorKey) {
+      const a = list.findIndex((r) => rowKey(r.node.path) === anchorKey)
+      const b = list.findIndex((r) => rowKey(r.node.path) === key)
       if (a >= 0 && b >= 0) {
         if (!mods.ctrl) next.clear()
-        for (let i = Math.min(a, b); i <= Math.max(a, b); i++) next.add(rowKey(group, list[i]!.node.path))
+        for (let i = Math.min(a, b); i <= Math.max(a, b); i++) next.add(rowKey(list[i]!.node.path))
       }
     } else if (mods.ctrl) {
       if (!next.delete(key)) next.add(key)
@@ -119,8 +116,8 @@ export const useChangesStore = defineStore('changes', () => {
     selected.value = next
   }
 
-  function selectAll(group: Group) {
-    selected.value = new Set(rows.value[group].map((r) => rowKey(group, r.node.path)))
+  function selectAll() {
+    selected.value = new Set(rows.value.map((r) => rowKey(r.node.path)))
   }
 
   function clearSelection() {
@@ -128,25 +125,22 @@ export const useChangesStore = defineStore('changes', () => {
     anchor.value = null
   }
 
-  function toggleFolder(group: Group, path: string) {
-    const next = new Set(collapsed.value[group])
+  function toggleFolder(path: string) {
+    const next = new Set(collapsed.value)
     if (!next.delete(path)) next.add(path)
-    collapsed.value = { ...collapsed.value, [group]: next }
+    collapsed.value = next
   }
 
   /** Files covered by the selection (folders expand to their files). */
   const selectedFiles = computed<SelectedFile[]>(() => {
     const out = new Map<string, SelectedFile>()
-    for (const group of ['staged', 'unstaged'] as const) {
-      const byPath = new Map<string, TreeNode>()
-      for (const r of rows.value[group]) byPath.set(r.node.path, r.node)
-      for (const key of selected.value) {
-        if (!key.startsWith(group + ':')) continue
-        const node = byPath.get(key.slice(group.length + 1))
-        if (!node) continue
-        for (const f of node.isDir ? descendants(node) : [node]) {
-          out.set(rowKey(group, f.path), { path: f.path, status: f.status, group, size: f.size })
-        }
+    const byPath = new Map<string, TreeNode>()
+    for (const r of rows.value) byPath.set(r.node.path, r.node)
+    for (const key of selected.value) {
+      const node = byPath.get(key.slice(LIST.length + 1))
+      if (!node) continue
+      for (const f of node.isDir ? descendants(node) : [node]) {
+        out.set(f.path, { path: f.path, status: f.status ?? 'modified', group: f.included ? 'staged' : 'unstaged', size: f.size })
       }
     }
     return [...out.values()]
@@ -156,7 +150,7 @@ export const useChangesStore = defineStore('changes', () => {
   watch(rows, (r) => {
     if (!selected.value.size) return
     const live = new Set<string>()
-    for (const g of ['staged', 'unstaged'] as const) for (const x of r[g]) live.add(rowKey(g, x.node.path))
+    for (const x of r) live.add(rowKey(x.node.path))
     const kept = [...selected.value].filter((k) => live.has(k))
     if (kept.length !== selected.value.size) selected.value = new Set(kept)
   })
@@ -175,9 +169,11 @@ export const useChangesStore = defineStore('changes', () => {
     try {
       await ops.track(
         { kind: 'add', label, retry: () => void stagePaths(paths, label) },
-        async () => {
+        async (report) => {
+          const join = new ProgressJoin()
           for (const batch of batchPaths(paths)) {
-            const r = await api.add(root, batch, { ...addOpts })
+            const r = await api.add(root, batch, { ...addOpts }, (p) => report(join.map(p)))
+            join.next()
             if (addOpts.dryRun) dry += r.added + r.modified + r.deleted
           }
         },
@@ -195,20 +191,37 @@ export const useChangesStore = defineStore('changes', () => {
 
   const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`
 
-  function stageSelected() {
-    const byPath = new Map(rows.value.unstaged.map((r) => [r.node.path, r.node]))
-    const paths = new Set<string>()
-    let n = 0
-    for (const key of selected.value) {
-      if (!key.startsWith('unstaged:')) continue
-      const p = key.slice('unstaged:'.length)
-      // A folder row stays one path; the CLI stages everything under it.
-      paths.add(p)
-      n += byPath.get(p)?.count ?? 1
-    }
-    return stagePaths([...paths], `Staging ${plural(n, 'file')}`)
+  const nodeOf = (path: string) => rows.value.find((r) => r.node.path === path)?.node
+
+  /** Include or exclude one row (a folder covers every file below it). */
+  function toggleInclude(path: string) {
+    const n = nodeOf(path)
+    if (!n) return
+    if (includeAction(tickOf(n)) === 'unstage') return unstagePaths([path], `Unstaging ${plural(n.count, 'file')}`)
+    return stagePaths([path], `Staging ${plural(n.count - n.included, 'file')}`)
   }
 
+  /** Include (stage) or exclude (unstage) known paths, e.g. a file picked in the explorer. */
+  function setIncluded(paths: string[], on: boolean) {
+    return on ? stagePaths(paths, `Staging ${plural(paths.length, 'file')}`) : unstagePaths(paths, `Unstaging ${plural(paths.length, 'item')}`)
+  }
+
+  /** Selected rows (a folder stays one path; the CLI takes everything under it). */
+  const selectedPaths = () => [...selected.value].map((k) => k.slice(LIST.length + 1))
+  const selectedCount = computed(() => selected.value.size)
+
+  function includeSelected() {
+    const paths = selectedPaths()
+    const n = paths.reduce((t, p) => t + (nodeOf(p)?.count ?? 1) - (nodeOf(p)?.included ?? 0), 0)
+    return stagePaths(paths, `Staging ${plural(n, 'file')}`)
+  }
+
+  function excludeSelected() {
+    const paths = selectedPaths()
+    return unstagePaths(paths, `Unstaging ${plural(paths.length, 'item')}`)
+  }
+
+  /** Include everything that is not yet included. */
   function stageAll() {
     return stagePaths(['.'], `Staging ${plural(counts.value.unstaged, 'file')}`)
   }
@@ -283,11 +296,6 @@ export const useChangesStore = defineStore('changes', () => {
     }
   }
 
-  function unstageSelected() {
-    const paths = [...selected.value].filter((k) => k.startsWith('staged:')).map((k) => k.slice('staged:'.length))
-    return unstagePaths(paths, `Unstaging ${plural(paths.length, 'item')}`)
-  }
-
   const unstageAll = () => unstagePaths(['.'], `Unstaging ${plural(counts.value.staged, 'file')}`)
 
   return {
@@ -297,8 +305,14 @@ export const useChangesStore = defineStore('changes', () => {
     preview,
     canSave,
     needsMessage,
-    unstageSelected,
     unstageAll,
+    toggleInclude,
+    setIncluded,
+    includeSelected,
+    excludeSelected,
+    selectedCount,
+    includedCount,
+    list,
     collapsed,
     selected,
     message,
@@ -313,7 +327,6 @@ export const useChangesStore = defineStore('changes', () => {
     selectAll,
     clearSelection,
     toggleFolder,
-    stageSelected,
     stageAll,
     commit,
   }

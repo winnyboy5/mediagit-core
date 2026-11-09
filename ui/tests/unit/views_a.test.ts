@@ -140,7 +140,7 @@ describe('changes options', () => {
     api.add.mockResolvedValue({ added: 2, modified: 0, deleted: 1, bytes: 0 })
     c.addOpts.force = true
     await c.stageAll()
-    expect(api.add).toHaveBeenCalledWith('/repos/hero', ['.'], expect.objectContaining({ force: true, dryRun: false }))
+    expect(api.add).toHaveBeenCalledWith('/repos/hero', ['.'], expect.objectContaining({ force: true, dryRun: false }), expect.any(Function))
     c.addOpts.dryRun = true
     await c.stageAll()
     expect(c.preview).toContain('3 files would be staged')
@@ -171,8 +171,8 @@ describe('changes options', () => {
     api.unstage.mockResolvedValue({})
     await c.unstageAll()
     expect(api.unstage).toHaveBeenCalledWith('/repos/hero', ['.'])
-    c.select('staged', 'a.psd')
-    await c.unstageSelected()
+    c.select('a.psd')
+    await c.excludeSelected()
     expect(api.unstage).toHaveBeenLastCalledWith('/repos/hero', ['a.psd'])
   })
 })

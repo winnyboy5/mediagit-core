@@ -106,14 +106,14 @@ export const useHistoryStore = defineStore('history', () => {
   /** Graph rows for `visible`; none while searching (a graph of scattered matches misleads). */
   const rows = computed<GraphRow[]>(() => {
     if (searching.value) return []
-    return keep.value ? createGraphLayout().push(visible.value) : allRows.value
+    return keep.value ? createGraphLayout(head.value).push(visible.value) : allRows.value
   })
   const selected = computed(() => commits.value.find((c) => c.oid === selectedOid.value) ?? null)
   const inspectFile = computed(() => (file.value && selectedOid.value ? { ...file.value, rev: selectedOid.value } : null))
 
   function append(r: LogReport, replace: boolean) {
     if (replace) {
-      layout = createGraphLayout()
+      layout = createGraphLayout(headOid(r.refs))
       commits.value = r.commits
       allRows.value = layout.push(r.commits)
     } else {

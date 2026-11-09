@@ -37,10 +37,8 @@ const rows = computed(() => (entry.value?.value ? flattenInfo(entry.value.value)
 h3 {
   margin: 0 0 var(--space-2);
   color: var(--text-muted);
-  font-size: var(--fs-xs);
+  font-size: var(--fs-md);
   font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
 }
 dl {
   display: grid;

@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import { GitCompare, RefreshCw } from "lucide-vue-next";
+import { GitCompare } from "lucide-vue-next";
+import { useFocusRefresh } from "@/lib/focusRefresh";
 import { api } from "@/api";
 import { formatBytes } from "@/components/format";
 import Checkbox from "@/components/Checkbox.vue";
 import EmptyState from "@/components/EmptyState.vue";
 import ErrorState from "@/components/ErrorState.vue";
-import IconButton from "@/components/IconButton.vue";
 import ProgressBar from "@/components/ProgressBar.vue";
 import Select from "@/components/Select.vue";
 import SkeletonRows from "@/components/SkeletonRows.vue";
@@ -26,6 +26,8 @@ onMounted(() => {
   if (!compare.commitsLoaded) void compare.loadCommits();
   else void compare.compare();
 });
+
+useFocusRefresh(() => compare.compare());
 
 const pickOptions = computed(() =>
   compare.commits.map((c) => ({
@@ -144,8 +146,7 @@ const size = (f: { old_size: number | null; new_size: number | null }) =>
   <section class="cmp" :aria-busy="compare.loading || extracting || undefined">
     <header class="head">
       <div class="ttl">
-        <h1>Compare</h1>
-        <p>what changed between two versions</p>
+        <h2 class="pt sr-only">Compare</h2>
       </div>
       <div class="tools">
         <Select
@@ -161,13 +162,6 @@ const size = (f: { old_size: number | null; new_size: number | null }) =>
           :options="toOptions"
           :disabled="!compare.commits.length"
         />
-        <IconButton
-          label="Refresh comparison"
-          variant="secondary"
-          :disabled="compare.loading || !compare.commits.length"
-          @click="compare.compare()"
-          ><RefreshCw :size="18"
-        /></IconButton>
       </div>
     </header>
 
@@ -428,7 +422,7 @@ const size = (f: { old_size: number | null; new_size: number | null }) =>
   display: flex;
   flex-wrap: wrap;
   align-items: flex-end;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: var(--space-3) var(--space-4);
 }
 .ttl {
@@ -436,9 +430,9 @@ const size = (f: { old_size: number | null; new_size: number | null }) =>
   align-items: baseline;
   gap: var(--space-3);
 }
-h1 {
+.pt {
   margin: 0;
-  font-size: var(--fs-2xl);
+  font-size: var(--fs-xl);
 }
 h2,
 h3 {

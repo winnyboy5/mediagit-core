@@ -27,7 +27,7 @@ describe('GraphCell', () => {
 
   it('marks HEAD with an accent ring', () => {
     const w = mount(GraphCell, { props: { row: rows[0]!, height: 36, head: true } })
-    expect(w.find('circle').attributes('stroke')).toBe('var(--accent)')
+    expect(w.find('circle').attributes('stroke')).toBe('var(--text)')
   })
 
   it('sizes the svg to the lanes in use', () => {

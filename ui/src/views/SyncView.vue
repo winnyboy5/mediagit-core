@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { ArrowDown, ArrowUp, Cloud, Download, Ellipsis, RefreshCw, Upload } from 'lucide-vue-next'
+import { ArrowDown, ArrowUp, Cloud, Download, Ellipsis, Plus, RefreshCw, Upload } from 'lucide-vue-next'
 import AlertDialog from '@/components/AlertDialog.vue'
 import Button from '@/components/Button.vue'
 import Dialog from '@/components/Dialog.vue'
@@ -38,11 +38,13 @@ const picked = computed({
   set: (v) => (sync.chosen = v ?? null),
 })
 
+// Get latest / Send live in the hub header; this page keeps Fetch and the options for all three.
 const verbs: { kind: TransferKind; label: string; hint: string; icon: typeof Download }[] = [
   { kind: 'fetch', label: 'Fetch', hint: 'Check what is new without changing your files', icon: RefreshCw },
   { kind: 'pull', label: 'Get latest', hint: 'Bring in your team’s new versions (pull)', icon: Download },
   { kind: 'push', label: 'Send', hint: 'Share your saved versions (push)', icon: Upload },
 ]
+const fetchVerb = verbs[0]!
 
 // The transfer in flight, with every bar that is still moving.
 const active = computed(() => sync.active)
@@ -142,7 +144,7 @@ const OVERWRITE_TEXT: Record<string, { text: string; flag?: string }> = {
   force: { text: 'Replaces the remote branch even if teammates sent new work. Their versions are lost from the remote.', flag: '--force' },
 }
 const pushForm = sync.form.push
-const confirmPushOpen = ref(false)
+const confirmPushOpen = computed({ get: () => sync.confirmPushOpen, set: (v) => (sync.confirmPushOpen = v) })
 const pushWarnings = computed(() => {
   const w: string[] = []
   const r = sync.remote ?? 'the remote'
@@ -151,10 +153,9 @@ const pushWarnings = computed(() => {
   if (!pushForm.delete && pushForm.overwrite === 'force') w.push(`Replaces the branch on ${r} with yours even if teammates sent new work. Their versions on that branch are lost from the remote.`)
   return w
 })
-const pushDeleteNeedsName = computed(() => pushForm.delete && !pushForm.refspecs.trim())
+const pushDeleteNeedsName = computed(() => sync.pushDeleteNeedsName)
 function go(kind: TransferKind) {
-  if (kind === 'push' && sync.pushNeedsConfirm) confirmPushOpen.value = true
-  else void sync.run(kind)
+  void sync.run(kind)
 }
 </script>
 
@@ -162,12 +163,7 @@ function go(kind: TransferKind) {
   <section class="sync" :aria-busy="sync.busy || undefined">
     <header class="head">
       <div class="ttl">
-        <h1>Sync</h1>
-        <p>share work with your team</p>
-      </div>
-      <div class="tools">
-        <IconButton label="Refresh remotes" variant="secondary" :disabled="sync.loading" @click="sync.refresh()"><RefreshCw :size="18" /></IconButton>
-        <Button variant="primary" :disabled="sync.busy" @click="openAdd">Add remote</Button>
+        <h2 class="pt sr-only">Sync</h2>
       </div>
     </header>
 
@@ -193,19 +189,19 @@ function go(kind: TransferKind) {
         <div class="where">
           <h2 id="sync-state">Where you stand</h2>
           <p class="branchline">
-            <span class="mono">{{ branch?.name ?? 'No branch' }}</span>
-            <template v-if="up"> follows <span class="mono">{{ up.name }}</span></template>
+            <span>{{ branch?.name ?? 'No branch' }}</span>
+            <template v-if="up"> follows <span>{{ up.name }}</span></template>
             <template v-else> is not shared yet. Send it to share it.</template>
           </p>
         </div>
         <dl class="counts">
           <div>
             <dt>To send</dt>
-            <dd class="mono" :aria-label="up?.ahead == null ? 'Unknown until you fetch' : `${ahead} versions to send`"><ArrowUp :size="16" aria-hidden="true" />{{ up?.ahead == null ? '--' : ahead }}</dd>
+            <dd class="num" :aria-label="up?.ahead == null ? 'Unknown until you fetch' : `${ahead} versions to send`"><ArrowUp :size="16" aria-hidden="true" />{{ up?.ahead == null ? '--' : ahead }}</dd>
           </div>
           <div>
             <dt>To get</dt>
-            <dd class="mono" :aria-label="up?.behind == null ? 'Unknown until you fetch' : `${behind} versions to get`"><ArrowDown :size="16" aria-hidden="true" />{{ up?.behind == null ? '--' : behind }}</dd>
+            <dd class="num" :aria-label="up?.behind == null ? 'Unknown until you fetch' : `${behind} versions to get`"><ArrowDown :size="16" aria-hidden="true" />{{ up?.behind == null ? '--' : behind }}</dd>
           </div>
           <div>
             <dt>Last synced</dt>
@@ -217,24 +213,20 @@ function go(kind: TransferKind) {
 
       <section class="actions" aria-labelledby="sync-act">
         <div class="arow">
-          <h2 id="sync-act">Sync with <span v-if="sync.remotes.length === 1" class="mono rname">{{ sync.remote }}</span></h2>
+          <h2 id="sync-act">Sync with <span v-if="sync.remotes.length === 1" class="rname">{{ sync.remote }}</span></h2>
           <Select v-if="sync.remotes.length > 1" v-model="picked" label="Remote" :options="remoteOptions" :disabled="sync.busy" />
         </div>
         <div class="verbs">
-          <div v-for="v in verbs" :key="v.kind" class="verb">
-            <Button
-              :variant="(v.kind === 'push' && ahead > 0) || (v.kind === 'pull' && behind > 0 && ahead === 0) ? 'primary' : 'secondary'"
-              :disabled="sync.busy || !sync.remote || (v.kind === 'push' && pushDeleteNeedsName)"
-              :loading="active?.kind === v.kind"
-              @click="go(v.kind)"
-            >
-              <component :is="v.icon" v-if="active?.kind !== v.kind" :size="16" aria-hidden="true" /> {{ v.label }}
+          <div class="verb">
+            <Button variant="secondary" :disabled="sync.busy || !sync.remote" :loading="active?.kind === 'fetch'" @click="go('fetch')">
+              <component :is="fetchVerb.icon" v-if="active?.kind !== 'fetch'" :size="16" aria-hidden="true" /> {{ fetchVerb.label }}
             </Button>
-            <span class="hint">{{ v.hint }}</span>
+            <span class="hint">{{ fetchVerb.hint }}</span>
           </div>
         </div>
 
         <MoreOptions data-testid="sync-more">
+          <p class="hint">These options apply to Fetch and to Get latest and Send at the top of the page.</p>
           <SegmentedControl v-model="optKind" label="Options for" :options="verbs.map((v) => ({ value: v.kind, label: v.label }))" />
           <div v-if="optKind === 'fetch'" class="opts">
             <TextField v-model="sync.form.fetch.branch" label="Only this branch" hint="Leave empty for the current branch." placeholder="main" mono :disabled="sync.form.fetch.all" />
@@ -290,12 +282,15 @@ function go(kind: TransferKind) {
       </section>
 
       <section class="remotes" aria-labelledby="sync-remotes">
-        <h2 id="sync-remotes">Remotes</h2>
+        <div class="arow">
+          <h2 id="sync-remotes">Remotes</h2>
+          <Button :disabled="sync.busy" @click="openAdd"><Plus :size="16" aria-hidden="true" /> Add remote</Button>
+        </div>
         <ul>
           <li v-for="r in sync.remotes" :key="r.name" :data-remote="r.name">
             <Cloud :size="18" class="ci" aria-hidden="true" />
             <div class="rn">
-              <strong class="mono">{{ r.name }}</strong>
+              <strong>{{ r.name }}</strong>
               <span class="mono url" :title="r.url">{{ r.url }}</span>
             </div>
             <DropdownMenu :items="REMOTE_MENU" @select="(id) => pickAction(r, id)">
@@ -407,9 +402,9 @@ function go(kind: TransferKind) {
   align-items: baseline;
   gap: var(--space-3);
 }
-h1 {
+.pt {
   margin: 0;
-  font-size: var(--fs-2xl);
+  font-size: var(--fs-xl);
 }
 .ttl p {
   margin: 0;
@@ -468,7 +463,7 @@ h2 {
   font-size: var(--fs-xl);
   font-weight: 600;
 }
-.counts dd:not(.mono) {
+.counts dd:not(.num) {
   font-size: var(--fs-md);
   font-weight: 500;
 }
@@ -489,9 +484,13 @@ h2 {
   letter-spacing: 0;
 }
 .verbs {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: var(--space-4);
+}
+.verbs > .hint {
+  margin: 0;
 }
 .verb {
   display: grid;
@@ -618,10 +617,5 @@ h2 {
   margin: 0;
   color: var(--danger);
   font-size: var(--fs-sm);
-}
-@media (max-width: 1100px) {
-  .verbs {
-    grid-template-columns: 1fr;
-  }
 }
 </style>

@@ -7,22 +7,18 @@ import IconButton from '@/components/IconButton.vue'
 import { formatBytes } from '@/components/format'
 import { extOf, mediaKind, type MediaKind } from '@/components/media'
 import StatusBadge from '@/components/StatusBadge.vue'
-import type { InspectFile } from '@/lib/inspect'
 import { shortOid } from '@/lib/history'
-import { useChangesStore } from '@/stores/changes'
-import { useHistoryStore } from '@/stores/history'
 import { fileKey, useInspectorStore } from '@/stores/inspector'
 import { useShellStore } from '@/stores/shell'
+import { useInspectedFiles } from './inspected'
 import InspectorHistory from './inspector/InspectorHistory.vue'
 import InspectorLock from './inspector/InspectorLock.vue'
 import InspectorMeta from './inspector/InspectorMeta.vue'
 import InspectorPreview from './inspector/InspectorPreview.vue'
 
-const changes = useChangesStore()
-const history = useHistoryStore()
 const shell = useShellStore()
 const route = useRoute()
-const inHistory = computed(() => route.path === '/history')
+const inHistory = computed(() => route.meta.hub === 'history')
 
 const KIND_LABEL: Record<MediaKind, string> = {
   image: 'Image',
@@ -36,11 +32,7 @@ const KIND_LABEL: Record<MediaKind, string> = {
 const STATUS_LABEL = { added: 'Added', modified: 'Modified', deleted: 'Deleted', locked: 'Locked', untracked: 'New, not staged', conflict: 'Conflict' } as const
 
 // History describes one file of the selected version; Changes describes the working copy.
-const files = computed<InspectFile[]>(() =>
-  inHistory.value
-    ? history.inspectFile ? [history.inspectFile] : []
-    : changes.selectedFiles.map((f) => ({ ...f, rev: null })),
-)
+const files = useInspectedFiles()
 const one = computed(() => (files.value.length === 1 ? files.value[0]! : null))
 const name = computed(() => one.value?.path.split('/').pop() ?? '')
 
@@ -74,18 +66,11 @@ const breakdown =computed(() => {
   <aside class="insp" aria-label="Details" data-testid="inspector">
     <header>
       <h2>Details</h2>
-      <IconButton label="Hide details panel" size="sm" @click="shell.toggleInspector()"><PanelRightClose :size="18" /></IconButton>
+      <IconButton v-if="shell.narrow" label="Hide details panel" size="sm" @click="shell.toggleInspector()"><PanelRightClose :size="18" /></IconButton>
     </header>
 
     <div v-if="!files.length" class="none">
-      <template v-if="inHistory">
-        <p>Choose a file under "Files at this version" to see it here.</p>
-        <p class="hint">You see the file as it was saved in that version.</p>
-      </template>
-      <template v-else>
-        <p>Select a file to see its details.</p>
-        <p class="hint">Hold Ctrl or Shift to select several.</p>
-      </template>
+      <p>{{ inHistory ? 'Choose a file in this version to see it here.' : 'Select a file to see its details.' }}</p>
     </div>
 
     <template v-else-if="one">
@@ -105,7 +90,7 @@ const breakdown =computed(() => {
           <dt>Type</dt>
           <dd>{{ KIND_LABEL[mediaKind(one.path).kind] }}<template v-if="extOf(one.path)"> · .{{ extOf(one.path) }}</template></dd>
           <dt>Size</dt>
-          <dd v-if="fileSize != null" class="mono">{{ formatBytes(fileSize) }}</dd>
+          <dd v-if="fileSize != null">{{ formatBytes(fileSize) }}</dd>
           <dd v-else>Not reported</dd>
           <template v-if="one.status">
             <dt>Status</dt>
@@ -113,7 +98,7 @@ const breakdown =computed(() => {
           </template>
           <template v-if="one.group">
             <dt>Section</dt>
-            <dd>{{ one.group === 'staged' ? 'Staged for the next version' : 'Not staged' }}</dd>
+            <dd>{{ one.group === 'staged' ? 'Included in the next version' : 'Not included yet' }}</dd>
           </template>
           <template v-if="one.rev">
             <dt>Version</dt>
@@ -133,7 +118,7 @@ const breakdown =computed(() => {
         <p class="big">{{ files.length }} files selected</p>
         <dl>
           <dt>Total size</dt>
-          <dd class="mono">{{ knownSize != null ? formatBytes(knownSize) : 'Not reported' }}</dd>
+          <dd>{{ knownSize != null ? formatBytes(knownSize) : 'Not reported' }}</dd>
         </dl>
       </section>
       <section aria-labelledby="insp-types">
@@ -142,7 +127,7 @@ const breakdown =computed(() => {
           <li v-for="b in breakdown" :key="b.kind">
             <FileIcon :path="b.sample" />
             <span class="k">{{ KIND_LABEL[b.kind] }}</span>
-            <span class="n mono">{{ b.n }}</span>
+            <span class="n">{{ b.n }}</span>
           </li>
         </ul>
       </section>
@@ -175,10 +160,8 @@ h2 {
 h3 {
   margin: 0 0 var(--space-2);
   color: var(--text-muted);
-  font-size: var(--fs-xs);
+  font-size: var(--fs-md);
   font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
 }
 .none {
   display: grid;

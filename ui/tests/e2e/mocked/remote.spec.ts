@@ -28,7 +28,7 @@ async function boot(page: Page, b: Boot = {}) {
     storage: REPO,
   })
   await page.goto('/#/remote', { waitUntil: 'domcontentloaded' })
-  await expect(page.getByRole('heading', { name: 'Remote Browser', level: 1 })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Remote Browser', level: 2 })).toBeVisible()
 }
 
 test.describe('Remote Browser: states', () => {

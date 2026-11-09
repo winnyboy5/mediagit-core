@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, useId } from 'vue'
 import { useVirtualizer } from '@tanstack/vue-virtual'
-import { ChevronDown, ChevronRight, Folder } from 'lucide-vue-next'
+import { Check, ChevronDown, ChevronRight, Folder, Minus } from 'lucide-vue-next'
 import FileRow from '@/components/FileRow.vue'
-import StatusBadge from '@/components/StatusBadge.vue'
 import { formatBytes } from '@/components/format'
 import type { Row } from '@/lib/fileTree'
+import { tickOf } from '@/lib/staging'
 
 export interface Mods {
   ctrl?: boolean
@@ -22,11 +22,17 @@ const props = defineProps<{
   progress?: { path: string; value: number | null }
   /** No status badges (a tree of files at a version has no change status). */
   plain?: boolean
+  /** Include checkboxes: on every row (Changes) or on changed files only (the explorer). */
+  checks?: 'all' | 'files'
+  /** Explorer rows: folders say "N changed" instead of showing a status. */
+  explorer?: boolean
 }>()
 const emit = defineEmits<{
   select: [path: string, mods: Mods]
   toggle: [path: string]
   selectAll: []
+  /** Include or exclude the row (Space, or its checkbox). */
+  check: [path: string]
 }>()
 
 const el = ref<HTMLElement | null>(null)
@@ -52,6 +58,12 @@ const virtual = useVirtualizer(
 const items = computed(() => virtual.value.getVirtualItems())
 const total = computed(() => virtual.value.getTotalSize())
 
+const hasCheck = (r: Row) => (props.checks === 'all' ? true : props.checks === 'files' && !r.node.isDir && !!r.node.status)
+const tick = (r: Row) => tickOf(r.node)
+const aria = (r: Row): boolean | 'mixed' => {
+  const t = tick(r)
+  return t === 'indeterminate' ? 'mixed' : t
+}
 const key = (r: Row) => `${props.group}:${r.node.path}`
 const idx = computed(() => props.rows.findIndex((r) => r.node.path === active.value))
 const activeId = computed(() => (idx.value >= 0 ? `${uid}-${idx.value}` : undefined))
@@ -99,7 +111,8 @@ function onKey(e: KeyboardEvent) {
       if (r?.node.isDir) emit('toggle', r.node.path)
       break
     case ' ':
-      if (r) emit('select', r.node.path, { ctrl: true })
+      if (r && hasCheck(r)) emit('check', r.node.path)
+      else if (r) emit('select', r.node.path, { ctrl: true })
       break
     case 'a':
     case 'A':
@@ -147,22 +160,53 @@ function onKey(e: KeyboardEvent) {
                 <ChevronDown v-if="rows[v.index]!.expanded" :size="16" />
                 <ChevronRight v-else :size="16" />
               </span>
+              <button
+                v-if="hasCheck(rows[v.index]!)"
+                type="button"
+                role="checkbox"
+                tabindex="-1"
+                class="ck"
+                :aria-checked="aria(rows[v.index]!)"
+                :aria-label="`Include ${rows[v.index]!.node.name}`"
+                @click.stop="emit('check', rows[v.index]!.node.path)"
+              >
+                <Minus v-if="tick(rows[v.index]!) === 'indeterminate'" :size="14" :stroke-width="3" aria-hidden="true" />
+                <Check v-else-if="tick(rows[v.index]!)" :size="14" :stroke-width="3" aria-hidden="true" />
+              </button>
               <Folder :size="18" class="ficon" aria-hidden="true" />
               <span class="nm">{{ rows[v.index]!.node.name }}/</span>
-              <span class="cnt">{{ rows[v.index]!.node.count }} {{ rows[v.index]!.node.count === 1 ? 'file' : 'files' }}</span>
-              <span v-if="rows[v.index]!.node.size != null" class="sz mono">{{ formatBytes(rows[v.index]!.node.size!) }}</span>
-              <StatusBadge v-if="!plain" :status="rows[v.index]!.node.status" />
+              <template v-if="explorer">
+                <span v-if="rows[v.index]!.node.changed" class="cnt">{{ rows[v.index]!.node.changed }} changed</span>
+              </template>
+              <template v-else>
+                <span class="cnt">{{ rows[v.index]!.node.count }} {{ rows[v.index]!.node.count === 1 ? 'file' : 'files' }}</span>
+                <span v-if="rows[v.index]!.node.size != null" class="sz">{{ formatBytes(rows[v.index]!.node.size!) }}</span>
+              </template>
             </div>
           </template>
-          <FileRow
-            v-else
-            :path="rows[v.index]!.node.name"
-            :size="rows[v.index]!.node.size ?? undefined"
-            :status="plain ? undefined : rows[v.index]!.node.status"
-            :selected="selected.has(key(rows[v.index]!))"
-            :progress="progress && progress.path === rows[v.index]!.node.path ? progress.value : undefined"
-            :class="{ nested: rows[v.index]!.node.depth > 0 }"
-          />
+          <div v-else class="frow" :class="{ ignored: rows[v.index]!.node.ignored, ckd: checks }">
+            <button
+              v-if="hasCheck(rows[v.index]!)"
+              type="button"
+              role="checkbox"
+              tabindex="-1"
+              class="ck"
+              :aria-checked="aria(rows[v.index]!)"
+              :aria-label="`Include ${rows[v.index]!.node.name}`"
+              @click.stop="emit('check', rows[v.index]!.node.path)"
+            >
+              <Check v-if="tick(rows[v.index]!)" :size="14" :stroke-width="3" aria-hidden="true" />
+            </button>
+            <span v-else-if="checks" class="ck-gap" aria-hidden="true" />
+            <FileRow
+              :path="rows[v.index]!.node.name"
+              :size="explorer ? undefined : (rows[v.index]!.node.size ?? undefined)"
+              :status="plain ? undefined : (rows[v.index]!.node.status ?? undefined)"
+              :selected="selected.has(key(rows[v.index]!))"
+              :progress="progress && progress.path === rows[v.index]!.node.path ? progress.value : undefined"
+              :class="{ nested: rows[v.index]!.node.depth > 0 && !checks }"
+            />
+          </div>
         </div>
       </div>
     </div>
@@ -215,6 +259,43 @@ function onKey(e: KeyboardEvent) {
 }
 .dir.selected {
   background: var(--accent-soft);
+}
+.frow {
+  display: flex;
+  align-items: center;
+  height: 100%;
+}
+.frow > :deep(.row) {
+  flex: 1;
+  min-width: 0;
+}
+.frow.ckd {
+  padding-left: calc(var(--space-4) + 20px + var(--space-3));
+}
+.ck-gap {
+  flex: none;
+  width: 20px;
+}
+.frow.ignored {
+  opacity: 0.6;
+}
+.ck {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--on-accent);
+  cursor: pointer;
+}
+.ck[aria-checked='true'],
+.ck[aria-checked='mixed'] {
+  border-color: var(--accent);
+  background: var(--accent);
 }
 .chev {
   display: grid;

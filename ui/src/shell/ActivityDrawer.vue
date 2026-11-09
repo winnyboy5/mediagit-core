@@ -8,10 +8,10 @@ import OpRow from './OpRow.vue'
 const ops = useOpsStore()
 const shell = useShellStore()
 
-// The bar's own Activity button toggles the drawer; don't let the outside-press close it first.
+// The pill toggles the drawer; don't let the outside-press close it first.
 function keepOpenForBar(e: Event) {
   const t = (e as CustomEvent<{ originalEvent: Event }>).detail?.originalEvent?.target
-  if (t instanceof Element && t.closest('[data-activity-bar]')) e.preventDefault()
+  if (t instanceof Element && t.closest('[data-activity-pill]')) e.preventDefault()
 }
 </script>
 
@@ -91,10 +91,8 @@ h3 {
   padding: var(--space-3) var(--space-5);
   background: var(--surface-2);
   color: var(--text-muted);
-  font-size: var(--fs-xs);
+  font-size: var(--fs-md);
   font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
 }
 ul {
   margin: 0;

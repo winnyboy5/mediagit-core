@@ -3,19 +3,21 @@ import { expectFocusRing, expectNoAxeViolations } from './helpers'
 import { fixture, healthy, ipcCalls, ipcRelease, mockIpc, RECENT } from './ipc-mock'
 
 const REPO = { 'mg.repo': JSON.stringify('/repos/hero-film'), 'mg.recent': RECENT }
-const bar = (page: Page) => page.locator('[data-activity-bar]')
+const pill = (page: Page) => page.locator('[data-activity-pill]')
+// The rail's quiet Activity button is the way in when nothing is running.
+const toggle = (page: Page) => page.getByRole('navigation', { name: 'Main' }).getByRole('button', { name: /^Activity/ })
 
 async function boot(page: Page, scripts = {}) {
   await mockIpc(page, { commands: healthy(), storage: REPO, scripts })
   await page.goto('/#/changes')
-  await expect(page.getByRole('heading', { name: 'Changes', level: 1 })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Changes', level: 2 })).toBeVisible()
 }
 
 test.describe('Activity bar and drawer', () => {
-  test('idle: bar is always visible and says so; drawer explains the empty list', async ({ page }) => {
+  test('idle: no pill; the drawer still opens from the rail and explains the empty list', async ({ page }) => {
     await boot(page)
-    await expect(bar(page)).toContainText('No activity')
-    await bar(page).getByRole('button', { name: 'Activity' }).click()
+    await expect(pill(page)).toHaveCount(0)
+    await toggle(page).click()
     const drawer = page.getByTestId('activity-drawer')
     await expect(drawer).toContainText('Nothing has run yet')
     await expectNoAxeViolations(page)
@@ -23,26 +25,24 @@ test.describe('Activity bar and drawer', () => {
 
   test('drawer opens from the bar, closes with Escape and with Close; focus ring is visible', async ({ page }) => {
     await boot(page)
-    const toggle = bar(page).getByRole('button', { name: 'Activity' })
-    await toggle.focus()
+    await toggle(page).focus()
     await expectFocusRing(page)
     await page.keyboard.press('Enter')
     await expect(page.getByTestId('activity-drawer')).toBeVisible()
-    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    await expect(toggle(page)).toHaveAttribute('aria-expanded', 'true')
     await page.keyboard.press('Escape')
     await expect(page.getByTestId('activity-drawer')).toHaveCount(0)
-    await toggle.click()
+    await toggle(page).click()
     await page.getByTestId('activity-drawer').getByRole('button', { name: 'Close' }).click()
     await expect(page.getByTestId('activity-drawer')).toHaveCount(0)
   })
 
-  test('a running op shows in the bar after the anti-flicker delay; finish lists it and toasts success', async ({ page }) => {
+  test('a running op shows in the header pill after the anti-flicker delay; finish lists it and toasts success', async ({ page }) => {
     await boot(page, { repo_add: [{ hold: true }, { resolve: null }] })
-    await page.getByRole('button', { name: 'Stage all', exact: true }).click()
-    await expect(bar(page)).toContainText('Staging 6 files')
+    await page.getByRole('button', { name: 'Include all', exact: true }).click()
+    await expect(pill(page)).toContainText('Staging 6 files')
     // Local ops have no cancel; only push/pull/fetch/clone do.
-    await expect(bar(page).getByRole('button', { name: 'Cancel' })).toHaveCount(0)
-    await bar(page).getByRole('button', { name: 'Activity' }).click()
+    await pill(page).click()
     const drawer = page.getByTestId('activity-drawer')
     await expect(drawer.getByRole('heading', { name: 'Running' })).toBeVisible()
     await expect(drawer.getByRole('button', { name: /Cancel/ })).toHaveCount(0)
@@ -55,8 +55,8 @@ test.describe('Activity bar and drawer', () => {
 
   test('a failed op appears under Failed with code + message and Retry that re-runs it', async ({ page }) => {
     await boot(page, { repo_add: [{ reject: { code: 'E_LOCKED', message: 'Another save is running.' } }] })
-    await page.getByRole('button', { name: 'Stage all', exact: true }).click()
-    await bar(page).getByRole('button', { name: 'Activity' }).click()
+    await page.getByRole('button', { name: 'Include all', exact: true }).click()
+    await toggle(page).click()
     const drawer = page.getByTestId('activity-drawer')
     await expect(drawer.getByRole('heading', { name: 'Failed' })).toBeVisible()
     await expect(drawer).toContainText('E_LOCKED')
@@ -66,7 +66,7 @@ test.describe('Activity bar and drawer', () => {
     await expect.poll(async () => (await ipcCalls(page, 'repo_add')).length).toBe(2)
   })
 
-  test('clone in progress: bar shows phase and -- until two samples are 1 s apart; Cancel is offered', async ({ page }) => {
+  test('clone in progress: the pill shows the op; the drawer row shows -- until two samples are 1 s apart and offers Cancel', async ({ page }) => {
     await mockIpc(page, { commands: healthy(), storage: REPO, scripts: { repo_clone: fixture('clone_progress') } })
     await page.goto('/#/welcome')
     await page.getByRole('button', { name: /Clone/ }).click()
@@ -74,10 +74,14 @@ test.describe('Activity bar and drawer', () => {
     await page.getByLabel('Save into').fill('/repos/hero-film')
     await page.getByRole('dialog').getByRole('button', { name: 'Clone', exact: true }).click()
     await ipcRelease(page)
-    await expect(bar(page)).toContainText('Downloading media')
-    await expect(bar(page)).toContainText('ETA --')
-    // The modal clone dialog hides the bar from the accessibility tree, so match by CSS.
-    await expect(bar(page).locator('button', { hasText: 'Cancel' })).toBeVisible()
-    await expect(bar(page).locator('[role="progressbar"]')).toHaveAttribute('aria-valuenow', '100000')
+    // The modal clone dialog hides the page from the accessibility tree, so match by CSS.
+    await expect(pill(page)).toContainText('Clone hero-film')
+    await expect(pill(page).locator('[role="progressbar"]')).toHaveAttribute('aria-valuenow', '100000')
+    // The modal dialog blocks pointer input; the pill's own click handler is what is under test.
+    await pill(page).dispatchEvent('click')
+    const drawer = page.getByTestId('activity-drawer')
+    await expect(drawer).toContainText('Downloading media')
+    await expect(drawer).toContainText('ETA --')
+    await expect(drawer.locator('button', { hasText: 'Cancel' })).toBeVisible()
   })
 })

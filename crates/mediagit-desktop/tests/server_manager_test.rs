@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use mediagit_desktop::engine::{EngineError, Secret};
-use mediagit_desktop::server_manager::ServerManager;
+use mediagit_desktop::server_manager::{ServerManager, StorageOpts};
 
 const PW: &str = "fake-admin horse battery 42";
 
@@ -31,9 +31,14 @@ fn manager(dir: &Path) -> ServerManager {
 }
 
 async fn set_up(m: &ServerManager) {
-    m.setup("root", "root@example.com", &Secret::new(PW.into()).unwrap())
-        .await
-        .unwrap();
+    m.setup(
+        "root",
+        "root@example.com",
+        &Secret::new(PW.into()).unwrap(),
+        None,
+    )
+    .await
+    .unwrap();
 }
 
 fn code(e: &EngineError) -> &str {
@@ -72,7 +77,12 @@ async fn setup_sends_the_password_on_stdin_only() {
     );
     assert_eq!(m.status().await.state, "stopped");
     let again = m
-        .setup("root", "root@example.com", &Secret::new(PW.into()).unwrap())
+        .setup(
+            "root",
+            "root@example.com",
+            &Secret::new(PW.into()).unwrap(),
+            None,
+        )
         .await
         .unwrap_err();
     assert_eq!(code(&again), "already_set_up");
@@ -179,10 +189,226 @@ async fn setup_failure_leaves_no_config_behind() {
     // Secret::new refuses an empty password, so reach the fake's own refusal with a blank
     // line smuggled through a username check instead: a bad username never spawns init.
     let e = m
-        .setup("-bad", "a@b.c", &Secret::new(PW.into()).unwrap())
+        .setup("-bad", "a@b.c", &Secret::new(PW.into()).unwrap(), None)
         .await
         .unwrap_err();
     assert!(matches!(e, EngineError::InvalidArgument(_)));
     assert_eq!(m.status().await.state, "not_set_up");
     assert!(Secret::new(String::new()).is_err());
+}
+
+fn s3_opts() -> StorageOpts {
+    StorageOpts {
+        kind: "s3".into(),
+        bucket: Some("media".into()),
+        endpoint: Some("http://127.0.0.1:9000".into()),
+        access_key_id: Some("AKIAFAKE".into()),
+        secret_access_key: Some("s3cret/key=1".into()),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn setup_passes_storage_flags_in_argv_and_secrets_on_stdin_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let m = manager(tmp.path());
+    m.setup(
+        "root",
+        "root@example.com",
+        &Secret::new(PW.into()).unwrap(),
+        Some(&s3_opts()),
+    )
+    .await
+    .unwrap();
+    let cfg = tmp.path().join("mediagit-server.toml");
+    let cfg = cfg.to_str().unwrap();
+    let argv = std::fs::read_to_string(format!("{cfg}.initargs")).unwrap();
+    for want in [
+        "--storage=s3",
+        "--storage-bucket=media",
+        "--storage-endpoint=http://127.0.0.1:9000",
+        "--storage-secret-stdin",
+    ] {
+        assert!(argv.contains(want), "{want} missing from {argv}");
+    }
+    assert!(
+        !argv.contains("s3cret") && !argv.contains("AKIAFAKE"),
+        "secret in argv"
+    );
+    assert_eq!(std::fs::read_to_string(format!("{cfg}.stdin")).unwrap(), PW);
+    let secrets = std::fs::read_to_string(format!("{cfg}.secrets")).unwrap();
+    assert!(
+        secrets.contains("access-key-id=AKIAFAKE")
+            && secrets.contains("secret-access-key=s3cret/key=1")
+    );
+}
+
+#[tokio::test]
+async fn bad_storage_options_are_refused_before_anything_runs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let m = manager(tmp.path());
+    let pw = Secret::new(PW.into()).unwrap();
+    for opts in [
+        StorageOpts {
+            kind: "ftp".into(),
+            ..Default::default()
+        },
+        StorageOpts {
+            bucket: Some("a\nb".into()),
+            ..s3_opts()
+        },
+        StorageOpts {
+            secret_access_key: Some("x\ny=z".into()),
+            ..s3_opts()
+        },
+    ] {
+        let e = m
+            .setup("root", "root@example.com", &pw, Some(&opts))
+            .await
+            .unwrap_err();
+        assert!(matches!(e, EngineError::InvalidArgument(_)), "{e:?}");
+    }
+    assert_eq!(m.status().await.state, "not_set_up");
+}
+
+#[tokio::test]
+async fn storage_test_reports_ok_and_denied() {
+    let tmp = tempfile::tempdir().unwrap();
+    let m = manager(tmp.path());
+    assert_eq!(m.storage_test(&s3_opts()).await.unwrap()["ok"], true);
+    let denied = StorageOpts {
+        access_key_id: Some("bad-key".into()),
+        ..s3_opts()
+    };
+    let v = m.storage_test(&denied).await.unwrap();
+    assert_eq!(
+        (v["ok"].clone(), v["error"].clone()),
+        (false.into(), "denied".into())
+    );
+    let fs = StorageOpts {
+        kind: "filesystem".into(),
+        ..Default::default()
+    };
+    assert!(matches!(
+        m.storage_test(&fs).await,
+        Err(EngineError::InvalidArgument(_))
+    ));
+}
+
+fn located(app_data: &Path) -> ServerManager {
+    ServerManager::with_bin(app_data.join("server"), fake_bin()).located(app_data.to_path_buf())
+}
+
+fn bad_folder(r: Result<impl Sized, EngineError>) -> String {
+    r.err().map(|e| e.code().to_owned()).unwrap_or_default()
+}
+
+#[tokio::test]
+async fn set_folder_validation_branches() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = tmp.path().join("appdata");
+    std::fs::create_dir(&app).unwrap();
+    let m = located(&app);
+    let p = |x: &Path| x.to_str().unwrap().to_owned();
+
+    // not absolute / parent traversal
+    assert_eq!(
+        bad_folder(m.set_folder(Some("relative/dir")).await),
+        "invalid_argument"
+    );
+    assert_eq!(
+        bad_folder(
+            m.set_folder(Some(&p(&tmp.path().join("a").join("..").join("b"))))
+                .await
+        ),
+        "invalid_argument"
+    );
+    // contains the app data dir
+    assert_eq!(
+        bad_folder(m.set_folder(Some(&p(tmp.path()))).await),
+        "invalid_argument"
+    );
+    assert_eq!(
+        bad_folder(m.set_folder(Some(&p(&app))).await),
+        "invalid_argument"
+    );
+    // inside a repository
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(repo.join(".mediagit")).unwrap();
+    assert_eq!(
+        bad_folder(m.set_folder(Some(&p(&repo.join("srv")))).await),
+        "invalid_argument"
+    );
+    // a file
+    let file = tmp.path().join("file");
+    std::fs::write(&file, b"x").unwrap();
+    assert_eq!(
+        bad_folder(m.set_folder(Some(&p(&file))).await),
+        "invalid_argument"
+    );
+    // non-empty, not a server folder
+    let full = tmp.path().join("full");
+    std::fs::create_dir(&full).unwrap();
+    std::fs::write(full.join("photo.psd"), b"x").unwrap();
+    assert_eq!(bad_folder(m.set_folder(Some(&p(&full))).await), "not_empty");
+    // nothing above changed the folder
+    assert_eq!(m.status().await.data_dir, p(&app.join("server")));
+}
+
+#[tokio::test]
+async fn set_folder_accepts_empty_and_existing_server_folders_and_remembers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = tmp.path().join("appdata");
+    std::fs::create_dir(&app).unwrap();
+    let m = located(&app);
+    let empty = tmp.path().join("new-srv");
+    let st = m.set_folder(Some(empty.to_str().unwrap())).await.unwrap();
+    assert_eq!(
+        (st.state, st.data_dir),
+        ("not_set_up", empty.display().to_string())
+    );
+
+    let old = tmp.path().join("old-srv");
+    std::fs::create_dir(&old).unwrap();
+    std::fs::write(old.join("mediagit-server.toml"), "mode=ok\n").unwrap();
+    std::fs::write(old.join("desktop.json"), r#"{"port":4999}"#).unwrap();
+    let st = m.set_folder(Some(old.to_str().unwrap())).await.unwrap();
+    assert_eq!((st.state, st.port), ("stopped", Some(4999)));
+
+    // A fresh manager (next app launch) finds the remembered folder.
+    let again = ServerManager::new(app.join("server"));
+    assert_eq!(again.status().await.data_dir, old.display().to_string());
+    // None goes back to the default.
+    let st = m.set_folder(None).await.unwrap();
+    assert_eq!(st.data_dir, app.join("server").display().to_string());
+    assert_eq!(
+        ServerManager::new(app.join("server"))
+            .status()
+            .await
+            .data_dir,
+        st.data_dir
+    );
+}
+
+#[tokio::test]
+async fn set_folder_is_refused_while_running_and_when_pinned() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = tmp.path().join("appdata");
+    std::fs::create_dir(&app).unwrap();
+    let m = located(&app);
+    set_up(&m).await;
+    m.start().await.unwrap();
+    let target = tmp.path().join("elsewhere");
+    assert_eq!(
+        bad_folder(m.set_folder(Some(target.to_str().unwrap())).await),
+        "running"
+    );
+    m.stop().await.unwrap();
+    assert!(m.set_folder(Some(target.to_str().unwrap())).await.is_ok());
+    // `manager()` has no app data to remember a choice in.
+    let pinned = manager(tmp.path());
+    assert_eq!(
+        bad_folder(pinned.set_folder(Some(target.to_str().unwrap())).await),
+        "pinned"
+    );
 }

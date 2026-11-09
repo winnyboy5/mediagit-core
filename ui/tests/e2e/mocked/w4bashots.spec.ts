@@ -45,7 +45,7 @@ for (const { w, h } of SIZES) {
       await go(page, '/#/sync')
       await page.getByTestId('sync-more').getByText('More options').click()
       await page.getByTestId('push-risk').getByRole('button', { name: 'Overwrite anyway' }).click()
-      await page.getByRole('button', { name: 'Send', exact: true }).first().click()
+      await page.getByRole('button', { name: /^Send( \d+)?$/ }).first().click()
       await shot(page, 'sync-push-confirm', theme, w)
     })
     test(name('sync-add-remote'), async ({ page }) => {
@@ -74,7 +74,10 @@ for (const { w, h } of SIZES) {
     })
 
     const row = (page: Page, n: string) => page.locator(`[data-branch="${n}"]`)
-    const branchBtn = (page: Page, label: string) => row(page, 'feature/grade').getByRole('button', { name: label })
+    const branchMenu = async (page: Page, item: string) => {
+      await row(page, 'feature/grade').getByRole('button', { name: 'Actions for feature/grade' }).click()
+      await page.getByRole('menuitem', { name: item }).click()
+    }
     test(name('branches-list'), async ({ page }) => {
       await go(page, '/#/branches')
       await expect(row(page, 'main')).toBeVisible()
@@ -88,12 +91,12 @@ for (const { w, h } of SIZES) {
     })
     test(name('branches-details'), async ({ page }) => {
       await go(page, '/#/branches')
-      await branchBtn(page, 'Details of feature/grade').click()
+      await branchMenu(page, 'Details…')
       await shot(page, 'branches-details', theme, w)
     })
     test(name('branches-rename-overwrite'), async ({ page }) => {
       await go(page, '/#/branches')
-      await branchBtn(page, 'Rename feature/grade').click()
+      await branchMenu(page, 'Rename…')
       const dlg = page.getByRole('dialog', { name: 'Rename feature/grade' })
       await dlg.getByLabel('New name').fill('main')
       await dlg.getByText('More options').click()
@@ -102,7 +105,7 @@ for (const { w, h } of SIZES) {
     })
     test(name('branches-delete-anyway'), async ({ page }) => {
       await go(page, '/#/branches')
-      await branchBtn(page, 'Delete feature/grade').click()
+      await branchMenu(page, 'Delete…')
       const dlg = page.getByRole('dialog', { name: 'Delete feature/grade?' })
       await dlg.getByText('More options').click()
       await dlg.getByRole('checkbox', { name: 'Delete even if its work is not merged anywhere' }).click()
@@ -120,7 +123,7 @@ for (const { w, h } of SIZES) {
       await go(page, '/#/history')
       await expect(page.getByRole('option')).toHaveCount(11)
       await page.getByRole('option').nth(1).click()
-      await page.getByTestId('commit-detail').getByRole('button', { name: 'Undo…' }).click()
+      await page.getByTestId('commit-detail').getByRole('button', { name: 'Undo this version' }).click()
       await page.getByRole('menuitem', { name: 'Undo this version (adds a new one)' }).click()
       const dlg = page.getByRole('dialog')
       await dlg.getByText('More options').click()

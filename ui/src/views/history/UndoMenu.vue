@@ -1,5 +1,6 @@
 <script setup lang="ts">
 // "Undo…" menu for one version: move the branch back, revert, or (after a consequence dialog) discard everything back to it.
+import { Undo2 } from 'lucide-vue-next'
 import Button from '@/components/Button.vue'
 import DropdownMenu, { type MenuItem } from '@/components/DropdownMenu.vue'
 import { useUndoStore } from '@/stores/undo'
@@ -22,6 +23,6 @@ function pick(id: string) {
 
 <template>
   <DropdownMenu :items="ITEMS" @select="pick">
-    <Button size="sm" :disabled="disabled || undo.busy">Undo…</Button>
+    <Button size="sm" :disabled="disabled || undo.busy"><Undo2 :size="14" aria-hidden="true" /> Undo this version</Button>
   </DropdownMenu>
 </template>

@@ -363,6 +363,33 @@ fn resolve_repo_id(
     Ok(id)
 }
 
+/// Prove `storage` works: build the backend exactly as a served repo would, then
+/// put, get and delete a tiny probe object. Backend init errors are logged by
+/// `build_storage_backend`; this reports a short cause.
+pub async fn probe_storage(storage: &mediagit_config::StorageConfig) -> anyhow::Result<()> {
+    let nonce = uuid::Uuid::new_v4();
+    let dir = std::env::temp_dir().join(format!("mediagit-probe-{nonce}"));
+    let result = async {
+        let cfg = mediagit_config::Config {
+            storage: storage.clone(),
+            ..Default::default()
+        };
+        cfg.save(&dir)?;
+        let backend = build_storage_backend(&dir).await.map_err(|c| {
+            anyhow::anyhow!("could not open the storage backend ({c}); see the log")
+        })?;
+        let (key, body) = (format!("mediagit-probe/{nonce}"), b"mediagit probe");
+        backend.put(&key, body).await?;
+        let got = backend.get(&key).await?;
+        backend.delete(&key).await?;
+        anyhow::ensure!(got == body, "probe object read back different bytes");
+        Ok(())
+    }
+    .await;
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
 /// Helper function to create storage backend based on repository configuration.
 ///
 /// Layout v2: always wraps the backend in

@@ -115,7 +115,7 @@ const PATHS = [
         <span v-for="k in ['image', 'video', 'audio', 'model3d', 'document', 'vfx', 'other']" :key="k" class="sw">
           <i :style="{ background: `var(--media-${k})` }" />{{ k }}
         </span>
-        <span v-for="n in 6" :key="n" class="sw"><i :style="{ background: `var(--lane-${n})` }" />lane-{{ n }}</span>
+        <span v-for="n in 8" :key="n" class="sw"><i :style="{ background: `var(--lane-${n - 1})` }" />lane-{{ n - 1 }}</span>
       </div>
     </section>
 

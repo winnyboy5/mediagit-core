@@ -38,7 +38,7 @@ const canRetry = computed(() => !noRemote.value && !/not a mediagit repository|p
     <p v-if="parts.rest">{{ parts.rest }}</p>
     <code v-if="showCode" class="mono">{{ code }}</code>
     <Button v-if="locked" variant="primary" @click="unlockThenRetry">Unlock…</Button>
-    <Button v-else-if="noRemote && router" variant="secondary" @click="router.push('/sync')">Add remote</Button>
+    <Button v-else-if="noRemote && router" variant="secondary" @click="router.push('/branches/sync')">Add remote</Button>
     <Button v-else-if="canRetry" variant="secondary" @click="emit('retry')">Retry</Button>
   </div>
 </template>

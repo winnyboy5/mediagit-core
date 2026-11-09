@@ -46,8 +46,8 @@ type Cmds = Record<string, unknown>
 async function boot(page: Page, commands: Cmds = {}, extra: Partial<Scenario> = {}, tab?: string) {
   await mockIpc(page, { commands: healthy(commands), ...extra })
   await page.goto('/#/server', { waitUntil: 'domcontentloaded' })
-  await expect(page.getByRole('heading', { name: 'Server', level: 1 })).toBeVisible()
-  if (tab) await page.getByRole('tab', { name: tab }).click()
+  await expect(page.getByRole('heading', { name: 'Server', level: 2, exact: true })).toBeVisible()
+  if (tab) await page.getByRole('navigation', { name: 'Server pages' }).getByRole('button', { name: tab }).click()
 }
 
 /** A running local server with a signed-in admin. */
@@ -81,6 +81,79 @@ test.describe('Server: Overview, this computer', () => {
     await expect(page.getByTestId('local-state')).toHaveText('Stopped')
   })
 
+  test('server folder: pick ok, back to default', async ({ page }) => {
+    await boot(page, { server_local_status: status('not_set_up'), server_local_set_folder: status('not_set_up', { data_dir: 'D:\\media\\srv' }) }, { dialog: 'D:\\media\\srv' })
+    await expect(page.getByTestId('folder-path')).toContainText('dev.mediagit.desktop')
+    await page.getByRole('button', { name: 'Choose folder…' }).click()
+    await expect(page.getByTestId('folder-path')).toHaveText('D:\\media\\srv')
+    const [pick] = await ipcCalls(page, 'server_local_set_folder')
+    expect(pick!.args).toMatchObject({ path: 'D:\\media\\srv' })
+    await expectNoAxeViolations(page)
+    await page.getByRole('button', { name: 'Use default' }).click()
+    await expect.poll(async () => (await ipcCalls(page, 'server_local_set_folder')).length).toBe(2)
+  })
+
+  test('server folder: a refusal shows inline', async ({ page }) => {
+    await boot(page, { server_local_status: status('not_set_up'), server_local_set_folder: { __error: { code: 'invalid_argument', message: 'that folder is inside a repository' } } }, { dialog: 'D:\\repo\\sub' })
+    await page.getByRole('button', { name: 'Choose folder…' }).click()
+    await expect(page.getByTestId('folder-error')).toHaveText('that folder is inside a repository')
+    await expectNoAxeViolations(page)
+  })
+
+  test('server folder: disabled with a reason while running', async ({ page }) => {
+    await boot(page, admin())
+    await expect(page.getByRole('button', { name: 'Choose folder…' })).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Use default' })).toBeDisabled()
+    await expect(page.getByText('Stop the server to change its folder.')).toBeVisible()
+  })
+
+  test('setup with S3: test connection fails, then passes; secrets reach setup once and vanish', async ({ page }) => {
+    const state = `(a, calls) => calls.some((c) => c.cmd === 'server_local_start') ? ${JSON.stringify(status('running'))} : calls.some((c) => c.cmd === 'server_local_setup') ? ${JSON.stringify(status('stopped'))} : ${JSON.stringify(status('not_set_up'))}`
+    const test = `(a, calls) => calls.filter((c) => c.cmd === 'server_storage_test').length < 2 ? { ok: false, error: 'Access denied for that key' } : { ok: true }`
+    await boot(
+      page,
+      { server_local_setup: status('stopped'), server_local_start: status('running'), auth_login: me('admin'), auth_run: me('admin') },
+      { handlers: { server_local_status: state, server_storage_test: test } },
+    )
+    await page.getByRole('button', { name: 'Set up local server…' }).click()
+    const dlg = page.getByRole('dialog', { name: 'Set up local server' })
+    await dlg.getByLabel('Admin username').fill('mira')
+    await dlg.getByLabel('Admin email').fill('mira@studio.example')
+    await dlg.getByLabel('Password', { exact: true }).fill(PW)
+    await dlg.getByLabel('Repeat password').fill(PW)
+    await dlg.getByRole('button', { name: 'Amazon S3 or MinIO' }).click()
+    await dlg.getByLabel('Bucket', { exact: true }).fill('studio-media')
+    await dlg.getByLabel('Access key ID').fill('AKIAEXAMPLE')
+    await dlg.getByLabel('Secret key').fill('s3cret-Value-42')
+    await expect(dlg.getByLabel('Secret key')).toHaveAttribute('type', 'password')
+    await dlg.getByRole('button', { name: 'Test connection' }).click()
+    await expect(dlg.getByTestId('storage-bad')).toContainText('Access denied')
+    await expectNoAxeViolations(page)
+    await dlg.getByRole('button', { name: 'Test connection' }).click()
+    await expect(dlg.getByTestId('storage-ok')).toBeVisible()
+    await expectNoAxeViolations(page)
+    await dlg.getByRole('button', { name: 'Set up and start' }).click()
+    await expect(page.getByTestId('local-state')).toHaveText('Running')
+    const [setup] = await ipcCalls(page, 'server_local_setup')
+    expect(setup!.args).toMatchObject({ storage: { kind: 's3', bucket: 'studio-media', secret_access_key: 's3cret-Value-42' } })
+    await secretsGone(page, PW, 's3cret-Value-42', 'AKIAEXAMPLE')
+  })
+
+  test('setup with Google Cloud and Azure shows their fields; local disk hides testing', async ({ page }) => {
+    await boot(page, { server_local_status: status('not_set_up') })
+    await page.getByRole('button', { name: 'Set up local server…' }).click()
+    const dlg = page.getByRole('dialog', { name: 'Set up local server' })
+    await dlg.getByRole('button', { name: 'Google Cloud' }).click()
+    await expect(dlg.getByLabel('Project')).toBeVisible()
+    await expect(dlg.getByRole('button', { name: 'Choose file…' })).toBeVisible()
+    await dlg.getByRole('button', { name: 'Azure Blob' }).click()
+    await expect(dlg.getByText('Azure support is in preview.')).toBeVisible()
+    await expect(dlg.getByLabel('Account key')).toHaveAttribute('type', 'password')
+    await expectNoAxeViolations(page)
+    await dlg.getByRole('button', { name: 'Local disk' }).click()
+    await expect(dlg.getByRole('button', { name: 'Test connection' })).toHaveCount(0)
+  })
+
   test('first run: set up, start, then sign in with the admin password', async ({ page }) => {
     const state = `(a, calls) => calls.some((c) => c.cmd === 'server_local_start') ? ${JSON.stringify(status('running'))} : calls.some((c) => c.cmd === 'server_local_setup') ? ${JSON.stringify(status('stopped'))} : ${JSON.stringify(status('not_set_up'))}`
     await boot(
@@ -102,6 +175,8 @@ test.describe('Server: Overview, this computer', () => {
     await expect(page.getByTestId('local-state')).toHaveText('Running')
     const names = (await ipcCalls(page)).map((c) => c.cmd).filter((c) => /^(server_local_setup|server_local_start|auth_login)$/.test(c))
     expect(names).toEqual(['server_local_setup', 'server_local_start', 'auth_login'])
+    const [setup0] = await ipcCalls(page, 'server_local_setup')
+    expect(setup0!.args.storage).toBeUndefined()
     const [login] = await ipcCalls(page, 'auth_login')
     expect(login!.args).toMatchObject({ server: LOCAL_URL, username: 'mira', repo: null })
     await expect(page.getByTestId('me-line')).toContainText('Signed in as mira')
@@ -237,11 +312,11 @@ test.describe('Server: other servers', () => {
     await expect(page.getByTestId('gate-member')).toContainText('Your role: Can change files (write)')
     await expectNoAxeViolations(page)
     expect(await ipcCalls(page, 'server_users_list')).toHaveLength(0)
-    await page.getByRole('tab', { name: 'API keys' }).click()
+    await page.getByRole('navigation', { name: 'Server pages' }).getByRole('button', { name: 'API keys' }).click()
     await expect(page.getByTestId('keys')).toContainText('build machine')
-    await page.getByRole('tab', { name: 'Repositories' }).click()
+    await page.getByRole('navigation', { name: 'Server pages' }).getByRole('button', { name: 'Repositories' }).click()
     await expect(page.getByTestId('gate-member')).toContainText('repositories')
-    await page.getByRole('tab', { name: 'Access' }).click()
+    await page.getByRole('navigation', { name: 'Server pages' }).getByRole('button', { name: 'Access' }).click()
     await expect(page.getByTestId('gate-member')).toContainText('access')
   })
 
@@ -249,7 +324,7 @@ test.describe('Server: other servers', () => {
     await boot(page, { ...remote(null, false), server_repos_list: { ...REPOS, server: STUDIO } }, { storage }, 'People')
     await expect(page.getByTestId('gate-open')).toContainText('does not use accounts')
     await expectNoAxeViolations(page)
-    await page.getByRole('tab', { name: 'Repositories' }).click()
+    await page.getByRole('navigation', { name: 'Server pages' }).getByRole('button', { name: 'Repositories' }).click()
     await expect(page.getByTestId('repos')).toContainText('hero-film')
   })
 
@@ -547,5 +622,5 @@ test('Welcome offers the Server view without a repository', async ({ page }) => 
   await mockIpc(page, { commands: healthy({ server_local_status: status('not_set_up') }) })
   await page.goto('/#/welcome', { waitUntil: 'domcontentloaded' })
   await page.getByRole('button', { name: 'Host a server…' }).click()
-  await expect(page.getByRole('heading', { name: 'Server', level: 1 })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Server', level: 2, exact: true })).toBeVisible()
 })

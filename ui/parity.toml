@@ -1296,3 +1296,12 @@ gui = "ServerView"
 [arg."remote repos delete --yes"]
 gui = "ServerView"
 
+
+[cmd."ls-files"]
+gui = "ChangesView"
+
+[arg."ls-files PATHS"]
+gui = "ChangesView"
+
+[arg."ls-files --ignored"]
+gui = "ChangesView/more"

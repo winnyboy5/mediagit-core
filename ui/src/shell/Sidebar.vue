@@ -1,77 +1,66 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { RouterLink } from 'vue-router'
-import {
-  ArrowDown,
-  ArrowUp,
-  ChevronsUpDown,
-  GitBranch,
-  GitCompare,
-  GitMerge,
-  HardDrive,
-  History as HistoryIcon,
-  Lock,
-  RefreshCw,
-  Server,
-  Settings,
-  ShieldCheck,
-  Tag,
-  Wrench,
-  Cloud,
-  FileDiff,
-  Wand2,
-} from 'lucide-vue-next'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
+import { ChevronsUpDown, GitBranch } from 'lucide-vue-next'
 import logo from '@/assets/logo-16.svg'
 import DropdownMenu, { type MenuItem } from '@/components/DropdownMenu.vue'
+import { timeAgo } from '@/lib/persist'
 import { useChangesStore } from '@/stores/changes'
+import { useLocksStore } from '@/stores/locks'
 import { useRecentStore } from '@/stores/recent'
 import { useRepoStore } from '@/stores/repo'
+import { useOpsStore } from '@/stores/ops'
+import { useShellStore } from '@/stores/shell'
+import { useSyncStore } from '@/stores/sync'
 import { useUnlockStore } from '@/stores/unlock'
 import { useOpenRepo } from './useOpenRepo'
+import { HUBS, WORK_HUBS, hubHome, inHub, type Hub } from './hubs'
 
 const repo = useRepoStore()
 const recent = useRecentStore()
+const locks = useLocksStore()
 const changes = useChangesStore()
 const unlock = useUnlockStore()
+const sync = useSyncStore()
+const ops = useOpsStore()
+const shell = useShellStore()
+const failed = computed(() => ops.finished.filter((o) => o.status === 'failed').length)
 const isUnlocked = computed(() => !!repo.path && unlock.unlocked.has(repo.path))
 // A command found it locked and it has not been unlocked since.
 const isLocked = computed(() => !!repo.path && !isUnlocked.value && unlock.locked.has(repo.path))
 const { openPath, pickAndOpen } = useOpenRepo()
+const router = useRouter()
 
 const repoName = computed(() => recent.list.find((r) => r.path === repo.path)?.name ?? repo.path ?? '')
 const branch = computed(() => repo.status?.branch)
 const up = computed(() => branch.value?.upstream)
+const subline = computed(() => {
+  const b = branch.value
+  const where = b?.name ?? (b?.detached ? `detached ${b.detached_oid?.slice(0, 7)}` : 'no versions yet')
+  const bits = [where]
+  if (up.value?.ahead) bits.push(`${up.value.ahead} to send`)
+  if (up.value?.behind) bits.push(`${up.value.behind} to get`)
+  return bits.join(', ')
+})
 
 const menu = computed<MenuItem[]>(() => [
   ...recent.list.map((r) => ({ id: r.path, label: r.name })),
-  { id: '__open', label: 'Open another repository…', separated: recent.list.length > 0 },
+  { id: '__open', label: 'Open a repository…', separated: recent.list.length > 0 },
+  { id: '__create', label: 'Create a new repository…' },
+  { id: '__clone', label: 'Clone a repository…' },
 ])
 
 function onMenu(id: string) {
   if (id === '__open') void pickAndOpen()
+  else if (id === '__create') void router.push({ path: '/welcome', query: { action: 'create' } })
+  else if (id === '__clone') void router.push({ path: '/welcome', query: { action: 'clone' } })
   else if (id !== repo.path) void openPath(id)
 }
 
-const nav = [
-  { to: '/changes', label: 'Changes', icon: FileDiff },
-  { to: '/history', label: 'History', icon: HistoryIcon },
-  { to: '/branches', label: 'Branches', icon: GitBranch },
-  { to: '/locks', label: 'Locks', icon: Lock },
-  { to: '/sync', label: 'Sync', icon: RefreshCw },
-  { to: '/merge', label: 'Merge & conflicts', icon: GitMerge },
-  { to: '/compare', label: 'Compare', icon: GitCompare },
-  { to: '/tags', label: 'Tags & Stash', icon: Tag },
-  { to: '/remote', label: 'Remote Browser', icon: Cloud },
-] as const
-const more = [
-  { to: '/storage', label: 'Storage', icon: HardDrive },
-  { to: '/maintenance', label: 'Maintenance', icon: Wrench },
-  { to: '/security', label: 'Security', icon: ShieldCheck },
-  { to: '/server', label: 'Server', icon: Server },
-  { to: '/advanced', label: 'Advanced', icon: Wand2 },
-  { to: '/settings', label: 'Settings', icon: Settings },
-] as const
-
+const settings = HUBS.find((h) => h.id === 'settings')!
+// hubHome only names a hub's first section, so router-link-active misses the others.
+const route = useRoute()
+const onHub = (h: Hub) => inHub(route.path, h)
 </script>
 
 <template>
@@ -80,66 +69,46 @@ const more = [
 
     <DropdownMenu :items="menu" @select="onMenu">
       <button type="button" class="switch" data-testid="repo-switcher">
-        <span class="cap">Repository</span>
-        <span class="val"><span class="name">{{ repoName }}</span><ChevronsUpDown :size="16" aria-hidden="true" /></span>
+        <span class="top"><span class="name">{{ repoName }}</span><ChevronsUpDown :size="16" aria-hidden="true" /></span>
+        <span class="sub" data-testid="branch-indicator"><GitBranch :size="14" aria-hidden="true" />{{ subline }}</span>
       </button>
     </DropdownMenu>
 
-    <div class="switch static" data-testid="branch-indicator">
-      <span class="cap">Branch</span>
-      <span class="val branchline">
-        <GitBranch :size="16" aria-hidden="true" />
-        <span v-if="branch?.name" class="name mono">{{ branch.name }}</span>
-        <span v-else-if="branch?.detached" class="name mono">detached {{ branch.detached_oid?.slice(0, 7) }}</span>
-        <span v-else class="name muted">no commits yet</span>
-        <span v-if="up && (up.ahead || up.behind)" class="sync mono" :aria-label="`${up.ahead ?? 0} ahead, ${up.behind ?? 0} behind`">
-          <template v-if="up.ahead"><ArrowUp :size="14" aria-hidden="true" />{{ up.ahead }}</template><template v-if="up.behind"><ArrowDown :size="14" aria-hidden="true" />{{ up.behind }}</template>
-        </span>
-      </span>
-    </div>
+    <p v-if="isUnlocked" class="enc" data-testid="unlocked-chip">
+      <span>Encrypted, unlocked</span>
+      <button type="button" class="link" aria-label="Lock this repository" @click="unlock.lock(repo.path!)">Lock</button>
+    </p>
+    <p v-else-if="isLocked" class="enc" data-testid="locked-chip">
+      <span>Encrypted, locked</span>
+      <button type="button" class="link" aria-label="Unlock this repository" @click="unlock.unlockRepo(repo.path!).catch(() => {})">Unlock…</button>
+    </p>
 
-    <div v-if="isUnlocked" class="switch static" data-testid="unlocked-chip">
-      <span class="cap">Encryption</span>
-      <span class="val">
-        <span class="name">Unlocked</span>
-        <button type="button" class="lockbtn" aria-label="Lock this repository" @click="unlock.lock(repo.path!)">Lock</button>
-      </span>
-    </div>
-
-    <div v-else-if="isLocked" class="switch static" data-testid="locked-chip">
-      <span class="cap">Encryption</span>
-      <span class="val">
-        <span class="name">Locked</span>
-        <button type="button" class="lockbtn" aria-label="Unlock this repository" @click="unlock.unlockRepo(repo.path!).catch(() => {})">Unlock…</button>
-      </span>
-    </div>
-
-    <div class="navscroll">
     <ul class="items">
-      <li v-for="(n, i) in nav" :key="n.to">
-        <RouterLink :to="n.to" class="item" :aria-keyshortcuts="i < 9 ? `Control+${i + 1}` : undefined">
-          <component :is="n.icon" :size="18" aria-hidden="true" />
-          <span class="lbl">{{ n.label }}</span>
-          <span v-if="n.to === '/changes' && changes.counts.total" class="count mono" :aria-label="`${changes.counts.total} changed files`">{{
-            changes.counts.total
-          }}</span>
-          <span v-else-if="n.to === '/sync' && up && (up.ahead || up.behind)" class="count mono" aria-hidden="true">
-            <template v-if="up.ahead"><ArrowUp :size="14" aria-hidden="true" />{{ up.ahead }}</template><template v-if="up.behind"><ArrowDown :size="14" aria-hidden="true" />{{ up.behind }}</template>
-          </span>
+      <li v-for="(h, i) in WORK_HUBS" :key="h.id">
+        <RouterLink :to="hubHome(h)" class="item" :class="{ on: onHub(h) }" :aria-current="onHub(h) ? 'page' : undefined" :aria-keyshortcuts="`Control+${i + 1}`">
+          <component :is="h.icon" :size="20" aria-hidden="true" />
+          <span class="lbl">{{ h.label }}</span>
+          <span v-if="h.id === 'files' && changes.counts.total" class="count" :aria-label="`${changes.counts.total} changed files`">{{ changes.counts.total }}</span>
+          <span v-else-if="h.id === 'team' && locks.locks.length" class="count" >{{ locks.locks.length }} {{ locks.locks.length === 1 ? 'lock' : 'locks' }}</span>
         </RouterLink>
       </li>
     </ul>
 
-    <h2 class="group">More</h2>
-    <ul class="items more">
-      <li v-for="n in more" :key="n.to">
-        <RouterLink :to="n.to" class="item">
-          <component :is="n.icon" :size="18" aria-hidden="true" />
-          <span class="lbl">{{ n.label }}</span>
-        </RouterLink>
-      </li>
-    </ul>
-
+    <div class="foot">
+      <RouterLink :to="hubHome(settings)" class="item" :class="{ on: onHub(settings) }" :aria-current="onHub(settings) ? 'page' : undefined" aria-keyshortcuts="Control+,">
+        <component :is="settings.icon" :size="20" aria-hidden="true" />
+        <span class="lbl">{{ settings.label }}</span>
+      </RouterLink>
+      <button
+        type="button"
+        class="act"
+        aria-haspopup="dialog"
+        :aria-expanded="shell.activityOpen"
+        :aria-label="`Activity${failed ? `, ${failed} failed` : ''}${sync.last ? `. Got latest ${timeAgo(sync.last)}` : ''}`"
+        @click="shell.activityOpen = !shell.activityOpen"
+      >
+        <template v-if="failed">{{ failed }} failed, </template>{{ sync.last ? `Got latest ${timeAgo(sync.last)}` : 'Activity' }}
+      </button>
     </div>
   </nav>
 </template>
@@ -169,108 +138,100 @@ const more = [
   gap: 2px;
   width: 100%;
   padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-panel);
-  background: var(--surface);
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
   color: var(--text);
   font: inherit;
   text-align: left;
-}
-button.switch {
   cursor: pointer;
 }
-button.switch:hover {
+.switch:hover {
   background: var(--surface-2);
 }
-.cap {
-  color: var(--text-muted);
-  font-size: var(--fs-xs);
-}
-.val {
+.top {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2);
   min-width: 0;
 }
-.branchline {
-  justify-content: flex-start;
-}
 .name {
   min-width: 0;
   overflow: hidden;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-weight: 500;
 }
-.lockbtn {
-  padding: 0 var(--space-2);
-  border: 0;
-  background: transparent;
-  color: var(--accent);
-  font: inherit;
-  font-weight: 600;
-  text-decoration: underline;
-  cursor: pointer;
-}
-.muted {
-  color: var(--text-muted);
-  font-weight: 400;
-}
-.sync,
-.count:has(svg) {
-  display: inline-flex;
+.sub {
+  display: flex;
   align-items: center;
-  gap: 2px;
+  gap: var(--space-1);
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.sync {
-  margin-left: auto;
+.enc {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0;
+  padding: 0 var(--space-3);
   color: var(--text-muted);
   font-size: var(--fs-sm);
 }
-.navscroll {
-  display: grid;
-  flex: 1;
-  align-content: start;
-  gap: var(--space-3);
-  min-height: 0;
-  padding: var(--space-2) 0 var(--space-4);
-  overflow-y: auto;
-  mask-image: linear-gradient(to bottom, transparent, #000 var(--space-2), #000 calc(100% - var(--space-4)), transparent);
+.link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-color: var(--brand);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
+  cursor: pointer;
 }
 .items {
   display: grid;
   gap: 2px;
-  margin: 0;
+  margin: var(--space-2) 0 0;
   padding: 0;
   list-style: none;
 }
 .item {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--space-3);
   width: 100%;
-  height: var(--row-h);
+  height: var(--row-h-hub);
   padding: 0 var(--space-3);
-  border: 0;
   border-radius: var(--radius-control);
-  background: transparent;
   color: var(--text);
   font: 400 var(--fs-md) / 1 var(--font-sans);
-  text-align: left;
   text-decoration: none;
-  cursor: pointer;
 }
 .item:hover {
   background: var(--surface-2);
 }
-.item.router-link-active {
+.item.on {
   background: var(--accent-soft);
   font-weight: 600;
 }
-.item.soon {
-  color: var(--text-muted);
-  cursor: default;
+/* Selected hub: a brand bar inset at the left edge. */
+.item.on::before {
+  content: '';
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: 0;
+  width: 4px;
+  border-radius: var(--radius-pill);
+  background: var(--brand);
 }
 .lbl {
   flex: 1;
@@ -283,20 +244,31 @@ button.switch:hover {
   color: var(--text-muted);
   font-size: var(--fs-sm);
 }
-.group {
-  margin: var(--space-3) 0 0;
+.foot {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: auto;
+}
+.act {
+  height: var(--control-h);
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.act:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.quiet {
+  margin: 0;
   padding: 0 var(--space-3);
   color: var(--text-muted);
-  font-size: var(--fs-xs);
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
+  font-size: var(--fs-sm);
 }
 </style>

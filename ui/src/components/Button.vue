@@ -46,9 +46,15 @@ withDefaults(
   padding: 0 var(--space-3);
   font-size: var(--fs-sm);
 }
+/* Disabled reads as "not now", same size and weight: a flat grey control, never a faded solid one. */
 .btn:disabled {
+  transition: none;
+}
+.btn:disabled:not([aria-busy='true']) {
+  border-color: var(--border);
+  background: var(--surface-2);
+  color: var(--text-muted);
   cursor: not-allowed;
-  opacity: 0.55;
 }
 .btn[aria-busy='true'] {
   cursor: progress;

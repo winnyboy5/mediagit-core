@@ -104,6 +104,9 @@ export const useSyncStore = defineStore('sync', () => {
 
   /** Whether the next push needs the person to agree first (overwrite or delete on the remote). */
   const pushNeedsConfirm = computed(() => pushIsRisky(form.push))
+  /** The overwrite / delete confirmation lives on the Sync page; the header's Send asks for it there. */
+  const confirmPushOpen = ref(false)
+  const pushDeleteNeedsName = computed(() => form.push.delete && !form.push.refspecs.trim())
 
   async function run(kind: TransferKind, confirmed = false) {
     if (!repo.path || busy.value) return false
@@ -151,5 +154,5 @@ export const useSyncStore = defineStore('sync', () => {
     },
   )
 
-  return { remotes, remote, chosen, loaded, loading, error, actionError, active, busy, last, refresh, form, detail, pushNeedsConfirm, addRemote, removeRemote, renameRemote, setRemoteUrl, showRemote, run }
+  return { remotes, remote, chosen, loaded, loading, error, actionError, active, busy, last, refresh, form, detail, pushNeedsConfirm, confirmPushOpen, pushDeleteNeedsName, addRemote, removeRemote, renameRemote, setRemoteUrl, showRemote, run }
 })

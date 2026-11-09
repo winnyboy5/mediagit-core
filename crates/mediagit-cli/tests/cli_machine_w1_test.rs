@@ -642,3 +642,30 @@ fn human_output_is_unchanged_without_machine() {
         );
     }
 }
+
+/// `add --machine` streams a bytes bar and a files bar on stderr.
+#[test]
+fn add_streams_bytes_and_items_progress() {
+    let dir = TempDir::new().unwrap();
+    init_repo(dir.path());
+    for i in 0..3 {
+        fs::write(dir.path().join(format!("f{i}.bin")), vec![i as u8; 4096]).unwrap();
+    }
+    let out = mediagit()
+        .args(["--machine", "add", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let lines: Vec<Value> = String::from_utf8_lossy(&out.stderr)
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .filter(|v: &Value| v["type"] == "progress")
+        .collect();
+    let last = |unit: &str| lines.iter().rev().find(|v| v["unit"] == unit).cloned();
+    let items = last("items").expect("items bar");
+    assert_eq!(items["pos"], 3);
+    assert_eq!(items["len"], 3);
+    assert_eq!(items["done"], true);
+    assert!(last("bytes").is_some(), "bytes bar");
+}

@@ -31,7 +31,7 @@ test.describe('lock state', () => {
     await boot(page, '/history', { handlers: { repo_log: NEEDS } })
     await unlockDialog(page).getByRole('button', { name: 'Cancel' }).click()
     const chip = page.getByTestId('locked-chip')
-    await expect(chip).toContainText('Locked')
+    await expect(chip).toContainText(/locked/i)
     await expect(page.getByTestId('unlocked-chip')).toHaveCount(0)
     await chip.getByRole('button', { name: 'Unlock this repository' }).click()
     await expect(unlockDialog(page)).toBeVisible()
@@ -57,16 +57,13 @@ test.describe('lock state', () => {
   })
 })
 
-test('sidebar groups Storage..Settings under a More label', async ({ page }) => {
+test('the rail has four hubs and Settings last, with no More group', async ({ page }) => {
   await boot(page, '/history')
-  const more = page.getByRole('heading', { name: 'More', level: 2 })
-  await expect(more).toBeVisible()
   const nav = page.getByRole('navigation', { name: 'Main' })
-  const remote = await nav.getByRole('link', { name: 'Remote Browser' }).boundingBox()
-  const label = await more.boundingBox()
-  const storage = await nav.getByRole('link', { name: 'Storage' }).boundingBox()
-  expect(remote!.y).toBeLessThan(label!.y)
-  expect(label!.y).toBeLessThan(storage!.y)
+  await expect(nav.getByRole('heading')).toHaveCount(0)
+  const ys: number[] = []
+  for (const n of ['Files', 'History', 'Branches', 'Team', 'Settings']) ys.push((await nav.getByRole('link', { name: new RegExp(`^${n}`) }).boundingBox())!.y)
+  expect([...ys].sort((a, b) => a - b)).toEqual(ys)
 })
 
 test('settings: a failed read shows an error with Retry in the All settings card', async ({ page }) => {
@@ -93,7 +90,7 @@ test('maintenance: Clean up… is danger, Preview is primary; findings use chips
   await expect(res.locator('dd.bad')).toHaveCount(2) // Damaged and Missing are non-zero
 })
 
-test('compact density shortens table and nav rows; comfortable stays 36px', async ({ page }) => {
+test('compact density shortens table and nav rows; hub rows go 44 to 36', async ({ page }) => {
   const rowH = (sel: string) => page.locator(sel).first().evaluate((e) => e.getBoundingClientRect().height)
   // Settings is a form now; Storage's table rows follow the density token.
   await boot(page, '/storage', { commands: { repo_stats: fixture('stats') } })
@@ -101,10 +98,10 @@ test('compact density shortens table and nav rows; comfortable stays 36px', asyn
   await expect(page.locator(row).first()).toBeVisible()
   const comfortable = await rowH(row)
   expect(comfortable).toBeGreaterThanOrEqual(36)
-  expect(await rowH('nav a.item')).toBe(36)
+  expect(await rowH('nav a.item')).toBe(44)
   await page.evaluate(() => document.documentElement.setAttribute('data-density', 'compact'))
   expect(await rowH(row)).toBeLessThanOrEqual(comfortable - 8)
-  expect(await rowH('nav a.item')).toBe(28)
+  expect(await rowH('nav a.item')).toBe(36)
 })
 
 test.describe('advanced', () => {

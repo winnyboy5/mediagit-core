@@ -10,6 +10,8 @@ const api = vi.hoisted(() => ({
   serverLocalStop: vi.fn(),
   serverLocalLog: vi.fn(),
   serverLocalSetNetwork: vi.fn(),
+  serverLocalSetFolder: vi.fn(),
+  serverStorageTest: vi.fn(),
   serverWhoami: vi.fn(),
   serverLogin: vi.fn(),
   serverUsers: vi.fn(),
@@ -109,10 +111,49 @@ describe('local server', () => {
     api.serverWhoami.mockResolvedValue(who('admin'))
     api.serverLocalStatus.mockResolvedValue(status())
     expect(await s.setUp('root', 'r@x.io', 'pw-1')).toBe(true)
-    expect(api.serverLocalSetup).toHaveBeenCalledWith('root', 'r@x.io', 'pw-1')
+    expect(api.serverLocalSetup).toHaveBeenCalledWith('root', 'r@x.io', 'pw-1', undefined)
     expect(api.serverLogin).toHaveBeenCalledWith(URL_, 'root', 'pw-1')
     expect(s.access).toBe('admin')
     expect(JSON.stringify(s.$state)).not.toContain('pw-1')
+  })
+
+  it('cloud storage: options go to setup in one call; no secret stays in the store', async () => {
+    api.serverLocalStatus.mockResolvedValue(status({ state: 'not_set_up', url: null, port: null, pid: null }))
+    const s = useServerStore()
+    await s.init()
+    api.serverLocalSetup.mockResolvedValue(status({ state: 'stopped' }))
+    api.serverLocalStart.mockResolvedValue(status())
+    api.serverLogin.mockResolvedValue(who('admin'))
+    api.serverWhoami.mockResolvedValue(who('admin'))
+    api.serverLocalStatus.mockResolvedValue(status())
+    const storage = { kind: 's3' as const, bucket: 'media', access_key_id: 'AKIA-secret-id', secret_access_key: 'sk-very-secret' }
+    expect(await s.setUp('root', 'r@x.io', 'pw-1', storage)).toBe(true)
+    expect(api.serverLocalSetup).toHaveBeenCalledWith('root', 'r@x.io', 'pw-1', storage)
+    expect(JSON.stringify(s.$state)).not.toMatch(/sk-very-secret|AKIA-secret-id/)
+  })
+
+  it('storage test never throws: a failure comes back as ok:false with the reason', async () => {
+    const s = useServerStore()
+    api.serverStorageTest.mockResolvedValueOnce({ ok: true })
+    expect(await s.testStorage({ kind: 's3', bucket: 'b' })).toEqual({ ok: true })
+    api.serverStorageTest.mockRejectedValueOnce({ code: 'storage_test_timeout', message: 'the storage did not answer in time' })
+    expect(await s.testStorage({ kind: 's3', bucket: 'b' })).toEqual({ ok: false, error: 'the storage did not answer in time' })
+  })
+
+  it('folder: success updates the status; refusal lands in folderError, not the shared banner', async () => {
+    const s = useServerStore()
+    api.serverLocalSetFolder.mockResolvedValueOnce(status({ state: 'not_set_up', data_dir: '/media/srv' }))
+    expect(await s.setFolder('/media/srv')).toBe(true)
+    expect(api.serverLocalSetFolder).toHaveBeenCalledWith('/media/srv')
+    expect(s.local?.data_dir).toBe('/media/srv')
+    api.serverLocalSetFolder.mockRejectedValueOnce({ code: 'invalid_argument', message: 'that folder is inside a repository' })
+    expect(await s.setFolder('/repo/sub')).toBe(false)
+    expect(s.folderError?.message).toBe('that folder is inside a repository')
+    expect(s.actionError).toBeNull()
+    api.serverLocalSetFolder.mockResolvedValueOnce(status({ state: 'not_set_up' }))
+    await s.setFolder()
+    expect(api.serverLocalSetFolder).toHaveBeenLastCalledWith(undefined)
+    expect(s.folderError).toBeNull()
   })
 
   it('a failed start keeps the server stopped and shows the reason', async () => {

@@ -21,7 +21,7 @@ async function boot(page: Page, commands: Record<string, unknown> = {}, handlers
     storage: REPO,
   })
   await page.goto('/#/compare', { waitUntil: 'domcontentloaded' })
-  await expect(page.getByRole('heading', { name: 'Compare', level: 1 })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Compare', level: 2 })).toBeVisible()
 }
 
 test.describe('Compare: states', () => {

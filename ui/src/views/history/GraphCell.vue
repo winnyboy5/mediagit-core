@@ -1,8 +1,8 @@
 <script setup lang="ts">
 // One row of the history graph: lane lines in and out, plus the commit node.
-// Geometry comes from lib/graphLayout; colours from the --lane-1..6 tokens.
+// Geometry comes from lib/graphLayout; colours from the --lane-0..7 tokens.
 import { computed } from 'vue'
-import type { GraphRow } from '@/lib/graphLayout'
+import { laneIndex, type GraphRow } from '@/lib/graphLayout'
 
 const props = defineProps<{ row: GraphRow; height: number; head?: boolean }>()
 
@@ -10,7 +10,7 @@ const LANE = 14 // px between lane centres
 const PAD = 8
 
 const x = (lane: number) => PAD + lane * LANE
-const laneColor = (lane: number) => `var(--lane-${(lane % 6) + 1})`
+const laneColor = (lane: number) => `var(--lane-${laneIndex(lane)})`
 const width = computed(() => PAD * 2 + Math.max(props.row.width - 1, 0) * LANE)
 const mid = computed(() => props.height / 2)
 
@@ -40,10 +40,10 @@ const lines = computed(() =>
     <circle
       :cx="x(row.col)"
       :cy="mid"
-      :r="head ? 6 : 4.5"
-      :fill="head ? 'var(--surface)' : laneColor(row.col)"
-      :stroke="head ? 'var(--accent)' : 'var(--surface)'"
-      :stroke-width="head ? 3 : 1.5"
+      :r="head ? 6 : 5"
+      fill="var(--surface)"
+      :stroke="head ? 'var(--text)' : laneColor(row.col)"
+      :stroke-width="head ? 3 : 2.5"
     />
   </svg>
 </template>

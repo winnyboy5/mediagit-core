@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { ArrowDown, ArrowUp, GitBranch, Info, Pencil, Plus, RefreshCw, Shield, Trash2 } from 'lucide-vue-next'
+import { ArrowDown, ArrowUp, Ellipsis, GitBranch, Plus, Trash2 } from 'lucide-vue-next'
+import DropdownMenu, { type MenuItem } from '@/components/DropdownMenu.vue'
 import AlertDialog from '@/components/AlertDialog.vue'
 import Button from '@/components/Button.vue'
 import Dialog from '@/components/Dialog.vue'
@@ -138,6 +139,27 @@ function rename() {
   else void doRename()
 }
 
+// Row menu: one "…" instead of four icon buttons.
+type Row = (typeof branches.list)[number]
+const branchMenu = (b: Row): MenuItem[] => [
+  { id: 'details', label: 'Details…' },
+  { id: 'protect', label: b.protected ? 'Remove protection…' : 'Protect branch…', disabled: branches.busy },
+  { id: 'rename', label: 'Rename…', disabled: branches.busy },
+  {
+    id: 'delete',
+    label: b.name === branches.current ? 'Delete (switch to another branch first)' : b.protected ? 'Delete (protected)' : 'Delete…',
+    danger: true,
+    separated: true,
+    disabled: branches.busy || b.name === branches.current || b.protected,
+  },
+]
+function onBranchMenu(id: string, b: Row) {
+  if (id === 'details') openDetails(b.name)
+  else if (id === 'protect') askProtect(b.name, b.protected)
+  else if (id === 'rename') startRename(b.name)
+  else askDelete(b.name)
+}
+
 // Delete ----------------------------------------------------------------
 // `deleting` outlives the dialog: the confirm click closes it before our handler runs.
 const deleting = ref<string | null>(null)
@@ -161,12 +183,10 @@ function doDelete() {
   <section class="branches" :aria-busy="branches.busy || undefined">
     <header class="head">
       <div class="ttl">
-        <h1>Branches</h1>
-        <p>separate lines of work in this project</p>
+        <h2 class="pt sr-only">Branches</h2>
       </div>
       <div class="tools">
-        <IconButton label="Refresh branches" variant="secondary" :disabled="branches.loading" @click="branches.refresh()"><RefreshCw :size="18" /></IconButton>
-        <Button variant="primary" :disabled="branches.busy" @click="openCreate"><Plus :size="16" aria-hidden="true" /> New branch</Button>
+        <Button variant="secondary" :disabled="branches.busy" @click="openCreate"><Plus :size="16" aria-hidden="true" /> New branch</Button>
       </div>
     </header>
 
@@ -192,7 +212,7 @@ function doDelete() {
         <li v-for="b in branches.list" :key="b.name" class="row" :class="{ cur: b.name === branches.current }" :data-branch="b.name">
           <GitBranch :size="18" class="gi" aria-hidden="true" />
           <div class="nm">
-            <strong class="mono">{{ b.name }}</strong>
+            <strong>{{ b.name }}</strong>
             <span v-if="b.name === branches.current" class="chip now">Current</span>
             <span v-if="b.protected" class="chip prot">Protected</span>
           </div>
@@ -204,19 +224,9 @@ function doDelete() {
           <span class="oid mono">{{ b.oid ? shortOid(b.oid) : '' }}</span>
           <div class="acts">
             <Button v-if="b.name !== branches.current" size="sm" :disabled="branches.busy" @click="doSwitch(b.name)">Switch to</Button>
-            <IconButton :label="`Details of ${b.name}`" size="sm" @click="openDetails(b.name)"><Info :size="16" /></IconButton>
-            <IconButton :label="b.protected ? `Remove protection from ${b.name}` : `Protect ${b.name}`" size="sm" :pressed="b.protected" :disabled="branches.busy" @click="askProtect(b.name, b.protected)">
-              <Shield :size="16" />
-            </IconButton>
-            <IconButton :label="`Rename ${b.name}`" size="sm" :disabled="branches.busy" @click="startRename(b.name)"><Pencil :size="16" /></IconButton>
-            <IconButton
-              :label="b.name === branches.current ? `Delete ${b.name} (switch to another branch first)` : b.protected ? `Delete ${b.name} (protected)` : `Delete ${b.name}`"
-              size="sm"
-              :disabled="branches.busy || b.name === branches.current || b.protected"
-              @click="askDelete(b.name)"
-            >
-              <Trash2 :size="16" />
-            </IconButton>
+            <DropdownMenu :items="branchMenu(b)" @select="(id) => onBranchMenu(id, b)">
+              <IconButton :label="`Actions for ${b.name}`" size="sm"><Ellipsis :size="16" /></IconButton>
+            </DropdownMenu>
           </div>
         </li>
       </ul>
@@ -226,11 +236,11 @@ function doDelete() {
         <ul class="rows" aria-label="Remote branches">
           <li v-for="r in branches.remotes" :key="r.name" class="row remote" :data-remote="r.name">
             <GitBranch :size="18" class="gi" aria-hidden="true" />
-            <strong class="mono nm">{{ r.name }}</strong>
+            <strong class="nm">{{ r.name }}</strong>
             <span class="oid mono">{{ r.oid ? shortOid(r.oid) : '' }}</span>
             <div class="acts">
               <Button size="sm" :disabled="branches.busy" @click="branches.checkoutRemote(r.name)">Start working on it</Button>
-              <IconButton :label="`Forget ${r.name} on this computer`" size="sm" :disabled="branches.busy" @click="((forgetting = r.name), (forgetOpen = true))"><Trash2 :size="16" /></IconButton>
+              <Button size="sm" variant="ghost" :aria-label="`Forget ${r.name} on this computer`" :disabled="branches.busy" @click="((forgetting = r.name), (forgetOpen = true))"><Trash2 :size="16" aria-hidden="true" /> Forget</Button>
             </div>
           </li>
         </ul>
@@ -370,9 +380,9 @@ function doDelete() {
   align-items: baseline;
   gap: var(--space-3);
 }
-h1 {
+.pt {
   margin: 0;
-  font-size: var(--fs-2xl);
+  font-size: var(--fs-xl);
 }
 .ttl p {
   margin: 0;

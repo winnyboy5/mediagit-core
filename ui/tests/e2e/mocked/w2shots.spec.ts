@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs'
 import { expect, test, type Page } from '@playwright/test'
 import { fixture, healthy, ipcRelease, mockIpc, RECENT, showHandler } from './ipc-mock'
+import { openSection } from './nav'
 
 // W2 review screenshots: `SHOTS=1 pnpm e2e w2shots`. Skipped in normal runs.
 // Output: ui/.impeccable/review/w2-<view>-<state>-<w>-<theme>.png. Every state is its own test, so each gets a fresh page.
@@ -46,8 +47,7 @@ async function open(page: Page, route: string, heading: string, b: Boot = {}) {
     dialog: '/Users/Mira/Desktop',
     storage: REPO,
   })
-  await page.goto(`/#${route}`, { waitUntil: 'domcontentloaded' })
-  await expect(page.getByRole('heading', { name: heading, level: 1 })).toBeVisible()
+  await openSection(page, route, heading)
 }
 
 const startMerge = async (page: Page) => {
@@ -55,7 +55,7 @@ const startMerge = async (page: Page) => {
   await page.getByRole('dialog', { name: 'Start a merge' }).getByRole('button', { name: 'Start merge' }).click()
 }
 const hero = (page: Page) => page.getByRole('list', { name: 'Changed files' }).getByRole('button', { name: /hero_preview/ })
-const undoMenu = (page: Page) => page.getByTestId('commit-detail').getByRole('button', { name: 'Undo…' })
+const undoMenu = (page: Page) => page.getByTestId('commit-detail').getByRole('button', { name: 'Undo this version' })
 async function history(page: Page, b: Boot = {}) {
   await open(page, '/history', 'History', b)
   await page.getByRole('option').nth(1).click()
@@ -155,8 +155,9 @@ for (const { w, h } of SIZES) {
     T('V9 busy', async (page, t) => {
       const slow = [{ progress: { id: 0, msg: 'Extracting', pos: 40, len: 100, unit: 'bytes', done: false } }, { hold: true }]
       await open(page, '/compare', 'Compare', { handlers: { repo_extract: '', repo_diff: `() => (${JSON.stringify(fixture('diff_commits'))})` }, scripts: { repo_extract: slow } })
+      // To: the newest saved version (after Working folder and Ready to save), so From is enabled.
       await page.getByLabel('To').click()
-      await page.getByRole('option').nth(1).click()
+      await page.getByRole('option').nth(2).click()
       await page.getByLabel('From').click()
       await page.getByRole('option').nth(1).click()
       await hero(page).click()
@@ -166,33 +167,33 @@ for (const { w, h } of SIZES) {
 
     // V10 Tags & Stash
     T('V10 populated', async (page, t) => {
-      await open(page, '/tags', 'Tags & Stash')
+      await open(page, '/tags-stash', 'Tags & Stash')
       await expect(page.getByRole('list', { name: 'Stashed work' })).toBeVisible()
       await shot(page, 'V10-tags-populated', t, w)
     })
     T('V10 loading', async (page, t) => {
-      await open(page, '/tags', 'Tags & Stash', { scripts: { tag_list: [{ hold: true }, { resolve: fixture('tags') }], stash_list: [{ hold: true }, { resolve: fixture('stash_list') }] } })
+      await open(page, '/tags-stash', 'Tags & Stash', { scripts: { tag_list: [{ hold: true }, { resolve: fixture('tags') }], stash_list: [{ hold: true }, { resolve: fixture('stash_list') }] } })
       await expect(page.getByRole('status', { name: 'Loading' }).first()).toBeVisible()
       await shot(page, 'V10-tags-loading', t, w)
     })
     T('V10 empty', async (page, t) => {
-      await open(page, '/tags', 'Tags & Stash', { commands: { tag_list: { tags: [] }, stash_list: fixture('stash_empty') } })
+      await open(page, '/tags-stash', 'Tags & Stash', { commands: { tag_list: { tags: [] }, stash_list: fixture('stash_empty') } })
       await expect(page.getByText('Nothing set aside')).toBeVisible()
       await shot(page, 'V10-tags-empty', t, w)
     })
     T('V10 error', async (page, t) => {
-      await open(page, '/tags', 'Tags & Stash', { commands: { stash_list: { __error: { code: 'error', message: 'Cannot read the stash.' } } } })
+      await open(page, '/tags-stash', 'Tags & Stash', { commands: { stash_list: { __error: { code: 'error', message: 'Cannot read the stash.' } } } })
       await expect(page.getByRole('alert')).toBeVisible()
       await shot(page, 'V10-tags-error', t, w)
     })
     T('V10 busy', async (page, t) => {
-      await open(page, '/tags', 'Tags & Stash', { scripts: { stash_apply: fixture('stash_apply_progress') } })
+      await open(page, '/tags-stash', 'Tags & Stash', { scripts: { stash_apply: fixture('stash_apply_progress') } })
       await page.getByRole('button', { name: 'Apply stash 0' }).click()
       await expect(page.getByTestId('stash-progress')).toBeVisible()
       await shot(page, 'V10-tags-busy', t, w)
     })
     T('V10 drop dialog', async (page, t) => {
-      await open(page, '/tags', 'Tags & Stash')
+      await open(page, '/tags-stash', 'Tags & Stash')
       await page.getByRole('button', { name: 'Drop stash 1' }).click()
       await expect(page.getByRole('alertdialog')).toBeVisible()
       await shot(page, 'V10-tags-drop', t, w)
@@ -273,7 +274,7 @@ for (const { w, h } of SIZES) {
     })
     T('Undo restore dialog', async (page, t) => {
       await history(page)
-      await page.getByRole('tab', { name: 'Files at this version' }).click()
+      await page.getByText('Files at this version', { exact: true }).click()
       await page.getByRole('tree', { name: 'Files at this version' }).getByRole('treeitem', { name: /hero_preview/ }).click()
       await page.getByRole('button', { name: 'Restore this file…' }).click()
       await expect(page.getByRole('alertdialog')).toBeVisible()

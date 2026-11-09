@@ -13,7 +13,7 @@ async function boot(page: Page, commands: Record<string, unknown> = {}, scripts:
     storage: REPO,
   })
   await page.goto('/#/maintenance', { waitUntil: 'domcontentloaded' })
-  await expect(page.getByRole('heading', { name: 'Maintenance', level: 1 })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Maintenance', level: 2 })).toBeVisible()
 }
 
 test.describe('Maintenance: states', () => {

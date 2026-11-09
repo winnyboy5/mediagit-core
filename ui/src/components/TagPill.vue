@@ -20,9 +20,10 @@ defineProps<{ name: string }>()
   height: 24px;
   padding: 0 var(--space-3) 0 var(--space-2);
   border-radius: var(--radius-pill);
-  background: var(--modified-soft);
-  color: var(--modified);
-  font: 500 var(--fs-sm) / 1 var(--font-mono);
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--text);
+  font: 500 var(--fs-sm) / 1 var(--font-sans);
 }
 .pill svg {
   flex: none;

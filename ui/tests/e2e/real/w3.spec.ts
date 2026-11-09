@@ -30,7 +30,7 @@ const cliPass = (cwd: string, ...args: string[]) => {
 const shot = (name: string) => page.screenshot({ path: join(shots, `${name}.png`) })
 const go = async (view: string, heading: string) => {
   await page.evaluate((v) => { window.location.hash = `#/${v}` }, view)
-  await expect(page.getByRole('heading', { name: heading, level: 1 })).toBeVisible()
+  await expect(page.getByRole('heading', { name: heading, level: 2 })).toBeVisible()
 }
 // Views load on mount: leave and come back so a view re-reads what the CLI changed.
 const goFresh = async (view: string, heading: string) => {
@@ -117,7 +117,7 @@ test('r. Settings: author identity reaches config; theme and density survive a r
   await expect(html).toHaveAttribute('data-theme', 'dark')
   await expect(html).toHaveAttribute('data-density', 'compact')
   await page.reload()
-  await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'General', level: 2 })).toBeVisible()
   await expect(html).toHaveAttribute('data-theme', 'dark')
   await expect(html).toHaveAttribute('data-density', 'compact')
   await shot('19-settings-dark-compact')

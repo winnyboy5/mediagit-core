@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, useId, watch } from 'vue'
 import { useVirtualizer } from '@tanstack/vue-virtual'
-import { Filter, History, PanelRight, RefreshCw, Search } from 'lucide-vue-next'
+import { Filter, History, PanelRight, Search } from 'lucide-vue-next'
+import { useFocusRefresh } from '@/lib/focusRefresh'
 import BranchPill from '@/components/BranchPill.vue'
 import Button from '@/components/Button.vue'
 import EmptyState from '@/components/EmptyState.vue'
@@ -12,6 +13,7 @@ import Select from '@/components/Select.vue'
 import TextField from '@/components/TextField.vue'
 import SkeletonRows from '@/components/SkeletonRows.vue'
 import TagPill from '@/components/TagPill.vue'
+import { laneIndex } from '@/lib/graphLayout'
 import { formatWhen, graphWidth, shortOid } from '@/lib/history'
 import { timeAgo } from '@/lib/persist'
 import { useHistoryStore } from '@/stores/history'
@@ -44,7 +46,7 @@ const startOptions = computed(() => [
 ])
 
 const MAX_LANES = 8
-const laneOf = (n: number) => ((n % 6) + 1) as 1 | 2 | 3 | 4 | 5 | 6
+const laneOf = (n: number) => laneIndex(n) as 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7
 const searchId = useId()
 const uid = useId()
 const el = ref<HTMLElement | null>(null)
@@ -56,6 +58,8 @@ onMounted(() => {
   if (h > 0) rowH.value = h
   void history.reload()
 })
+
+useFocusRefresh(() => history.reload())
 
 const virtual = useVirtualizer(
   computed(() => ({
@@ -108,8 +112,7 @@ const busy = computed(() => history.loading || history.loadingMore)
   <section class="history" :aria-busy="busy || undefined">
     <header class="head">
       <div class="ttl">
-        <h1>History</h1>
-        <p>every saved version, on every branch</p>
+        <h2 class="pt sr-only">History</h2>
       </div>
       <div class="tools">
         <div class="search">
@@ -118,17 +121,11 @@ const busy = computed(() => history.loading || history.loadingMore)
           <input :id="searchId" v-model="history.query" type="search" placeholder="Search versions" autocomplete="off" />
         </div>
         <SegmentedControl v-model="scope" label="Which versions" :options="SCOPES" />
+        <Button :aria-pressed="filtersOpen" aria-controls="history-filters" @click="filtersOpen = !filtersOpen">
+          <Filter :size="16" aria-hidden="true" /> {{ history.filtering ? 'Filters (on)' : 'Filters' }}
+        </Button>
         <IconButton
-          :label="history.filtering ? 'Filters (on)' : 'Filters'"
-          variant="secondary"
-          :pressed="filtersOpen"
-          aria-controls="history-filters"
-          @click="filtersOpen = !filtersOpen"
-        >
-          <Filter :size="18" />
-        </IconButton>
-        <IconButton label="Refresh history" variant="secondary" :disabled="history.loading" @click="history.reload()"><RefreshCw :size="18" /></IconButton>
-        <IconButton
+          v-if="shell.narrow"
           :label="shell.inspectorVisible ? 'Hide details panel' : 'Show details panel'"
           variant="secondary"
           :pressed="shell.inspectorVisible"
@@ -255,9 +252,9 @@ const busy = computed(() => history.loading || history.loadingMore)
   align-items: baseline;
   gap: var(--space-3);
 }
-h1 {
+.pt {
   margin: 0;
-  font-size: var(--fs-2xl);
+  font-size: var(--fs-xl);
 }
 .ttl p {
   margin: 0;
@@ -314,20 +311,30 @@ h1 {
 .pad {
   overflow-y: auto;
 }
+/* List on the left, the selected version in a column on the right. */
 .split {
   display: flex;
   flex: 1;
-  flex-direction: column;
   gap: var(--space-4);
   min-height: 0;
 }
 .split > .panel {
   flex: 1 1 0;
-  min-height: 160px;
+  min-width: 0;
 }
 .split > :deep(.detail) {
-  flex: 1 1 0;
-  min-height: 240px;
+  flex: none;
+  width: clamp(320px, 38%, 460px);
+}
+@media (max-width: 900px) {
+  .split {
+    flex-direction: column;
+  }
+  .split > :deep(.detail) {
+    width: auto;
+    flex: 1 1 0;
+    min-height: 240px;
+  }
 }
 .panel {
   display: flex;
@@ -377,6 +384,7 @@ h1 {
   overflow: hidden;
 }
 .sum {
+  font-weight: 600;
   flex: 1 1 0;
   min-width: 0;
   overflow: hidden;

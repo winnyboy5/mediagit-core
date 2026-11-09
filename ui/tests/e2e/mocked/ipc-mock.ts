@@ -162,6 +162,9 @@ export function healthy(extra: Record<string, unknown> = {}): Record<string, unk
     repo_log: { commits: [], refs: [] },
     media_info: {},
     config_schema: { keys: [] },
+    // App preloads these on repo open for the section counts.
+    tag_list: { tags: [] },
+    stash_list: { stashes: [] },
     ...extra,
   }
 }

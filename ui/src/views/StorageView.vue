@@ -4,7 +4,7 @@ import { HardDrive, RefreshCw } from 'lucide-vue-next'
 import { formatBytes } from '@/components/format'
 import EmptyState from '@/components/EmptyState.vue'
 import ErrorState from '@/components/ErrorState.vue'
-import IconButton from '@/components/IconButton.vue'
+import Button from '@/components/Button.vue'
 import ProgressBar from '@/components/ProgressBar.vue'
 import SkeletonRows from '@/components/SkeletonRows.vue'
 import { formatWhen } from '@/lib/history'
@@ -39,10 +39,9 @@ const n = (x: number) => x.toLocaleString('en-US')
   <section class="st" :aria-busy="st.loading || undefined">
     <header class="head">
       <div class="ttl">
-        <h1>Storage</h1>
-        <p>how much space the repository uses</p>
+        <h2 class="pt sr-only">Storage</h2>
       </div>
-      <IconButton label="Recalculate storage" variant="secondary" :disabled="st.loading" @click="st.refresh()"><RefreshCw :size="18" /></IconButton>
+      <Button :disabled="st.loading" @click="st.refresh()"><RefreshCw :size="16" aria-hidden="true" /> Recalculate storage</Button>
     </header>
 
     <div v-if="!s && !st.error" class="pad"><SkeletonRows :count="6" /></div>
@@ -125,9 +124,9 @@ const n = (x: number) => x.toLocaleString('en-US')
   align-items: baseline;
   gap: var(--space-3);
 }
-h1 {
+.pt {
   margin: 0;
-  font-size: var(--fs-2xl);
+  font-size: var(--fs-xl);
 }
 h2 {
   margin: 0;

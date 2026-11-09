@@ -12,7 +12,7 @@ async function boot(page: Page, commands: Record<string, unknown> = {}, scripts:
     storage: REPO,
   })
   await page.goto('/#/merge', { waitUntil: 'domcontentloaded' })
-  await expect(page.getByRole('heading', { name: 'Merge & conflicts', level: 1 })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Merge & conflicts', level: 2 })).toBeVisible()
 }
 
 /** Open the dialog and start merging feature/grade (the first other branch). */
@@ -34,10 +34,12 @@ test.describe('Merge: states', () => {
   test('loading: skeleton until branches arrive', async ({ page }) => {
     await boot(page, {}, { branch_list: [{ hold: true }, { resolve: fixture('branches') }] })
     await expect(page.getByRole('status', { name: 'Loading' })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Start a merge' })).toBeDisabled()
+    // No toolbar button while loading; the empty state later carries the only one.
+    await expect(page.getByRole('button', { name: 'Start a merge' })).toHaveCount(0)
     await expectNoAxeViolations(page)
     await ipcRelease(page)
     await expect(page.getByText('No merge in progress')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Start a merge' })).toHaveCount(1)
   })
 
   test('only one branch: nothing to merge, start is disabled with a reason', async ({ page }) => {

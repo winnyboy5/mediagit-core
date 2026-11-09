@@ -22,6 +22,17 @@ body {
 :focus-visible {
   outline: var(--focus-ring);
   outline-offset: var(--focus-offset);
+  box-shadow: var(--focus-halo);
+}
+
+/* Links: ink text, brand underline. */
+a:not([class]),
+.link {
+  color: var(--text);
+  text-decoration: underline;
+  text-decoration-color: var(--brand);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
 }
 
 ::selection {

@@ -73,17 +73,14 @@ const theirsMissing = computed(() => !merge.theirsOid)
   <section class="merge" :aria-busy="merge.busy || undefined">
     <header class="head">
       <div class="ttl">
-        <h1>Merge &amp; conflicts</h1>
-        <p>combine branches, resolve clashes</p>
+        <h2 class="pt sr-only">Merge &amp; conflicts</h2>
       </div>
       <div class="tools">
         <template v-if="merge.active">
           <Button variant="danger" :disabled="merge.busy" @click="abortOpen = true">Cancel merge</Button>
           <Button variant="primary" :disabled="!merge.canContinue || merge.busy" :loading="merge.busy" @click="merge.continue()">Finish merge</Button>
         </template>
-        <Button v-else variant="primary" :disabled="merge.busy || firstLoad || !others.length" @click="openStart">
-          <GitMerge :size="16" aria-hidden="true" /> Start a merge
-        </Button>
+        <!-- Idle: the empty state below carries the one Start a merge button. -->
       </div>
     </header>
 
@@ -161,13 +158,12 @@ const theirsMissing = computed(() => !merge.theirsOid)
         <p v-if="!others.length" class="muted">There is no other branch to merge yet.</p>
       </EmptyState>
       <!-- The status report does not say whether a merge is under way, so these stay behind a disclosure. -->
-      <details class="resume">
-        <summary class="muted">Merge started in another tool?</summary>
+      <MoreOptions class="resume" label="Merge started in another tool?">
         <div class="resume-acts">
           <Button size="sm" :disabled="merge.busy" @click="merge.continue()">Finish merge</Button>
           <Button size="sm" variant="ghost" :disabled="merge.busy" @click="abortOpen = true">Cancel merge</Button>
         </div>
-      </details>
+      </MoreOptions>
       <div v-if="merge.running" class="busy" role="status" data-testid="merge-progress">
         <strong>{{ merge.running.label }}</strong>
         <ProgressBar label="Updating files" :value="bar && bar.len != null ? bar.pos : null" :max="bar?.len ?? 100" />
@@ -223,9 +219,9 @@ const theirsMissing = computed(() => !merge.theirsOid)
   align-items: baseline;
   gap: var(--space-3);
 }
-h1 {
+.pt {
   margin: 0;
-  font-size: var(--fs-2xl);
+  font-size: var(--fs-xl);
 }
 .ttl p,
 .muted {

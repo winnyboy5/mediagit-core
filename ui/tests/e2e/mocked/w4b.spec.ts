@@ -31,10 +31,15 @@ async function boot(page: Page, route: string, heading: string, commands: Record
     storage: REPO,
   })
   await page.goto(`/#${route}`, { waitUntil: 'domcontentloaded' })
-  await expect(page.getByRole('heading', { name: heading, level: 1 })).toBeVisible()
+  await expect(page.getByRole('heading', { name: heading, level: 2, exact: true })).toBeVisible()
 }
 const args = async (page: Page, cmd: string) => (await ipcCalls(page, cmd)).map((c) => c.args)
 const row = (page: Page, name: string) => page.locator(`[data-branch="${name}"]`)
+/** Row actions live in one "Actions for NAME" menu. */
+async function menu(page: Page, name: string, item: string) {
+  await row(page, name).getByRole('button', { name: `Actions for ${name}` }).click()
+  await page.getByRole('menuitem', { name: item }).click()
+}
 const more = (scope: ReturnType<Page['locator']>) => scope.getByText('More options').click()
 
 test.describe('Branches: options', () => {
@@ -80,14 +85,14 @@ test.describe('Branches: options', () => {
 
   test('delete is "only if merged" by default; deleting anyway is a danger option', async ({ page }) => {
     await boot(page, '/branches', 'Branches')
-    await row(page, 'feature/grade').getByRole('button', { name: 'Delete feature/grade' }).click()
+    await menu(page, 'feature/grade', 'Delete…')
     let dlg = page.getByRole('dialog', { name: 'Delete feature/grade?' })
     await expect(dlg).toContainText('only deleted if its work is already part of another branch')
     await dlg.getByRole('button', { name: 'Delete branch' }).click()
     await expect.poll(() => args(page, 'branch_delete')).toMatchObject([{ name: 'feature/grade', opts: { mergedOnly: true } }])
     expect((await args(page, 'branch_delete'))[0]!.opts).not.toHaveProperty('force')
 
-    await row(page, 'review/cut-2').getByRole('button', { name: 'Delete review/cut-2' }).click()
+    await menu(page, 'review/cut-2', 'Delete…')
     dlg = page.getByRole('dialog', { name: 'Delete review/cut-2?' })
     await more(dlg)
     await dlg.getByRole('checkbox', { name: /Delete even if its work is not merged/ }).click()
@@ -99,7 +104,7 @@ test.describe('Branches: options', () => {
 
   test('rename over an existing branch needs the option and a confirmation', async ({ page }) => {
     await boot(page, '/branches', 'Branches')
-    await row(page, 'feature/grade').getByRole('button', { name: 'Rename feature/grade' }).click()
+    await menu(page, 'feature/grade', 'Rename…')
     const dlg = page.getByRole('dialog', { name: 'Rename feature/grade' })
     await dlg.getByLabel('New name').fill('review/cut-2')
     await expect(dlg).toContainText('A branch with this name exists')
@@ -116,20 +121,20 @@ test.describe('Branches: options', () => {
 
   test('protect with reviews, then remove protection after asking; details dialog', async ({ page }) => {
     await boot(page, '/branches', 'Branches')
-    await row(page, 'feature/grade').getByRole('button', { name: 'Protect feature/grade' }).click()
+    await menu(page, 'feature/grade', 'Protect branch…')
     const dlg = page.getByRole('dialog', { name: 'Protect feature/grade' })
     await dlg.getByRole('checkbox', { name: 'Ask for a review first' }).click()
     await dlg.getByRole('button', { name: 'Protect branch' }).click()
     await expect.poll(() => args(page, 'branch_protect')).toMatchObject([{ name: 'feature/grade', requireReviews: true, unprotect: false }])
 
-    await row(page, 'main').getByRole('button', { name: 'Remove protection from main' }).click()
+    await menu(page, 'main', 'Remove protection…')
     const ask = page.getByRole('alertdialog')
     await expect(ask).toContainText('Anyone can then delete this branch')
     expect(await ipcCalls(page, 'branch_protect')).toHaveLength(1)
     await ask.getByRole('button', { name: 'Remove protection' }).click()
     await expect.poll(async () => (await args(page, 'branch_protect'))[1]).toMatchObject({ name: 'main', unprotect: true, confirmed: true })
 
-    await row(page, 'feature/grade').getByRole('button', { name: 'Details of feature/grade' }).click()
+    await menu(page, 'feature/grade', 'Details…')
     await expect(page.getByTestId('branch-detail')).toContainText('Latest version')
     expect(await args(page, 'branch_show')).toMatchObject([{ name: 'feature/grade' }])
     await expectNoAxeViolations(page)
@@ -194,7 +199,7 @@ test.describe('History: filters and undo options', () => {
 
   test('undo: several versions, a message and no-commit; a stopped undo can continue or skip', async ({ page }) => {
     await boot(page, '/history', 'History')
-    await page.getByTestId('commit-detail').getByRole('button', { name: 'Undo…' }).click()
+    await page.getByTestId('commit-detail').getByRole('button', { name: 'Undo this version' }).click()
     await page.getByRole('menuitem', { name: /Undo this version/ }).click()
     const dlg = page.getByRole('dialog')
     await more(dlg)
@@ -211,7 +216,7 @@ test.describe('History: filters and undo options', () => {
 
   test('a revert that stops on clashes offers continue, skip and abandon', async ({ page }) => {
     await boot(page, '/history', 'History', { repo_revert: { action: 'revert', status: 'conflict', commits: [], conflicts: ['a.psd'] }, repo_revert_control: fixture('revert_ok') })
-    await page.getByTestId('commit-detail').getByRole('button', { name: 'Undo…' }).click()
+    await page.getByTestId('commit-detail').getByRole('button', { name: 'Undo this version' }).click()
     await page.getByRole('menuitem', { name: /Undo this version/ }).click()
     await page.getByRole('dialog').getByRole('button', { name: /Undo this version/ }).click()
     const banner = page.getByTestId('revert-stopped')

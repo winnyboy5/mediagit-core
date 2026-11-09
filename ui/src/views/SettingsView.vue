@@ -107,8 +107,7 @@ const leaveGo = () => {
   <section class="set" :aria-busy="rs.busy || undefined">
     <header class="head">
       <div class="ttl">
-        <h1>Settings</h1>
-        <p>how MediaGit looks and who you are</p>
+        <h2 class="pt sr-only">General</h2>
       </div>
     </header>
 
@@ -223,9 +222,9 @@ const leaveGo = () => {
   align-items: baseline;
   gap: var(--space-3);
 }
-h1 {
+.pt {
   margin: 0;
-  font-size: var(--fs-2xl);
+  font-size: var(--fs-xl);
 }
 h2 {
   margin: 0;

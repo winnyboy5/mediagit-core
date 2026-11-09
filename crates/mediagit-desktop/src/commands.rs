@@ -139,6 +139,18 @@ fn media_info_argv(repo: &Path, path: &str) -> Result<Vec<String>, EngineError> 
     ])
 }
 
+fn ls_files_argv(repo: &Path, paths: &[String], ignored: bool) -> Result<Vec<String>, EngineError> {
+    let mut argv = vec!["ls-files".to_owned()];
+    if ignored {
+        argv.push("--ignored".into());
+    }
+    argv.push("--".into());
+    for p in paths {
+        argv.push(repo_relative(repo, p)?);
+    }
+    Ok(argv)
+}
+
 fn lock_create_argv(repo: &Path, path: &str) -> Result<Vec<String>, EngineError> {
     Ok(vec![
         "lock".into(),
@@ -525,7 +537,7 @@ async fn write(
 /// A queued write that streams progress. `cancellable` ops register under
 /// `op_id`; `cancel_op` then drops the run, which kills the child.
 #[allow(clippy::too_many_arguments)]
-async fn stream(
+pub(crate) async fn stream(
     engine: &Engine,
     ops: &Ops,
     queues: &RepoQueues,
@@ -740,6 +752,19 @@ pub async fn media_info(
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
     read(&engine, &repo, &media_info_argv(&repo, &path)?).await
+}
+
+/// Every file in the working folder with its status (`ls-files`).
+#[tauri::command]
+pub async fn repo_ls_files(
+    engine: tauri::State<'_, Engine>,
+    repo: String,
+    paths: Option<Vec<String>>,
+    ignored: Option<bool>,
+) -> Result<Value, EngineError> {
+    let repo = repo_path(&repo)?;
+    let argv = ls_files_argv(&repo, &paths.unwrap_or_default(), ignored == Some(true))?;
+    read(&engine, &repo, &argv).await
 }
 
 /// Local branches with ahead/behind; `remote` lists the remote-tracking ones instead.
@@ -1492,6 +1517,19 @@ mod tests {
     }
 
     #[test]
+    fn ls_files_argv_keeps_paths_positional_and_inside_the_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        assert_eq!(ls_files_argv(repo, &[], false).unwrap(), ["ls-files", "--"]);
+        assert_eq!(
+            ls_files_argv(repo, &["a/b".into()], true).unwrap(),
+            ["ls-files", "--ignored", "--", "a/b"]
+        );
+        assert!(bad(ls_files_argv(repo, &["--machine".into()], false)));
+        assert!(bad(ls_files_argv(repo, &["../x".into()], false)));
+    }
+
+    #[test]
     fn show_and_extract_only_accept_hex_revisions() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path();
@@ -2087,6 +2125,43 @@ mod tests {
             peak.load(Ordering::SeqCst),
             2,
             "different repos run together"
+        );
+    }
+
+    /// `stream` must forward the CLI's progress events to the window's channel.
+    #[tokio::test]
+    async fn stream_forwards_add_progress_to_the_channel() {
+        let engine = Engine::locate().expect("run `cargo build -p mediagit-cli` first");
+        let tmp = tempfile::tempdir().unwrap();
+        let init = std::process::Command::new(engine.bin())
+            .arg("init")
+            .arg(tmp.path())
+            .output()
+            .unwrap();
+        assert!(init.status.success());
+        std::fs::write(tmp.path().join("a.bin"), vec![7u8; 4096]).unwrap();
+        let sent = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&sent);
+        let channel = Channel::<Progress>::new(move |_| {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        });
+        let argv = vec!["add".to_owned(), "--".into(), "a.bin".into()];
+        stream(
+            &engine,
+            &Ops::default(),
+            &RepoQueues::default(),
+            tmp.path(),
+            &argv,
+            "",
+            false,
+            &channel,
+        )
+        .await
+        .unwrap();
+        assert!(
+            sent.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            "no progress reached the channel"
         );
     }
 }

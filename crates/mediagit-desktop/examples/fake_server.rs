@@ -21,11 +21,28 @@ fn flag(args: &[String], name: &str) -> Option<String> {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("storage-test") {
+        let mut secrets = String::new();
+        std::io::stdin().read_to_string(&mut secrets).unwrap();
+        let ok = !secrets.contains("bad-key");
+        println!(
+            "{}",
+            if ok {
+                r#"{"ok":true}"#.to_owned()
+            } else {
+                r#"{"ok":false,"error":"denied"}"#.to_owned()
+            }
+        );
+        std::process::exit(i32::from(!ok));
+    }
     let config = flag(&args, "--config").expect("--config");
     if args.first().map(String::as_str) == Some("init") {
         let mut line = String::new();
         std::io::stdin().lock().read_line(&mut line).unwrap();
         let line = line.trim_end().to_owned();
+        let mut rest = String::new();
+        std::io::stdin().lock().read_to_string(&mut rest).unwrap();
+        std::fs::write(format!("{config}.secrets"), rest).unwrap();
         if line.is_empty() {
             eprintln!("no password on stdin");
             std::process::exit(1);

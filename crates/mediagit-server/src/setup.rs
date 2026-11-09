@@ -60,6 +60,9 @@ pub struct InitArgs {
     /// no secret in argv or the environment. Wins over the env variable.
     #[arg(long, requires = "non_interactive")]
     pub admin_password_stdin: bool,
+
+    #[command(flatten)]
+    pub storage: StorageArgs,
 }
 
 /// One line from `reader`, without its line ending; empty input is an error.
@@ -170,6 +173,10 @@ pub async fn run_init(args: &InitArgs) -> Result<()> {
         None
     };
 
+    if args.storage.storage.is_some() {
+        config.default_storage = args.storage.to_config(&args.storage.read_secrets()?)?;
+    }
+
     write_config_file(config_path, &config)?;
     std::fs::create_dir_all(&config.repos_dir)
         .with_context(|| format!("creating repos dir {:?}", config.repos_dir))?;
@@ -269,6 +276,177 @@ fn generate_jwt_secret() -> String {
 fn write_config_file(path: &Path, config: &ServerConfig) -> Result<()> {
     let toml_str = toml::to_string_pretty(config).context("serializing config")?;
     std::fs::write(path, toml_str).with_context(|| format!("writing {:?}", path))
+}
+
+// ---------------------------------------------------------------------
+// storage (default backend for repos created through the admin API)
+// ---------------------------------------------------------------------
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StorageKind {
+    Filesystem,
+    S3,
+    Gcs,
+    Azure,
+}
+
+/// Where new repositories keep their objects. Secrets are never flags: with
+/// `--storage-secret-stdin` they are read as `name=value` lines
+/// (`access-key-id`, `secret-access-key`, `account-key`, `connection-string`,
+/// `credentials-path`), after the admin password line when both are given.
+#[derive(Args, Debug, Default, Clone)]
+pub struct StorageArgs {
+    /// Backend for new repos: filesystem (the default, nothing written), s3, gcs or azure.
+    #[arg(long = "storage", value_enum)]
+    pub storage: Option<StorageKind>,
+    #[arg(long)]
+    pub storage_bucket: Option<String>,
+    #[arg(long)]
+    pub storage_region: Option<String>,
+    /// S3-compatible endpoint (MinIO, R2...).
+    #[arg(long)]
+    pub storage_endpoint: Option<String>,
+    #[arg(long)]
+    pub storage_prefix: Option<String>,
+    /// Azure container.
+    #[arg(long)]
+    pub storage_container: Option<String>,
+    /// Azure storage account name.
+    #[arg(long)]
+    pub storage_account: Option<String>,
+    /// GCS project id.
+    #[arg(long)]
+    pub storage_project: Option<String>,
+    /// Read storage credentials from stdin as `name=value` lines.
+    #[arg(long)]
+    pub storage_secret_stdin: bool,
+}
+
+/// `name=value` lines until EOF; blank lines are skipped, the value may contain `=`.
+fn read_secret_lines(
+    reader: impl std::io::BufRead,
+) -> Result<std::collections::HashMap<String, String>> {
+    let mut out = std::collections::HashMap::new();
+    for line in reader.lines() {
+        let line = line.context("reading storage credentials from stdin")?;
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            continue;
+        }
+        let (k, v) = line
+            .split_once('=')
+            .context("--storage-secret-stdin: expected name=value lines")?;
+        out.insert(k.to_owned(), v.to_owned());
+    }
+    Ok(out)
+}
+
+impl StorageArgs {
+    /// Secrets from stdin when asked for; empty otherwise.
+    pub fn read_secrets(&self) -> Result<std::collections::HashMap<String, String>> {
+        if self.storage_secret_stdin {
+            read_secret_lines(std::io::stdin().lock())
+        } else {
+            Ok(Default::default())
+        }
+    }
+
+    /// The backend these flags describe; `None` for the filesystem default.
+    pub fn to_config(
+        &self,
+        secrets: &std::collections::HashMap<String, String>,
+    ) -> Result<Option<mediagit_config::StorageConfig>> {
+        use mediagit_config::{AzureAuth, AzureStorage, GCSStorage, S3Storage, StorageConfig};
+        let need = |v: &Option<String>, flag: &str| -> Result<String> {
+            v.clone()
+                .filter(|s| !s.is_empty())
+                .with_context(|| format!("--storage {} requires --{flag}", self.kind_name()))
+        };
+        let prefix = self.storage_prefix.clone().unwrap_or_default();
+        let secret = |k: &str| secrets.get(k).filter(|s| !s.is_empty()).cloned();
+        Ok(match self.storage {
+            None | Some(StorageKind::Filesystem) => None,
+            Some(StorageKind::S3) => {
+                let (id, key) = (secret("access-key-id"), secret("secret-access-key"));
+                if id.is_some() != key.is_some() {
+                    anyhow::bail!("S3 needs both access-key-id and secret-access-key, or neither");
+                }
+                Some(StorageConfig::S3(S3Storage {
+                    bucket: need(&self.storage_bucket, "storage-bucket")?,
+                    region: self
+                        .storage_region
+                        .clone()
+                        .unwrap_or_else(|| "us-east-1".into()),
+                    access_key_id: id,
+                    secret_access_key: key,
+                    endpoint: self.storage_endpoint.clone().filter(|s| !s.is_empty()),
+                    prefix,
+                }))
+            }
+            Some(StorageKind::Gcs) => Some(StorageConfig::GCS(GCSStorage {
+                bucket: need(&self.storage_bucket, "storage-bucket")?,
+                project_id: need(&self.storage_project, "storage-project")?,
+                credentials_path: secret("credentials-path"),
+                prefix,
+            })),
+            Some(StorageKind::Azure) => {
+                let auth = match (secret("connection-string"), secret("account-key")) {
+                    (Some(value), _) => AzureAuth::ConnectionString { value },
+                    (None, Some(account_key)) => AzureAuth::AccountKey {
+                        account_name: need(&self.storage_account, "storage-account")?,
+                        account_key,
+                    },
+                    (None, None) => {
+                        anyhow::bail!("Azure needs a connection-string or account-key secret")
+                    }
+                };
+                Some(StorageConfig::Azure(AzureStorage {
+                    container: need(&self.storage_container, "storage-container")?,
+                    prefix,
+                    auth: Some(auth),
+                    legacy: Default::default(),
+                }))
+            }
+        })
+    }
+
+    fn kind_name(&self) -> &'static str {
+        match self.storage {
+            Some(StorageKind::S3) => "s3",
+            Some(StorageKind::Gcs) => "gcs",
+            Some(StorageKind::Azure) => "azure",
+            _ => "filesystem",
+        }
+    }
+}
+
+#[derive(Args, Debug)]
+pub struct StorageTestArgs {
+    #[command(flatten)]
+    pub storage: StorageArgs,
+}
+
+/// Verify the credentials by writing, reading back and deleting a probe object.
+/// Prints one JSON line (`{"ok":true}` or `{"ok":false,"error":...}`); the exit
+/// code is 0 only on success.
+pub async fn run_storage_test(args: &StorageTestArgs) -> Result<()> {
+    let secrets = args.storage.read_secrets()?;
+    let Some(cfg) = args.storage.to_config(&secrets)? else {
+        anyhow::bail!("storage-test needs --storage s3, gcs or azure");
+    };
+    match mediagit_server::handlers::probe_storage(&cfg).await {
+        Ok(()) => {
+            println!("{}", serde_json::json!({ "ok": true }));
+            Ok(())
+        }
+        Err(e) => {
+            println!(
+                "{}",
+                serde_json::json!({ "ok": false, "error": e.to_string() })
+            );
+            std::process::exit(1);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------

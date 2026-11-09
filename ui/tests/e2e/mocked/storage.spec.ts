@@ -8,7 +8,7 @@ async function boot(page: Page, commands: Record<string, unknown> = {}, handlers
   await mockIpc(page, { commands: healthy({ repo_stats: fixture('stats'), ...commands }), handlers, scripts: scripts as never, storage: REPO })
   await page.goto('/#/storage', { waitUntil: 'domcontentloaded' })
   // A modal prompt hides the page from the accessibility tree, so its tests skip this.
-  if (wait) await expect(page.getByRole('heading', { name: 'Storage', level: 1 })).toBeVisible()
+  if (wait) await expect(page.getByRole('heading', { name: 'Storage', level: 2 })).toBeVisible()
 }
 
 test.describe('Storage: states', () => {

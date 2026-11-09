@@ -83,8 +83,7 @@ function runGc() {
   <section class="mt" :aria-busy="m.busy || undefined">
     <header class="head">
       <div class="ttl">
-        <h1>Maintenance</h1>
-        <p>clean up and check the repository</p>
+        <h2 class="pt sr-only">Maintenance</h2>
       </div>
     </header>
 
@@ -240,9 +239,9 @@ function runGc() {
   align-items: baseline;
   gap: var(--space-3);
 }
-h1 {
+.pt {
   margin: 0;
-  font-size: var(--fs-2xl);
+  font-size: var(--fs-xl);
 }
 h2 {
   margin: 0;

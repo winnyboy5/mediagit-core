@@ -31,8 +31,9 @@ const pct = computed(() =>
   width: 100%;
   height: 8px;
   overflow: hidden;
+  border: 1px solid var(--text);
   border-radius: var(--radius-pill);
-  background: var(--surface-3);
+  background: var(--surface);
 }
 .bar.sm {
   height: 4px;
@@ -40,15 +41,15 @@ const pct = computed(() =>
 .fill {
   height: 100%;
   border-radius: inherit;
-  background: var(--accent);
+  background: var(--brand);
   transition: width var(--dur) var(--ease);
 }
 .indeterminate .fill {
   width: 100%;
   background: repeating-linear-gradient(
     -45deg,
-    var(--accent) 0 10px,
-    color-mix(in srgb, var(--accent) 55%, var(--surface-3)) 10px 20px
+    var(--brand) 0 10px,
+    color-mix(in srgb, var(--brand) 55%, var(--surface)) 10px 20px
   );
   background-size: 28px 28px;
   animation: stripe 900ms linear infinite;

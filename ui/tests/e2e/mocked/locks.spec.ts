@@ -8,7 +8,7 @@ const row = (page: Page, path: string) => page.locator(`[data-lock="${path}"]`)
 async function boot(page: Page, commands: Record<string, unknown> = {}, storage: Record<string, string> = {}, scripts: Record<string, unknown[]> = {}) {
   await mockIpc(page, { commands: healthy({ lock_list: fixture('locks'), lock_create: { lock_id: 'l-9', path: 'audio/vo_take3.wav', owner: 'Mira Okafor', created_at: 1793000000 }, ...commands }), storage: { ...REPO, ...storage }, scripts: scripts as never })
   await page.goto('/#/locks', { waitUntil: 'domcontentloaded' })
-  await expect(page.getByRole('heading', { name: 'Locks', level: 1 })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Locks', level: 2 })).toBeVisible()
 }
 
 test.describe('Locks: states', () => {
@@ -44,7 +44,7 @@ test.describe('Locks: states', () => {
     await expectNoAxeViolations(page)
     await expect(page.getByRole('button', { name: 'Retry' })).toHaveCount(0)
     await page.getByRole('button', { name: 'Add remote' }).click()
-    await expect(page).toHaveURL(/#\/sync$/)
+    await expect(page).toHaveURL(/#\/branches\/sync$/)
   })
 })
 

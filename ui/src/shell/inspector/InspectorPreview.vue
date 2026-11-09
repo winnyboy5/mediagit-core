@@ -32,7 +32,7 @@ watch(() => [props.file.path, props.file.rev, src.value], () => (broken.value = 
 </script>
 
 <template>
-  <div class="prev" data-testid="preview">
+  <div class="prev" :class="{ plain: gone || kind === 'none' }" data-testid="preview">
     <template v-if="gone">
       <FileIcon :path="file.path" />
       <p>This file is deleted here, so there is nothing to preview.</p>
@@ -87,6 +87,16 @@ watch(() => [props.file.path, props.file.rev, src.value], () => (broken.value = 
   background: var(--surface-2);
   color: var(--text-muted);
   text-align: center;
+}
+/* Nothing to show: one quiet line, not an empty box. */
+.plain {
+  display: flex;
+  align-items: center;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
 }
 p {
   margin: 0;

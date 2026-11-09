@@ -16,7 +16,7 @@ use tauri::Manager;
 use super::admin::{SecretCmd, run, server_flag};
 use super::{invalid, plain_arg};
 use crate::engine::{Engine, EngineError, Secret};
-use crate::server_manager::{LocalStatus, ServerManager};
+use crate::server_manager::{LocalStatus, ServerManager, StorageOpts};
 
 // ---------------------------------------------------------------------------
 // argv builders (pure, unit-tested)
@@ -443,9 +443,11 @@ pub async fn server_local_setup(
     username: String,
     email: String,
     password: String,
+    storage: Option<StorageOpts>,
 ) -> Result<LocalStatus, EngineError> {
     let password = Secret::new(password)?;
-    mgr.setup(&username, &email, &password).await
+    mgr.setup(&username, &email, &password, storage.as_ref())
+        .await
 }
 
 #[tauri::command]
@@ -477,6 +479,24 @@ pub async fn server_local_set_network(
     enabled: bool,
 ) -> Result<LocalStatus, EngineError> {
     mgr.set_lan(enabled).await
+}
+
+/// Move the local server to another folder (`path` omitted = the default). Stopped server only.
+#[tauri::command]
+pub async fn server_local_set_folder(
+    mgr: tauri::State<'_, ServerManager>,
+    path: Option<String>,
+) -> Result<LocalStatus, EngineError> {
+    mgr.set_folder(path.as_deref()).await
+}
+
+/// Check storage credentials with a throwaway write, read and delete. Returns `{ok, error?}`.
+#[tauri::command]
+pub async fn server_storage_test(
+    mgr: tauri::State<'_, ServerManager>,
+    storage: StorageOpts,
+) -> Result<Value, EngineError> {
+    mgr.storage_test(&storage).await
 }
 
 /// Stop the owned server when the app exits.

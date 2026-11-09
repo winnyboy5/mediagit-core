@@ -17,7 +17,7 @@ watchEffect(() => inspector.ensureHistory(props.file))
 const entry = computed(() => inspector.histories.get(props.file.path))
 
 async function open(oid: string) {
-  await router.push('/history')
+  await router.push('/history/versions')
   void history.select(oid)
 }
 </script>
@@ -45,10 +45,8 @@ async function open(oid: string) {
 h3 {
   margin: 0 0 var(--space-2);
   color: var(--text-muted);
-  font-size: var(--fs-xs);
+  font-size: var(--fs-md);
   font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
 }
 ul {
   display: grid;
