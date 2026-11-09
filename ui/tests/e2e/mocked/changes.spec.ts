@@ -64,7 +64,7 @@ test.describe('Changes: states', () => {
     await expectNoAxeViolations(page)
     await ipcRelease(page)
     await expect(section.getByRole('button', { name: 'Stage all', exact: true })).toBeEnabled()
-    expect((await ipcCalls(page, 'repo_add'))[0]!.args).toEqual({ repo: '/repos/hero-film', paths: ['.'] })
+    expect((await ipcCalls(page, 'repo_add'))[0]!.args).toEqual({ repo: '/repos/hero-film', paths: ['.'], opts: { all: false, dryRun: false, force: false, update: false, ignoreRemoval: false } })
   })
 })
 
@@ -142,7 +142,7 @@ test.describe('Changes: stage and commit', () => {
     await unstaged(page).getByRole('treeitem', { name: /vo_take3/ }).click()
     await page.getByRole('button', { name: 'Stage selected (1)' }).click()
     await expect.poll(async () => (await ipcCalls(page, 'repo_add')).length).toBe(1)
-    expect((await ipcCalls(page, 'repo_add'))[0]!.args).toEqual({ repo: '/repos/hero-film', paths: ['audio/vo_take3.wav'] })
+    expect((await ipcCalls(page, 'repo_add'))[0]!.args).toEqual({ repo: '/repos/hero-film', paths: ['audio/vo_take3.wav'], opts: { all: false, dryRun: false, force: false, update: false, ignoreRemoval: false } })
   })
 
   test('commit needs staged files and a message; Ctrl+Enter saves it', async ({ page }) => {
@@ -153,7 +153,7 @@ test.describe('Changes: stage and commit', () => {
     await expect(save).toBeEnabled()
     await page.getByLabel('Message').press('Control+Enter')
     await expect.poll(async () => (await ipcCalls(page, 'repo_commit')).length).toBe(1)
-    expect((await ipcCalls(page, 'repo_commit'))[0]!.args).toEqual({ repo: '/repos/hero-film', message: 'Grade pass on shot_010' })
+    expect((await ipcCalls(page, 'repo_commit'))[0]!.args).toEqual({ repo: '/repos/hero-film', message: 'Grade pass on shot_010', opts: {} })
     await expect(page.getByLabel('Message')).toHaveValue('')
   })
 

@@ -289,8 +289,9 @@ export const useServerStore = defineStore('server', () => {
   const revokeGrant = (user: string, repoName: string) =>
     write((u) => api.serverGrantRemove(u, user, repoName), () => `${user} no longer has access to ${repoName}`, reloadAccess)
 
-  async function createKey(name: string) {
-    const r = await write((u) => api.serverKeyCreate(u, name, []), () => undefined, loadKeys)
+  /** `permissions` empty = everything you can do yourself; otherwise only those (`repo:read`, `repo:write`, `repo:admin`). */
+  async function createKey(name: string, permissions: string[] = []) {
+    const r = await write((u) => api.serverKeyCreate(u, name, permissions), () => undefined, loadKeys)
     if (r?.key) newKey.value = { name, key: r.key }
     return !!r
   }

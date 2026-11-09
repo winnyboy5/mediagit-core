@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { onBeforeRouteLeave } from 'vue-router'
+import { SETTING_COPY } from '@/lib/settingCopy'
 import AlertDialog from '@/components/AlertDialog.vue'
 import Button from '@/components/Button.vue'
 import Checkbox from '@/components/Checkbox.vue'
@@ -10,6 +12,7 @@ import SkeletonRows from '@/components/SkeletonRows.vue'
 import Textarea from '@/components/Textarea.vue'
 import TextField from '@/components/TextField.vue'
 import { primaryBar } from '@/stores/ops'
+import SettingRow from './settings/SettingRow.vue'
 import { useLookStore, useRepoSettingsStore, type Density, type Theme } from '@/stores/settings'
 
 const look = useLookStore()
@@ -60,7 +63,44 @@ const sparseError = computed(() => (list.value.some((p) => p.startsWith('-') || 
 const applyOpen = ref(false)
 const disableOpen = ref(false)
 const bar = computed(() => (rs.running ? primaryBar(rs.running) : undefined))
-const rows = computed(() => rs.entries.filter((e) => e.value !== null))
+
+// Every setting the CLI knows, grouped (the form is built from `config schema`).
+const GROUPS: Record<string, string> = {
+  performance: 'Speed',
+  storage: 'Storage',
+  remotes: 'Remote servers',
+}
+const groupTitle = (g: string) => GROUPS[g] ?? g.charAt(0).toUpperCase() + g.slice(1)
+const groups = computed(() => {
+  const by = new Map<string, typeof rs.fields>()
+  for (const f of rs.fields) by.set(f.group, [...(by.get(f.group) ?? []), f])
+  return [...by.entries()].map(([id, fields]) => ({ id, title: groupTitle(id), fields }))
+})
+const labelOf = (key: string) => {
+  const known = SETTING_COPY[key]
+  if (known) return known.label
+  const leaf = key.split('.').pop()!.replace(/_/g, ' ')
+  return leaf.charAt(0).toUpperCase() + leaf.slice(1)
+}
+const fieldLabel = (f: (typeof rs.fields)[number]) => (f.name ? `${f.name}: ${labelOf(f.spec.key)}` : labelOf(f.spec.key))
+
+// Unsaved rows: leaving the page would drop them, so ask first (in-app dialog, not window.confirm).
+const dirtyKeys = reactive(new Set<string>())
+const onDirty = (k: string, d: boolean) => void (d ? dirtyKeys.add(k) : dirtyKeys.delete(k))
+const leaveOpen = ref(false)
+let leaveDecision: ((ok: boolean) => void) | null = null
+onBeforeRouteLeave(() => {
+  if (!dirtyKeys.size) return true
+  leaveOpen.value = true
+  return new Promise<boolean>((res) => (leaveDecision = res))
+})
+watch(leaveOpen, (o) => {
+  if (!o) setTimeout(() => leaveDecision && (leaveDecision(false), (leaveDecision = null)))
+})
+const leaveGo = () => {
+  leaveDecision?.(true)
+  leaveDecision = null
+}
 </script>
 
 <template>
@@ -100,18 +140,29 @@ const rows = computed(() => rs.entries.filter((e) => e.value !== null))
 
       <section class="card wide" aria-labelledby="cfg-h" data-testid="config">
         <h2 id="cfg-h">All settings</h2>
+        <p class="muted">Every setting this repository understands. An empty box uses the default. Secret values are never shown.</p>
         <ErrorState v-if="rs.error && !rs.loaded" :code="rs.error.code" :message="rs.error.message" @retry="rs.refresh()" />
-        <p v-else-if="!rows.length && rs.loaded" class="muted">Nothing has been changed from the defaults.</p>
-        <table v-else-if="rows.length" class="t">
-          <thead><tr><th scope="col">Setting</th><th scope="col">Value</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
-          <tbody>
-            <tr v-for="e in rows" :key="e.key">
-              <th scope="row" class="mono">{{ e.key }}</th>
-              <td class="mono">{{ e.value }}</td>
-              <td class="r"><Button size="sm" variant="ghost" :disabled="rs.busy" :aria-label="`Reset ${e.key}`" @click="rs.unsetKey(e.key)">Reset</Button></td>
-            </tr>
-          </tbody>
-        </table>
+        <div v-else-if="!rs.loaded"><SkeletonRows :count="3" /></div>
+        <p v-else-if="!groups.length" class="muted" data-testid="no-schema">The list of settings could not be read. Close and reopen the repository to try again.</p>
+        <template v-else>
+          <section v-for="g in groups" :key="g.id" class="group" :aria-labelledby="`g-${g.id}`" :data-group="g.id">
+            <h3 :id="`g-${g.id}`">{{ g.title }}</h3>
+            <SettingRow
+              v-for="f in g.fields"
+              :key="f.key"
+              :spec="f.spec"
+              :full-key="f.key"
+              :label="fieldLabel(f)"
+              :description="SETTING_COPY[f.spec.key]?.description"
+              :env="SETTING_COPY[f.spec.key]?.env"
+              @dirty="onDirty"
+              :value="f.value"
+              :busy="rs.busy"
+              @save="(k, v, s) => rs.setKey(k, v, s)"
+              @reset="(k) => rs.unsetKey(k)"
+            />
+          </section>
+        </template>
       </section>
 
       <section class="card wide" aria-labelledby="sp-h" data-testid="sparse">
@@ -144,6 +195,15 @@ const rows = computed(() => rs.entries.filter((e) => e.value !== null))
       description="Every file in the project is brought back to this computer's folder. For a big project that can take a while and a lot of space."
       confirm-label="Bring everything back"
       @confirm="rs.disableSparse()"
+    />
+    <AlertDialog
+      v-model:open="leaveOpen"
+      title="Leave without saving?"
+      description="Some settings are changed but not saved. If you leave now, those changes are lost."
+      confirm-label="Leave and discard"
+      cancel-label="Keep editing"
+      destructive
+      @confirm="leaveGo"
     />
   </section>
 </template>
@@ -237,28 +297,13 @@ h2 {
   display: flex;
   gap: var(--space-2);
 }
-.t {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: var(--fs-sm);
+.group {
+  display: grid;
+  gap: var(--space-1);
+  margin-top: var(--space-3);
 }
-.t tr {
-  height: var(--row-h);
-}
-.t th,
-.t td {
-  /* 8px at the comfortable 36px row; the 8px shrinks by half of what compact takes off the row. */
-  padding: calc(var(--space-2) - (36px - var(--row-h)) / 2) var(--space-3);
-  border-bottom: 1px solid var(--border);
-  text-align: left;
-}
-.t thead th {
-  color: var(--text-muted);
-}
-.t tbody th {
-  font-weight: 500;
-}
-.r {
-  text-align: right !important;
+.group h3 {
+  margin: 0;
+  font-size: var(--fs-md);
 }
 </style>

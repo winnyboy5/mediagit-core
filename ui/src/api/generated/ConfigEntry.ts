@@ -2,6 +2,6 @@
 
 export type ConfigEntry = { key: string, 
 /**
- * `None` when unset.
+ * `None` when unset. A secret key reports `"set"` here, never its value.
  */
-value: string | null, };
+value: string | null, secret: boolean, };

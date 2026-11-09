@@ -1167,3 +1167,242 @@ fn stash_push_without_paths_still_stashes_everything() {
     assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "a0");
     assert_eq!(fs::read_to_string(dir.join("b.txt")).unwrap(), "b0");
 }
+
+// ---------------------------------------------------------------------------
+// config schema / generic set|get|unset
+// ---------------------------------------------------------------------------
+
+fn config_text(dir: &Path) -> String {
+    fs::read_to_string(dir.join(".mediagit/config.toml")).unwrap()
+}
+
+#[test]
+fn config_schema_describes_every_key() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_repo(dir);
+
+    let d = ok(dir, &["config", "schema"]);
+    let keys = d["keys"].as_array().unwrap();
+    let find = |k: &str| {
+        keys.iter()
+            .find(|e| e["key"] == k)
+            .unwrap_or_else(|| panic!("{k}"))
+    };
+    assert_eq!(find("author.email")["type"], "string");
+    assert_eq!(find("performance.upload_concurrency")["type"], "int");
+    assert_eq!(find("performance.upload_concurrency")["min"], 1);
+    assert_eq!(find("storage.sync")["type"], "bool");
+    assert_eq!(find("storage.sync")["default"], "false");
+    assert_eq!(find("remotes.<name>.token")["secret"], true);
+    assert_eq!(find("author.name")["secret"], false);
+    assert!(keys.iter().all(|e| !e["doc"].as_str().unwrap().is_empty()));
+    // Needs no repository.
+    let outside = TempDir::new().unwrap();
+    assert!(
+        !ok(outside.path(), &["config", "schema"])["keys"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn config_set_checks_the_type_and_leaves_the_file_alone_on_failure() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_repo(dir);
+    let before = config_text(dir);
+
+    for args in [
+        ["config", "set", "storage.sync", "maybe"],
+        ["config", "set", "performance.pack_workers", "0"],
+        ["config", "set", "performance.pack_workers", "many"],
+        ["config", "set", "storage.file_permissions", "rwx"],
+        ["config", "set", "cdc_seed", "1"],
+    ] {
+        assert_eq!(err(dir, &args), "error", "{args:?}");
+        assert_eq!(config_text(dir), before, "{args:?} must not touch the file");
+    }
+
+    let d = ok(dir, &["config", "set", "storage.sync", "true"]);
+    assert_eq!(d["entries"][0]["value"], "true");
+    assert_eq!(
+        ok(dir, &["config", "get", "storage.sync"])["entries"][0]["value"],
+        "true"
+    );
+    assert!(ok(dir, &["config", "unset", "storage.sync"])["entries"][0]["value"].is_null());
+    assert_eq!(
+        ok(dir, &["config", "get", "storage.sync"])["entries"][0]["value"],
+        Value::Null
+    );
+}
+
+#[test]
+fn config_set_is_validated_against_the_real_config_struct() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_repo(dir);
+    let before = config_text(dir);
+
+    // The type-correct value for a key the current backend cannot have.
+    assert_eq!(
+        err(dir, &["config", "set", "storage.region", "eu-west-1"]),
+        "error"
+    );
+    assert_eq!(config_text(dir), before);
+    // A remote token with no remote: the struct requires a url.
+    let r = run_env(
+        dir,
+        &[],
+        &["--secret-stdin"],
+        &["config", "set", "remotes.ghost.token"],
+        Some("tok\n"),
+    );
+    assert_ne!(r.code, 0, "{}", r.stdout);
+    assert_eq!(config_text(dir), before);
+}
+
+#[test]
+fn config_set_keeps_comments_unknown_keys_and_a_u64_seed() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_repo(dir);
+    // A top-level u64 above i64::MAX (which `toml::Value` cannot hold) and a
+    // comment, placed before the first table.
+    let rest: String = config_text(dir)
+        .lines()
+        .filter(|l| !l.starts_with("cdc_seed"))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let seeded = format!("# hand-written note\ncdc_seed = 18446744073709551615 # big\n{rest}");
+    fs::write(dir.join(".mediagit/config.toml"), &seeded).unwrap();
+
+    ok(dir, &["config", "set", "author.name", "Ada"]);
+    let after = config_text(dir);
+    assert!(after.contains("# hand-written note"), "{after}");
+    assert!(after.contains("18446744073709551615 # big"), "{after}");
+    assert!(after.contains("name = \"Ada\""), "{after}");
+}
+
+#[test]
+fn config_secret_keys_come_from_stdin_and_are_never_shown() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_repo(dir);
+    ok(dir, &["remote", "add", "origin", "http://127.0.0.1:1/r"]);
+    let secret = "tok-Zq81-config-secret";
+
+    // On argv: refused, and the file never sees it.
+    let r = run_env(
+        dir,
+        &[],
+        &["--secret-stdin"],
+        &["config", "set", "remotes.origin.token", secret],
+        Some(&format!("{secret}\n")),
+    );
+    assert_eq!(r.json["error"]["code"], "invalid_args", "{}", r.stdout);
+    assert!(!config_text(dir).contains(secret));
+    assert_no_leak(&r, secret);
+
+    // No stdin permission: a prompt, not a hang.
+    let r = run_env(
+        dir,
+        &[],
+        &[],
+        &["config", "set", "remotes.origin.token"],
+        Some(&format!("{secret}\n")),
+    );
+    assert_eq!(r.json["error"]["code"], "needs_input", "{}", r.stdout);
+
+    // On stdin: stored, reported as "set", never echoed.
+    let r = run_env(
+        dir,
+        &[],
+        &["--secret-stdin"],
+        &["config", "set", "remotes.origin.token"],
+        Some(&format!("{secret}\n")),
+    );
+    assert_eq!(r.code, 0, "{}", r.stdout);
+    assert_eq!(r.json["data"]["entries"][0]["value"], "set");
+    assert_eq!(r.json["data"]["entries"][0]["secret"], true);
+    assert_no_leak(&r, secret);
+    assert!(
+        config_text(dir).contains(secret),
+        "pinned: tokens are stored in plain text"
+    );
+
+    let r = run_env(
+        dir,
+        &[],
+        &[],
+        &["config", "get", "remotes.origin.token"],
+        None,
+    );
+    assert_eq!(r.json["data"]["entries"][0]["value"], "set");
+    assert_no_leak(&r, secret);
+    let r = run_env(dir, &[], &[], &["config", "list"], None);
+    assert_no_leak(&r, secret);
+    let listed = r.json["data"]["entries"].as_array().unwrap();
+    assert!(
+        listed
+            .iter()
+            .any(|e| e["key"] == "remotes.origin.token" && e["value"] == "set")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// diff -- PATHS (prefix filter)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn diff_paths_filter_every_mode() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_repo(dir);
+    fs::create_dir(dir.join("art")).unwrap();
+    commit_file(dir, "a.txt", b"a0", "a");
+    commit_file(dir, "art/b.txt", b"b0", "b");
+    commit_file(dir, "art/c.txt", b"c0", "c");
+    let names = |d: &Value| -> Vec<String> {
+        d["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // working tree
+    fs::write(dir.join("a.txt"), "a1").unwrap();
+    fs::write(dir.join("art/b.txt"), "b1").unwrap();
+    assert_eq!(names(&ok(dir, &["diff"])), ["a.txt", "art/b.txt"]);
+    assert_eq!(names(&ok(dir, &["diff", "--", "a.txt"])), ["a.txt"]);
+    assert_eq!(names(&ok(dir, &["diff", "--", "art"])), ["art/b.txt"]);
+    assert_eq!(names(&ok(dir, &["diff", "--", "art/"])), ["art/b.txt"]);
+    // A prefix of a name is not a path prefix.
+    assert!(names(&ok(dir, &["diff", "--", "ar"])).is_empty());
+    assert!(names(&ok(dir, &["diff", "--", "nope"])).is_empty());
+
+    // staged
+    human(dir, &["add", "a.txt", "art/b.txt"]);
+    assert_eq!(
+        names(&ok(dir, &["diff", "--cached"])),
+        ["a.txt", "art/b.txt"]
+    );
+    assert_eq!(
+        names(&ok(dir, &["diff", "--cached", "--", "art"])),
+        ["art/b.txt"]
+    );
+
+    // two commits
+    human(dir, &["commit", "-m", "both"]);
+    assert_eq!(
+        names(&ok(dir, &["diff", "HEAD~1", "HEAD"])),
+        ["a.txt", "art/b.txt"]
+    );
+    assert_eq!(
+        names(&ok(dir, &["diff", "HEAD~1", "HEAD", "--", "art"])),
+        ["art/b.txt"]
+    );
+}

@@ -29,7 +29,6 @@ conflicts, creates a merge commit with both branches as parents.
 | `--ff-only` | Fail instead of merging if a fast-forward isn't possible |
 | `--squash` | Collapse `BRANCH`'s changes into a single-parent commit instead of a merge commit |
 | `-s`, `--strategy <STRATEGY>` | `ours`, `theirs`, or `recursive` (default) |
-| `-X`, `--strategy-option <OPTION>` | Accepted and parsed, but not currently applied by any strategy |
 | `--no-commit` | Perform the merge but leave the result staged, uncommitted |
 | `--abort` | Discard an in-progress merge and restore the pre-merge working tree |
 | `-q`, `--quiet` | Suppress non-error output |

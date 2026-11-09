@@ -7,6 +7,7 @@ import Checkbox from '@/components/Checkbox.vue'
 import Dialog from '@/components/Dialog.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import ErrorState from '@/components/ErrorState.vue'
+import MoreOptions from '@/components/MoreOptions.vue'
 import SkeletonRows from '@/components/SkeletonRows.vue'
 import TextField from '@/components/TextField.vue'
 import { useServerStore } from '@/stores/server'
@@ -23,11 +24,20 @@ const date = (s: number) => new Date(s * 1000).toLocaleDateString(undefined, { y
 // New key ------------------------------------------------------------------------
 const makeOpen = ref(false)
 const name = ref('')
+// Limit what the key may do (`auth key create --permissions`); none ticked = all you can do.
+const PERMS = [
+  { value: 'repo:read', label: 'Look at repositories (repo:read)' },
+  { value: 'repo:write', label: 'Change files (repo:write)' },
+  { value: 'repo:admin', label: 'Manage repositories (repo:admin)' },
+]
+const perms = ref<Record<string, boolean | 'indeterminate'>>({})
 async function make() {
   if (!name.value || server.busy) return
-  if (await server.createKey(name.value)) {
+  const chosen = PERMS.filter((p) => perms.value[p.value] === true).map((p) => p.value)
+  if (await server.createKey(name.value, chosen)) {
     makeOpen.value = false
     name.value = ''
+    perms.value = {}
   }
 }
 
@@ -88,6 +98,10 @@ function askRevoke(key: { id: string; name: string }) {
   <Dialog v-model:open="makeOpen" title="New API key" description="Name it after what will use it, like “build machine”. It can do everything you can.">
     <form id="new-key" class="form" autocomplete="off" @submit.prevent="make">
       <TextField v-model="name" label="Name" placeholder="build machine" />
+      <MoreOptions label="Limit what it can do">
+        <p class="muted">Tick what the key may do. With nothing ticked it can do everything you can.</p>
+        <Checkbox v-for="p in PERMS" :key="p.value" v-model="perms[p.value]" :label="p.label" />
+      </MoreOptions>
       <p v-if="server.actionError" class="err" role="alert">{{ server.actionError.message }}</p>
     </form>
     <template #footer>

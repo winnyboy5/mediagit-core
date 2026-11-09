@@ -48,6 +48,21 @@ export const useSecurityStore = defineStore('security', () => {
   /** The password is passed on and forgotten; the caller clears its own field. */
   const login = (server: string, username: string, password: string) =>
     run('Sign in', (root) => api.authLogin(root, server || null, username || null, password), () => 'Signed in', undefined, true)
+  /** Make an account on a server that allows sign-up; the password is passed on and forgotten. */
+  const register = (server: string, username: string, email: string, password: string) =>
+    run('Create account', () => api.authRegister(server || null, username, email, password), () => 'Account created. You can sign in now', undefined, true)
+  /** Both passwords are passed on and forgotten. */
+  const changePassword = (server: string, current: string, next: string) =>
+    run('Change password', () => api.authPasswd(server || null, current, next), () => 'Password changed', undefined, true)
+  /** A new master key: a key file path, or a passphrase. Secrets are passed on and forgotten. */
+  const rotateMaster = (newKeyfile: string, current: string, newPassphrase: string) =>
+    run(
+      'Replace master key',
+      (root) => api.keyRotateMaster(root, newKeyfile.trim() || null, current || null, newPassphrase || null),
+      (k) => (k.source ? `Master key replaced, unlocks with ${k.source}` : 'Master key replaced'),
+      undefined,
+      true,
+    )
   const logout = (all: boolean) => run(all ? 'Sign out everywhere' : 'Sign out', (root) => api.authRun(root, 'logout', null, all), () => 'Signed out')
 
   async function enableEncryption(passphrase: string) {
@@ -77,5 +92,5 @@ export const useSecurityStore = defineStore('security', () => {
     },
   )
 
-  return { auth, authError, key, keyError, loading, recoveryCode, keySource, busy, actionError, refresh, login, logout, enableEncryption, recover, dismissRecovery }
+  return { auth, authError, key, keyError, loading, recoveryCode, keySource, busy, actionError, refresh, login, register, changePassword, rotateMaster, logout, enableEncryption, recover, dismissRecovery }
 })

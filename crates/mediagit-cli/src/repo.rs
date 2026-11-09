@@ -395,6 +395,9 @@ pub fn resolve_credentials_for_origin(
 /// logout` with no local repo/remote context, or an explicit `--server`).
 /// Returns `true` if an entry was actually removed.
 pub fn forget_credentials_for_origin(origin: &str) -> bool {
+    if keyring_disabled() {
+        return false;
+    }
     keyring::Entry::new(KEYRING_SERVICE, origin)
         .ok()
         .and_then(|e| e.delete_credential().ok())
@@ -405,6 +408,9 @@ pub fn forget_credentials_for_origin(origin: &str) -> bool {
 /// keychain entries for `remote_name` (`mediagit auth logout` run inside a
 /// repo). Returns `true` if either was removed.
 pub fn forget_credentials(config: &mediagit_config::Config, remote_name: &str) -> bool {
+    if keyring_disabled() {
+        return false;
+    }
     let origin_account = keyring_account(config, remote_name);
     let origin_removed = keyring::Entry::new(KEYRING_SERVICE, &origin_account)
         .ok()

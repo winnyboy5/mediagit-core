@@ -30,9 +30,6 @@ One or more commits to apply. Applied in order (first to last). Accepts full
 Apply changes to the working tree without committing. Allows editing before
 the commit is created.
 
-#### `-e`, `--edit`
-Open an editor to modify the commit message before committing.
-
 #### `-x`, `--append-message`
 Append the original commit hash to the commit message for traceability:
 `(cherry picked from commit abc1234...)`.

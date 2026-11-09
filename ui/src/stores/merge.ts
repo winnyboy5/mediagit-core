@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { computed, ref, shallowRef, watch } from 'vue'
-import { api, type MergeReport, type MergeStrategy } from '@/api'
+import { api, type MergeOpts, type MergeReport, type MergeStrategy } from '@/api'
 import { mergeSummary, toConflicts, type Conflict, type Side } from '@/lib/merge'
 import { useAction } from './action'
 import { useBranchesStore } from './branches'
@@ -42,9 +42,9 @@ export const useMergeStore = defineStore('merge', () => {
 
   const isStopped = (r: MergeReport) => r.status === 'conflict'
 
-  async function start(name: string, strategy: MergeStrategy, noFf: boolean) {
+  async function start(name: string, strategy: MergeStrategy, opts: MergeOpts = {}) {
     const oid = branches.list.find((b) => b.name === name)?.oid ?? null
-    const r = await run(`Merge ${name}`, (root, report) => api.merge(root, name, strategy, noFf, report), mergeSummary, isStopped)
+    const r = await run(`Merge ${name}`, (root, report) => api.merge(root, name, strategy, opts, report), mergeSummary, isStopped)
     if (r) apply(r.value, name, oid)
     return !!r
   }

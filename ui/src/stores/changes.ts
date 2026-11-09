@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { computed, ref, shallowRef, watch } from 'vue'
+import { computed, reactive, ref, shallowRef, watch } from 'vue'
 import { api, toApiError, type ApiError, type StatusReport } from '@/api'
 import type { FileStatus } from '@/components/StatusBadge.vue'
 import { buildTree, flatRows, flattenTree, type FileEntry, type Row, type TreeNode } from '@/lib/fileTree'
@@ -64,7 +64,12 @@ export const useChangesStore = defineStore('changes', () => {
   const selected = shallowRef<ReadonlySet<string>>(new Set())
   const anchor = ref<string | null>(null)
   const message = ref('')
-  const busy = ref<'add' | 'commit' | null>(null)
+  const busy = ref<'add' | 'commit' | 'unstage' | null>(null)
+  /** More options for the next stage and the next save (the person's ticks, kept until changed). */
+  const addOpts = reactive({ all: false, dryRun: false, force: false, update: false, ignoreRemoval: false })
+  const commitForm = reactive({ messageFile: '', all: false, include: '', author: '', date: '', allowEmpty: false, signoff: false, dryRun: false })
+  /** What the last preview said; cleared by the next real action. */
+  const preview = ref<string | null>(null)
   const error = ref<ApiError | null>(null)
 
   watch(mode, (m) => save('mg.changes.mode', m))
@@ -165,15 +170,21 @@ export const useChangesStore = defineStore('changes', () => {
     const root = repo.path
     busy.value = 'add'
     error.value = null
+    preview.value = null
+    let dry = 0
     try {
       await ops.track(
         { kind: 'add', label, retry: () => void stagePaths(paths, label) },
         async () => {
-          for (const batch of batchPaths(paths)) await api.add(root, batch)
+          for (const batch of batchPaths(paths)) {
+            const r = await api.add(root, batch, { ...addOpts })
+            if (addOpts.dryRun) dry += r.added + r.modified + r.deleted
+          }
         },
-        () => label.replace(/^Staging/, 'Staged'),
+        () => (addOpts.dryRun ? `Preview: ${dry} files would be staged` : label.replace(/^Staging/, 'Staged')),
       )
-      clearSelection()
+      if (addOpts.dryRun) preview.value = `Preview only: ${dry} ${dry === 1 ? 'file' : 'files'} would be staged. Nothing changed.`
+      else clearSelection()
     } catch (e) {
       error.value = toApiError(e)
     } finally {
@@ -202,19 +213,67 @@ export const useChangesStore = defineStore('changes', () => {
     return stagePaths(['.'], `Staging ${plural(counts.value.unstaged, 'file')}`)
   }
 
+  /** Something to save: staged files, or an option that stages or allows an empty version. */
+  const canSave = computed(() => counts.value.staged > 0 || commitForm.all || commitForm.allowEmpty || !!commitForm.include.trim())
+  const needsMessage = computed(() => !commitForm.messageFile.trim())
+
   async function commit() {
     const text = message.value.trim()
-    if (!repo.path || busy.value || !text || !counts.value.staged) return
+    if (!repo.path || busy.value || (needsMessage.value && !text) || !canSave.value) return
     const root = repo.path
     busy.value = 'commit'
     error.value = null
+    preview.value = null
     try {
       await ops.track(
         { kind: 'commit', label: `Save version "${text.split('\n')[0]!.slice(0, 40)}"`, retry: () => void commit() },
-        () => api.commit(root, text),
-        () => plural(counts.value.staged, 'file') + ' saved',
+        async () => {
+          const r = await api.commit(root, text, commitOpts())
+          if (commitForm.dryRun) {
+            preview.value = r.would_commit
+              ? `Preview only: would save ${r.staged} files, ${r.deleted} deletions. Nothing changed.`
+              : 'Preview only: nothing to save yet.'
+          }
+        },
+        () => (commitForm.dryRun ? 'Previewed the version' : plural(counts.value.staged, 'file') + ' saved'),
       )
-      message.value = ''
+      if (!commitForm.dryRun) {
+        message.value = ''
+        clearSelection()
+      }
+    } catch (e) {
+      error.value = toApiError(e)
+    } finally {
+      busy.value = null
+      await repo.refresh()
+    }
+  }
+
+  /** Options as the API wants them: blanks and unticked boxes left out. */
+  function commitOpts() {
+    const f = commitForm
+    const include = f.include.split(String.fromCharCode(10)).map((x) => x.trim()).filter(Boolean)
+    return {
+      ...(f.messageFile.trim() ? { messageFile: f.messageFile.trim() } : {}),
+      ...(f.all ? { all: true } : {}),
+      ...(include.length ? { include } : {}),
+      ...(f.author.trim() ? { author: f.author.trim() } : {}),
+      ...(f.date.trim() ? { date: f.date.trim() } : {}),
+      ...(f.allowEmpty ? { allowEmpty: true } : {}),
+      ...(f.signoff ? { signoff: true } : {}),
+      ...(f.dryRun ? { dryRun: true } : {}),
+    }
+  }
+
+  /** Take paths out of the staging area; files stay as they are. */
+  async function unstagePaths(paths: string[], label: string) {
+    if (!repo.path || busy.value || !paths.length) return
+    const root = repo.path
+    busy.value = 'unstage'
+    error.value = null
+    preview.value = null
+    try {
+      await ops.track({ kind: 'other', label, retry: () => void unstagePaths(paths, label) }, () => api.unstage(root, paths), () => label.replace(/^Unstaging/, 'Unstaged'))
       clearSelection()
     } catch (e) {
       error.value = toApiError(e)
@@ -224,8 +283,22 @@ export const useChangesStore = defineStore('changes', () => {
     }
   }
 
+  function unstageSelected() {
+    const paths = [...selected.value].filter((k) => k.startsWith('staged:')).map((k) => k.slice('staged:'.length))
+    return unstagePaths(paths, `Unstaging ${plural(paths.length, 'item')}`)
+  }
+
+  const unstageAll = () => unstagePaths(['.'], `Unstaging ${plural(counts.value.staged, 'file')}`)
+
   return {
     mode,
+    addOpts,
+    commitForm,
+    preview,
+    canSave,
+    needsMessage,
+    unstageSelected,
+    unstageAll,
     collapsed,
     selected,
     message,

@@ -76,8 +76,9 @@ test.describe('Welcome', () => {
     await mockIpc(page, { commands: healthy({ repo_init: fixture('unsupported') }), dialog: '/repos/new' })
     await page.goto('/#/welcome')
     await page.getByRole('button', { name: /New repository/ }).click()
+    await page.getByRole('dialog').getByRole('button', { name: 'Create', exact: true }).click()
     await expect(page.getByRole('alert')).toContainText('json_unsupported')
-    expect((await ipcCalls(page, 'repo_init'))[0]!.args).toEqual({ path: '/repos/new' })
+    expect((await ipcCalls(page, 'repo_init'))[0]!.args).toEqual({ path: '/repos/new', initialBranch: null })
     await expect(page).toHaveURL(/#\/welcome$/)
   })
 
@@ -85,6 +86,7 @@ test.describe('Welcome', () => {
     await mockIpc(page, { commands: healthy({ repo_init: { ok: true } }), dialog: '/repos/new' })
     await page.goto('/#/welcome')
     await page.getByRole('button', { name: /New repository/ }).click()
+    await page.getByRole('dialog').getByRole('button', { name: 'Create', exact: true }).click()
     await expect(page).toHaveURL(/#\/changes$/)
   })
 })

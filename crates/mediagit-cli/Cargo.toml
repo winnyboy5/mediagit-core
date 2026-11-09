@@ -46,6 +46,7 @@ tracing.workspace = true
 indicatif.workspace = true
 console.workspace = true
 toml.workspace = true
+toml_edit = "0.25"  # `config set/unset` edits config.toml in place, keeping comments and unknown keys
 chrono.workspace = true
 rayon.workspace = true
 blake3.workspace = true

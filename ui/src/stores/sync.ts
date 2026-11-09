@@ -1,8 +1,8 @@
 import { defineStore } from 'pinia'
-import { computed, ref, shallowRef, watch } from 'vue'
-import { api, toApiError, type ApiError, type FetchReport, type PullReport, type PushReport, type RemoteReport } from '@/api'
+import { computed, reactive, ref, shallowRef, watch } from 'vue'
+import { api, toApiError, type ApiError, type FetchReport, type PullReport, type PushReport, type RemoteReport, type RemoteShowReport } from '@/api'
 import { load, save } from '@/lib/persist'
-import { summarizeTransfer } from '@/lib/sync'
+import { emptyForm, pushIsRisky, summarizeTransfer, transferOpts } from '@/lib/sync'
 import { useOpsStore, type OpKind } from './ops'
 import { useRepoStore } from './repo'
 
@@ -24,6 +24,9 @@ export const useSyncStore = defineStore('sync', () => {
   const chosen = ref<string | null>(null)
   const lastSync = ref<Record<string, number>>(load<Record<string, number>>(KEY, {}))
   const editing = ref(false)
+  /** Options for the next fetch / pull / push (More options). */
+  const form = reactive(emptyForm())
+  const detail = ref<RemoteShowReport | null>(null)
   let token = 0
 
   /** Remote used for transfers: the user's pick, else the upstream's, else `origin`, else the first. */
@@ -70,26 +73,57 @@ export const useSyncStore = defineStore('sync', () => {
     }
   }
 
-  const addRemote = (name: string, url: string) => edit(`Add remote ${name}`, (root) => api.remoteAdd(root, name, url))
+  const addRemote = (name: string, url: string, opts: { fetch?: boolean; token?: string } = {}) =>
+    edit(`Add remote ${name}`, (root) => api.remoteAdd(root, name, url, opts))
   const removeRemote = (name: string) => edit(`Remove remote ${name}`, (root) => api.remoteRemove(root, name))
 
-  async function run(kind: TransferKind) {
+  /** Rename / change address: the CLI returns no remote set, so read it again. */
+  const change = (label: string, run: (root: string) => Promise<unknown>) =>
+    edit(label, async (root) => {
+      await run(root)
+      return api.remoteList(root)
+    })
+  const renameRemote = (from: string, to: string) => change(`Rename remote ${from}`, (root) => api.remoteRename(root, from, to))
+  const setRemoteUrl = (name: string, url: string, push: boolean) =>
+    change(`Change address of ${name}`, (root) => api.remoteSetUrl(root, name, url, push))
+
+  /** Ask the server about a remote; `detail` is null while it loads and after a failure. */
+  async function showRemote(name: string) {
+    if (!repo.path) return false
+    const root = repo.path
+    detail.value = null
+    actionError.value = null
+    try {
+      detail.value = await ops.track({ kind: 'other', label: `Check remote ${name}` }, () => api.remoteShow(root, name), () => `Checked ${name}`)
+      return true
+    } catch (e) {
+      actionError.value = toApiError(e)
+      return false
+    }
+  }
+
+  /** Whether the next push needs the person to agree first (overwrite or delete on the remote). */
+  const pushNeedsConfirm = computed(() => pushIsRisky(form.push))
+
+  async function run(kind: TransferKind, confirmed = false) {
     if (!repo.path || busy.value) return false
     const root = repo.path
     const target = remote.value
+    // Frozen now: the form may change while the transfer runs, and a retry repeats what was asked.
+    const opts = transferOpts(kind as 'push', form, confirmed)
     actionError.value = null
     let id = ''
     const cancel = () => api.cancelOp(id)
     try {
       await ops.track<FetchReport | PullReport | PushReport>(
-        { kind, label: `${LABEL[kind]}${target ? ` ${target}` : ''}`, cancel, retry: () => void run(kind) },
+        { kind, label: `${LABEL[kind]}${target ? ` ${target}` : ''}`, cancel, retry: () => void run(kind, confirmed) },
         (report, opId) => {
           id = opId
           return kind === 'fetch'
-            ? api.fetch(root, target, opId, report)
+            ? api.fetch(root, target, opId, report, opts as never)
             : kind === 'pull'
-              ? api.pull(root, target, opId, report)
-              : api.push(root, target, opId, report)
+              ? api.pull(root, target, opId, report, opts as never)
+              : api.push(root, target, opId, report, opts as never)
         },
         (r) => summarizeTransfer(kind as never, r as never),
       )
@@ -117,5 +151,5 @@ export const useSyncStore = defineStore('sync', () => {
     },
   )
 
-  return { remotes, remote, chosen, loaded, loading, error, actionError, active, busy, last, refresh, addRemote, removeRemote, run }
+  return { remotes, remote, chosen, loaded, loading, error, actionError, active, busy, last, refresh, form, detail, pushNeedsConfirm, addRemote, removeRemote, renameRemote, setRemoteUrl, showRemote, run }
 })

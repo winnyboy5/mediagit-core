@@ -2,7 +2,7 @@
 import { ToggleGroupItem, ToggleGroupRoot } from 'reka-ui'
 
 const model = defineModel<string>({ required: true })
-defineProps<{ options: { value: string; label: string }[]; label: string }>()
+defineProps<{ options: { value: string; label: string }[]; label: string; disabled?: boolean }>()
 
 // A segmented control always has one value; reka reports '' on re-click.
 function set(v: unknown) {
@@ -11,7 +11,7 @@ function set(v: unknown) {
 </script>
 
 <template>
-  <ToggleGroupRoot type="single" :model-value="model" class="seg" :aria-label="label" @update:model-value="set">
+  <ToggleGroupRoot type="single" :model-value="model" class="seg" :aria-label="label" :disabled="disabled" @update:model-value="set">
     <ToggleGroupItem v-for="o in options" :key="o.value" :value="o.value" class="opt">{{ o.label }}</ToggleGroupItem>
   </ToggleGroupRoot>
 </template>
@@ -33,6 +33,10 @@ function set(v: unknown) {
   color: var(--text-muted);
   font: 500 var(--fs-sm) / 1 var(--font-sans);
   cursor: pointer;
+}
+.opt:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 .opt:hover {
   color: var(--text);

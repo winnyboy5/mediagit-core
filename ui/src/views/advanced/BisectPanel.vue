@@ -4,6 +4,9 @@ import { computed, ref, watch } from 'vue'
 import { Bug } from 'lucide-vue-next'
 import AlertDialog from '@/components/AlertDialog.vue'
 import Button from '@/components/Button.vue'
+import { open as openDialog } from '@tauri-apps/plugin-dialog'
+import MoreOptions from '@/components/MoreOptions.vue'
+import OptionCheck from '@/components/OptionCheck.vue'
 import ProgressBar from '@/components/ProgressBar.vue'
 import Select from '@/components/Select.vue'
 import { shortOid } from '@/lib/history'
@@ -27,6 +30,20 @@ watch(
 const r = computed(() => bisect.report)
 const bar = computed(() => (bisect.running ? primaryBar(bisect.running) : undefined))
 const resetOpen = ref(false)
+const restart = ref(false)
+const restartOpen = ref(false)
+const moveOpen = ref(false)
+const other = ref('')
+watch(options, (o) => !o.some((x) => x.value === other.value) && (other.value = o[0]?.value ?? ''), { immediate: true })
+// Throwing away a running bisect needs a yes; a plain start does not.
+function begin() {
+  if (restart.value === true) restartOpen.value = true
+  else void bisect.start('HEAD', good.value)
+}
+async function replay() {
+  const file = await openDialog({ multiple: false, directory: false, title: 'Choose a bisect log' })
+  if (typeof file === 'string') void bisect.replay(file)
+}
 const name = (oid: string | null) => (oid ? `${shortOid(oid)}${versions.summaryOf(oid) ? ` · ${versions.summaryOf(oid)}` : ''}` : '')
 </script>
 
@@ -48,8 +65,15 @@ const name = (oid: string | null) => (oid ? `${shortOid(oid)}${versions.summaryO
     <div v-if="!bisect.active" class="start">
       <p v-if="r?.status === 'reset'" class="done" role="status">Bisect ended. Your files are back where they were.</p>
       <Select v-model="good" label="A version that was working" :options="options" :disabled="!options.length || bisect.busy" />
-      <Button variant="primary" :disabled="!good || bisect.busy" @click="bisect.start('HEAD', good)"><Bug :size="16" aria-hidden="true" /> Start bisect</Button>
+      <Button variant="primary" :disabled="!good || bisect.busy" @click="begin"><Bug :size="16" aria-hidden="true" /> Start bisect</Button>
       <p class="muted">The latest version is taken as the bad one.</p>
+      <MoreOptions>
+        <OptionCheck v-model="restart" danger label="Throw away a bisect that is already running" flag="--reset" hint="Everything marked so far is forgotten." :disabled="bisect.busy" />
+        <div>
+          <Button :disabled="bisect.busy" @click="replay">Replay a saved bisect log…</Button>
+          <p class="muted">Re-applies the good and bad marks recorded in a log file. <code class="mono">bisect replay</code></p>
+        </div>
+      </MoreOptions>
     </div>
 
     <div v-else-if="r" class="wizard" data-testid="bisect-state">
@@ -76,7 +100,33 @@ const name = (oid: string | null) => (oid ? `${shortOid(oid)}${versions.summaryO
         <dt>Skipped</dt><dd class="mono">{{ r.skipped.map(shortOid).join(', ') || '–' }}</dd>
       </dl>
       <Button :disabled="bisect.busy" @click="resetOpen = true">End bisect…</Button>
+      <MoreOptions>
+        <Select v-model="other" label="A different version" :options="options" :disabled="bisect.busy" />
+        <div class="verdicts" role="group" aria-label="Mark that version">
+          <Button :disabled="!other || bisect.busy" @click="bisect.mark('good', other)">Mark it good</Button>
+          <Button :disabled="!other || bisect.busy" @click="bisect.mark('bad', other)">Mark it bad</Button>
+          <Button :disabled="!other || bisect.busy" @click="bisect.mark('skip', other)">Skip it</Button>
+        </div>
+        <Button variant="danger" :disabled="!other || bisect.busy" @click="moveOpen = true">End bisect and move my branch to it…</Button>
+      </MoreOptions>
     </div>
+
+    <AlertDialog
+      v-model:open="restartOpen"
+      title="Throw away the running bisect?"
+      description="Everything you marked in it is forgotten and a new one starts."
+      confirm-label="Start a new bisect"
+      destructive
+      @confirm="bisect.start('HEAD', good, true)"
+    />
+    <AlertDialog
+      v-model:open="moveOpen"
+      title="Move your branch to that version?"
+      :description="`The bisect ends and your branch, and your files, jump to ${name(other)}. Versions after it leave the branch.`"
+      confirm-label="End and move branch"
+      destructive
+      @confirm="bisect.reset(other)"
+    />
 
     <AlertDialog
       v-model:open="resetOpen"

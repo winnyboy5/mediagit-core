@@ -4,6 +4,8 @@ import { api, toApiError, type ApiError } from '@/api'
 import Button from '@/components/Button.vue'
 import Dialog from '@/components/Dialog.vue'
 import ErrorState from '@/components/ErrorState.vue'
+import MoreOptions from '@/components/MoreOptions.vue'
+import { refNameError } from '@/lib/inspect'
 import ProgressBar from '@/components/ProgressBar.vue'
 import TextField from '@/components/TextField.vue'
 import TransferStats from '@/components/TransferStats.vue'
@@ -17,6 +19,8 @@ const { openPath } = useOpenRepo()
 
 const url = ref('')
 const dest = ref('')
+const branch = ref('')
+const branchError = computed(() => (branch.value ? (refNameError(branch.value) ?? undefined) : undefined))
 const error = ref<ApiError | null>(null)
 const opId = ref<string | null>(null)
 
@@ -36,7 +40,7 @@ async function browse() {
 }
 
 async function submit() {
-  if (running.value || !url.value || !dest.value || urlError.value) return
+  if (running.value || !url.value || !dest.value || urlError.value || branchError.value) return
   error.value = null
   const target = dest.value
   let id = ''
@@ -46,7 +50,7 @@ async function submit() {
       (report, opIdent) => {
         id = opIdent
         opId.value = opIdent
-        return api.clone(url.value, target, opIdent, report)
+        return api.clone(url.value, target, opIdent, report, branch.value.trim() || undefined)
       },
       () => `Cloned into ${target}`,
     )
@@ -68,10 +72,13 @@ async function submit() {
         <TextField v-model="dest" label="Save into" placeholder="D:\Projects\hero-film" mono />
         <Button @click="browse">Browse…</Button>
       </div>
+      <MoreOptions data-testid="clone-more">
+        <TextField v-model="branch" label="Branch to check out" hint="Leave empty for main." flag="--branch" placeholder="main" :error="branchError" mono />
+      </MoreOptions>
       <ErrorState v-if="error" :code="error.code" :message="error.message" @retry="submit" />
       <div class="foot">
         <Button @click="open = false">Cancel</Button>
-        <Button type="submit" variant="primary" :disabled="!url || !dest || !!urlError">Clone</Button>
+        <Button type="submit" variant="primary" :disabled="!url || !dest || !!urlError || !!branchError">Clone</Button>
       </div>
     </form>
 

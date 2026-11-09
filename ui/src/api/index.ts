@@ -8,10 +8,15 @@ import type {
   BisectReport,
   CherryPickReport,
   ConfigReport,
+  ConfigSchemaReport,
   FsckCliReport,
   GcReport,
   KeyReport,
   RebaseReport,
+  ReflogAllReport,
+  ReflogMaintainReport,
+  BranchProtectReport,
+  BranchEntryReport,
   ReflogReport,
   SparseReport,
   StatsReport,
@@ -39,13 +44,23 @@ import type {
   TagActionReport,
   StatusReport,
   TagListReport,
+  TagShowReport,
+  TagVerifyReport,
+  VerifyRangeReport,
   AuthOpReport,
   HostedRepoActionReport,
   HostedReposReport,
   LocalServerStatus,
 } from './types'
 
+import type { AddOpts, CommitOpts, FetchOpts, PullOpts, PushOpts } from './options'
+import type { AddReport } from './generated/AddReport'
+import type { CommitDryRunReport } from './generated/CommitDryRunReport'
+import type { RemoteShowReport } from './generated/RemoteShowReport'
+
 export type * from './types'
+export type * from './options'
+export type { AddReport, CommitDryRunReport, RemoteShowReport }
 
 /** Contract version this UI was written against (engine.rs CONTRACT_VERSION). */
 export const CONTRACT_VERSION = 1
@@ -103,17 +118,98 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
   }
 }
 
+/** Extra options of `tag create`; `force` is only sent with `confirmed`. */
+export interface TagOptions {
+  commit?: string | null
+  message?: string | null
+  tagger?: string | null
+  email?: string | null
+  force?: boolean
+  confirmed?: boolean
+}
+
+/** Options of `gc` beyond preview-or-run. */
+export interface GcOptions {
+  noPrune?: boolean
+  auto?: boolean
+  repack?: boolean
+}
+
+/** Options of `fsck`. A real `repair` needs `confirmed`; `dryRun` needs `repair`. */
+export interface FsckOptions {
+  deep?: boolean
+  all?: boolean
+  lostFound?: boolean
+  noDangling?: boolean
+  repair?: boolean
+  dryRun?: boolean
+  confirmed?: boolean
+}
+
+/** Options of `verify`: the whole repository, one version (`commit`) or a range (`start`/`end`). */
+export interface VerifyOptions {
+  quick?: boolean
+  commit?: string | null
+  start?: string | null
+  end?: string | null
+  checksums?: boolean
+  detailed?: boolean
+}
+
+/** Options of `stash apply|pop`: `index` also restores what was staged; `force` overwrites changed files (confirmed first). */
+export interface StashRestore {
+  index?: boolean
+  force?: boolean
+}
+const stashRestoreArgs = (o: StashRestore) => ({ restoreIndex: !!o.index, force: !!o.force, confirmed: !!o.force })
+
+export interface LogFilter {
+  revision?: string
+  author?: string
+  grep?: string
+  since?: string
+  until?: string
+  paths?: string[]
+}
+export interface BranchCreateOpts {
+  startPoint?: string
+  setUpstream?: string
+  tracking?: 'track' | 'none'
+}
+export interface BranchSwitchOpts {
+  create?: boolean
+  track?: boolean
+  force?: boolean
+  confirmed?: boolean
+}
+export interface BranchDeleteOpts {
+  force?: boolean
+  mergedOnly?: boolean
+  remote?: boolean
+  confirmed?: boolean
+}
+export interface MergeOpts {
+  noFf?: boolean
+  ffOnly?: boolean
+  squash?: boolean
+  noCommit?: boolean
+  message?: string
+}
+
 /** `recursive` asks per file; `ours`/`theirs` settle every conflict the same way. */
 export type MergeStrategy = 'recursive' | 'ours' | 'theirs'
 
 export const api = {
   engineInfo: () => invoke<EngineInfo>('engine_info'),
   repoStatus: (repo: string) => invoke<StatusReport>('repo_status', { repo }),
-  add: (repo: string, paths: string[]) => invoke<unknown>('repo_add', { repo, paths }),
-  commit: (repo: string, message: string) => invoke<unknown>('repo_commit', { repo, message }),
-  init: (path: string) => invoke<unknown>('repo_init', { path }),
-  clone: (url: string, dest: string, opId: string, onProgress: Report) =>
-    invoke<unknown>('repo_clone', { url, dest, opId, onProgress: channel(onProgress) }),
+  add: (repo: string, paths: string[], opts?: AddOpts) => invoke<AddReport>('repo_add', { repo, paths, opts: opts ?? null }),
+  /** Take paths out of the staging area (`reset`); the files are not touched. */
+  unstage: (repo: string, paths: string[]) => invoke<unknown>('repo_unstage', { repo, paths }),
+  commit: (repo: string, message: string, opts?: CommitOpts) =>
+    invoke<{ oid?: string } & Partial<CommitDryRunReport>>('repo_commit', { repo, message, opts: opts ?? null }),
+  init: (path: string, initialBranch?: string) => invoke<unknown>('repo_init', { path, initialBranch: initialBranch ?? null }),
+  clone: (url: string, dest: string, opId: string, onProgress: Report, branch?: string) =>
+    invoke<unknown>('repo_clone', { url, dest, branch: branch ?? null, opId, onProgress: channel(onProgress) }),
   /** Stop a running push/pull/fetch/clone. */
   cancelOp: (opId: string) => invoke<boolean>('cancel_op', { opId }),
   /** Subscribe to working-copy changes; returns the unsubscribe function. */
@@ -124,42 +220,58 @@ export const api = {
   /** A URL the webview can load for a local file. */
   fileSrc: (path: string) => convertFileSrc(path),
 
-  log: (repo: string, skip: number, max: number, all: boolean, path?: string) =>
-    invoke<LogReport>('repo_log', { repo, skip, max, all, path: path ?? null }),
+  log: (repo: string, skip: number, max: number, all: boolean, path?: string, filter?: LogFilter) =>
+    invoke<LogReport>('repo_log', { repo, skip, max, all, path: path ?? null, ...(filter ? { filter } : {}) }),
   show: (repo: string, rev: string, tree = false) => invoke<ShowCommitReport>('repo_show', { repo, rev, tree }),
   /** Write `<rev>:<path>` to the preview folder; `expected` is the size the tree reported. */
   extract: (repo: string, rev: string, path: string, expected: number | null, onProgress: Report) =>
     invoke<Extracted>('repo_extract', { repo, rev, path, expected, onProgress: channel(onProgress) }),
   mediaInfo: (repo: string, path: string) => invoke<MediaInfo>('media_info', { repo, path }),
 
-  branchList: (repo: string) => invoke<BranchListReport>('branch_list', { repo }),
-  branchCreate: (repo: string, name: string) => invoke<BranchActionReport>('branch_create', { repo, name }),
-  branchSwitch: (repo: string, name: string, onProgress: Report) =>
-    invoke<BranchActionReport>('branch_switch', { repo, name, onProgress: channel(onProgress) }),
-  branchDelete: (repo: string, name: string, force = false) => invoke<unknown>('branch_delete', { repo, name, force }),
-  branchRename: (repo: string, from: string, to: string) => invoke<BranchActionReport>('branch_rename', { repo, from, to }),
-  tagList: (repo: string) => invoke<TagListReport>('tag_list', { repo }),
-  /** Name a version (`commit` null = the latest); a message makes the tag annotated. */
-  tagCreate: (repo: string, name: string, commit: string | null, message: string | null) =>
-    invoke<TagActionReport>('tag_create', { repo, name, commit, message }),
+  /** `remote` lists the remote-tracking branches (`origin/feature`) instead of the local ones. */
+  branchList: (repo: string, remote = false) => invoke<BranchListReport>('branch_list', { repo, ...(remote ? { remote } : {}) }),
+  branchCreate: (repo: string, name: string, opts?: BranchCreateOpts) =>
+    invoke<BranchActionReport>('branch_create', { repo, name, ...(opts ? { opts } : {}) }),
+  branchSwitch: (repo: string, name: string, onProgress: Report, opts?: BranchSwitchOpts) =>
+    invoke<BranchActionReport>('branch_switch', { repo, name, ...(opts ? { opts } : {}), onProgress: channel(onProgress) }),
+  branchDelete: (repo: string, name: string, opts?: BranchDeleteOpts) =>
+    invoke<unknown>('branch_delete', { repo, name, ...(opts ? { opts } : {}) }),
+  branchRename: (repo: string, from: string, to: string, overwrite = false) =>
+    invoke<BranchActionReport>('branch_rename', { repo, from, to, ...(overwrite ? { force: true, confirmed: true } : {}) }),
+  branchShow: (repo: string, name: string | null) => invoke<BranchEntryReport>('branch_show', { repo, name }),
+  branchProtect: (repo: string, name: string, requireReviews: boolean, unprotect: boolean) =>
+    invoke<BranchProtectReport>('branch_protect', { repo, name, requireReviews, unprotect, confirmed: unprotect }),
+  /** `pattern`: a glob that narrows the list (`v1.*`). */
+  tagList: (repo: string, pattern: string | null = null) => invoke<TagListReport>('tag_list', { repo, pattern }),
+  tagShow: (repo: string, name: string) => invoke<TagShowReport>('tag_show', { repo, name }),
+  tagVerify: (repo: string, name: string) => invoke<TagVerifyReport>('tag_verify', { repo, name }),
+  /** Name a version. A message makes the tag annotated; `tagger`/`email` need one. `force` replaces an existing tag and needs `confirmed`. */
+  tagCreate: (repo: string, name: string, options: TagOptions = {}) => invoke<TagActionReport>('tag_create', { repo, name, options }),
   tagDelete: (repo: string, name: string) => invoke<TagActionReport>('tag_delete', { repo, name }),
 
-  lockList: (repo: string) => invoke<LocksReport>('lock_list', { repo }),
-  lockCreate: (repo: string, path: string) => invoke<LockReport>('lock_create', { repo, path }),
-  lockUnlock: (repo: string, lockId: string, force = false) => invoke<unknown>('lock_unlock', { repo, lockId, force }),
+  lockList: (repo: string, remote?: string) => invoke<LocksReport>('lock_list', { repo, remote: remote ?? null }),
+  lockCreate: (repo: string, path: string, owner?: string, remote?: string) =>
+    invoke<LockReport>('lock_create', { repo, path, owner: owner ?? null, remote: remote ?? null }),
+  lockUnlock: (repo: string, lockId: string, force = false, remote?: string) =>
+    invoke<unknown>('lock_unlock', { repo, lockId, force, remote: remote ?? null }),
 
   remoteList: (repo: string) => invoke<RemotesReport>('remote_list', { repo }),
-  remoteAdd: (repo: string, name: string, url: string) => invoke<RemotesReport>('remote_add', { repo, name, url }),
+  /** `token` (optional) goes to the CLI on stdin only. */
+  remoteAdd: (repo: string, name: string, url: string, opts: { fetch?: boolean; token?: string } = {}) =>
+    invoke<RemotesReport>('remote_add', { repo, name, url, fetch: opts.fetch ?? false, token: opts.token || null }),
+  remoteRename: (repo: string, old: string, to: string) => invoke<unknown>('remote_rename', { repo, old, new: to }),
+  remoteSetUrl: (repo: string, name: string, url: string, push = false) => invoke<unknown>('remote_set_url', { repo, name, url, push }),
+  remoteShow: (repo: string, name: string) => invoke<RemoteShowReport>('remote_show', { repo, name }),
   remoteRemove: (repo: string, name: string) => invoke<RemotesReport>('remote_remove', { repo, name }),
-  fetch: (repo: string, remote: string | null, opId: string, onProgress: Report) =>
-    invoke<FetchReport>('repo_fetch', { repo, remote, opId, onProgress: channel(onProgress) }),
-  pull: (repo: string, remote: string | null, opId: string, onProgress: Report) =>
-    invoke<PullReport>('repo_pull', { repo, remote, opId, onProgress: channel(onProgress) }),
-  push: (repo: string, remote: string | null, opId: string, onProgress: Report) =>
-    invoke<PushReport>('repo_push', { repo, remote, opId, onProgress: channel(onProgress) }),
+  fetch: (repo: string, remote: string | null, opId: string, onProgress: Report, opts?: FetchOpts) =>
+    invoke<FetchReport>('repo_fetch', { repo, remote, opts: opts ?? null, opId, onProgress: channel(onProgress) }),
+  pull: (repo: string, remote: string | null, opId: string, onProgress: Report, opts?: PullOpts) =>
+    invoke<PullReport>('repo_pull', { repo, remote, opts: opts ?? null, opId, onProgress: channel(onProgress) }),
+  push: (repo: string, remote: string | null, opId: string, onProgress: Report, opts?: PushOpts) =>
+    invoke<PushReport>('repo_push', { repo, remote, opts: opts ?? null, opId, onProgress: channel(onProgress) }),
 
-  merge: (repo: string, branch: string, strategy: MergeStrategy, noFf: boolean, onProgress: Report) =>
-    invoke<MergeReport>('repo_merge', { repo, branch, strategy, noFf, onProgress: channel(onProgress) }),
+  merge: (repo: string, branch: string, strategy: MergeStrategy, opts: MergeOpts, onProgress: Report) =>
+    invoke<MergeReport>('repo_merge', { repo, branch, strategy, opts, onProgress: channel(onProgress) }),
   mergeControl: (repo: string, action: 'continue' | 'abort', onProgress: Report) =>
     invoke<MergeReport>('repo_merge_control', { repo, action, onProgress: channel(onProgress) }),
   /** Take our version (`ours`) or `theirs` (a commit id) of one conflicted file, and stage it. */
@@ -167,16 +279,19 @@ export const api = {
     invoke<unknown>('merge_resolve', { repo, path, side, theirs }),
 
   /** Two versions, or (both null) the working folder against the latest version. */
-  diff: (repo: string, from: string | null, to: string | null) => invoke<DiffReport>('repo_diff', { repo, from, to }),
+  /** `cached` (both null): the changes set aside for the next version, against the latest one. */
+  diff: (repo: string, from: string | null, to: string | null, cached = false) =>
+    invoke<DiffReport>('repo_diff', { repo, from, to, ...(cached ? { cached } : {}) }),
 
   stashList: (repo: string) => invoke<StashReport>('stash_list', { repo }),
   stashShow: (repo: string, index: number) => invoke<StashReport>('stash_show', { repo, index }),
-  stashSave: (repo: string, message: string | null, includeUntracked: boolean, onProgress: Report) =>
-    invoke<StashReport>('stash_save', { repo, message, includeUntracked, onProgress: channel(onProgress) }),
-  stashApply: (repo: string, index: number, onProgress: Report) =>
-    invoke<StashReport>('stash_apply', { repo, index, onProgress: channel(onProgress) }),
-  stashPop: (repo: string, index: number, onProgress: Report) =>
-    invoke<StashReport>('stash_pop', { repo, index, onProgress: channel(onProgress) }),
+  /** `paths` empty = everything; otherwise only those files are set aside (`stash push -- paths`). */
+  stashSave: (repo: string, message: string | null, includeUntracked: boolean, paths: string[], onProgress: Report) =>
+    invoke<StashReport>('stash_save', { repo, message, includeUntracked, paths, onProgress: channel(onProgress) }),
+  stashApply: (repo: string, index: number, opts: StashRestore, onProgress: Report) =>
+    invoke<StashReport>('stash_apply', { repo, index, ...stashRestoreArgs(opts), onProgress: channel(onProgress) }),
+  stashPop: (repo: string, index: number, opts: StashRestore, onProgress: Report) =>
+    invoke<StashReport>('stash_pop', { repo, index, ...stashRestoreArgs(opts), onProgress: channel(onProgress) }),
   stashDrop: (repo: string, index: number) => invoke<StashReport>('stash_drop', { repo, index }),
   stashClear: (repo: string) => invoke<StashReport>('stash_clear', { repo }),
 
@@ -185,7 +300,8 @@ export const api = {
   /** Move the branch to `rev` and overwrite the working folder. Unsaved work is lost. */
   resetHard: (repo: string, rev: string, onProgress: Report) =>
     invoke<ResetReport>('repo_reset_hard', { repo, rev, onProgress: channel(onProgress) }),
-  revert: (repo: string, rev: string) => invoke<RevertReport>('repo_revert', { repo, rev }),
+  revert: (repo: string, revs: string[], opts?: { noCommit?: boolean; message?: string }) =>
+    invoke<RevertReport>('repo_revert', { repo, revs, ...(opts ? { opts } : {}) }),
   revertControl: (repo: string, action: 'continue' | 'abort' | 'skip') =>
     invoke<RevertReport>('repo_revert_control', { repo, action }),
   /** Overwrite one working file with its content at `rev`. */
@@ -207,12 +323,13 @@ export const api = {
   // Secrets (`passphrase`, `password`, `code`) go to the child's stdin only; `passphrase` answers a
   // `needs_input` prompt on retry (see stores/unlock.ts).
   stats: (repo: string, passphrase?: string) => invoke<StatsReport>('repo_stats', { repo, passphrase: passphrase ?? null }),
-  gc: (repo: string, dryRun: boolean, confirmed: boolean, passphrase: string | undefined, onProgress: Report) =>
-    invoke<GcReport>('repo_gc', { repo, dryRun, confirmed, passphrase: passphrase ?? null, onProgress: channel(onProgress) }),
-  fsck: (repo: string, deep: boolean, passphrase: string | undefined, onProgress: Report) =>
-    invoke<FsckCliReport>('repo_fsck', { repo, deep, passphrase: passphrase ?? null, onProgress: channel(onProgress) }),
-  verify: (repo: string, quick: boolean, passphrase: string | undefined, onProgress: Report) =>
-    invoke<FsckCliReport>('repo_verify', { repo, quick, passphrase: passphrase ?? null, onProgress: channel(onProgress) }),
+  gc: (repo: string, dryRun: boolean, confirmed: boolean, options: GcOptions, passphrase: string | undefined, onProgress: Report) =>
+    invoke<GcReport>('repo_gc', { repo, dryRun, confirmed, options, passphrase: passphrase ?? null, onProgress: channel(onProgress) }),
+  fsck: (repo: string, options: FsckOptions, passphrase: string | undefined, onProgress: Report) =>
+    invoke<FsckCliReport>('repo_fsck', { repo, options, passphrase: passphrase ?? null, onProgress: channel(onProgress) }),
+  /** The whole repository gives an `FsckCliReport`; one version or a range gives a `VerifyRangeReport`. */
+  verify: (repo: string, options: VerifyOptions, passphrase: string | undefined, onProgress: Report) =>
+    invoke<FsckCliReport | VerifyRangeReport>('repo_verify', { repo, options, passphrase: passphrase ?? null, onProgress: channel(onProgress) }),
 
   authLogin: (repo: string | null, server: string | null, username: string | null, password: string) =>
     rawInvoke<AuthReport>('auth_login', { repo, server, username, password }),
@@ -252,29 +369,50 @@ export const api = {
   serverRepoDelete: (server: string, name: string, typedName: string, force: boolean) =>
     rawInvoke<HostedRepoActionReport>('server_repo_delete', { server, name, typedName, force, confirm: true }),
 
+  authRegister: (server: string | null, username: string, email: string, password: string) =>
+    rawInvoke<AuthOpReport>('auth_register', { server, username, email, password }),
+  authPasswd: (server: string | null, current: string, newPassword: string) =>
+    rawInvoke<AuthOpReport>('auth_passwd', { server, current, new: newPassword }),
+  /** Re-lock the key under a new master: a key file path, or a new passphrase (`current` only if the key is passphrase-protected now). */
+  keyRotateMaster: (repo: string, newKeyfile: string | null, current: string | null, newPassphrase: string | null) =>
+    rawInvoke<KeyReport>('key_rotate_master', { repo, newKeyfile, current, newPassphrase }),
   keyStatus: (repo: string, passphrase?: string) => invoke<KeyReport>('key_status', { repo, passphrase: passphrase ?? null }),
   keyInit: (repo: string, passphrase: string | null) => rawInvoke<KeyReport>('key_init', { repo, passphrase }),
   keyRecover: (repo: string, code: string, passphrase: string | null) => rawInvoke<KeyReport>('key_recover', { repo, code, passphrase }),
 
   configList: (repo: string) => invoke<ConfigReport>('config_list', { repo }),
-  configSet: (repo: string, key: string, value: string) => invoke<ConfigReport>('config_set', { repo, key, value }),
+  /** `secret`: the value goes to the CLI privately (stdin) and is never shown again. */
+  configSet: (repo: string, key: string, value: string, secret = false) => invoke<ConfigReport>('config_set', { repo, key, value, secret }),
+  /** Every setting the CLI knows (type, default, documentation, secret or not). Needs no repository. */
+  configSchema: () => rawInvoke<ConfigSchemaReport>('config_schema'),
   configUnset: (repo: string, key: string) => invoke<ConfigReport>('config_unset', { repo, key }),
   sparseList: (repo: string) => invoke<SparseReport>('sparse_list', { repo }),
   sparseSet: (repo: string, patterns: string[], patternMode: boolean, onProgress: Report) =>
     invoke<SparseReport>('sparse_set', { repo, patterns, patternMode, onProgress: channel(onProgress) }),
   sparseDisable: (repo: string, onProgress: Report) => invoke<SparseReport>('sparse_disable', { repo, onProgress: channel(onProgress) }),
 
-  rebaseStart: (repo: string, upstream: string, onProgress: Report) =>
-    invoke<RebaseReport>('rebase_start', { repo, upstream, onProgress: channel(onProgress) }),
+  rebaseStart: (repo: string, upstream: string, onProgress: Report, extra?: { branch?: string; keepEmpty?: boolean }) =>
+    invoke<RebaseReport>('rebase_start', { repo, upstream, ...extra, onProgress: channel(onProgress) }),
   sequencerControl: <T = RebaseReport | CherryPickReport>(repo: string, command: 'rebase' | 'cherry-pick', action: 'continue' | 'abort' | 'skip', onProgress: Report) =>
     invoke<T>('sequencer_control', { repo, command, action, onProgress: channel(onProgress) }),
-  pickStart: (repo: string, commits: string[], onProgress: Report) =>
-    invoke<CherryPickReport>('pick_start', { repo, commits, onProgress: channel(onProgress) }),
-  bisectStart: (repo: string, bad: string, good: string | null, onProgress: Report) =>
-    invoke<BisectReport>('bisect_start', { repo, bad, good, onProgress: channel(onProgress) }),
+  pickStart: (repo: string, commits: string[], onProgress: Report, opts?: { noCommit?: boolean; appendMessage?: boolean }) =>
+    invoke<CherryPickReport>('pick_start', { repo, commits, ...(opts ? { opts } : {}), onProgress: channel(onProgress) }),
+  /** `restart` throws away a bisect already running; the person has agreed to that. */
+  bisectStart: (repo: string, bad: string, good: string | null, onProgress: Report, restart = false) =>
+    invoke<BisectReport>('bisect_start', { repo, bad, good, ...(restart ? { restart, confirmed: true } : {}), onProgress: channel(onProgress) }),
   bisectMark: (repo: string, verdict: 'good' | 'bad' | 'skip', commit: string | null, onProgress: Report) =>
     invoke<BisectReport>('bisect_mark', { repo, verdict, commit, onProgress: channel(onProgress) }),
-  bisectReset: (repo: string, onProgress: Report) => invoke<BisectReport>('bisect_reset', { repo, onProgress: channel(onProgress) }),
+  /** `commit` moves the branch there instead of back to where the bisect began; the person has agreed. */
+  bisectReset: (repo: string, onProgress: Report, commit?: string) =>
+    invoke<BisectReport>('bisect_reset', { repo, ...(commit ? { commit, confirmed: true } : {}), onProgress: channel(onProgress) }),
+  bisectReplay: (repo: string, logfile: string, onProgress: Report) =>
+    invoke<BisectReport>('bisect_replay', { repo, logfile, onProgress: channel(onProgress) }),
   bisectLog: (repo: string) => invoke<BisectReport>('bisect_log', { repo }),
   reflog: (repo: string, reference: string, count: number) => invoke<ReflogReport>('reflog_list', { repo, reference, count }),
+  reflogAll: (repo: string, count: number) => invoke<ReflogAllReport>('reflog_all', { repo, count }),
+  /** Forget where a ref has been. Cannot be undone; the person has agreed. */
+  reflogDelete: (repo: string, reference: string) => invoke<ReflogMaintainReport>('reflog_delete', { repo, reference, confirmed: true }),
+  /** Keep only the newest `keep` entries (of `reference`, or of every ref when null). Cannot be undone. */
+  reflogExpire: (repo: string, reference: string | null, keep: number) =>
+    invoke<ReflogMaintainReport>('reflog_expire', { repo, reference, keep, confirmed: true }),
 }

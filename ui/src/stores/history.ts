@@ -5,6 +5,7 @@ import {
   toApiError,
   type ApiError,
   type LogCommitReport,
+  type LogFilter,
   type LogRefReport,
   type LogReport,
   type ShowCommitReport,
@@ -16,6 +17,17 @@ import { load, save } from '@/lib/persist'
 import { useRepoStore } from './repo'
 
 export const PAGE_SIZE = 200
+
+/** The filter form: every field is text; blank means "any". `paths` is one per line or comma-separated. */
+export interface HistoryFilter {
+  revision: string
+  author: string
+  grep: string
+  since: string
+  until: string
+  paths: string
+}
+const NO_FILTER: HistoryFilter = { revision: '', author: '', grep: '', since: '', until: '', paths: '' }
 /** With a filter on, keep paging until at least this many rows match (or history ends). */
 const MIN_VISIBLE = 40
 
@@ -59,7 +71,29 @@ export const useHistoryStore = defineStore('history', () => {
   let detailToken = 0
   let treeToken = 0
 
-  const searching = computed(() => query.value.trim().length > 0)
+  /** Filters the CLI applies (`log --author` etc.); `applied` is what the loaded pages were read with. */
+  const filter = ref<HistoryFilter>({ ...NO_FILTER })
+  const applied = ref<HistoryFilter>({ ...NO_FILTER })
+  const filtering = computed(() => Object.values(applied.value).some((v) => v.trim()))
+  const logFilter = (): LogFilter | undefined => {
+    const f = applied.value
+    if (!filtering.value) return undefined
+    const t = (v: string) => v.trim() || undefined
+    const paths = f.paths.split(/[\n,]/).map((p) => p.trim()).filter(Boolean)
+    return { revision: t(f.revision), author: t(f.author), grep: t(f.grep), since: t(f.since), until: t(f.until), ...(paths.length ? { paths } : {}) }
+  }
+  /** A start point replaces "all branches": the CLI walks from there only. */
+  const allRefs = () => !applied.value.revision.trim()
+  function applyFilter() {
+    applied.value = { ...filter.value }
+    void reload()
+  }
+  function clearFilter() {
+    filter.value = { ...NO_FILTER }
+    applyFilter()
+  }
+
+  const searching = computed(() => query.value.trim().length > 0 || filtering.value)
   const decorations = computed(() => decorate(refs.value))
   const head = computed(() => headOid(refs.value))
   const keep = computed(() => (branchOnly.value ? ancestorsOf(commits.value, head.value) : null))
@@ -99,7 +133,7 @@ export const useHistoryStore = defineStore('history', () => {
     error.value = null
     moreError.value = null
     try {
-      const r = await api.log(repo.path, 0, PAGE_SIZE, true)
+      const r = await api.log(repo.path, 0, PAGE_SIZE, allRefs(), undefined, logFilter())
       if (mine !== token) return
       append(r, true)
       loaded.value = true
@@ -121,7 +155,7 @@ export const useHistoryStore = defineStore('history', () => {
     loadingMore.value = true
     moreError.value = null
     try {
-      const r = await api.log(repo.path, commits.value.length, PAGE_SIZE, true)
+      const r = await api.log(repo.path, commits.value.length, PAGE_SIZE, allRefs(), undefined, logFilter())
       if (mine !== token) return
       append({ commits: r.commits, refs: r.refs }, false)
       fillIfSparse()
@@ -214,6 +248,8 @@ export const useHistoryStore = defineStore('history', () => {
     tree.value = null
     file.value = null
     query.value = ''
+    filter.value = { ...NO_FILTER }
+    applied.value = { ...NO_FILTER }
   }
 
   watch(
@@ -235,6 +271,10 @@ export const useHistoryStore = defineStore('history', () => {
     error,
     moreError,
     query,
+    filter,
+    filtering,
+    applyFilter,
+    clearFilter,
     searching,
     branchOnly,
     selectedOid,

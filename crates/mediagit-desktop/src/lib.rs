@@ -253,9 +253,14 @@ async fn repo_add(
     queues: tauri::State<'_, RepoQueues>,
     repo: String,
     paths: Vec<String>,
+    opts: Option<commands::views_a::AddOpts>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    let argv = add_argv(&repo, &paths)?;
+    let mut argv = add_argv(&repo, &paths)?;
+    argv.splice(
+        1..1,
+        commands::views_a::add_flags(&opts.unwrap_or_default()),
+    );
     let args: Vec<&str> = argv.iter().map(String::as_str).collect();
     queues
         .write(&repo, engine.run(Some(&repo), &args, |_| {}))
@@ -269,9 +274,10 @@ async fn repo_commit(
     queues: tauri::State<'_, RepoQueues>,
     repo: String,
     message: String,
+    opts: Option<commands::views_a::CommitOpts>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    let argv = commit_argv(&message)?;
+    let argv = commands::views_a::commit_argv(&repo, &message, &opts.unwrap_or_default())?;
     let args: Vec<&str> = argv.iter().map(String::as_str).collect();
     queues
         .write(&repo, engine.run(Some(&repo), &args, |_| {}))
@@ -280,8 +286,17 @@ async fn repo_commit(
 
 /// New repository (`mediagit init`).
 #[tauri::command]
-async fn repo_init(engine: tauri::State<'_, Engine>, path: String) -> Result<Value, EngineError> {
-    let argv = init_argv(&path)?;
+async fn repo_init(
+    engine: tauri::State<'_, Engine>,
+    path: String,
+    initial_branch: Option<String>,
+) -> Result<Value, EngineError> {
+    let argv = commands::views_a::with_branch(
+        init_argv(&path)?,
+        1,
+        "initial-branch",
+        initial_branch.as_deref(),
+    )?;
     let args: Vec<&str> = argv.iter().map(String::as_str).collect();
     engine.run(None, &args, |_| {}).await
 }
@@ -293,10 +308,12 @@ async fn repo_clone(
     ops: tauri::State<'_, Ops>,
     url: String,
     dest: String,
+    branch: Option<String>,
     op_id: String,
     on_progress: Channel<Progress>,
 ) -> Result<Value, EngineError> {
-    let argv = clone_argv(&url, &dest)?;
+    let argv =
+        commands::views_a::with_branch(clone_argv(&url, &dest)?, 1, "branch", branch.as_deref())?;
     let args: Vec<&str> = argv.iter().map(String::as_str).collect();
     let cancel = ops.register(&op_id);
     let mut throttle = Throttle::new(Duration::from_millis(100));
@@ -362,11 +379,17 @@ pub fn run() {
             commands::tag_list,
             commands::tag_create,
             commands::tag_delete,
+            commands::tag_show,
+            commands::tag_verify,
             commands::lock_list,
             commands::lock_create,
             commands::lock_unlock,
             commands::remote_list,
-            commands::remote_add,
+            commands::views_a::remote_add,
+            commands::views_a::remote_rename,
+            commands::views_a::remote_set_url,
+            commands::views_a::remote_show,
+            commands::views_a::repo_unstage,
             commands::remote_remove,
             commands::repo_fetch,
             commands::repo_pull,
@@ -398,11 +421,15 @@ pub fn run() {
             commands::admin::repo_verify,
             commands::admin::auth_login,
             commands::admin::auth_run,
+            commands::admin::auth_register,
+            commands::admin::auth_passwd,
+            commands::admin::key_rotate_master,
             commands::admin::key_status,
             commands::admin::key_init,
             commands::admin::key_recover,
             commands::admin::config_list,
             commands::admin::config_set,
+            commands::admin::config_schema,
             commands::admin::config_unset,
             commands::admin::sparse_list,
             commands::admin::sparse_set,
@@ -414,6 +441,12 @@ pub fn run() {
             commands::admin::bisect_mark,
             commands::admin::bisect_reset,
             commands::admin::bisect_log,
+            commands::admin::bisect_replay,
+            commands::views_b::branch_show,
+            commands::views_b::branch_protect,
+            commands::views_b::reflog_all,
+            commands::views_b::reflog_delete,
+            commands::views_b::reflog_expire,
             commands::admin::reflog_list,
             commands::server_admin::server_users_list,
             commands::server_admin::server_user_create,

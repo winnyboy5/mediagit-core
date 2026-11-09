@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, useId, watch } from 'vue'
 import { useVirtualizer } from '@tanstack/vue-virtual'
-import { History, PanelRight, RefreshCw, Search } from 'lucide-vue-next'
+import { Filter, History, PanelRight, RefreshCw, Search } from 'lucide-vue-next'
 import BranchPill from '@/components/BranchPill.vue'
 import Button from '@/components/Button.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import ErrorState from '@/components/ErrorState.vue'
 import IconButton from '@/components/IconButton.vue'
 import SegmentedControl from '@/components/SegmentedControl.vue'
+import Select from '@/components/Select.vue'
+import TextField from '@/components/TextField.vue'
 import SkeletonRows from '@/components/SkeletonRows.vue'
 import TagPill from '@/components/TagPill.vue'
 import { formatWhen, graphWidth, shortOid } from '@/lib/history'
@@ -30,6 +32,16 @@ const scope = computed({
   get: () => (history.branchOnly ? 'branch' : 'all'),
   set: (v: string) => (history.branchOnly = v === 'branch'),
 })
+
+// Filters the CLI applies before paging (`log --author` and friends).
+const filtersOpen = ref(false)
+// The select cannot hold an empty value, so "every branch" is a named choice.
+const EVERY = '*every'
+const startValue = computed({ get: () => history.filter.revision || EVERY, set: (v?: string) => (history.filter.revision = !v || v === EVERY ? '' : v) })
+const startOptions = computed(() => [
+  { value: EVERY, label: 'Every branch' },
+  ...history.refs.filter((r) => r.kind === 'branch' || r.kind === 'tag').map((r) => ({ value: r.name, label: `${r.kind === 'tag' ? 'Tag' : 'Branch'} ${r.name}` })),
+])
 
 const MAX_LANES = 8
 const laneOf = (n: number) => ((n % 6) + 1) as 1 | 2 | 3 | 4 | 5 | 6
@@ -106,6 +118,15 @@ const busy = computed(() => history.loading || history.loadingMore)
           <input :id="searchId" v-model="history.query" type="search" placeholder="Search versions" autocomplete="off" />
         </div>
         <SegmentedControl v-model="scope" label="Which versions" :options="SCOPES" />
+        <IconButton
+          :label="history.filtering ? 'Filters (on)' : 'Filters'"
+          variant="secondary"
+          :pressed="filtersOpen"
+          aria-controls="history-filters"
+          @click="filtersOpen = !filtersOpen"
+        >
+          <Filter :size="18" />
+        </IconButton>
         <IconButton label="Refresh history" variant="secondary" :disabled="history.loading" @click="history.reload()"><RefreshCw :size="18" /></IconButton>
         <IconButton
           :label="shell.inspectorVisible ? 'Hide details panel' : 'Show details panel'"
@@ -117,6 +138,19 @@ const busy = computed(() => history.loading || history.loadingMore)
         </IconButton>
       </div>
     </header>
+
+    <form v-show="filtersOpen" id="history-filters" class="filters" aria-label="Filter versions" @submit.prevent="history.applyFilter()">
+      <Select v-model="startValue" label="Start from" :options="startOptions" />
+      <TextField v-model="history.filter.author" label="Saved by" placeholder="e.g. Ana or ana@studio.example" hint="Only versions saved by this person." flag="--author" />
+      <TextField v-model="history.filter.grep" label="Message contains" placeholder="e.g. grade pass" hint="Only versions whose message has these words." flag="--grep" />
+      <TextField v-model="history.filter.since" label="From date" type="date" hint="Leave empty to go back to the start." flag="--since" />
+      <TextField v-model="history.filter.until" label="Until date" type="date" hint="Leave empty to include the newest." flag="--until" />
+      <TextField v-model="history.filter.paths" label="Only these files or folders" placeholder="e.g. art/hero.psd, video/shots" hint="Separate with commas" mono />
+      <div class="factions">
+        <Button type="submit" variant="primary" :disabled="history.loading">Apply filters</Button>
+        <Button type="button" :disabled="!history.filtering" @click="history.clearFilter()">Clear</Button>
+      </div>
+    </form>
 
     <div v-if="firstLoad" class="pad"><SkeletonRows :count="10" /></div>
     <div v-else-if="history.error && !history.loaded" class="pad">
@@ -135,7 +169,7 @@ const busy = computed(() => history.loading || history.loadingMore)
           <span>{{ history.error.message }}</span>
           <Button size="sm" variant="ghost" @click="history.reload()">Retry</Button>
         </div>
-        <p v-if="history.searching && history.visible.length" class="hint">The graph is hidden while you search.</p>
+        <p v-if="history.searching && history.visible.length" class="hint">The graph is hidden while you search or filter.</p>
         <div
           ref="el"
           class="list"
@@ -232,6 +266,21 @@ h1 {
 .tools {
   display: flex;
   align-items: center;
+  gap: var(--space-2);
+}
+.filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--space-3) var(--space-4);
+  align-items: start;
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+}
+.factions {
+  display: flex;
+  align-self: end;
   gap: var(--space-2);
 }
 .search {

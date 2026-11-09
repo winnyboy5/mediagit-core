@@ -147,8 +147,8 @@ pub struct DiffCmd {
     #[arg(long)]
     pub summary: bool,
 
-    /// Paths to diff
-    #[arg(value_name = "PATHS")]
+    /// Only show these paths (files or directories), after `--`
+    #[arg(last = true, value_name = "PATHS")]
     pub paths: Vec<String>,
 
     /// Quiet mode
@@ -157,6 +157,17 @@ pub struct DiffCmd {
 }
 
 impl DiffCmd {
+    /// `path` is one of the requested PATHS or lies under one (no PATHS: all).
+    fn keep(&self, path: &str) -> bool {
+        let path = path.replace('\\', "/");
+        self.paths.is_empty()
+            || self.paths.iter().any(|p| {
+                let p = p.replace('\\', "/");
+                let p = p.trim_start_matches("./").trim_end_matches('/');
+                p.is_empty() || p == "." || path == p || path.starts_with(&format!("{p}/"))
+            })
+    }
+
     pub async fn execute(&self) -> Result<()> {
         // --machine always answers: quiet would leave stdout empty.
         if self.quiet && !output::machine_mode() {
@@ -197,10 +208,13 @@ impl DiffCmd {
         if output::machine_mode() {
             let mut files = Vec::new();
             if from_commit.tree != to_commit.tree {
-                let diff = TreeDiffer::new(odb.clone())
+                let mut diff = TreeDiffer::new(odb.clone())
                     .diff_trees(&from_commit.tree, &to_commit.tree)
                     .await
                     .context("Failed to diff trees")?;
+                diff.added.retain(|e| self.keep(&e.name));
+                diff.modified.retain(|e| self.keep(&e.path));
+                diff.deleted.retain(|e| self.keep(&e.name));
                 for e in &diff.added {
                     files
                         .push(stored_file(&odb, e.name.clone(), "added", None, Some(&e.oid)).await);
@@ -253,10 +267,13 @@ impl DiffCmd {
         }
 
         let differ = TreeDiffer::new(odb.clone());
-        let diff = differ
+        let mut diff = differ
             .diff_trees(&from_commit.tree, &to_commit.tree)
             .await
             .context("Failed to diff trees")?;
+        diff.added.retain(|e| self.keep(&e.name));
+        diff.modified.retain(|e| self.keep(&e.path));
+        diff.deleted.retain(|e| self.keep(&e.name));
 
         let total = diff.added.len() + diff.deleted.len() + diff.modified.len();
         if total == 0 {
@@ -360,6 +377,11 @@ impl DiffCmd {
                 added.push(path.clone());
             }
         }
+
+        let wanted = |p: &PathBuf| self.keep(&p.to_string_lossy());
+        modified.retain(wanted);
+        added.retain(wanted);
+        deleted.retain(wanted);
 
         if output::machine_mode() {
             let mut files = Vec::new();
@@ -511,6 +533,9 @@ impl DiffCmd {
                 staged_new.push(entry.path.clone());
             }
         }
+
+        staged_new.retain(|p| self.keep(&p.to_string_lossy()));
+        staged_modified.retain(|p| self.keep(&p.to_string_lossy()));
 
         if machine {
             let staged: HashMap<&PathBuf, &Oid> =

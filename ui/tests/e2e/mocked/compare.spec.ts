@@ -37,6 +37,21 @@ test.describe('Compare: states', () => {
     await expectNoAxeViolations(page)
   })
 
+  test('filter: narrows the changed files by any part of the path, says when none match', async ({ page }) => {
+    await boot(page)
+    const items = page.getByRole('list', { name: 'Changed files' }).getByRole('listitem')
+    await expect(items).toHaveCount(4)
+    await page.getByLabel('Filter files').fill('HERO_PREV')
+    await expect(items).toHaveCount(1)
+    await expect(file(page, /hero_preview/)).toBeVisible()
+    await page.getByLabel('Filter files').fill('zzz-nothing')
+    await expect(page.getByRole('status').filter({ hasText: 'No changed file matches' })).toBeVisible()
+    await expectNoAxeViolations(page)
+    await page.getByLabel('Filter files').fill('')
+    await expect(items).toHaveCount(4)
+    expect(await ipcCalls(page, 'repo_diff')).toHaveLength(1)
+  })
+
   test('loading: skeleton until the comparison arrives', async ({ page }) => {
     await boot(page, {}, { repo_diff: '' }, { repo_diff: [{ hold: true }, { resolve: fixture('diff_working') }] })
     await expect(page.getByRole('status', { name: 'Loading' })).toBeVisible()
@@ -150,9 +165,9 @@ test.describe('Compare: files and previews', () => {
       { resolve: { path: '/preview/x.png', size: 100 } },
     ]
     await boot(page, {}, { repo_extract: '', repo_diff: `() => (${JSON.stringify(fixture('diff_commits'))})` }, { repo_extract: slow })
-    // To = newest version first (this enables From), then From = the one before it.
+    // To = newest version (after Working folder and staged; this enables From), then From = the one before it.
     await page.getByLabel('To').click()
-    await page.getByRole('option').nth(1).click()
+    await page.getByRole('option').nth(2).click()
     await page.getByLabel('From').click()
     await page.getByRole('option').nth(1).click()
     await file(page, /hero_preview/).click()

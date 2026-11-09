@@ -10,9 +10,11 @@ const props = defineProps<{
   error?: string
   disabled?: boolean
   mono?: boolean
+  flag?: string
 }>()
 const id = useId()
 const note = computed(() => props.error ?? props.hint)
+const noted = computed(() => !!note.value || (!!props.flag && !props.error))
 </script>
 
 <template>
@@ -26,9 +28,9 @@ const note = computed(() => props.error ?? props.hint)
       :placeholder="placeholder"
       :disabled="disabled"
       :aria-invalid="error ? true : undefined"
-      :aria-describedby="note ? id + '-note' : undefined"
+      :aria-describedby="noted ? id + '-note' : undefined"
     />
-    <p v-if="note" :id="id + '-note'" class="note" :class="{ err: !!error }">{{ note }}</p>
+    <p v-if="noted" :id="id + '-note'" class="note" :class="{ err: !!error }">{{ note }}<template v-if="flag && !error"> <code class="mono flag">{{ flag }}</code></template></p>
   </div>
 </template>
 
@@ -55,18 +57,28 @@ input.mono {
 }
 input::placeholder {
   color: var(--text-muted);
+  font-family: var(--font-sans, inherit);
+  font-style: italic;
 }
 input.invalid {
   border-color: var(--danger);
 }
 input:disabled {
-  opacity: 0.55;
+  background: var(--surface-2);
+  color: var(--text-muted);
+  border-color: var(--border);
   cursor: not-allowed;
 }
 .note {
   margin: 0;
   font-size: var(--fs-sm);
   color: var(--text-muted);
+}
+.flag {
+  /* Vue drops the space before this inline element; keep the gap here. */
+  margin-inline-start: 0.35em;
+  font-size: var(--fs-sm);
+  white-space: nowrap;
 }
 .note.err {
   color: var(--danger);

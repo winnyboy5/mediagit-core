@@ -8,17 +8,22 @@ import EmptyState from '@/components/EmptyState.vue'
 import ErrorState from '@/components/ErrorState.vue'
 import FileIcon from '@/components/FileIcon.vue'
 import IconButton from '@/components/IconButton.vue'
+import MoreOptions from '@/components/MoreOptions.vue'
+import Select from '@/components/Select.vue'
 import SegmentedControl from '@/components/SegmentedControl.vue'
 import SkeletonRows from '@/components/SkeletonRows.vue'
 import TextField from '@/components/TextField.vue'
 import { timeAgo } from '@/lib/persist'
 import { useIdentityStore } from '@/stores/identity'
+import { useSyncStore } from '@/stores/sync'
 import { filterLocks, useLocksStore, type LockFilter } from '@/stores/locks'
 import type { LockReport } from '@/api'
 
 const locks = useLocksStore()
 const identity = useIdentityStore()
+const sync = useSyncStore()
 onMounted(() => {
+  if (!sync.loaded) void sync.refresh()
   void locks.refresh()
   void identity.refresh()
 })
@@ -36,6 +41,16 @@ const isMine = (l: LockReport) => locks.isMine(l)
 // Lock a file -----------------------------------------------------------
 const lockOpen = ref(false)
 const lockPath = ref('')
+const lockOwner = ref('')
+// Which remote the locks live on; only worth a picker when there is a choice.
+const remoteOptions = computed(() => sync.remotes.map((r) => ({ value: r.name, label: r.name })))
+const remotePick = computed({
+  get: () => locks.remote ?? sync.remote ?? undefined,
+  set: (v) => {
+    locks.remote = v ?? null
+    void locks.refresh()
+  },
+})
 const lockError = computed(() => {
   const p = lockPath.value.trim()
   if (!p) return undefined
@@ -49,9 +64,10 @@ function openLock() {
 async function lockFile() {
   const p = lockPath.value.trim().replace(/\\/g, '/')
   if (!p || lockError.value || locks.busy) return
-  if (await locks.lock(p)) {
+  if (await locks.lock(p, lockOwner.value)) {
     lockOpen.value = false
     lockPath.value = ''
+    lockOwner.value = ''
   }
 }
 
@@ -73,6 +89,7 @@ function askForce(l: LockReport) {
         <p>who is working on which file</p>
       </div>
       <div class="tools">
+        <Select v-if="sync.remotes.length > 1" v-model="remotePick" label="Remote" :options="remoteOptions" />
         <SegmentedControl v-model="filter" label="Whose locks" :options="FILTERS" />
         <IconButton label="Refresh locks" variant="secondary" :disabled="locks.loading" @click="locks.refresh()"><RefreshCw :size="18" /></IconButton>
         <Button variant="primary" :disabled="!!locks.busy" @click="openLock"><Lock :size="16" aria-hidden="true" /> Lock a file</Button>
@@ -131,7 +148,10 @@ function askForce(l: LockReport) {
 
     <Dialog v-model:open="lockOpen" title="Lock a file" description="Others can still look at the file, but they cannot save changes to it until you unlock it.">
       <form id="lock-file" class="form" @submit.prevent="lockFile">
-        <TextField v-model="lockPath" label="File path" placeholder="art/hero.psd" :error="lockError" hint="Relative to the project folder" mono />
+        <TextField v-model="lockPath" label="File path" placeholder="e.g. art/hero.psd" :error="lockError" hint="Relative to the project folder" mono />
+        <MoreOptions data-testid="lock-more">
+          <TextField v-model="lockOwner" label="Lock as" hint="A name for no-sign-in servers; signed-in servers use your account." flag="--owner" mono />
+        </MoreOptions>
         <p v-if="locks.actionError && lockOpen" class="derr" role="alert">{{ locks.actionError.message }}</p>
       </form>
       <template #footer>

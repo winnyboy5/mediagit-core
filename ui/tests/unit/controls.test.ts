@@ -76,6 +76,19 @@ describe('TextField / Textarea', () => {
     expect(note.text()).toBe('Bad URL')
     expect(input.attributes('aria-describedby')).toBe(note.attributes('id'))
   })
+  it('flag renders as secondary code text and is described; an error replaces it', async () => {
+    const w = mount(TextField, { props: { label: 'Saved by', hint: 'Only versions by this person.', flag: '--author' } })
+    const note = w.get('.note')
+    expect(note.text()).toContain('Only versions by this person.')
+    expect(note.get('code.flag').text()).toBe('--author')
+    expect(w.get('input').attributes('aria-describedby')).toBe(note.attributes('id'))
+    await w.setProps({ error: 'Bad' })
+    expect(w.find('code.flag').exists()).toBe(false)
+  })
+  it('a disabled field carries the disabled attribute', () => {
+    const w = mount(TextField, { props: { label: 'Tagger', disabled: true, hint: 'Add a note first to set these.' } })
+    expect(w.get('input').attributes('disabled')).toBeDefined()
+  })
   it('Textarea wires label and error', () => {
     const w = mount(Textarea, { props: { label: 'Message', error: 'Required', rows: 2 } })
     const ta = w.get('textarea')

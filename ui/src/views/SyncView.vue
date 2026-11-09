@@ -1,9 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { ArrowDown, ArrowUp, Cloud, Download, RefreshCw, Trash2, Upload } from 'lucide-vue-next'
+import { ArrowDown, ArrowUp, Cloud, Download, Ellipsis, RefreshCw, Upload } from 'lucide-vue-next'
 import AlertDialog from '@/components/AlertDialog.vue'
 import Button from '@/components/Button.vue'
 import Dialog from '@/components/Dialog.vue'
+import DropdownMenu from '@/components/DropdownMenu.vue'
+import MoreOptions from '@/components/MoreOptions.vue'
+import OptionCheck from '@/components/OptionCheck.vue'
+import SegmentedControl from '@/components/SegmentedControl.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import ErrorState from '@/components/ErrorState.vue'
 import IconButton from '@/components/IconButton.vue'
@@ -58,13 +62,17 @@ function openAdd() {
   sync.actionError = null
   addOpen.value = true
 }
+const fetchNow = ref(false)
+const token = ref('')
 const canAdd = computed(() => !!name.value && !!url.value && !nameError.value && !urlError.value && !sync.busy)
 async function add() {
   if (!canAdd.value) return
-  if (await sync.addRemote(name.value, url.value)) {
+  if (await sync.addRemote(name.value, url.value, { fetch: fetchNow.value, token: token.value })) {
     addOpen.value = false
     url.value = ''
     name.value = ''
+    token.value = ''
+    fetchNow.value = false
   }
 }
 
@@ -74,6 +82,79 @@ const removeOpen = ref(false)
 function askRemove(name: string) {
   removing.value = name
   removeOpen.value = true
+}
+
+// Per-remote actions ----------------------------------------------------
+const REMOTE_MENU = [
+  { id: 'details', label: 'Details…' },
+  { id: 'rename', label: 'Rename…' },
+  { id: 'url', label: 'Change address…' },
+  { id: 'remove', label: 'Remove…', danger: true, separated: true },
+]
+const target = ref<{ name: string; url: string } | null>(null)
+const detailOpen = ref(false)
+const renameOpen = ref(false)
+const urlOpen = ref(false)
+const newName = ref('')
+const newUrl = ref('')
+const pushOnly = ref(false)
+function pickAction(r: { name: string; url: string }, id: string) {
+  target.value = r
+  sync.actionError = null
+  if (id === 'remove') askRemove(r.name)
+  else if (id === 'details') {
+    detailOpen.value = true
+    void sync.showRemote(r.name)
+  } else if (id === 'rename') {
+    newName.value = r.name
+    renameOpen.value = true
+  } else {
+    newUrl.value = r.url
+    pushOnly.value = false
+    urlOpen.value = true
+  }
+}
+const renameError = computed(() =>
+  newName.value && newName.value !== target.value?.name
+    ? (refNameError(newName.value) ?? (sync.remotes.some((r) => r.name === newName.value) ? 'A remote with this name exists' : undefined))
+    : undefined,
+)
+const canRename = computed(() => !!newName.value && newName.value !== target.value?.name && !renameError.value && !sync.busy)
+async function rename() {
+  if (canRename.value && target.value && (await sync.renameRemote(target.value.name, newName.value))) renameOpen.value = false
+}
+const newUrlError = computed(() => (newUrl.value && !/^https?:\/\/[^\s/]+/.test(newUrl.value) && !/^([a-zA-Z]:)?[\\/]/.test(newUrl.value) ? 'Use an http(s) address or a local folder path' : undefined))
+const canSetUrl = computed(() => !!newUrl.value && !newUrlError.value && !sync.busy)
+async function setUrl() {
+  if (canSetUrl.value && target.value && (await sync.setRemoteUrl(target.value.name, newUrl.value, pushOnly.value))) urlOpen.value = false
+}
+
+// Transfer options ------------------------------------------------------
+const optKind = ref<TransferKind>('push')
+const OVERWRITE = [
+  { value: 'none', label: 'Stop if the remote moved' },
+  { value: 'lease', label: 'Overwrite safely' },
+  { value: 'force', label: 'Overwrite anyway' },
+]
+const OVERWRITE_TEXT: Record<string, { text: string; flag?: string }> = {
+  none: { text: 'Nothing is sent if someone else sent work since you last checked.' },
+  lease: { text: 'Replaces the remote branch only if nobody sent new work since you last checked.', flag: '--force-with-lease' },
+  force: { text: 'Replaces the remote branch even if teammates sent new work. Their versions are lost from the remote.', flag: '--force' },
+}
+const pushForm = sync.form.push
+const confirmPushOpen = ref(false)
+const pushWarnings = computed(() => {
+  const w: string[] = []
+  const r = sync.remote ?? 'the remote'
+  if (pushForm.delete) w.push(`Deletes ${pushForm.refspecs.trim() || 'the named branches'} on ${r} for everyone. Your own copies stay.`)
+  if (!pushForm.delete && pushForm.overwrite === 'lease') w.push(`Replaces the branch on ${r} with yours. It stops if someone sent new work since your last fetch.`)
+  if (!pushForm.delete && pushForm.overwrite === 'force') w.push(`Replaces the branch on ${r} with yours even if teammates sent new work. Their versions on that branch are lost from the remote.`)
+  return w
+})
+const pushDeleteNeedsName = computed(() => pushForm.delete && !pushForm.refspecs.trim())
+function go(kind: TransferKind) {
+  if (kind === 'push' && sync.pushNeedsConfirm) confirmPushOpen.value = true
+  else void sync.run(kind)
 }
 </script>
 
@@ -143,15 +224,52 @@ function askRemove(name: string) {
           <div v-for="v in verbs" :key="v.kind" class="verb">
             <Button
               :variant="(v.kind === 'push' && ahead > 0) || (v.kind === 'pull' && behind > 0 && ahead === 0) ? 'primary' : 'secondary'"
-              :disabled="sync.busy || !sync.remote"
+              :disabled="sync.busy || !sync.remote || (v.kind === 'push' && pushDeleteNeedsName)"
               :loading="active?.kind === v.kind"
-              @click="sync.run(v.kind)"
+              @click="go(v.kind)"
             >
               <component :is="v.icon" v-if="active?.kind !== v.kind" :size="16" aria-hidden="true" /> {{ v.label }}
             </Button>
             <span class="hint">{{ v.hint }}</span>
           </div>
         </div>
+
+        <MoreOptions data-testid="sync-more">
+          <SegmentedControl v-model="optKind" label="Options for" :options="verbs.map((v) => ({ value: v.kind, label: v.label }))" />
+          <div v-if="optKind === 'fetch'" class="opts">
+            <TextField v-model="sync.form.fetch.branch" label="Only this branch" hint="Leave empty for the current branch." placeholder="main" mono :disabled="sync.form.fetch.all" />
+            <OptionCheck v-model="sync.form.fetch.all" label="Every branch" flag="--all" />
+            <OptionCheck v-model="sync.form.fetch.prune" label="Forget branches deleted on the remote" flag="--prune" />
+          </div>
+          <div v-else-if="optKind === 'pull'" class="opts">
+            <TextField v-model="sync.form.pull.branch" label="Only this branch" hint="Leave empty to follow the branch you are on." placeholder="main" mono />
+            <OptionCheck v-model="sync.form.pull.rebase" label="Replay my versions on top" hint="Instead of merging." flag="--rebase" />
+            <OptionCheck v-model="sync.form.pull.dryRun" label="Preview only" hint="Check what would change; nothing is applied." flag="--dry-run" />
+          </div>
+          <div v-else class="opts">
+            <TextField v-model="pushForm.refspecs" label="Branches to send" hint="Names separated by spaces, or local:remote. Leave empty for the current branch." placeholder="e.g. main dev:release" mono :disabled="pushForm.all" />
+            <OptionCheck v-model="pushForm.all" label="Every branch" flag="--all" :disabled="pushForm.delete" />
+            <OptionCheck v-model="pushForm.tags" label="Send tags too" flag="--tags" :disabled="pushForm.delete" />
+            <OptionCheck v-model="pushForm.followTags" label="Send tags that point at what is sent" flag="--follow-tags" :disabled="pushForm.delete" />
+            <OptionCheck v-model="pushForm.dryRun" label="Preview only" hint="Check what would be sent; nothing leaves this computer." flag="--dry-run" />
+            <OptionCheck v-model="pushForm.setUpstream" label="Make the remote branch this branch’s upstream" flag="--set-upstream" />
+            <OptionCheck v-model="pushForm.noTrack" label="Do not track the remote branch" flag="--no-track" :disabled="pushForm.setUpstream" />
+            <OptionCheck v-model="pushForm.repair" label="Check the remote and re-send damaged data" flag="--repair" />
+            <fieldset class="risk" data-testid="push-risk">
+              <legend>If the remote has newer work</legend>
+              <SegmentedControl v-model="pushForm.overwrite" label="If the remote has newer work" :options="OVERWRITE" :disabled="pushForm.delete" />
+              <p class="rhint" data-testid="overwrite-hint">
+                {{ pushForm.delete ? 'Not used while deleting branches.' : OVERWRITE_TEXT[pushForm.overwrite]?.text }}
+                <code v-if="!pushForm.delete && OVERWRITE_TEXT[pushForm.overwrite]?.flag" class="mono flag">{{ OVERWRITE_TEXT[pushForm.overwrite]?.flag }}</code>
+              </p>
+            </fieldset>
+            <fieldset class="risk danger-group" data-testid="push-delete">
+              <legend>Remove branches</legend>
+              <OptionCheck v-model="pushForm.delete" danger label="Delete these branches on the remote" hint="Name them above. This removes them for everyone." flag="--delete" />
+              <p v-if="pushDeleteNeedsName" class="derr" role="alert">Name the branches to delete.</p>
+            </fieldset>
+          </div>
+        </MoreOptions>
 
         <div v-if="active" class="run" data-testid="transfer-progress" role="status" aria-live="polite">
           <div class="rhead">
@@ -180,7 +298,9 @@ function askRemove(name: string) {
               <strong class="mono">{{ r.name }}</strong>
               <span class="mono url" :title="r.url">{{ r.url }}</span>
             </div>
-            <IconButton :label="`Remove ${r.name}`" size="sm" :disabled="sync.busy" @click="askRemove(r.name)"><Trash2 :size="16" /></IconButton>
+            <DropdownMenu :items="REMOTE_MENU" @select="(id) => pickAction(r, id)">
+              <IconButton :label="`Actions for ${r.name}`" size="sm" :disabled="sync.busy"><Ellipsis :size="16" /></IconButton>
+            </DropdownMenu>
           </li>
         </ul>
       </section>
@@ -190,6 +310,16 @@ function askRemove(name: string) {
       <form id="add-remote" class="form" @submit.prevent="add">
         <TextField v-model="name" label="Name" placeholder="origin" :error="nameError" mono />
         <TextField v-model="url" label="Address" placeholder="https://mediagit.studio.example/hero-film" :error="urlError" mono />
+        <MoreOptions data-testid="remote-more">
+          <OptionCheck v-model="fetchNow" label="Fetch right after adding" flag="--fetch" />
+          <TextField
+            v-model="token"
+            type="password"
+            label="Access token"
+            hint="Optional. Saved in this project’s settings file; to use your system keychain, sign in under Security instead." flag="--token-stdin"
+            mono
+          />
+        </MoreOptions>
         <p v-if="sync.actionError && addOpen" class="derr" role="alert">{{ sync.actionError.message }}</p>
       </form>
       <template #footer>
@@ -197,6 +327,53 @@ function askRemove(name: string) {
         <Button type="submit" form="add-remote" variant="primary" :disabled="!canAdd" :loading="sync.busy">Add remote</Button>
       </template>
     </Dialog>
+
+    <Dialog v-model:open="renameOpen" :title="`Rename ${target?.name ?? ''}`" description="Branches that follow it keep working.">
+      <form id="rename-remote" class="form" @submit.prevent="rename">
+        <TextField v-model="newName" label="New name" :error="renameError" mono />
+        <p v-if="sync.actionError && renameOpen" class="derr" role="alert">{{ sync.actionError.message }}</p>
+      </form>
+      <template #footer>
+        <Button @click="renameOpen = false">Cancel</Button>
+        <Button type="submit" form="rename-remote" variant="primary" :disabled="!canRename" :loading="sync.busy">Rename</Button>
+      </template>
+    </Dialog>
+
+    <Dialog v-model:open="urlOpen" :title="`Change address of ${target?.name ?? ''}`" description="Where this remote lives.">
+      <form id="seturl-remote" class="form" @submit.prevent="setUrl">
+        <TextField v-model="newUrl" label="Address" :error="newUrlError" mono />
+        <MoreOptions data-testid="url-more">
+          <OptionCheck v-model="pushOnly" label="Only where versions are sent" hint="Fetching keeps using the old address." flag="--push" />
+        </MoreOptions>
+        <p v-if="sync.actionError && urlOpen" class="derr" role="alert">{{ sync.actionError.message }}</p>
+      </form>
+      <template #footer>
+        <Button @click="urlOpen = false">Cancel</Button>
+        <Button type="submit" form="seturl-remote" variant="primary" :disabled="!canSetUrl" :loading="sync.busy">Change address</Button>
+      </template>
+    </Dialog>
+
+    <Dialog v-model:open="detailOpen" :title="target?.name ?? 'Remote'" description="What the server says about this remote.">
+      <p v-if="sync.actionError && detailOpen" class="derr" role="alert">{{ sync.actionError.message }}</p>
+      <p v-else-if="!sync.detail" role="status">Asking the server…</p>
+      <dl v-else class="detail" data-testid="remote-detail">
+        <dt>Fetch address</dt><dd class="mono">{{ sync.detail.fetch_url }}</dd>
+        <dt>Send address</dt><dd class="mono">{{ sync.detail.push_url }}</dd>
+        <dt>Reachable</dt><dd>{{ sync.detail.reachable ? 'Yes' : 'No' }}<template v-if="sync.detail.error"> · {{ sync.detail.error }}</template></dd>
+        <dt>Default branch</dt><dd class="mono">{{ sync.detail.head_branch ?? 'unknown' }}</dd>
+        <dt>Branches</dt><dd class="mono">{{ sync.detail.branches.join(', ') || 'none' }}</dd>
+      </dl>
+      <template #footer><Button @click="detailOpen = false">Close</Button></template>
+    </Dialog>
+
+    <AlertDialog
+      v-model:open="confirmPushOpen"
+      :title="pushForm.delete ? 'Delete on the remote?' : 'Overwrite on the remote?'"
+      :description="pushWarnings.join(' ')"
+      :confirm-label="pushForm.delete ? 'Delete branches' : 'Overwrite'"
+      destructive
+      @confirm="sync.run('push', true)"
+    />
 
     <AlertDialog
       v-model:open="removeOpen"
@@ -391,6 +568,51 @@ h2 {
 .form {
   display: grid;
   gap: var(--space-3);
+}
+.opts {
+  display: grid;
+  gap: var(--space-3);
+  max-width: 560px;
+}
+.risk {
+  display: grid;
+  gap: var(--space-3);
+  margin: var(--space-2) 0 0;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+}
+.risk legend {
+  padding: 0 var(--space-2);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+}
+.danger-group {
+  border-color: var(--danger);
+}
+.danger-group legend {
+  color: var(--danger);
+}
+.flag {
+  white-space: nowrap;
+}
+.rhint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+.detail {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-2) var(--space-4);
+  margin: 0;
+}
+.detail dt {
+  color: var(--text-muted);
+}
+.detail dd {
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 .derr {
   margin: 0;

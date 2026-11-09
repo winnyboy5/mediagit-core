@@ -134,16 +134,15 @@ test.describe('Branches: actions', () => {
     await boot(page)
     const del = row(page, 'feature/grade').getByRole('button', { name: 'Delete feature/grade' })
     await del.click()
-    const dlg = page.getByRole('alertdialog')
-    await expect(dlg).toContainText('Delete feature/grade?')
-    await expect(dlg).toContainText('stay in the project')
+    const dlg = page.getByRole('dialog', { name: 'Delete feature/grade?' })
+    await expect(dlg).toContainText('already part of another branch')
     await expectNoAxeViolations(page)
     await dlg.getByRole('button', { name: 'Cancel' }).click()
     expect(await ipcCalls(page, 'branch_delete')).toHaveLength(0)
     await del.click()
-    await page.getByRole('alertdialog').getByRole('button', { name: 'Delete branch' }).click()
+    await page.getByRole('dialog', { name: 'Delete feature/grade?' }).getByRole('button', { name: 'Delete branch' }).click()
     await expect.poll(async () => (await ipcCalls(page, 'branch_delete')).map((c) => c.args)).toEqual([
-      { repo: '/repos/hero-film', name: 'feature/grade', force: false },
+      { repo: '/repos/hero-film', name: 'feature/grade', opts: { mergedOnly: true } },
     ])
   })
 
@@ -152,7 +151,7 @@ test.describe('Branches: actions', () => {
     await row(page, 'feature/grade').getByRole('button', { name: 'Switch to', exact: true }).focus()
     await expectFocusRing(page)
     await page.keyboard.press('Tab')
-    await expect(row(page, 'feature/grade').getByRole('button', { name: 'Rename feature/grade' })).toBeFocused()
+    await expect(row(page, 'feature/grade').getByRole('button', { name: 'Details of feature/grade' })).toBeFocused()
     await expectFocusRing(page)
   })
 })

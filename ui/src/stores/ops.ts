@@ -36,6 +36,8 @@ export interface Bar {
 
 export interface Op {
   id: string
+  /** The view shows the result itself: record it in Activity but raise no toast. */
+  quiet?: boolean
   kind: OpKind
   label: string
   phase: string
@@ -60,6 +62,8 @@ export interface OpSpec {
   retry?: () => void
   /** The call carries a secret: keep no closure that could re-run it (and so hold the secret). */
   noRetry?: boolean
+  /** The view shows the result itself: no toast on finish. */
+  quiet?: boolean
 }
 
 /** Bytes/s over the sample window, or null until two samples >= 1 s apart exist. */
@@ -132,6 +136,7 @@ export const useOpsStore = defineStore('ops', () => {
     ops.value.push({
       id,
       kind: spec.kind,
+      quiet: spec.quiet,
       label: spec.label,
       phase: '',
       bars: new Map(),
@@ -190,7 +195,7 @@ export const useOpsStore = defineStore('ops', () => {
     for (const b of op.bars.values()) b.done = true
     op.summary = summary
     end(op, 'done', at)
-    toast.push({ kind: warn ? 'warning' : 'success', title: op.label, description: summary })
+    if (!op.quiet) toast.push({ kind: warn ? 'warning' : 'success', title: op.label, description: summary })
   }
 
   function fail(id: string, error: ApiError, at = Date.now()) {

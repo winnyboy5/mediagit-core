@@ -38,10 +38,6 @@ pub struct CherryPickCmd {
     #[arg(short = 'n', long)]
     pub no_commit: bool,
 
-    /// Edit commit message before committing
-    #[arg(short, long)]
-    pub edit: bool,
-
     /// Use original commit message
     #[arg(short = 'x', long)]
     pub append_message: bool,
@@ -515,7 +511,6 @@ impl CherryPickCmd {
             abort: false,
             skip: false,
             no_commit: self.no_commit,
-            edit: self.edit,
             append_message: self.append_message,
             quiet: self.quiet,
         };
@@ -563,7 +558,6 @@ impl CherryPickCmd {
             abort: false,
             skip: false,
             no_commit: self.no_commit,
-            edit: self.edit,
             append_message: self.append_message,
             quiet: self.quiet,
         };
@@ -732,9 +726,8 @@ mod tests {
 
     #[test]
     fn parse_all_flags() {
-        let cmd = parse(&["c1", "-n", "-e", "-x", "-q"]).unwrap();
+        let cmd = parse(&["c1", "-n", "-x", "-q"]).unwrap();
         assert!(cmd.no_commit);
-        assert!(cmd.edit);
         assert!(cmd.append_message);
         assert!(cmd.quiet);
     }

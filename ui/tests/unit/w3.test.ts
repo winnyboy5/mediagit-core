@@ -19,6 +19,7 @@ const api = vi.hoisted(() => ({
   keyRecover: vi.fn(),
   configList: vi.fn(),
   configSet: vi.fn(),
+  configSchema: vi.fn(),
   configUnset: vi.fn(),
   sparseList: vi.fn(),
   sparseSet: vi.fn(),
@@ -57,7 +58,8 @@ beforeEach(() => {
   api.authRun.mockResolvedValue({ identity: null })
   api.keyStatus.mockResolvedValue({ enabled: false })
   api.configList.mockResolvedValue({ entries: [] })
-  api.sparseList.mockResolvedValue({ enabled: false, patterns: [] })
+  api.configList.mockResolvedValue({ entries: [] })
+  api.configSchema.mockResolvedValue({ keys: [] })
 })
 
 const open = () => {
@@ -129,10 +131,10 @@ describe('storage and maintenance stores', () => {
     const m = useMaintenanceStore()
     api.gc.mockResolvedValue({ errors: [], objects_deleted: 3 })
     await m.runGc(true, false)
-    expect(api.gc).toHaveBeenLastCalledWith('/repos/hero', true, false, undefined, expect.any(Function))
+    expect(api.gc).toHaveBeenLastCalledWith('/repos/hero', true, false, {}, undefined, expect.any(Function))
     expect(m.gc?.preview).toBe(true)
     await m.runGc(false, true)
-    expect(api.gc).toHaveBeenLastCalledWith('/repos/hero', false, true, undefined, expect.any(Function))
+    expect(api.gc).toHaveBeenLastCalledWith('/repos/hero', false, true, {}, undefined, expect.any(Function))
     expect(m.gc?.preview).toBe(false)
     expect(m.last['/repos/hero']?.gc).toBeGreaterThan(0)
     expect(JSON.parse(localStorage.getItem('mg.maint.last')!)['/repos/hero'].gc).toBeGreaterThan(0)
@@ -143,9 +145,9 @@ describe('storage and maintenance stores', () => {
     const m = useMaintenanceStore()
     api.fsck.mockResolvedValue({ healthy: false, objects_checked: 9, issues: [] })
     api.verify.mockResolvedValue({ healthy: true, objects_checked: 9, issues: [] })
-    expect(await m.runFsck(true)).toBe(true)
-    expect(api.fsck).toHaveBeenCalledWith('/repos/hero', true, undefined, expect.any(Function))
-    expect(await m.runVerify(false)).toBe(true)
+    expect(await m.runFsck({ deep: true })).toBe(true)
+    expect(api.fsck).toHaveBeenCalledWith('/repos/hero', { deep: true }, undefined, expect.any(Function))
+    expect(await m.runVerify({})).toBe(true)
     expect(m.fsck?.report.healthy).toBe(false)
     expect(m.verify?.report.healthy).toBe(true)
     expect(useOpsStore().finished.map((o) => o.label)).toEqual(expect.arrayContaining(['Deep integrity check', 'Verify repository']))
@@ -156,10 +158,10 @@ describe('storage and maintenance stores', () => {
     const m = useMaintenanceStore()
     let release!: (v: unknown) => void
     api.fsck.mockImplementation(() => new Promise((r) => (release = r)))
-    const first = m.runFsck(false)
+    const first = m.runFsck({})
     await nextTick()
     expect(m.busy).toBe(true)
-    expect(await m.runVerify(true)).toBe(false)
+    expect(await m.runVerify({ quick: true })).toBe(false)
     release({ healthy: true })
     await first
   })
@@ -263,7 +265,7 @@ describe('rebase and cherry-pick stores', () => {
     const rb = useRebaseStore()
     api.rebaseStart.mockResolvedValue(conflict)
     await rb.start('feature')
-    expect(api.rebaseStart).toHaveBeenCalledWith('/repos/hero', 'feature', expect.any(Function))
+    expect(api.rebaseStart).toHaveBeenCalledWith('/repos/hero', 'feature', expect.any(Function), { branch: undefined, keepEmpty: undefined })
     expect(rb.active).toBe(true)
     expect(rb.clashes.map((c) => c.path)).toEqual(['a.psd', 'b.fbx'])
     api.mergeResolve.mockResolvedValue(null)
@@ -299,7 +301,7 @@ describe('rebase and cherry-pick stores', () => {
     const rb = useRebaseStore()
     api.pickStart.mockResolvedValue({ action: 'start', status: 'conflict', commits: [], conflict_commit: 'dd', conflicts: ['x.wav'] })
     await pick.start('abc')
-    expect(api.pickStart).toHaveBeenCalledWith('/repos/hero', ['abc'], expect.any(Function))
+    expect(api.pickStart).toHaveBeenCalledWith('/repos/hero', ['abc'], expect.any(Function), { noCommit: undefined, appendMessage: undefined })
     expect(pick.active).toBe(true)
     expect(rb.active).toBe(false)
     api.sequencerControl.mockResolvedValue({ action: 'abort', status: 'aborted', commits: [], conflict_commit: null, conflicts: [] })
@@ -328,7 +330,7 @@ describe('bisect and reflog stores', () => {
     expect(b.active).toBe(false)
     api.bisectStart.mockResolvedValue({ status: 'testing', current: 'c1', remaining_steps: 3, good: [], skipped: [], log: [] })
     await b.start('HEAD', 'old')
-    expect(api.bisectStart).toHaveBeenCalledWith('/repos/hero', 'HEAD', 'old', expect.any(Function))
+    expect(api.bisectStart).toHaveBeenCalledWith('/repos/hero', 'HEAD', 'old', expect.any(Function), false)
     expect(b.active).toBe(true)
     api.bisectMark.mockResolvedValue({ status: 'complete', first_bad: 'c1', good: [], skipped: [], log: [] })
     await b.mark('bad')
@@ -411,7 +413,7 @@ describe('look and repository settings', () => {
     expect(s.sparse?.patterns).toEqual(['art'])
     api.configSet.mockResolvedValue({ entries: [] })
     await s.setAuthor('Mira O.', 'm@x.example')
-    expect(api.configSet.mock.calls.map((c) => c.slice(1))).toEqual([['author.name', 'Mira O.'], ['author.email', 'm@x.example']])
+    expect(api.configSet.mock.calls.map((c) => c.slice(1, 3))).toEqual([['author.name', 'Mira O.'], ['author.email', 'm@x.example']])
     expect(api.configList.mock.calls.length).toBeGreaterThan(1)
   })
 

@@ -37,7 +37,7 @@ gui = "WelcomeView"
 gui = "WelcomeView"
 
 [arg."init --initial-branch"]
-gui = "TODO:WelcomeView"
+gui = "WelcomeView/more"
 
 [arg."init --bare"]
 excluded = "documented compat alias for git users; the GUI always creates a normal repository"
@@ -46,13 +46,13 @@ excluded = "documented compat alias for git users; the GUI always creates a norm
 gui = "WelcomeView"
 
 [arg."clone URL"]
-gui = "TODO:WelcomeView"
+gui = "WelcomeView"
 
 [arg."clone DIRECTORY"]
-gui = "TODO:WelcomeView"
+gui = "WelcomeView"
 
 [arg."clone --branch"]
-gui = "TODO:WelcomeView"
+gui = "WelcomeView/more"
 
 [cmd."add"]
 gui = "ChangesView"
@@ -61,19 +61,19 @@ gui = "ChangesView"
 gui = "ChangesView"
 
 [arg."add --all"]
-gui = "TODO:ChangesView"
+gui = "ChangesView/more"
 
 [arg."add --dry-run"]
-gui = "TODO:ChangesView"
+gui = "ChangesView/more"
 
 [arg."add --force"]
-gui = "TODO:ChangesView"
+gui = "ChangesView/more"
 
 [arg."add --ignore-removal"]
-gui = "TODO:ChangesView"
+gui = "ChangesView/more"
 
 [arg."add --update"]
-gui = "TODO:ChangesView"
+gui = "ChangesView/more"
 
 [arg."add --no-chunking"]
 excluded = "tuning knob for benchmarks; the GUI always uses the repo defaults"
@@ -97,28 +97,28 @@ gui = "ChangesView"
 excluded = "opens $EDITOR; the GUI has its own message box"
 
 [arg."commit --file"]
-gui = "TODO:ChangesView"
+gui = "ChangesView/more"
 
 [arg."commit --all"]
-gui = "TODO:ChangesView"
+gui = "ChangesView/more"
 
 [arg."commit --include"]
-gui = "TODO:ChangesView"
+gui = "ChangesView/more"
 
 [arg."commit --author"]
-gui = "TODO:ChangesView"
+gui = "ChangesView/more"
 
 [arg."commit --date"]
-gui = "TODO:ChangesView"
+gui = "ChangesView/more"
 
 [arg."commit --allow-empty"]
-gui = "TODO:ChangesView"
+gui = "ChangesView/more"
 
 [arg."commit --signoff"]
-gui = "TODO:ChangesView"
+gui = "ChangesView/more"
 
 [arg."commit --dry-run"]
-gui = "TODO:ChangesView"
+gui = "ChangesView/more"
 
 [cmd."config"]
 gui = "SettingsView"
@@ -129,20 +129,23 @@ gui = "SettingsView"
 [arg."config get KEY"]
 excluded = "presentation only: the GUI renders this information itself"
 
+[cmd."config schema"]
+gui = "SettingsView"
+
 [cmd."config set"]
 gui = "SettingsView"
 
 [arg."config set KEY"]
-gui = "TODO:SettingsView"
+gui = "SettingsView"
 
 [arg."config set VALUE"]
-gui = "TODO:SettingsView"
+gui = "SettingsView"
 
 [cmd."config unset"]
 gui = "SettingsView"
 
 [arg."config unset KEY"]
-gui = "TODO:SettingsView"
+gui = "SettingsView"
 
 [cmd."config list"]
 gui = "SettingsView"
@@ -151,40 +154,40 @@ gui = "SettingsView"
 gui = "SyncView"
 
 [arg."push REMOTE"]
-gui = "TODO:SyncView"
+gui = "SyncView"
 
 [arg."push REFSPEC"]
-gui = "TODO:SyncView"
+gui = "SyncView/more"
 
 [arg."push --all"]
-gui = "TODO:SyncView"
+gui = "SyncView/more"
 
 [arg."push --tags"]
-gui = "TODO:SyncView"
+gui = "SyncView/more"
 
 [arg."push --follow-tags"]
-gui = "TODO:SyncView"
+gui = "SyncView/more"
 
 [arg."push --dry-run"]
-gui = "TODO:SyncView"
+gui = "SyncView/more"
 
 [arg."push --force"]
-gui = "TODO:SyncView"
+gui = "SyncView/more"
 
 [arg."push --force-with-lease"]
-gui = "TODO:SyncView"
+gui = "SyncView/more"
 
 [arg."push --delete"]
-gui = "TODO:SyncView"
+gui = "SyncView/more"
 
 [arg."push --set-upstream"]
-gui = "TODO:SyncView"
+gui = "SyncView/more"
 
 [arg."push --no-track"]
-gui = "TODO:SyncView"
+gui = "SyncView/more"
 
 [arg."push --repair"]
-gui = "TODO:SyncView"
+gui = "SyncView/more"
 
 [cmd."pull"]
 gui = "SyncView"
@@ -193,49 +196,49 @@ gui = "SyncView"
 gui = "SyncView"
 
 [arg."pull BRANCH"]
-gui = "TODO:SyncView"
+gui = "SyncView/more"
 
 [arg."pull --rebase"]
-gui = "TODO:SyncView"
+gui = "SyncView/more"
 
 [arg."pull --dry-run"]
-gui = "TODO:SyncView"
+gui = "SyncView/more"
 
 [arg."pull --continue"]
-gui = "TODO:SyncView"
+excluded = "the CLI refuses it (never implemented); resolving a conflicted pull goes through Merge"
 
 [arg."pull --strategy"]
-gui = "TODO:SyncView"
+excluded = "the CLI refuses it (never applied); the Merge view offers the real strategies"
 
 [arg."pull --strategy-option"]
-gui = "TODO:SyncView"
+excluded = "the CLI refuses it (never applied)"
 
 [cmd."fetch"]
 gui = "SyncView"
 
 [arg."fetch REMOTE"]
-gui = "TODO:SyncView"
+gui = "SyncView"
 
 [arg."fetch BRANCH"]
-gui = "TODO:SyncView"
+gui = "SyncView/more"
 
 [arg."fetch --all"]
-gui = "TODO:SyncView"
+gui = "SyncView/more"
 
 [arg."fetch --prune"]
-gui = "TODO:SyncView"
+gui = "SyncView/more"
 
 [cmd."download"]
 gui = "SyncView"
 
 [arg."download REMOTE_PATH"]
-gui = "TODO:SyncView"
+gui = "RemoteView"
 
 [arg."download --ref"]
-gui = "TODO:SyncView"
+gui = "RemoteView"
 
 [arg."download --output"]
-gui = "TODO:SyncView"
+gui = "RemoteView"
 
 [cmd."media"]
 gui = "HistoryView"
@@ -262,13 +265,13 @@ gui = "RemoteView"
 gui = "RemoteView"
 
 [arg."remote add --fetch"]
-gui = "TODO:RemoteView"
+gui = "SyncView/more"
 
 [arg."remote add --token"]
-gui = "TODO:RemoteView"
+excluded = "puts a secret on argv; the GUI sends the token with --token-stdin"
 
 [arg."remote add --token-stdin"]
-gui = "TODO:RemoteView"
+gui = "SyncView/more"
 
 [cmd."remote remove"]
 gui = "RemoteView"
@@ -283,28 +286,28 @@ gui = "RemoteView"
 gui = "RemoteView"
 
 [arg."remote rename OLD_NAME"]
-gui = "TODO:RemoteView"
+gui = "SyncView"
 
 [arg."remote rename NEW_NAME"]
-gui = "TODO:RemoteView"
+gui = "SyncView"
 
 [cmd."remote show"]
 gui = "RemoteView"
 
 [arg."remote show NAME"]
-gui = "TODO:RemoteView"
+gui = "SyncView"
 
 [cmd."remote set-url"]
 gui = "RemoteView"
 
 [arg."remote set-url NAME"]
-gui = "TODO:RemoteView"
+gui = "SyncView"
 
 [arg."remote set-url URL"]
-gui = "TODO:RemoteView"
+gui = "SyncView"
 
 [arg."remote set-url --push"]
-gui = "TODO:RemoteView"
+gui = "SyncView/more"
 
 [cmd."branch"]
 gui = "BranchesView"
@@ -325,31 +328,31 @@ gui = "BranchesView"
 gui = "BranchesView"
 
 [arg."branch create START_POINT"]
-gui = "TODO:BranchesView"
+gui = "BranchesView/more"
 
 [arg."branch create --set-upstream"]
-gui = "TODO:BranchesView"
+gui = "BranchesView/more"
 
 [arg."branch create --track"]
-gui = "TODO:BranchesView"
+gui = "BranchesView/more"
 
 [arg."branch create --no-track"]
-gui = "TODO:BranchesView"
+gui = "BranchesView/more"
 
 [cmd."branch switch"]
 gui = "BranchesView"
 
 [arg."branch switch BRANCH"]
-gui = "TODO:BranchesView"
+gui = "BranchesView"
 
 [arg."branch switch --create"]
-gui = "TODO:BranchesView"
+gui = "BranchesView"
 
 [arg."branch switch --track"]
-gui = "TODO:BranchesView"
+gui = "BranchesView"
 
 [arg."branch switch --force"]
-gui = "TODO:BranchesView"
+gui = "BranchesView"
 
 [cmd."branch delete"]
 gui = "BranchesView"
@@ -361,22 +364,22 @@ gui = "BranchesView"
 gui = "BranchesView"
 
 [arg."branch delete --delete-merged"]
-gui = "TODO:BranchesView"
+gui = "BranchesView"
 
 [arg."branch delete --remote"]
-gui = "TODO:BranchesView"
+gui = "BranchesView"
 
 [cmd."branch protect"]
 gui = "BranchesView"
 
 [arg."branch protect BRANCH"]
-gui = "TODO:BranchesView"
+gui = "BranchesView"
 
 [arg."branch protect --require-reviews"]
-gui = "TODO:BranchesView"
+gui = "BranchesView"
 
 [arg."branch protect --unprotect"]
-gui = "TODO:BranchesView"
+gui = "BranchesView"
 
 [cmd."branch rename"]
 gui = "BranchesView"
@@ -388,13 +391,13 @@ gui = "BranchesView"
 gui = "BranchesView"
 
 [arg."branch rename --force"]
-gui = "TODO:BranchesView"
+gui = "BranchesView/more"
 
 [cmd."branch show"]
 gui = "BranchesView"
 
 [arg."branch show BRANCH"]
-gui = "TODO:BranchesView"
+gui = "BranchesView"
 
 [cmd."tag"]
 gui = "TagsStashView"
@@ -406,28 +409,28 @@ gui = "TagsStashView"
 gui = "TagsStashView"
 
 [arg."tag create COMMIT"]
-gui = "TODO:TagsStashView"
+gui = "TagsStashView/more"
 
 [arg."tag create --annotated"]
-gui = "TODO:TagsStashView"
+gui = "TagsStashView"
 
 [arg."tag create --message"]
-gui = "TODO:TagsStashView"
+gui = "TagsStashView"
 
 [arg."tag create --tagger"]
-gui = "TODO:TagsStashView"
+gui = "TagsStashView/more"
 
 [arg."tag create --email"]
-gui = "TODO:TagsStashView"
+gui = "TagsStashView/more"
 
 [arg."tag create --force"]
-gui = "TODO:TagsStashView"
+gui = "TagsStashView/more"
 
 [cmd."tag list"]
 gui = "TagsStashView"
 
 [arg."tag list PATTERN"]
-gui = "TODO:TagsStashView"
+gui = "TagsStashView"
 
 [arg."tag list --info"]
 excluded = "presentation only: the GUI renders this information itself"
@@ -445,13 +448,13 @@ gui = "TagsStashView"
 gui = "TagsStashView"
 
 [arg."tag delete --force"]
-gui = "TODO:TagsStashView"
+gui = "TagsStashView"
 
 [cmd."tag show"]
 gui = "TagsStashView"
 
 [arg."tag show NAME"]
-gui = "TODO:TagsStashView"
+gui = "TagsStashView"
 
 [arg."tag show --full"]
 excluded = "presentation only: the GUI renders this information itself"
@@ -460,7 +463,7 @@ excluded = "presentation only: the GUI renders this information itself"
 gui = "TagsStashView"
 
 [arg."tag verify NAME"]
-gui = "TODO:TagsStashView"
+gui = "TagsStashView"
 
 [cmd."lock"]
 gui = "LocksView"
@@ -472,16 +475,16 @@ gui = "LocksView"
 gui = "LocksView"
 
 [arg."lock create --owner"]
-gui = "TODO:LocksView"
+gui = "LocksView/more"
 
 [arg."lock create --remote"]
-gui = "TODO:LocksView"
+gui = "LocksView"
 
 [cmd."lock unlock"]
 gui = "LocksView"
 
 [arg."lock unlock PATH"]
-gui = "TODO:LocksView"
+gui = "LocksView"
 
 [arg."lock unlock --id"]
 gui = "LocksView"
@@ -490,7 +493,7 @@ gui = "LocksView"
 gui = "LocksView"
 
 [arg."lock unlock --remote"]
-gui = "TODO:LocksView"
+gui = "LocksView"
 
 [cmd."lock list"]
 gui = "LocksView"
@@ -499,7 +502,7 @@ gui = "LocksView"
 excluded = "legacy per-command JSON; the GUI uses the global --machine envelope"
 
 [arg."lock list --remote"]
-gui = "TODO:LocksView"
+gui = "LocksView"
 
 [cmd."auth"]
 gui = "SecurityView"
@@ -514,22 +517,22 @@ gui = "ServerView"
 gui = "ServerView"
 
 [arg."auth login --token"]
-gui = "TODO:SecurityView"
+excluded = "puts a secret in argv, which the CLI refuses under --machine; the GUI signs in with a password on stdin or with an API key made in the Server view"
 
 [arg."auth login --api-key"]
-gui = "TODO:SecurityView"
+excluded = "puts a secret in argv, which the CLI refuses under --machine; the GUI signs in with a password on stdin"
 
 [cmd."auth register"]
 gui = "SecurityView"
 
 [arg."auth register --server"]
-gui = "TODO:SecurityView"
+gui = "SecurityView"
 
 [arg."auth register --username"]
-gui = "TODO:SecurityView"
+gui = "SecurityView"
 
 [arg."auth register --email"]
-gui = "TODO:SecurityView"
+gui = "SecurityView"
 
 [cmd."auth status"]
 gui = "SecurityView"
@@ -550,7 +553,7 @@ gui = "SecurityView"
 gui = "SecurityView"
 
 [arg."auth passwd --server"]
-gui = "TODO:SecurityView"
+gui = "SecurityView"
 
 [cmd."auth whoami"]
 gui = "SecurityView"
@@ -571,7 +574,7 @@ gui = "ServerView"
 gui = "ServerView"
 
 [arg."auth key create --permissions"]
-gui = "TODO:SecurityView"
+gui = "ServerView/more"
 
 [cmd."auth key list"]
 gui = "SecurityView"
@@ -685,7 +688,7 @@ gui = "SecurityView"
 gui = "SecurityView"
 
 [arg."key rotate-master --new-keyfile"]
-gui = "TODO:SecurityView"
+gui = "SecurityView"
 
 [cmd."merge"]
 gui = "MergeView"
@@ -694,25 +697,22 @@ gui = "MergeView"
 gui = "MergeView"
 
 [arg."merge --message"]
-gui = "TODO:MergeView"
+gui = "MergeView/more"
 
 [arg."merge --no-ff"]
 gui = "MergeView"
 
 [arg."merge --ff-only"]
-gui = "TODO:MergeView"
+gui = "MergeView/more"
 
 [arg."merge --squash"]
-gui = "TODO:MergeView"
+gui = "MergeView/more"
 
 [arg."merge --strategy"]
 gui = "MergeView"
 
-[arg."merge --strategy-option"]
-gui = "TODO:MergeView"
-
 [arg."merge --no-commit"]
-gui = "TODO:MergeView"
+gui = "MergeView/more"
 
 [arg."merge --abort"]
 gui = "MergeView"
@@ -727,19 +727,19 @@ gui = "MergeView"
 gui = "MergeView"
 
 [arg."rebase BRANCH"]
-gui = "TODO:MergeView"
+gui = "AdvancedView/more"
 
 [arg."rebase --keep-empty"]
-gui = "TODO:MergeView"
+gui = "AdvancedView/more"
 
 [arg."rebase --abort"]
-gui = "TODO:MergeView"
+gui = "AdvancedView"
 
 [arg."rebase --skip"]
 gui = "MergeView"
 
 [arg."rebase --continue"]
-gui = "TODO:MergeView"
+gui = "AdvancedView"
 
 [cmd."cherry-pick"]
 gui = "MergeView"
@@ -748,19 +748,16 @@ gui = "MergeView"
 gui = "MergeView"
 
 [arg."cherry-pick --abort"]
-gui = "TODO:MergeView"
+gui = "AdvancedView"
 
 [arg."cherry-pick --skip"]
 gui = "MergeView"
 
 [arg."cherry-pick --no-commit"]
-gui = "TODO:MergeView"
-
-[arg."cherry-pick --edit"]
-gui = "TODO:MergeView"
+gui = "AdvancedView/more"
 
 [arg."cherry-pick --append-message"]
-gui = "TODO:MergeView"
+gui = "AdvancedView/more"
 
 [arg."cherry-pick --continue"]
 gui = "MergeView"
@@ -772,13 +769,13 @@ gui = "TagsStashView"
 gui = "TagsStashView"
 
 [arg."stash push PATHS"]
-gui = "TODO:TagsStashView"
+gui = "TagsStashView/more"
 
 [arg."stash push --message"]
-gui = "TODO:TagsStashView"
+gui = "TagsStashView"
 
 [arg."stash push --include-untracked"]
-gui = "TODO:TagsStashView"
+gui = "TagsStashView"
 
 [cmd."stash save"]
 gui = "TagsStashView"
@@ -787,13 +784,13 @@ gui = "TagsStashView"
 gui = "TagsStashView"
 
 [arg."stash save PATHS"]
-gui = "TODO:TagsStashView"
+gui = "TagsStashView/more"
 
 [arg."stash save --message"]
-gui = "TODO:TagsStashView"
+gui = "TagsStashView"
 
 [arg."stash save --include-untracked"]
-gui = "TODO:TagsStashView"
+gui = "TagsStashView"
 
 [cmd."stash apply"]
 gui = "TagsStashView"
@@ -802,10 +799,10 @@ gui = "TagsStashView"
 gui = "TagsStashView"
 
 [arg."stash apply --index"]
-gui = "TODO:TagsStashView"
+gui = "TagsStashView/more"
 
 [arg."stash apply --force"]
-gui = "TODO:TagsStashView"
+gui = "TagsStashView/more"
 
 [cmd."stash list"]
 gui = "TagsStashView"
@@ -814,7 +811,7 @@ gui = "TagsStashView"
 gui = "TagsStashView"
 
 [arg."stash show STASH"]
-gui = "TODO:TagsStashView"
+gui = "TagsStashView"
 
 [arg."stash show --patch"]
 excluded = "presentation only: the GUI renders this information itself"
@@ -832,10 +829,10 @@ gui = "TagsStashView"
 gui = "TagsStashView"
 
 [arg."stash pop --index"]
-gui = "TODO:TagsStashView"
+gui = "TagsStashView/more"
 
 [arg."stash pop --force"]
-gui = "TODO:TagsStashView"
+gui = "TagsStashView/more"
 
 [cmd."stash clear"]
 gui = "TagsStashView"
@@ -853,10 +850,10 @@ gui = "AdvancedView"
 gui = "AdvancedView"
 
 [arg."bisect start GOOD"]
-gui = "TODO:AdvancedView"
+gui = "AdvancedView"
 
 [arg."bisect start --reset"]
-gui = "TODO:AdvancedView"
+gui = "AdvancedView/more"
 
 [cmd."bisect good"]
 gui = "AdvancedView"
@@ -868,7 +865,7 @@ gui = "AdvancedView"
 gui = "AdvancedView"
 
 [arg."bisect bad COMMIT"]
-gui = "TODO:AdvancedView"
+gui = "AdvancedView/more"
 
 [cmd."bisect skip"]
 gui = "AdvancedView"
@@ -880,7 +877,7 @@ gui = "AdvancedView"
 gui = "AdvancedView"
 
 [arg."bisect reset COMMIT"]
-gui = "TODO:AdvancedView"
+gui = "AdvancedView/more"
 
 [cmd."bisect log"]
 gui = "AdvancedView"
@@ -889,16 +886,16 @@ gui = "AdvancedView"
 gui = "AdvancedView"
 
 [arg."bisect replay LOGFILE"]
-gui = "TODO:AdvancedView"
+gui = "AdvancedView/more"
 
 [cmd."log"]
 gui = "HistoryView"
 
 [arg."log REVISION"]
-gui = "TODO:HistoryView"
+gui = "HistoryView"
 
 [arg."log PATHS"]
-gui = "TODO:HistoryView"
+gui = "HistoryView"
 
 [arg."log --max-count"]
 gui = "HistoryView"
@@ -916,16 +913,16 @@ excluded = "presentation only: the GUI renders this information itself"
 excluded = "presentation only: the GUI renders this information itself"
 
 [arg."log --author"]
-gui = "TODO:HistoryView"
+gui = "HistoryView"
 
 [arg."log --grep"]
-gui = "TODO:HistoryView"
+gui = "HistoryView"
 
 [arg."log --since"]
-gui = "TODO:HistoryView"
+gui = "HistoryView"
 
 [arg."log --until"]
-gui = "TODO:HistoryView"
+gui = "HistoryView"
 
 [arg."log --format"]
 excluded = "presentation only: the GUI renders this information itself"
@@ -940,13 +937,13 @@ gui = "CompareView"
 gui = "CompareView"
 
 [arg."diff REVISION2"]
-gui = "TODO:CompareView"
+gui = "CompareView"
 
 [arg."diff PATHS"]
-gui = "TODO:CompareView"
+excluded = "Compare already lists every changed file and filters that list in the view; a path filter on the CLI call adds nothing"
 
 [arg."diff --cached"]
-gui = "TODO:CompareView"
+gui = "CompareView"
 
 [arg."diff --stat"]
 excluded = "presentation only: the GUI renders this information itself"
@@ -994,10 +991,10 @@ excluded = "legacy per-command JSON; the GUI uses the global --machine envelope"
 gui = "MaintenanceView"
 
 [arg."gc --no-prune"]
-gui = "TODO:MaintenanceView"
+gui = "MaintenanceView/more"
 
 [arg."gc --auto"]
-gui = "TODO:MaintenanceView"
+gui = "MaintenanceView/more"
 
 [arg."gc --dry-run"]
 gui = "MaintenanceView"
@@ -1006,7 +1003,7 @@ gui = "MaintenanceView"
 gui = "MaintenanceView"
 
 [arg."gc --repack"]
-gui = "TODO:MaintenanceView"
+gui = "MaintenanceView/more"
 
 [arg."gc --max-pack-size"]
 excluded = "tuning knob; the repo config decides pack size"
@@ -1021,19 +1018,19 @@ gui = "MaintenanceView"
 gui = "MaintenanceView"
 
 [arg."fsck --all"]
-gui = "TODO:MaintenanceView"
+gui = "MaintenanceView/more"
 
 [arg."fsck --lost-found"]
-gui = "TODO:MaintenanceView"
+gui = "MaintenanceView/more"
 
 [arg."fsck --no-dangling"]
-gui = "TODO:MaintenanceView"
+gui = "MaintenanceView/more"
 
 [arg."fsck --repair"]
-gui = "TODO:MaintenanceView"
+gui = "MaintenanceView/more"
 
 [arg."fsck --dry-run"]
-gui = "TODO:MaintenanceView"
+gui = "MaintenanceView/more"
 
 [arg."fsck --max-objects"]
 excluded = "bounded-run knob for scripted checks"
@@ -1045,22 +1042,22 @@ excluded = "redundant with the global -C/--repository, which the GUI always sets
 gui = "MaintenanceView"
 
 [arg."verify COMMIT"]
-gui = "TODO:MaintenanceView"
+gui = "MaintenanceView/more"
 
 [arg."verify --checksums"]
-gui = "TODO:MaintenanceView"
+gui = "MaintenanceView/more"
 
 [arg."verify --start"]
-gui = "TODO:MaintenanceView"
+gui = "MaintenanceView/more"
 
 [arg."verify --end"]
-gui = "TODO:MaintenanceView"
+gui = "MaintenanceView/more"
 
 [arg."verify --quick"]
 gui = "MaintenanceView"
 
 [arg."verify --detailed"]
-gui = "TODO:MaintenanceView"
+gui = "MaintenanceView/more"
 
 [arg."verify --path"]
 excluded = "redundant with the global -C/--repository, which the GUI always sets"
@@ -1099,7 +1096,7 @@ excluded = "metrics export for monitoring systems, not a desktop view"
 gui = "HistoryView"
 
 [arg."reflog REF"]
-gui = "TODO:HistoryView"
+gui = "AdvancedView"
 
 [arg."reflog --count"]
 excluded = "presentation only: the GUI renders this information itself"
@@ -1108,34 +1105,34 @@ excluded = "presentation only: the GUI renders this information itself"
 gui = "HistoryView"
 
 [arg."reflog show REF"]
-gui = "TODO:HistoryView"
+gui = "AdvancedView"
 
 [arg."reflog show --count"]
 excluded = "presentation only: the GUI renders this information itself"
 
 [arg."reflog show --all"]
-gui = "TODO:HistoryView"
+gui = "AdvancedView"
 
 [cmd."reflog delete"]
 gui = "HistoryView"
 
 [arg."reflog delete REFERENCE"]
-gui = "TODO:HistoryView"
+gui = "AdvancedView/more"
 
 [arg."reflog delete --yes"]
-gui = "TODO:HistoryView"
+gui = "AdvancedView/more"
 
 [cmd."reflog expire"]
 gui = "HistoryView"
 
 [arg."reflog expire REF"]
-gui = "TODO:HistoryView"
+gui = "AdvancedView/more"
 
 [arg."reflog expire --keep"]
-gui = "TODO:HistoryView"
+gui = "AdvancedView/more"
 
 [arg."reflog expire --yes"]
-gui = "TODO:HistoryView"
+gui = "AdvancedView/more"
 
 [cmd."reset"]
 gui = "ChangesView"
@@ -1144,7 +1141,7 @@ gui = "ChangesView"
 gui = "ChangesView"
 
 [arg."reset PATHS"]
-gui = "TODO:ChangesView"
+gui = "ChangesView"
 
 [arg."reset --soft"]
 gui = "ChangesView"
@@ -1159,22 +1156,22 @@ gui = "ChangesView"
 gui = "HistoryView"
 
 [arg."revert COMMITS"]
-gui = "TODO:HistoryView"
+gui = "HistoryView"
 
 [arg."revert --no-commit"]
-gui = "TODO:HistoryView"
+gui = "HistoryView/more"
 
 [arg."revert --message"]
-gui = "TODO:HistoryView"
+gui = "HistoryView/more"
 
 [arg."revert --abort"]
-gui = "TODO:HistoryView"
+gui = "HistoryView"
 
 [arg."revert --skip"]
-gui = "TODO:HistoryView"
+gui = "HistoryView"
 
 [arg."revert --continue"]
-gui = "TODO:HistoryView"
+gui = "HistoryView"
 
 [cmd."sparse-checkout"]
 gui = "AdvancedView"
@@ -1186,7 +1183,7 @@ gui = "AdvancedView"
 gui = "AdvancedView"
 
 [arg."sparse-checkout set --patterns"]
-gui = "TODO:AdvancedView"
+gui = "SettingsView"
 
 [cmd."sparse-checkout list"]
 gui = "AdvancedView"

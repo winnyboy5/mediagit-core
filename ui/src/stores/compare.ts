@@ -8,6 +8,8 @@ import { useRepoStore } from './repo'
 /** How many recent versions the pickers offer. */
 export const PICKER_COMMITS = 100
 export const WORKING = 'working'
+/** The changes already set aside for the next version (`diff --cached`). */
+export const STAGED = 'staged'
 
 /** Compare: two versions, or the working folder against the latest version. */
 export const useCompareStore = defineStore('compare', () => {
@@ -26,7 +28,9 @@ export const useCompareStore = defineStore('compare', () => {
   const selectedPath = ref<string | null>(null)
   let token = 0
 
-  const working = computed(() => to.value === WORKING)
+  const staged = computed(() => to.value === STAGED)
+  /** Either side-less comparison: the left side is the latest version. */
+  const working = computed(() => to.value === WORKING || to.value === STAGED)
   const files = computed<DiffFileReport[]>(() => report.value?.files ?? [])
   const file = computed(() => files.value.find((f) => f.path === selectedPath.value) ?? null)
   /** The version shown as "before": the report's own, falling back to the latest. */
@@ -70,7 +74,7 @@ export const useCompareStore = defineStore('compare', () => {
     loading.value = true
     error.value = null
     try {
-      const r = working.value ? await api.diff(root, null, null) : await api.diff(root, from.value, to.value)
+      const r = working.value ? await api.diff(root, null, null, staged.value) : await api.diff(root, from.value, to.value)
       if (mine !== token) return
       report.value = r
       if (!r.files.some((f) => f.path === selectedPath.value)) selectedPath.value = null
@@ -87,6 +91,9 @@ export const useCompareStore = defineStore('compare', () => {
     const { before, after } = sides.value
     for (const side of [before, after]) {
       if (!side) continue
+      // The staged copy cannot be read on its own, and the working file may differ from it:
+      // showing that file as "after" would be a wrong answer, so staged files get sizes only.
+      if (staged.value && side === after) continue
       if (previewKind(side.path) === 'image') inspector.ensureExtraction(side)
       if (hasMediaInfo(side.path)) inspector.ensureInfo(side)
     }
@@ -111,5 +118,5 @@ export const useCompareStore = defineStore('compare', () => {
     },
   )
 
-  return { commits, commitsLoaded, commitsError, from, to, working, report, files, file, sides, loading, error, selectedPath, loadCommits, compare, select }
+  return { commits, commitsLoaded, commitsError, from, to, working, staged, report, files, file, sides, loading, error, selectedPath, loadCommits, compare, select }
 })

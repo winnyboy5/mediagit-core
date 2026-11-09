@@ -1,0 +1,16 @@
+{
+  "keys": [
+    { "key": "author.email", "type": "string", "default": null, "doc": "Email recorded on commits you create.", "enum_values": [], "secret": false, "min": null, "max": null },
+    { "key": "author.name", "type": "string", "default": null, "doc": "Display name recorded on commits you create.", "enum_values": [], "secret": false, "min": null, "max": null },
+    { "key": "performance.upload_concurrency", "type": "int", "default": null, "doc": "Parallel chunk uploads on push. Unset: MEDIAGIT_UPLOAD_CONCURRENCY, then 32.", "enum_values": [], "secret": false, "min": 1, "max": null },
+    { "key": "performance.download_concurrency", "type": "int", "default": null, "doc": "Parallel chunk downloads on pull/fetch. Unset: MEDIAGIT_DOWNLOAD_CONCURRENCY, then 24.", "enum_values": [], "secret": false, "min": 1, "max": null },
+    { "key": "storage.create_dirs", "type": "bool", "default": "true", "doc": "Filesystem backend: create missing directories.", "enum_values": [], "secret": false, "min": null, "max": null },
+    { "key": "storage.sync", "type": "bool", "default": "false", "doc": "Filesystem backend: sync writes to disk (slower, safer).", "enum_values": [], "secret": false, "min": null, "max": null },
+    { "key": "storage.file_permissions", "type": "string", "default": "0644", "doc": "Filesystem backend: octal permission string for stored files.", "enum_values": [], "secret": false, "min": null, "max": null },
+    { "key": "storage.region", "type": "string", "default": null, "doc": "S3 backend: region of the bucket.", "enum_values": [], "secret": false, "min": null, "max": null },
+    { "key": "storage.credentials_path", "type": "path", "default": null, "doc": "GCS backend: service-account JSON file. Unset: Application Default Credentials.", "enum_values": [], "secret": false, "min": null, "max": null },
+    { "key": "storage.secret_access_key", "type": "string", "default": null, "doc": "S3 backend: secret access key.", "enum_values": [], "secret": true, "min": null, "max": null },
+    { "key": "remotes.<name>.url", "type": "string", "default": null, "doc": "Remote server URL (http:// or https://).", "enum_values": [], "secret": false, "min": null, "max": null },
+    { "key": "remotes.<name>.token", "type": "string", "default": null, "doc": "Bearer token for this remote. Stored in plain text in config.toml.", "enum_values": [], "secret": true, "min": null, "max": null }
+  ]
+}

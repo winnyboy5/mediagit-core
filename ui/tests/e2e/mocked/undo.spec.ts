@@ -86,12 +86,12 @@ test.describe('Undo: menu and dialogs', () => {
     await history(page)
     const before = (await ipcCalls(page, 'repo_log')).length
     await choose(page, 'Undo this version (adds a new one)')
-    const dlg = page.getByRole('alertdialog')
+    const dlg = page.getByRole('dialog')
     await expect(dlg).toContainText('Undo Fix audio sync on VO take 2?')
     await expect(dlg).toContainText('Nothing is deleted')
     await expectNoAxeViolations(page)
     await dlg.getByRole('button', { name: 'Undo this version' }).click()
-    await expect.poll(async () => (await ipcCalls(page, 'repo_revert')).map((c) => c.args)).toEqual([{ repo: '/repos/hero-film', rev: SECOND }])
+    await expect.poll(async () => (await ipcCalls(page, 'repo_revert')).map((c) => c.args)).toEqual([{ repo: '/repos/hero-film', revs: [SECOND], opts: {} }])
     await expect.poll(async () => (await ipcCalls(page, 'repo_log')).length).toBeGreaterThan(before)
     await expect(page.getByText('Undone with a new version').first()).toBeVisible()
   })
@@ -99,7 +99,7 @@ test.describe('Undo: menu and dialogs', () => {
   test('a revert that stops on clashes names the files and can be abandoned', async ({ page }) => {
     await history(page, { repo_revert: fixture('revert_conflict'), repo_revert_control: { action: 'abort', status: 'aborted', commits: [], conflicts: [] } })
     await choose(page, 'Undo this version (adds a new one)')
-    await page.getByRole('alertdialog').getByRole('button', { name: 'Undo this version' }).click()
+    await page.getByRole('dialog').getByRole('button', { name: 'Undo this version' }).click()
     const banner = page.getByTestId('revert-stopped')
     await expect(banner).toContainText('1 file clashes (art/hero_preview.png)')
     await expectNoAxeViolations(page)

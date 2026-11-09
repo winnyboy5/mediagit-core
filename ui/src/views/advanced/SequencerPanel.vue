@@ -3,6 +3,8 @@
 import { computed, ref, watch } from 'vue'
 import AlertDialog from '@/components/AlertDialog.vue'
 import Button from '@/components/Button.vue'
+import MoreOptions from '@/components/MoreOptions.vue'
+import OptionCheck from '@/components/OptionCheck.vue'
 import ProgressBar from '@/components/ProgressBar.vue'
 import Select from '@/components/Select.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
@@ -51,6 +53,14 @@ watch(
   },
   { immediate: true },
 )
+
+// More options. A rebase can name the branch to move ('' = the current one).
+const CURRENT = '*current'
+const rebaseBranch = ref(CURRENT)
+const rebaseBranches = computed(() => [{ value: CURRENT, label: 'The branch I am on' }, ...branches.list.map((b) => ({ value: b.name, label: b.name }))])
+const keepEmpty = ref(false)
+const noCommit = ref(false)
+const appendMessage = ref(false)
 
 const confirmOpen = ref(false)
 const abortOpen = ref(false)
@@ -109,6 +119,16 @@ const targetLabel = computed(() => options.value.find((o) => o.value === target.
         <Select v-model="target" :label="isRebase ? 'Rebase onto' : 'Copy this version'" :placeholder="isRebase ? undefined : 'Choose a version…'" :options="options" :disabled="!options.length || seq.busy" />
         <Button variant="primary" :disabled="!target || seq.busy" @click="confirmOpen = true">{{ isRebase ? 'Start rebase…' : 'Copy version' }}</Button>
       </div>
+      <MoreOptions>
+        <template v-if="isRebase">
+          <Select v-model="rebaseBranch" label="Branch to rebase" :options="rebaseBranches" :disabled="seq.busy" />
+          <OptionCheck v-model="keepEmpty" label="Keep versions that end up changing nothing" flag="--keep-empty" />
+        </template>
+        <template v-else>
+          <OptionCheck v-model="noCommit" label="Let me look before it is saved" flag="--no-commit" hint="Files change but no version is made yet" />
+          <OptionCheck v-model="appendMessage" label="Note where it was copied from" flag="--append-message" hint="Adds “(cherry picked from commit …)” to the message" />
+        </template>
+      </MoreOptions>
       <p v-if="!options.length" class="muted">{{ isRebase ? 'There is no other branch to rebase onto.' : 'There are no versions to copy yet.' }}</p>
       <div class="row-actions resume">
         <span class="muted">Already {{ isRebase ? 'rebasing' : 'copying' }}, from another tool?</span>
@@ -122,7 +142,7 @@ const targetLabel = computed(() => options.value.find((o) => o.value === target.
       :title="isRebase ? `Rebase onto ${targetLabel}?` : 'Copy this version?'"
       :description="isRebase ? 'This branch gets new versions in place of its old ones. If it clashes you decide file by file, and you can cancel.' : `${targetLabel} is copied onto this branch as a new version. If it clashes you decide file by file.`"
       :confirm-label="isRebase ? 'Start rebase' : 'Copy version'"
-      @confirm="seq.start(target)"
+      @confirm="seq.start(target, { branch: rebaseBranch === CURRENT ? undefined : rebaseBranch, keepEmpty: keepEmpty === true, noCommit: noCommit === true, appendMessage: appendMessage === true })"
     />
     <AlertDialog
       v-model:open="abortOpen"

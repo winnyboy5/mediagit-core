@@ -70,7 +70,7 @@ test.describe('Merge: states', () => {
     await dlg.getByRole('checkbox', { name: 'Always create a merge version' }).click()
     await dlg.getByRole('button', { name: 'Start merge' }).click()
     await expect.poll(async () => (await ipcCalls(page, 'repo_merge')).map((c) => c.args)).toMatchObject([
-      { repo: '/repos/hero-film', branch: 'review/cut-2', strategy: 'theirs', noFf: true },
+      { repo: '/repos/hero-film', branch: 'review/cut-2', strategy: 'theirs', opts: { noFf: true } },
     ])
   })
 

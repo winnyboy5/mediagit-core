@@ -7,10 +7,12 @@ import EmptyState from '@/components/EmptyState.vue'
 import ErrorState from '@/components/ErrorState.vue'
 import IconButton from '@/components/IconButton.vue'
 import Kbd from '@/components/Kbd.vue'
+import MoreOptions from '@/components/MoreOptions.vue'
+import OptionCheck from '@/components/OptionCheck.vue'
+import TextField from '@/components/TextField.vue'
 import SegmentedControl from '@/components/SegmentedControl.vue'
 import SkeletonRows from '@/components/SkeletonRows.vue'
 import Textarea from '@/components/Textarea.vue'
-import Tooltip from '@/components/Tooltip.vue'
 import { primaryBar } from '@/stores/ops'
 import { useChangesStore } from '@/stores/changes'
 import { useRepoStore } from '@/stores/repo'
@@ -30,9 +32,10 @@ const empty = computed(() => !!repo.status && changes.counts.total === 0)
 const busy = computed(() => changes.busy !== null)
 
 const selectedUnstaged = computed(() => [...changes.selected].filter((k) => k.startsWith('unstaged:')).length)
-const canCommit = computed(() => changes.counts.staged > 0 && changes.message.trim().length > 0 && !busy.value)
+const selectedStaged = computed(() => [...changes.selected].filter((k) => k.startsWith('staged:')).length)
+const canCommit = computed(() => changes.canSave && (!changes.needsMessage || changes.message.trim().length > 0) && !busy.value)
 const commitHint = computed(() =>
-  changes.counts.staged === 0 ? 'Stage files first, then save a version.' : changes.message.trim() ? '' : 'Describe what changed to save.',
+  !changes.canSave ? 'Stage files first, then save a version.' : changes.needsMessage && !changes.message.trim() ? 'Describe what changed to save.' : '',
 )
 
 // The file being staged, taken from the add op's bar message when it names a row.
@@ -100,9 +103,12 @@ const MODES = [
         <section v-if="changes.counts.staged" class="panel staged" aria-labelledby="h-staged">
           <header>
             <h2 id="h-staged">Staged · {{ changes.counts.staged }} {{ changes.counts.staged === 1 ? 'file' : 'files' }}</h2>
-            <Tooltip text="Unstaging arrives in a later release">
-              <Button size="sm" aria-disabled="true" class="soon" @click.prevent>Unstage all</Button>
-            </Tooltip>
+            <div class="acts">
+              <Button v-if="selectedStaged" size="sm" :disabled="busy" :loading="changes.busy === 'unstage'" @click="changes.unstageSelected()">
+                Unstage selected ({{ selectedStaged }})
+              </Button>
+              <Button size="sm" :disabled="busy" @click="changes.unstageAll()">Unstage all</Button>
+            </div>
           </header>
           <FileList
             :rows="changes.rows.staged"
@@ -136,6 +142,14 @@ const MODES = [
             @select-all="changes.selectAll('unstaged')"
           />
         </section>
+        <!-- Outside the clipped panel, so opening it never squeezes the file list. -->
+        <MoreOptions v-if="changes.counts.unstaged" label="Staging options" data-testid="stage-more">
+          <OptionCheck v-model="changes.addOpts.all" label="Include removed files" hint="Stage deletions together with new and changed files." flag="--all" />
+          <OptionCheck v-model="changes.addOpts.update" label="Only files already tracked" hint="New files are left out." flag="--update" />
+          <OptionCheck v-model="changes.addOpts.ignoreRemoval" label="Leave removed files out" flag="--ignore-removal" />
+          <OptionCheck v-model="changes.addOpts.force" label="Include files the ignore list skips" flag="--force" />
+          <OptionCheck v-model="changes.addOpts.dryRun" label="Preview only" hint="Show what would be staged; nothing is." flag="--dry-run" />
+        </MoreOptions>
       </div>
 
       <form class="commit" @submit.prevent="changes.commit()">
@@ -147,6 +161,21 @@ const MODES = [
           :disabled="busy"
           @keydown.ctrl.enter.prevent="changes.commit()"
         />
+        <MoreOptions data-testid="commit-more">
+          <TextField v-model="changes.commitForm.messageFile" label="Take the description from a file" hint="Full path of a text file. The box above is then not needed." flag="--file" mono />
+          <OptionCheck v-model="changes.commitForm.all" label="Stage every changed tracked file first" flag="--all" />
+          <label class="inc">
+            <span>Also stage these files</span>
+            <textarea v-model="changes.commitForm.include" rows="2" placeholder="e.g. art/hero.psd" aria-describedby="inc-hint" class="mono"></textarea>
+            <span id="inc-hint" class="hint">One path per line. <code class="mono flag">--include</code></span>
+          </label>
+          <TextField v-model="changes.commitForm.author" label="Author" hint="Name &lt;email&gt;, instead of your configured identity." flag="--author" placeholder="e.g. Ana Ruiz <ana@studio.example>" mono />
+          <TextField v-model="changes.commitForm.date" label="Date" hint="Like 2026-01-15T10:30:00Z." flag="--date" placeholder="e.g. 2026-01-15T10:30:00Z" mono />
+          <OptionCheck v-model="changes.commitForm.allowEmpty" label="Allow a version with no changes" flag="--allow-empty" />
+          <OptionCheck v-model="changes.commitForm.signoff" label="Add a Signed-off-by line" flag="--signoff" />
+          <OptionCheck v-model="changes.commitForm.dryRun" label="Preview only" hint="Show what would be saved; nothing is." flag="--dry-run" />
+        </MoreOptions>
+        <p v-if="changes.preview" class="preview" role="status" data-testid="preview-note">{{ changes.preview }}</p>
         <div class="row">
           <p class="hint"><template v-if="commitHint">{{ commitHint }}</template><template v-else><Kbd>Ctrl</Kbd> + <Kbd>Enter</Kbd> to save</template></p>
           <Button type="submit" variant="primary" :disabled="!canCommit" :loading="changes.busy === 'commit'">Save version (commit)</Button>
@@ -157,6 +186,31 @@ const MODES = [
 </template>
 
 <style scoped>
+.preview {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-control);
+  background: var(--surface-2);
+}
+.inc {
+  display: grid;
+  gap: var(--space-2);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+}
+.inc textarea {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-family: var(--font-mono);
+}
+.inc .hint {
+  color: var(--text-muted);
+  font-weight: 400;
+}
 .changes {
   display: flex;
   flex: 1;
@@ -164,6 +218,7 @@ const MODES = [
   gap: var(--space-4);
   min-height: 0;
   padding: var(--space-5) var(--space-6);
+  overflow-y: auto;
 }
 .head {
   display: flex;
@@ -194,20 +249,22 @@ h1 {
 }
 .panels {
   display: flex;
-  flex: 1;
+  /* Grows past the window when options open; the view scrolls, lists keep their height. */
+  flex: 1 0 auto;
   flex-direction: column;
   gap: var(--space-4);
-  min-height: 0;
+  min-height: 320px;
 }
 .panel {
   display: flex;
   flex: 1 1 0;
   flex-direction: column;
-  min-height: 120px;
+  min-height: 200px;
   border: 1px solid var(--border);
   border-radius: var(--radius-panel);
   background: var(--surface);
   overflow: hidden;
+  contain: paint;
 }
 .panel.staged {
   flex-grow: 0.6;
@@ -231,10 +288,6 @@ h2 {
 .acts {
   display: flex;
   gap: var(--space-2);
-}
-.soon {
-  opacity: 0.55;
-  cursor: not-allowed;
 }
 .banner {
   display: flex;

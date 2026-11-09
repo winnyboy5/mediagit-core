@@ -88,34 +88,6 @@ fn ref_name_ok(what: &str, name: &str) -> Result<(), EngineError> {
     }
 }
 
-fn log_argv(
-    skip: u32,
-    max: u32,
-    all: bool,
-    path: Option<&str>,
-    repo: &Path,
-) -> Result<Vec<String>, EngineError> {
-    if !(1..=1000).contains(&max) {
-        return Err(invalid("page size", &max.to_string()));
-    }
-    let mut argv = vec![
-        "log".to_owned(),
-        "--skip".into(),
-        skip.to_string(),
-        "-n".into(),
-        max.to_string(),
-    ];
-    if all {
-        argv.push("--all".into());
-    }
-    if let Some(p) = path {
-        // The revision must come first: the first positional after `--` would
-        // otherwise be read as one.
-        argv.extend(["HEAD".into(), "--".into(), repo_relative(repo, p)?]);
-    }
-    Ok(argv)
-}
-
 fn show_argv(rev: &str, tree: bool) -> Result<Vec<String>, EngineError> {
     rev_ok(rev)?;
     let mut argv = vec!["show".to_owned(), rev.to_owned()];
@@ -167,19 +139,6 @@ fn media_info_argv(repo: &Path, path: &str) -> Result<Vec<String>, EngineError> 
     ])
 }
 
-fn branch_argv(sub: &str, names: &[&str], force: bool) -> Result<Vec<String>, EngineError> {
-    for n in names {
-        ref_name_ok("branch name", n)?;
-    }
-    let mut argv = vec!["branch".to_owned(), sub.to_owned()];
-    if force {
-        argv.push("-D".into());
-    }
-    argv.push("--".into());
-    argv.extend(names.iter().map(|n| (*n).to_owned()));
-    Ok(argv)
-}
-
 fn lock_create_argv(repo: &Path, path: &str) -> Result<Vec<String>, EngineError> {
     Ok(vec![
         "lock".into(),
@@ -224,31 +183,6 @@ fn remote_remove_argv(name: &str) -> Result<Vec<String>, EngineError> {
         "--".into(),
         name.into(),
     ])
-}
-
-fn transfer_argv(verb: &str, remote: Option<&str>) -> Result<Vec<String>, EngineError> {
-    let mut argv = vec![verb.to_owned()];
-    if let Some(r) = remote {
-        ref_name_ok("remote name", r)?;
-        argv.push("--".into());
-        argv.push(r.into());
-    }
-    Ok(argv)
-}
-
-/// `merge --strategy=<s> [--no-ff] -- <branch>`. Strategy is the only merge-wide
-/// conflict knob the CLI honours; per-file choices go through [`file_at_argv`].
-fn merge_argv(branch: &str, strategy: &str, no_ff: bool) -> Result<Vec<String>, EngineError> {
-    ref_name_ok("branch name", branch)?;
-    if !matches!(strategy, "recursive" | "ours" | "theirs") {
-        return Err(invalid("merge strategy", strategy));
-    }
-    let mut argv = vec!["merge".to_owned(), format!("--strategy={strategy}")];
-    if no_ff {
-        argv.push("--no-ff".into());
-    }
-    argv.extend(["--".into(), branch.into()]);
-    Ok(argv)
 }
 
 /// `merge --continue` or `merge --abort`.
@@ -312,24 +246,18 @@ fn merge_resolve_argvs(
     Ok([show, vec!["add".into(), "--".into(), rel]])
 }
 
-/// `diff` (working folder against HEAD) or `diff <from> <to>`; never half of each.
-fn diff_argv(from: Option<&str>, to: Option<&str>) -> Result<Vec<String>, EngineError> {
-    match (from, to) {
-        (None, None) => Ok(vec!["diff".into()]),
-        (Some(a), Some(b)) => {
-            rev_ok(a)?;
-            rev_ok(b)?;
-            Ok(vec!["diff".into(), a.into(), b.into()])
-        }
-        _ => Err(invalid("comparison", "needs two versions or none")),
-    }
-}
-
+/// `stash save [--message=..] [--include-untracked]` for everything, or
+/// `stash push [..] -- <paths>` to set aside only those files and leave the rest alone.
 fn stash_save_argv(
+    repo: &Path,
     message: Option<&str>,
     include_untracked: bool,
+    paths: &[String],
 ) -> Result<Vec<String>, EngineError> {
-    let mut argv = vec!["stash".to_owned(), "save".into()];
+    let mut argv = vec![
+        "stash".to_owned(),
+        if paths.is_empty() { "save" } else { "push" }.into(),
+    ];
     if let Some(m) = message.map(str::trim).filter(|m| !m.is_empty()) {
         if m.contains('\0') {
             return Err(invalid("stash message", m));
@@ -338,6 +266,12 @@ fn stash_save_argv(
     }
     if include_untracked {
         argv.push("--include-untracked".into());
+    }
+    if !paths.is_empty() {
+        argv.push("--".into());
+        for p in paths {
+            argv.push(repo_relative(repo, p)?);
+        }
     }
     Ok(argv)
 }
@@ -348,6 +282,32 @@ fn stash_entry_argv(sub: &str, index: u32) -> Result<Vec<String>, EngineError> {
         return Err(invalid("stash action", sub));
     }
     Ok(vec!["stash".into(), sub.into(), index.to_string()])
+}
+
+/// `stash apply|pop [--index] [--force] <index>`. `--force` overwrites uncommitted changes
+/// that differ from the stash, so it is refused unless `confirmed`.
+fn stash_restore_argv(
+    sub: &str,
+    index: u32,
+    restore_index: bool,
+    force: bool,
+    confirmed: bool,
+) -> Result<Vec<String>, EngineError> {
+    if !matches!(sub, "apply" | "pop") {
+        return Err(invalid("stash action", sub));
+    }
+    let mut argv = vec!["stash".to_owned(), sub.into()];
+    if restore_index {
+        argv.push("--index".into());
+    }
+    if force {
+        if !confirmed {
+            return Err(invalid("overwrite changes", "not confirmed"));
+        }
+        argv.push("--force".into());
+    }
+    argv.push(index.to_string());
+    Ok(argv)
 }
 
 /// `stash clear --force`: the UI has already asked, and under `--machine` the CLI's own
@@ -370,41 +330,98 @@ fn reset_argv(mode: &str, rev: &str) -> Result<Vec<String>, EngineError> {
     ])
 }
 
-/// `tag create [-a --message=<m>] -- <name> [<commit>]`; a message makes the tag annotated.
-fn tag_create_argv(
-    name: &str,
-    commit: Option<&str>,
-    message: Option<&str>,
-) -> Result<Vec<String>, EngineError> {
+/// What a new tag carries besides its name. `tagger`, `email` and `message` make an
+/// annotated tag; the first two mean nothing without a message.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TagOptions {
+    pub commit: Option<String>,
+    pub message: Option<String>,
+    pub tagger: Option<String>,
+    pub email: Option<String>,
+    /// Replace an existing tag of this name. Refused unless `confirmed` too.
+    pub force: bool,
+    /// The person has been told the old tag is lost and agreed.
+    pub confirmed: bool,
+}
+
+/// One printable line, no flag lookalikes: a tagger name or a list filter.
+fn line_ok(what: &str, v: &str) -> Result<(), EngineError> {
+    if v.is_empty() || v.len() > 200 || v.starts_with('-') || v.chars().any(char::is_control) {
+        return Err(invalid(what, v));
+    }
+    Ok(())
+}
+
+/// `tag create [-a --message=<m> --tagger=<n> --email=<e>] [--force] -- <name> [<commit>]`.
+fn tag_create_argv(name: &str, o: &TagOptions) -> Result<Vec<String>, EngineError> {
     ref_name_ok("tag name", name)?;
     let mut argv = vec!["tag".to_owned(), "create".into()];
-    if let Some(m) = message.map(str::trim).filter(|m| !m.is_empty()) {
+    fn blank(s: &Option<String>) -> Option<&str> {
+        s.as_deref().map(str::trim).filter(|s| !s.is_empty())
+    }
+    if let Some(m) = blank(&o.message) {
         if m.contains('\0') {
             return Err(invalid("tag message", m));
         }
         argv.extend(["--annotated".into(), format!("--message={m}")]);
+        if let Some(t) = blank(&o.tagger) {
+            line_ok("tagger name", t)?;
+            argv.push(format!("--tagger={t}"));
+        }
+        if let Some(e) = blank(&o.email) {
+            line_ok("tagger email", e)?;
+            if e.split_whitespace().count() != 1 || !e.contains('@') {
+                return Err(invalid("tagger email", e));
+            }
+            argv.push(format!("--email={e}"));
+        }
+    } else if blank(&o.tagger).is_some() || blank(&o.email).is_some() {
+        return Err(invalid("tagger", "a note is needed for an annotated tag"));
+    }
+    if o.force {
+        if !o.confirmed {
+            return Err(invalid("replace tag", "not confirmed"));
+        }
+        argv.push("--force".into());
     }
     argv.extend(["--".into(), name.into()]);
-    if let Some(c) = commit {
+    if let Some(c) = o.commit.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
         rev_ok(c)?;
         argv.push(c.into());
     }
     Ok(argv)
 }
 
+/// `tag list [-- <glob>]`.
+fn tag_list_argv(pattern: Option<&str>) -> Result<Vec<String>, EngineError> {
+    let mut argv = vec!["tag".to_owned(), "list".into()];
+    if let Some(p) = pattern.map(str::trim).filter(|p| !p.is_empty()) {
+        line_ok("tag filter", p)?;
+        argv.extend(["--".into(), p.into()]);
+    }
+    Ok(argv)
+}
+
+/// `tag delete --force -- <name>`: the dialog has asked, and `--force` skips the CLI's own question.
 fn tag_delete_argv(name: &str) -> Result<Vec<String>, EngineError> {
     ref_name_ok("tag name", name)?;
     Ok(vec![
         "tag".into(),
         "delete".into(),
+        "--force".into(),
         "--".into(),
         name.into(),
     ])
 }
 
-fn revert_argv(rev: &str) -> Result<Vec<String>, EngineError> {
-    rev_ok(rev)?;
-    Ok(vec!["revert".into(), "--".into(), rev.into()])
+/// `tag show|verify -- <name>`.
+fn tag_inspect_argv(sub: &str, name: &str) -> Result<Vec<String>, EngineError> {
+    if !matches!(sub, "show" | "verify") {
+        return Err(invalid("tag action", sub));
+    }
+    ref_name_ok("tag name", name)?;
+    Ok(vec!["tag".into(), sub.into(), "--".into(), name.into()])
 }
 
 fn revert_control_argv(action: &str) -> Result<Vec<String>, EngineError> {
@@ -606,12 +623,14 @@ pub async fn repo_log(
     max: u32,
     all: bool,
     path: Option<String>,
+    filter: Option<views_b::LogFilter>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
+    let filter = filter.unwrap_or_default();
     read(
         &engine,
         &repo,
-        &log_argv(skip, max, all, path.as_deref(), &repo)?,
+        &views_b::log_argv(skip, max, all, path.as_deref(), &filter, &repo)?,
     )
     .await
 }
@@ -723,32 +742,33 @@ pub async fn media_info(
     read(&engine, &repo, &media_info_argv(&repo, &path)?).await
 }
 
-/// Local branches with ahead/behind.
+/// Local branches with ahead/behind; `remote` lists the remote-tracking ones instead.
 #[tauri::command]
 pub async fn branch_list(
     engine: tauri::State<'_, Engine>,
     repo: String,
+    remote: Option<bool>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    read(&engine, &repo, &["branch".to_owned(), "list".into()]).await
+    let mut argv = vec!["branch".to_owned(), "list".into()];
+    if remote == Some(true) {
+        argv.push("--remote".into());
+    }
+    read(&engine, &repo, &argv).await
 }
 
-/// Create a branch at HEAD.
+/// Create a branch at HEAD, or at `opts.start_point`.
 #[tauri::command]
 pub async fn branch_create(
     engine: tauri::State<'_, Engine>,
     queues: tauri::State<'_, RepoQueues>,
     repo: String,
     name: String,
+    opts: Option<views_b::BranchCreateOpts>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    write(
-        &engine,
-        &queues,
-        &repo,
-        &branch_argv("create", &[name.as_str()], false)?,
-    )
-    .await
+    let argv = views_b::branch_create_argv(&name, &opts.unwrap_or_default())?;
+    write(&engine, &queues, &repo, &argv).await
 }
 
 /// Switch the working tree to a branch; streams files-written progress.
@@ -759,10 +779,11 @@ pub async fn branch_switch(
     queues: tauri::State<'_, RepoQueues>,
     repo: String,
     name: String,
+    opts: Option<views_b::BranchSwitchOpts>,
     on_progress: Channel<Progress>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    let argv = branch_argv("switch", &[name.as_str()], false)?;
+    let argv = views_b::branch_switch_argv(&name, &opts.unwrap_or_default())?;
     stream(
         &engine,
         &ops,
@@ -776,26 +797,22 @@ pub async fn branch_switch(
     .await
 }
 
-/// Delete a branch; `force` also removes unmerged work.
+/// Delete a branch; `opts.force` also removes unmerged work, `opts.remote` forgets a
+/// remote-tracking branch.
 #[tauri::command]
 pub async fn branch_delete(
     engine: tauri::State<'_, Engine>,
     queues: tauri::State<'_, RepoQueues>,
     repo: String,
     name: String,
-    force: bool,
+    opts: Option<views_b::BranchDeleteOpts>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    write(
-        &engine,
-        &queues,
-        &repo,
-        &branch_argv("delete", &[name.as_str()], force)?,
-    )
-    .await
+    let argv = views_b::branch_delete_argv(&name, &opts.unwrap_or_default())?;
+    write(&engine, &queues, &repo, &argv).await
 }
 
-/// Rename a branch.
+/// Rename a branch; `force` replaces a branch that already has the new name.
 #[tauri::command]
 pub async fn branch_rename(
     engine: tauri::State<'_, Engine>,
@@ -803,15 +820,17 @@ pub async fn branch_rename(
     repo: String,
     from: String,
     to: String,
+    force: Option<bool>,
+    confirmed: Option<bool>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    write(
-        &engine,
-        &queues,
-        &repo,
-        &branch_argv("rename", &[from.as_str(), to.as_str()], false)?,
-    )
-    .await
+    let argv = views_b::branch_rename_argv(
+        &from,
+        &to,
+        force.unwrap_or(false),
+        confirmed.unwrap_or(false),
+    )?;
+    write(&engine, &queues, &repo, &argv).await
 }
 
 /// Tags with the commit each points at.
@@ -819,23 +838,45 @@ pub async fn branch_rename(
 pub async fn tag_list(
     engine: tauri::State<'_, Engine>,
     repo: String,
+    pattern: Option<String>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    read(&engine, &repo, &["tag".to_owned(), "list".into()]).await
+    read(&engine, &repo, &tag_list_argv(pattern.as_deref())?).await
 }
 
-/// Name a version. `commit` defaults to HEAD; a message makes the tag annotated.
+/// One tag's details: message, tagger, date, whether it is signed.
+#[tauri::command]
+pub async fn tag_show(
+    engine: tauri::State<'_, Engine>,
+    repo: String,
+    name: String,
+) -> Result<Value, EngineError> {
+    let repo = repo_path(&repo)?;
+    read(&engine, &repo, &tag_inspect_argv("show", &name)?).await
+}
+
+/// Check a tag's signature (an unsigned tag reports `signed: false`).
+#[tauri::command]
+pub async fn tag_verify(
+    engine: tauri::State<'_, Engine>,
+    repo: String,
+    name: String,
+) -> Result<Value, EngineError> {
+    let repo = repo_path(&repo)?;
+    read(&engine, &repo, &tag_inspect_argv("verify", &name)?).await
+}
+
+/// Name a version. `options.commit` defaults to HEAD; a message makes the tag annotated.
 #[tauri::command]
 pub async fn tag_create(
     engine: tauri::State<'_, Engine>,
     queues: tauri::State<'_, RepoQueues>,
     repo: String,
     name: String,
-    commit: Option<String>,
-    message: Option<String>,
+    options: TagOptions,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    let argv = tag_create_argv(&name, commit.as_deref(), message.as_deref())?;
+    let argv = tag_create_argv(&name, &options)?;
     write(&engine, &queues, &repo, &argv).await
 }
 
@@ -856,9 +897,15 @@ pub async fn tag_delete(
 pub async fn lock_list(
     engine: tauri::State<'_, Engine>,
     repo: String,
+    remote: Option<String>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    read(&engine, &repo, &["lock".to_owned(), "list".into()]).await
+    let argv = views_a::with_lock_flags(
+        vec!["lock".to_owned(), "list".into()],
+        None,
+        remote.as_deref(),
+    )?;
+    read(&engine, &repo, &argv).await
 }
 
 /// Lock one file.
@@ -868,9 +915,16 @@ pub async fn lock_create(
     queues: tauri::State<'_, RepoQueues>,
     repo: String,
     path: String,
+    owner: Option<String>,
+    remote: Option<String>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    write(&engine, &queues, &repo, &lock_create_argv(&repo, &path)?).await
+    let argv = views_a::with_lock_flags(
+        lock_create_argv(&repo, &path)?,
+        owner.as_deref(),
+        remote.as_deref(),
+    )?;
+    write(&engine, &queues, &repo, &argv).await
 }
 
 /// Release a lock by id; `force` releases someone else's.
@@ -881,9 +935,12 @@ pub async fn lock_unlock(
     repo: String,
     lock_id: String,
     force: bool,
+    remote: Option<String>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    write(&engine, &queues, &repo, &lock_unlock_argv(&lock_id, force)?).await
+    let argv =
+        views_a::with_lock_flags(lock_unlock_argv(&lock_id, force)?, None, remote.as_deref())?;
+    write(&engine, &queues, &repo, &argv).await
 }
 
 /// Configured remotes.
@@ -894,19 +951,6 @@ pub async fn remote_list(
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
     read(&engine, &repo, &["remote".to_owned(), "list".into()]).await
-}
-
-/// Add a remote; returns the resulting remote set.
-#[tauri::command]
-pub async fn remote_add(
-    engine: tauri::State<'_, Engine>,
-    queues: tauri::State<'_, RepoQueues>,
-    repo: String,
-    name: String,
-    url: String,
-) -> Result<Value, EngineError> {
-    let repo = repo_path(&repo)?;
-    write(&engine, &queues, &repo, &remote_add_argv(&name, &url)?).await
 }
 
 /// Remove a remote; returns the resulting remote set.
@@ -923,17 +967,19 @@ pub async fn remote_remove(
 
 /// Download new work from a remote without changing files (`fetch`); cancellable.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn repo_fetch(
     engine: tauri::State<'_, Engine>,
     ops: tauri::State<'_, Ops>,
     queues: tauri::State<'_, RepoQueues>,
     repo: String,
     remote: Option<String>,
+    opts: Option<views_a::FetchOpts>,
     op_id: String,
     on_progress: Channel<Progress>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    let argv = transfer_argv("fetch", remote.as_deref())?;
+    let argv = views_a::fetch_argv(remote.as_deref(), &opts.unwrap_or_default())?;
     stream(
         &engine,
         &ops,
@@ -950,17 +996,19 @@ pub async fn repo_fetch(
 /// Get the latest work from a remote and apply it (`pull`); cancellable. A killed pull
 /// is safe to retry since issues 93 and 95 (kill-safety gate G3).
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn repo_pull(
     engine: tauri::State<'_, Engine>,
     ops: tauri::State<'_, Ops>,
     queues: tauri::State<'_, RepoQueues>,
     repo: String,
     remote: Option<String>,
+    opts: Option<views_a::PullOpts>,
     op_id: String,
     on_progress: Channel<Progress>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    let argv = transfer_argv("pull", remote.as_deref())?;
+    let argv = views_a::pull_argv(remote.as_deref(), &opts.unwrap_or_default())?;
     stream(
         &engine,
         &ops,
@@ -976,17 +1024,19 @@ pub async fn repo_pull(
 
 /// Send local work to a remote (`push`); cancellable.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn repo_push(
     engine: tauri::State<'_, Engine>,
     ops: tauri::State<'_, Ops>,
     queues: tauri::State<'_, RepoQueues>,
     repo: String,
     remote: Option<String>,
+    opts: Option<views_a::PushOpts>,
     op_id: String,
     on_progress: Channel<Progress>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    let argv = transfer_argv("push", remote.as_deref())?;
+    let argv = views_a::push_argv(remote.as_deref(), &opts.unwrap_or_default())?;
     stream(
         &engine,
         &ops,
@@ -1015,11 +1065,11 @@ pub async fn repo_merge(
     repo: String,
     branch: String,
     strategy: String,
-    no_ff: bool,
+    opts: Option<views_b::MergeOpts>,
     on_progress: Channel<Progress>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    let argv = merge_argv(&branch, &strategy, no_ff)?;
+    let argv = views_b::merge_argv(&branch, &strategy, &opts.unwrap_or_default())?;
     stream(
         &engine,
         &ops,
@@ -1085,9 +1135,11 @@ pub async fn repo_diff(
     repo: String,
     from: Option<String>,
     to: Option<String>,
+    cached: Option<bool>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    read(&engine, &repo, &diff_argv(from.as_deref(), to.as_deref())?).await
+    let argv = views_b::diff_argv(from.as_deref(), to.as_deref(), cached.unwrap_or(false))?;
+    read(&engine, &repo, &argv).await
 }
 
 /// All stash entries, newest first.
@@ -1121,10 +1173,11 @@ pub async fn stash_save(
     repo: String,
     message: Option<String>,
     include_untracked: bool,
+    paths: Vec<String>,
     on_progress: Channel<Progress>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    let argv = stash_save_argv(message.as_deref(), include_untracked)?;
+    let argv = stash_save_argv(&repo, message.as_deref(), include_untracked, &paths)?;
     stream(
         &engine,
         &ops,
@@ -1140,16 +1193,20 @@ pub async fn stash_save(
 
 /// Bring a stash back, keeping the entry; streams files-written progress.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn stash_apply(
     engine: tauri::State<'_, Engine>,
     ops: tauri::State<'_, Ops>,
     queues: tauri::State<'_, RepoQueues>,
     repo: String,
     index: u32,
+    restore_index: bool,
+    force: bool,
+    confirmed: bool,
     on_progress: Channel<Progress>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    let argv = stash_entry_argv("apply", index)?;
+    let argv = stash_restore_argv("apply", index, restore_index, force, confirmed)?;
     stream(
         &engine,
         &ops,
@@ -1165,16 +1222,20 @@ pub async fn stash_apply(
 
 /// Bring a stash back and remove the entry.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn stash_pop(
     engine: tauri::State<'_, Engine>,
     ops: tauri::State<'_, Ops>,
     queues: tauri::State<'_, RepoQueues>,
     repo: String,
     index: u32,
+    restore_index: bool,
+    force: bool,
+    confirmed: bool,
     on_progress: Channel<Progress>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    let argv = stash_entry_argv("pop", index)?;
+    let argv = stash_restore_argv("pop", index, restore_index, force, confirmed)?;
     stream(
         &engine,
         &ops,
@@ -1259,10 +1320,12 @@ pub async fn repo_revert(
     engine: tauri::State<'_, Engine>,
     queues: tauri::State<'_, RepoQueues>,
     repo: String,
-    rev: String,
+    revs: Vec<String>,
+    opts: Option<views_b::RevertOpts>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    write(&engine, &queues, &repo, &revert_argv(&rev)?).await
+    let argv = views_b::revert_argv(&revs, &opts.unwrap_or_default())?;
+    write(&engine, &queues, &repo, &argv).await
 }
 
 /// `continue`, `abort` or `skip` a revert that stopped on a conflict.
@@ -1414,6 +1477,8 @@ pub async fn repo_download_preview(
 
 pub mod admin;
 pub mod server_admin;
+pub mod views_a;
+pub mod views_b;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
@@ -1424,34 +1489,6 @@ mod tests {
     #[allow(clippy::needless_pass_by_value)] // call sites pass temporaries
     fn bad(r: Result<Vec<String>, EngineError>) -> bool {
         matches!(r, Err(EngineError::InvalidArgument(_)))
-    }
-
-    #[test]
-    fn log_argv_pages_and_puts_the_revision_before_the_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = tmp.path();
-        assert_eq!(
-            log_argv(0, 200, true, None, repo).unwrap(),
-            ["log", "--skip", "0", "-n", "200", "--all"]
-        );
-        assert_eq!(
-            log_argv(5, 10, false, Some("art/hero.psd"), repo).unwrap(),
-            [
-                "log",
-                "--skip",
-                "5",
-                "-n",
-                "10",
-                "HEAD",
-                "--",
-                "art/hero.psd"
-            ]
-        );
-        assert!(bad(log_argv(0, 0, false, None, repo)));
-        assert!(bad(log_argv(0, 5000, false, None, repo)));
-        for p in ["--all", "../x", "-n", "a/../../b"] {
-            assert!(bad(log_argv(0, 10, false, Some(p), repo)), "{p}");
-        }
     }
 
     #[test]
@@ -1500,33 +1537,7 @@ mod tests {
     }
 
     #[test]
-    fn branch_argv_rejects_flags_and_reserved_names() {
-        assert_eq!(
-            branch_argv("create", &["feature/grade"], false).unwrap(),
-            ["branch", "create", "--", "feature/grade"]
-        );
-        assert_eq!(
-            branch_argv("delete", &["old"], true).unwrap(),
-            ["branch", "delete", "-D", "--", "old"]
-        );
-        assert_eq!(
-            branch_argv("rename", &["a", "b"], false).unwrap(),
-            ["branch", "rename", "--", "a", "b"]
-        );
-        for n in [
-            "--force", "-x", "a b", "a..b", "a~1", "a^", "a:b", "x/", "/x", "x.lock", "x.",
-            "a@{1}", "a\\b", "", "a//b", "a\u{7}b",
-        ] {
-            assert!(bad(branch_argv("create", &[n], false)), "{n:?}");
-        }
-        assert!(
-            bad(branch_argv("rename", &["ok", "--bad"], false)),
-            "one bad name poisons the call"
-        );
-    }
-
-    #[test]
-    fn lock_remote_and_transfer_argv_validate() {
+    fn lock_and_remote_argv_validate() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path();
         assert_eq!(
@@ -1550,29 +1561,10 @@ mod tests {
             remote_remove_argv("origin").unwrap(),
             ["remote", "remove", "--", "origin"]
         );
-        assert_eq!(transfer_argv("push", None).unwrap(), ["push"]);
-        assert_eq!(
-            transfer_argv("pull", Some("origin")).unwrap(),
-            ["pull", "--", "origin"]
-        );
-        assert!(bad(transfer_argv("push", Some("--force"))));
-        assert!(bad(transfer_argv("fetch", Some("a b"))));
     }
 
     #[test]
     fn merge_argv_spells_out_strategy_and_guards_the_branch() {
-        assert_eq!(
-            merge_argv("feature/fx", "recursive", false).unwrap(),
-            ["merge", "--strategy=recursive", "--", "feature/fx"]
-        );
-        assert_eq!(
-            merge_argv("fx", "theirs", true).unwrap(),
-            ["merge", "--strategy=theirs", "--no-ff", "--", "fx"]
-        );
-        assert!(bad(merge_argv("--abort", "ours", false)));
-        assert!(bad(merge_argv("a b", "ours", false)));
-        assert!(bad(merge_argv("fx", "octopus", false)));
-        assert!(bad(merge_argv("fx", "--strategy=ours", false)));
         assert_eq!(
             merge_control_argv("continue").unwrap(),
             ["merge", "--continue"]
@@ -1612,26 +1604,14 @@ mod tests {
     }
 
     #[test]
-    fn diff_needs_two_versions_or_none() {
-        let a = "0123456789abcdef";
-        let b = "fedcba9876543210";
-        assert_eq!(diff_argv(None, None).unwrap(), ["diff"]);
-        assert_eq!(diff_argv(Some(a), Some(b)).unwrap(), ["diff", a, b]);
-        assert_eq!(
-            diff_argv(Some("HEAD"), Some(a)).unwrap(),
-            ["diff", "HEAD", a]
-        );
-        assert!(bad(diff_argv(Some(a), None)));
-        assert!(bad(diff_argv(None, Some(a))));
-        assert!(bad(diff_argv(Some("--cached"), Some(a))));
-        assert!(bad(diff_argv(Some("main"), Some(a))));
-    }
-
-    #[test]
     fn stash_argv_keeps_messages_as_values_and_indexes_numeric() {
-        assert_eq!(stash_save_argv(None, false).unwrap(), ["stash", "save"]);
+        let repo = Path::new("/");
         assert_eq!(
-            stash_save_argv(Some("  WIP --lighting "), true).unwrap(),
+            stash_save_argv(repo, None, false, &[]).unwrap(),
+            ["stash", "save"]
+        );
+        assert_eq!(
+            stash_save_argv(repo, Some("  WIP --lighting "), true, &[]).unwrap(),
             [
                 "stash",
                 "save",
@@ -1640,10 +1620,10 @@ mod tests {
             ]
         );
         assert_eq!(
-            stash_save_argv(Some("   "), false).unwrap(),
+            stash_save_argv(repo, Some("   "), false, &[]).unwrap(),
             ["stash", "save"]
         );
-        assert!(bad(stash_save_argv(Some("a\0b"), false)));
+        assert!(bad(stash_save_argv(repo, Some("a\0b"), false, &[])));
         assert_eq!(stash_entry_argv("pop", 2).unwrap(), ["stash", "pop", "2"]);
         for sub in ["show", "apply", "pop", "drop"] {
             assert!(stash_entry_argv(sub, 0).is_ok(), "{sub}");
@@ -1651,6 +1631,70 @@ mod tests {
         assert_eq!(stash_clear_argv(), ["stash", "clear", "--force"]);
         assert!(bad(stash_entry_argv("clear", 0)));
         assert!(bad(stash_entry_argv("--index", 0)));
+    }
+
+    #[test]
+    fn shelving_selected_files_uses_push_with_repo_relative_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = repo_path(tmp.path().to_str().unwrap()).unwrap();
+        std::fs::create_dir(repo.join("art")).unwrap();
+        std::fs::write(repo.join("art").join("hero.psd"), b"x").unwrap();
+        let inside = repo.join("art").join("hero.psd");
+        assert_eq!(
+            stash_save_argv(
+                &repo,
+                Some("only art"),
+                true,
+                &["notes.txt".into(), inside.to_str().unwrap().into()]
+            )
+            .unwrap(),
+            [
+                "stash",
+                "push",
+                "--message=only art",
+                "--include-untracked",
+                "--",
+                "notes.txt",
+                "art/hero.psd"
+            ]
+        );
+        for p in ["--all", "../x", "a/../../x", ""] {
+            assert!(
+                bad(stash_save_argv(&repo, None, false, &[p.into()])),
+                "{p:?}"
+            );
+        }
+        // One bad path poisons the whole call.
+        assert!(bad(stash_save_argv(
+            &repo,
+            None,
+            false,
+            &["ok".into(), "-x".into()]
+        )));
+    }
+
+    #[test]
+    fn stash_restore_options_and_the_overwrite_guard() {
+        assert_eq!(
+            stash_restore_argv("apply", 1, false, false, false).unwrap(),
+            ["stash", "apply", "1"]
+        );
+        assert_eq!(
+            stash_restore_argv("pop", 0, true, false, false).unwrap(),
+            ["stash", "pop", "--index", "0"]
+        );
+        assert_eq!(
+            stash_restore_argv("apply", 2, true, true, true).unwrap(),
+            ["stash", "apply", "--index", "--force", "2"]
+        );
+        // --force destroys uncommitted work: never without the confirmation.
+        assert!(bad(stash_restore_argv("pop", 0, false, true, false)));
+        // Confirmation alone adds nothing.
+        assert_eq!(
+            stash_restore_argv("pop", 0, false, false, true).unwrap(),
+            ["stash", "pop", "0"]
+        );
+        assert!(bad(stash_restore_argv("drop", 0, false, false, false)));
     }
 
     #[test]
@@ -1672,8 +1716,6 @@ mod tests {
         assert!(bad(reset_argv("--hard", oid)));
         assert!(bad(reset_argv("hard", "main")));
         assert!(bad(reset_argv("hard", "--soft")));
-        assert_eq!(revert_argv(oid).unwrap(), ["revert", "--", oid]);
-        assert!(bad(revert_argv("--no-commit")));
         for a in ["continue", "abort", "skip"] {
             assert_eq!(
                 revert_control_argv(a).unwrap(),
@@ -1737,12 +1779,22 @@ mod tests {
     #[test]
     fn tag_argv_guards_names_commits_and_messages() {
         let oid = "0123456789abcdef";
+        let none = TagOptions::default();
+        let with = |f: &dyn Fn(&mut TagOptions)| {
+            let mut o = TagOptions::default();
+            f(&mut o);
+            o
+        };
         assert_eq!(
-            tag_create_argv("v1.0", None, None).unwrap(),
+            tag_create_argv("v1.0", &none).unwrap(),
             ["tag", "create", "--", "v1.0"]
         );
+        let note = with(&|o| {
+            o.commit = Some(oid.into());
+            o.message = Some(" Final ".into());
+        });
         assert_eq!(
-            tag_create_argv("v1.0", Some(oid), Some(" Final ")).unwrap(),
+            tag_create_argv("v1.0", &note).unwrap(),
             [
                 "tag",
                 "create",
@@ -1754,15 +1806,99 @@ mod tests {
             ]
         );
         for n in ["--force", "a b", "x..y", ""] {
-            assert!(bad(tag_create_argv(n, None, None)), "{n:?}");
+            assert!(bad(tag_create_argv(n, &none)), "{n:?}");
             assert!(bad(tag_delete_argv(n)), "{n:?}");
         }
-        assert!(bad(tag_create_argv("v1", Some("main"), None)));
-        assert!(bad(tag_create_argv("v1", None, Some("a\0b"))));
+        assert!(bad(tag_create_argv(
+            "v1",
+            &with(&|o| o.commit = Some("main".into()))
+        )));
+        assert!(bad(tag_create_argv(
+            "v1",
+            &with(&|o| o.message = Some("a\0b".into()))
+        )));
         assert_eq!(
             tag_delete_argv("v1.0").unwrap(),
-            ["tag", "delete", "--", "v1.0"]
+            ["tag", "delete", "--force", "--", "v1.0"]
         );
+    }
+
+    #[test]
+    fn tag_tagger_and_email_need_a_note_and_stay_values() {
+        let annotated = |t: Option<&str>, e: Option<&str>| TagOptions {
+            message: Some("Final".into()),
+            tagger: t.map(Into::into),
+            email: e.map(Into::into),
+            ..TagOptions::default()
+        };
+        assert_eq!(
+            tag_create_argv("v1", &annotated(Some("Mira O"), Some("m@x.io"))).unwrap(),
+            [
+                "tag",
+                "create",
+                "--annotated",
+                "--message=Final",
+                "--tagger=Mira O",
+                "--email=m@x.io",
+                "--",
+                "v1"
+            ]
+        );
+        // No note: a tagger would be silently dropped, so it is refused.
+        let lone = TagOptions {
+            tagger: Some("Mira".into()),
+            ..TagOptions::default()
+        };
+        assert!(bad(tag_create_argv("v1", &lone)));
+        for t in ["--force", "a\nb"] {
+            assert!(
+                bad(tag_create_argv("v1", &annotated(Some(t), None))),
+                "{t:?}"
+            );
+        }
+        for e in ["no-at", "a b@c.d", "--x@y"] {
+            assert!(
+                bad(tag_create_argv("v1", &annotated(None, Some(e)))),
+                "{e:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn replacing_a_tag_needs_force_and_confirmation() {
+        let o = |force, confirmed| TagOptions {
+            force,
+            confirmed,
+            ..TagOptions::default()
+        };
+        assert!(bad(tag_create_argv("v1", &o(true, false))));
+        assert_eq!(
+            tag_create_argv("v1", &o(true, true)).unwrap(),
+            ["tag", "create", "--force", "--", "v1"]
+        );
+        // Confirmation alone changes nothing: the safe default stays without --force.
+        assert_eq!(
+            tag_create_argv("v1", &o(false, true)).unwrap(),
+            ["tag", "create", "--", "v1"]
+        );
+    }
+
+    #[test]
+    fn tag_list_filter_and_inspect_argv() {
+        assert_eq!(tag_list_argv(None).unwrap(), ["tag", "list"]);
+        assert_eq!(tag_list_argv(Some("  ")).unwrap(), ["tag", "list"]);
+        assert_eq!(
+            tag_list_argv(Some("v1.*")).unwrap(),
+            ["tag", "list", "--", "v1.*"]
+        );
+        assert!(bad(tag_list_argv(Some("--all"))));
+        assert!(bad(tag_list_argv(Some("a\0b"))));
+        assert_eq!(
+            tag_inspect_argv("verify", "v1").unwrap(),
+            ["tag", "verify", "--", "v1"]
+        );
+        assert!(bad(tag_inspect_argv("delete", "v1")));
+        assert!(bad(tag_inspect_argv("show", "--full")));
     }
 
     #[test]

@@ -118,7 +118,6 @@ merge	--no-ff	no	OK
 merge	--ff-only	no	OK
 merge	--squash	no	OK
 merge	-s,--strategy	yes	ERROR
-merge	-X,--strategy-option	yes	ERROR
 merge	--no-commit	no	OK
 merge	--abort	no	ERROR
 merge	--continue-merge	no	ERROR
@@ -132,7 +131,6 @@ cherry-pick	--continue-pick	no	ERROR
 cherry-pick	--abort	no	ERROR
 cherry-pick	--skip	no	ERROR
 cherry-pick	-n,--no-commit	no	OK
-cherry-pick	-e,--edit	no	ERROR
 cherry-pick	-x,--append-message	no	ERROR
 stash	-(bare invocation)	no	USAGE
 stash push	-(bare invocation)	no	OK

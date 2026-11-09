@@ -7,7 +7,7 @@ import { useHistoryStore } from './history'
 
 export type Pending =
   | { kind: 'reset'; mode: 'soft' | 'mixed' | 'hard'; rev: string }
-  | { kind: 'revert'; rev: string; summary: string }
+  | { kind: 'revert'; rev: string; summary: string; also?: string[]; noCommit?: boolean; message?: string }
   | { kind: 'restore'; rev: string; path: string }
 
 /**
@@ -44,10 +44,12 @@ export const useUndoStore = defineStore('undo', () => {
       return !!r
     }
     if (p.kind === 'revert') {
+      const revs = [p.rev, ...(p.also ?? [])]
+      const opts = { noCommit: p.noCommit || undefined, message: p.message?.trim() || undefined }
       const r = await run(
-        `Undo ${shortOid(p.rev)}`,
-        (root) => api.revert(root, p.rev),
-        (x) => (x.status === 'conflict' ? `Stopped: ${x.conflicts.length} files clash` : 'Undone with a new version'),
+        revs.length > 1 ? `Undo ${revs.length} versions` : `Undo ${shortOid(p.rev)}`,
+        (root) => api.revert(root, revs, opts),
+        (x) => (x.status === 'conflict' ? `Stopped: ${x.conflicts.length} files clash` : x.status === 'not_committed' ? 'Undone, not saved yet' : 'Undone with a new version'),
         (x) => x.status === 'conflict',
       )
       if (r) revertConflicts.value = r.value.status === 'conflict' ? r.value.conflicts : []

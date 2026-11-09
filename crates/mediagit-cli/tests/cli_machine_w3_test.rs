@@ -218,7 +218,7 @@ fn config_machine_get_set_unset_list() {
     );
     let d = ok(dir, &["config", "list"]);
     let entries = d["entries"].as_array().unwrap();
-    assert_eq!(entries.len(), 4);
+    assert!(entries.len() >= 4, "{d}");
     assert!(
         entries
             .iter()

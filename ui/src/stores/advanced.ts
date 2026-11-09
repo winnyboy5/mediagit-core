@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { computed, ref, shallowRef, watch } from 'vue'
-import { api, toApiError, type ApiError, type BisectReport, type CherryPickReport, type LogCommitReport, type RebaseReport, type ReflogEntryReport } from '@/api'
+import { api, toApiError, type ApiError, type BisectReport, type CherryPickReport, type LogCommitReport, type RebaseReport, type ReflogEntryReport, type ReflogReport } from '@/api'
 import type { Side } from '@/lib/merge'
 import { useAction } from './action'
 import { useBranchesStore } from './branches'
@@ -32,6 +32,14 @@ const SUMMARY: Record<string, string> = {
 export function stepSummary(s: Step): string {
   if (s.status === 'conflict') return `Stopped: ${s.conflicts.length} ${s.conflicts.length === 1 ? 'file clashes' : 'files clash'}`
   return SUMMARY[s.status] ?? s.status
+}
+
+/** Rebase: `branch` (default: the current one), `keepEmpty`. Cherry-pick: `noCommit`, `appendMessage`. */
+export interface SequencerExtra {
+  branch?: string
+  keepEmpty?: boolean
+  noCommit?: boolean
+  appendMessage?: boolean
 }
 
 /** The recent versions the pickers offer. */
@@ -95,11 +103,14 @@ function sequencer(command: 'rebase' | 'cherry-pick') {
     const stopped = (x: RebaseReport | CherryPickReport) => x.status === 'conflict'
     const stepOf = (r: RebaseReport | CherryPickReport): Step => ({ status: r.status, conflicts: r.conflicts, conflictCommit: r.conflict_commit })
 
-    async function start(target: string) {
+    async function start(target: string, extra: SequencerExtra = {}) {
       const label = command === 'rebase' ? `Rebase onto ${target}` : `Copy ${target.slice(0, 7)}`
       const r = await run<RebaseReport | CherryPickReport>(
         label,
-        (root, report) => (command === 'rebase' ? api.rebaseStart(root, target, report) : api.pickStart(root, [target], report)),
+        (root, report) =>
+          command === 'rebase'
+            ? api.rebaseStart(root, target, report, { branch: extra.branch || undefined, keepEmpty: extra.keepEmpty || undefined })
+            : api.pickStart(root, [target], report, { noCommit: extra.noCommit || undefined, appendMessage: extra.appendMessage || undefined }),
         (x) => stepSummary(stepOf(x)),
         stopped,
       )
@@ -167,9 +178,12 @@ export const useBisectStore = defineStore('bisect', () => {
     return !!r
   }
 
-  const start = (bad: string, good: string | null) => exec('Start bisect', (root, p) => api.bisectStart(root, bad, good, p))
-  const mark = (verdict: 'good' | 'bad' | 'skip') => exec(`Mark ${verdict}`, (root, p) => api.bisectMark(root, verdict, null, p))
-  const reset = () => exec('End bisect', (root, p) => api.bisectReset(root, p))
+  const start = (bad: string, good: string | null, restart = false) => exec('Start bisect', (root, p) => api.bisectStart(root, bad, good, p, restart))
+  /** `commit` marks that version instead of the one being tested. */
+  const mark = (verdict: 'good' | 'bad' | 'skip', commit: string | null = null) => exec(`Mark ${verdict}`, (root, p) => api.bisectMark(root, verdict, commit, p))
+  /** `commit` moves the branch there instead of back to where the bisect began. */
+  const reset = (commit?: string) => exec('End bisect', (root, p) => api.bisectReset(root, p, commit))
+  const replay = (logfile: string) => exec('Replay bisect log', (root, p) => api.bisectReplay(root, logfile, p))
 
   watch(
     () => repo.path,
@@ -178,8 +192,11 @@ export const useBisectStore = defineStore('bisect', () => {
       error.value = null
     },
   )
-  return { report, active, busy, error, running, start, mark, reset }
+  return { report, active, busy, error, running, start, mark, reset, replay }
 })
+
+/** The "every ref" choice in the undo log's picker (`reflog show --all`). */
+export const ALL_REFS = '*all-refs'
 
 /** The reflog of one ref, newest first. */
 export const useReflogStore = defineStore('reflog', () => {
@@ -189,6 +206,8 @@ export const useReflogStore = defineStore('reflog', () => {
   const loaded = ref(false)
   const loading = ref(false)
   const error = ref<ApiError | null>(null)
+  /** Every ref's newest entries, when `reference` is the all-refs choice. */
+  const groups = shallowRef<ReflogReport[]>([])
   let token = 0
 
   async function refresh() {
@@ -198,6 +217,14 @@ export const useReflogStore = defineStore('reflog', () => {
     loading.value = true
     error.value = null
     try {
+      if (reference.value === ALL_REFS) {
+        const r = await api.reflogAll(root, 20)
+        if (mine !== token) return
+        groups.value = r.refs
+        entries.value = []
+        loaded.value = true
+        return
+      }
       const r = await api.reflog(root, reference.value, 100)
       if (mine !== token) return
       entries.value = r.entries
@@ -215,9 +242,18 @@ export const useReflogStore = defineStore('reflog', () => {
       token++
       reference.value = 'HEAD'
       entries.value = []
+      groups.value = []
       loaded.value = false
       error.value = null
     },
   )
-  return { reference, entries, loaded, loading, error, refresh }
+
+  // Cleaning up undo history cannot itself be undone: the view asks first.
+  const action = useAction(refresh)
+  /** Forget where `ref` has been. */
+  const forget = (ref: string) => action.run(`Clear undo history of ${ref}`, (root) => api.reflogDelete(root, ref), () => 'Undo history cleared')
+  /** Keep the newest `keep` entries of `ref` (null = every ref). */
+  const trim = (ref: string | null, keep: number) =>
+    action.run(`Trim undo history${ref ? ` of ${ref}` : ''}`, (root) => api.reflogExpire(root, ref, keep), (r) => `Removed ${r.expired} ${r.expired === 1 ? 'entry' : 'entries'}`)
+  return { reference, entries, groups, loaded, loading, error, refresh, forget, trim, busy: action.busy, actionError: action.error }
 })

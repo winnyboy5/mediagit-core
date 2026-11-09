@@ -6,6 +6,7 @@ import Button from '@/components/Button.vue'
 import Checkbox from '@/components/Checkbox.vue'
 import Dialog from '@/components/Dialog.vue'
 import ErrorState from '@/components/ErrorState.vue'
+import SegmentedControl from '@/components/SegmentedControl.vue'
 import SkeletonRows from '@/components/SkeletonRows.vue'
 import TextField from '@/components/TextField.vue'
 import { useRepoStore } from '@/stores/repo'
@@ -39,6 +40,59 @@ async function login() {
 }
 const signOutOpen = ref(false)
 
+// Create account (`auth register`) -------------------------------------------
+const regOpen = ref(false)
+const regServer = ref('')
+const regUser = ref('')
+const regEmail = ref('')
+const regPass = ref('')
+const regAgain = ref('')
+const regServerError = computed(() => (regServer.value && !/^https?:\/\/[^\s/]+/.test(regServer.value) ? 'Use an http(s) address' : undefined))
+const regMismatch = computed(() => (regAgain.value && regAgain.value !== regPass.value ? 'The passwords do not match' : undefined))
+const canRegister = computed(() => !!regUser.value && !!regEmail.value && !!regPass.value && regPass.value === regAgain.value && !regServerError.value && !sec.busy)
+async function register() {
+  if (!canRegister.value) return
+  const pw = regPass.value
+  regPass.value = regAgain.value = ''
+  regOpen.value = false
+  await sec.register(regServer.value, regUser.value, regEmail.value, pw)
+}
+
+// Change password (`auth passwd`) ---------------------------------------------
+const pwOpen = ref(false)
+const pwServer = ref('')
+const pwCurrent = ref('')
+const pwNew = ref('')
+const pwAgain = ref('')
+const pwServerError = computed(() => (pwServer.value && !/^https?:\/\/[^\s/]+/.test(pwServer.value) ? 'Use an http(s) address' : undefined))
+const pwMismatch = computed(() => (pwAgain.value && pwAgain.value !== pwNew.value ? 'The passwords do not match' : undefined))
+const canChangePw = computed(() => !!pwCurrent.value && !!pwNew.value && pwNew.value === pwAgain.value && !pwServerError.value && !sec.busy)
+async function changePassword() {
+  if (!canChangePw.value) return
+  const [cur, next] = [pwCurrent.value, pwNew.value]
+  pwCurrent.value = pwNew.value = pwAgain.value = ''
+  pwOpen.value = false
+  await sec.changePassword(pwServer.value, cur, next)
+}
+
+// Replace the master key (`key rotate-master`) -------------------------------------
+const rotOpen = ref(false)
+const rotMode = ref('passphrase')
+const rotKeyfile = ref('')
+const rotCurrent = ref('')
+const rotNew = ref('')
+const currentIsPassphrase = computed(() => /passphrase/i.test(sec.key?.source ?? ''))
+const canRotate = computed(() => (rotMode.value === 'keyfile' ? !!rotKeyfile.value.trim() : !!rotNew.value) && (!currentIsPassphrase.value || !!rotCurrent.value) && !sec.busy)
+async function rotate() {
+  if (!canRotate.value) return
+  const keyfile = rotMode.value === 'keyfile' ? rotKeyfile.value : ''
+  const next = rotMode.value === 'passphrase' ? rotNew.value : ''
+  const cur = currentIsPassphrase.value ? rotCurrent.value : ''
+  rotNew.value = rotCurrent.value = ''
+  rotOpen.value = false
+  await sec.rotateMaster(keyfile, cur, next)
+}
+
 // Encryption --------------------------------------------------------------
 const initOpen = ref(false)
 const initPass = ref('')
@@ -63,6 +117,9 @@ async function recover() {
 // Whatever was typed is gone when its dialog closes.
 watch(loginOpen, (o) => !o && (password.value = ''))
 watch(initOpen, (o) => !o && (initPass.value = ''))
+watch(regOpen, (o) => !o && (regPass.value = regAgain.value = ''))
+watch(pwOpen, (o) => !o && (pwCurrent.value = pwNew.value = pwAgain.value = ''))
+watch(rotOpen, (o) => !o && (rotNew.value = rotCurrent.value = ''))
 watch(recoverOpen, (o) => !o && (code.value = recoverPass.value = ''))
 
 // The one-time recovery code ------------------------------------------------
@@ -123,11 +180,17 @@ const sourceText = (s: string | null) => s ?? 'No key available on this machine'
             <ul v-if="a.identity.grants.length" class="grants" aria-label="Projects you can reach">
               <li v-for="g in a.identity.grants" :key="g.repo"><span class="mono">{{ g.repo }}</span> <span class="chip">{{ g.level }}</span></li>
             </ul>
-            <Button variant="danger" :disabled="sec.busy" @click="signOutOpen = true">Sign out…</Button>
+            <div class="btns">
+              <Button :disabled="sec.busy" @click="pwOpen = true">Change password…</Button>
+              <Button variant="danger" :disabled="sec.busy" @click="signOutOpen = true">Sign out…</Button>
+            </div>
           </template>
           <template v-else>
             <p class="muted">You are not signed in{{ a.server ? ` to ${a.server}` : '' }}.</p>
-            <Button variant="primary" :disabled="sec.busy" @click="loginOpen = true"><LogIn :size="16" aria-hidden="true" /> Sign in</Button>
+            <div class="btns">
+              <Button variant="primary" :disabled="sec.busy" @click="loginOpen = true"><LogIn :size="16" aria-hidden="true" /> Sign in</Button>
+              <Button :disabled="sec.busy" @click="regOpen = true">Create account…</Button>
+            </div>
           </template>
         </template>
       </section>
@@ -147,6 +210,7 @@ const sourceText = (s: string | null) => s ?? 'No key available on this machine'
             <div class="btns">
               <Button v-if="isUnlocked" @click="unlock.lock(repo.path!)"><Lock :size="16" aria-hidden="true" /> Lock now</Button>
               <Button :disabled="sec.busy" @click="recoverOpen = true">Recover with a code…</Button>
+              <Button :disabled="sec.busy || !k.source" @click="rotOpen = true">Replace master key…</Button>
             </div>
           </template>
           <template v-else>
@@ -166,6 +230,54 @@ const sourceText = (s: string | null) => s ?? 'No key available on this machine'
       <template #footer>
         <Button @click="loginOpen = false">Cancel</Button>
         <Button type="submit" form="login-form" variant="primary" :disabled="!canLogin">Sign in</Button>
+      </template>
+    </Dialog>
+
+    <Dialog v-model:open="regOpen" title="Create account" description="Make an account on a MediaGit server that allows sign-up. Then sign in with it.">
+      <form id="reg-form" class="form" autocomplete="off" @submit.prevent="register">
+        <TextField v-model="regServer" label="Server address (optional)" placeholder="https://mediagit.studio.example" hint="Leave empty to use this repository's remote (--server)" :error="regServerError" />
+        <TextField v-model="regUser" label="Username" />
+        <TextField v-model="regEmail" label="Email" type="email" />
+        <TextField v-model="regPass" label="Password" type="password" />
+        <TextField v-model="regAgain" label="Repeat password" type="password" :error="regMismatch" />
+      </form>
+      <template #footer>
+        <Button @click="regOpen = false">Cancel</Button>
+        <Button type="submit" form="reg-form" variant="primary" :disabled="!canRegister">Create account</Button>
+      </template>
+    </Dialog>
+
+    <Dialog v-model:open="pwOpen" title="Change password" description="Your old password stops working at once on that server.">
+      <form id="pw-form" class="form" autocomplete="off" @submit.prevent="changePassword">
+        <TextField v-model="pwServer" label="Server address (optional)" placeholder="https://mediagit.studio.example" hint="Leave empty to use this repository's remote (--server)" :error="pwServerError" />
+        <TextField v-model="pwCurrent" label="Current password" type="password" />
+        <TextField v-model="pwNew" label="New password" type="password" />
+        <TextField v-model="pwAgain" label="Repeat new password" type="password" :error="pwMismatch" />
+      </form>
+      <template #footer>
+        <Button @click="pwOpen = false">Cancel</Button>
+        <Button type="submit" form="pw-form" variant="primary" :disabled="!canChangePw">Change password</Button>
+      </template>
+    </Dialog>
+
+    <Dialog
+      v-model:open="rotOpen"
+      title="Replace the master key"
+      description="The master key protects this repository's own key. Replacing it rewrites no files and your recovery code keeps working. It does not re-encrypt the data: if the old master key leaked together with a copy of the files, those files stay readable by it."
+    >
+      <form id="rot-form" class="form" autocomplete="off" @submit.prevent="rotate">
+        <SegmentedControl
+          v-model="rotMode"
+          label="New master key"
+          :options="[{ value: 'passphrase', label: 'A passphrase' }, { value: 'keyfile', label: 'A key file' }]"
+        />
+        <TextField v-if="currentIsPassphrase" v-model="rotCurrent" label="Current passphrase" type="password" />
+        <TextField v-if="rotMode === 'passphrase'" v-model="rotNew" label="New passphrase" type="password" hint="Write it down: without it and your recovery code the data cannot be read." />
+        <TextField v-else v-model="rotKeyfile" label="Key file" placeholder="C:\Keys\hero-film.key" hint="Full path to the new key file (--new-keyfile). It must differ from the current one." mono />
+      </form>
+      <template #footer>
+        <Button @click="rotOpen = false">Cancel</Button>
+        <Button type="submit" form="rot-form" variant="primary" :disabled="!canRotate">Replace master key</Button>
       </template>
     </Dialog>
 

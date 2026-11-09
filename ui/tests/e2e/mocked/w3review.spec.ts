@@ -95,13 +95,15 @@ test('maintenance: Clean up… is danger, Preview is primary; findings use chips
 
 test('compact density shortens table and nav rows; comfortable stays 36px', async ({ page }) => {
   const rowH = (sel: string) => page.locator(sel).first().evaluate((e) => e.getBoundingClientRect().height)
-  await boot(page, '/settings')
-  await expect(page.getByTestId('config')).toContainText('performance.upload_concurrency')
-  const comfortable = await rowH('[data-testid="config"] tbody tr')
+  // Settings is a form now; Storage's table rows follow the density token.
+  await boot(page, '/storage', { commands: { repo_stats: fixture('stats') } })
+  const row = 'main table tbody tr'
+  await expect(page.locator(row).first()).toBeVisible()
+  const comfortable = await rowH(row)
   expect(comfortable).toBeGreaterThanOrEqual(36)
   expect(await rowH('nav a.item')).toBe(36)
   await page.evaluate(() => document.documentElement.setAttribute('data-density', 'compact'))
-  expect(await rowH('[data-testid="config"] tbody tr')).toBeLessThanOrEqual(comfortable - 8)
+  expect(await rowH(row)).toBeLessThanOrEqual(comfortable - 8)
   expect(await rowH('nav a.item')).toBe(28)
 })
 

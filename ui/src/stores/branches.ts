@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { computed, ref, shallowRef, watch } from 'vue'
-import { api, toApiError, type ApiError, type BranchEntryReport, type Progress } from '@/api'
+import { api, toApiError, type ApiError, type BranchCreateOpts, type BranchDeleteOpts, type BranchEntryReport, type BranchSwitchOpts, type Progress } from '@/api'
 import { useOpsStore } from './ops'
 import { useRepoStore } from './repo'
 
@@ -10,6 +10,8 @@ export const useBranchesStore = defineStore('branches', () => {
   const ops = useOpsStore()
 
   const list = shallowRef<BranchEntryReport[]>([])
+  /** Remote-tracking branches (`origin/feature`): what the last fetch saw. */
+  const remotes = shallowRef<BranchEntryReport[]>([])
   const current = ref<string | null>(null)
   const loaded = ref(false)
   const loading = ref(false)
@@ -34,6 +36,9 @@ export const useBranchesStore = defineStore('branches', () => {
       list.value = r.branches.filter((b) => !b.remote)
       current.value = r.current
       loaded.value = true
+      // Remote-tracking branches are a bonus: a failure here must not hide the local list.
+      const rr = await api.branchList(repo.path, true).catch(() => null)
+      if (mine === token) remotes.value = rr ? rr.branches.filter((b) => b.remote) : []
     } catch (e) {
       if (mine === token) error.value = toApiError(e)
     } finally {
@@ -62,16 +67,41 @@ export const useBranchesStore = defineStore('branches', () => {
     }
   }
 
-  const create = (name: string) => act(`Create branch ${name}`, (root) => api.branchCreate(root, name), `Created branch ${name}`)
-  const switchTo = (name: string) => act(`Switch to ${name}`, (root, report) => api.branchSwitch(root, name, report), `Switched to ${name}`, true)
-  const remove = (name: string) => act(`Delete branch ${name}`, (root) => api.branchDelete(root, name), `Deleted branch ${name}`)
-  const rename = (from: string, to: string) => act(`Rename ${from}`, (root) => api.branchRename(root, from, to), `Renamed ${from} to ${to}`)
+  const create = (name: string, opts?: BranchCreateOpts) => act(`Create branch ${name}`, (root) => api.branchCreate(root, name, opts), `Created branch ${name}`)
+  const switchTo = (name: string, opts?: BranchSwitchOpts) =>
+    act(`Switch to ${name}`, (root, report) => api.branchSwitch(root, name, report, opts), `Switched to ${name}`, true)
+  /** Make a local branch that follows a remote-tracking one (`origin/feature`) and switch to it. */
+  const checkoutRemote = (remoteName: string) => switchTo(remoteName, { create: true, track: true })
+  const remove = (name: string, opts?: BranchDeleteOpts) =>
+    act(`Delete branch ${name}`, (root) => api.branchDelete(root, name, opts), `Deleted branch ${name}`)
+  /** Forget a remote-tracking branch on this computer; nothing changes on the server. */
+  const forgetRemote = (name: string) => remove(name, { remote: true })
+  const rename = (from: string, to: string, overwrite = false) =>
+    act(`Rename ${from}`, (root) => api.branchRename(root, from, to, overwrite), `Renamed ${from} to ${to}`)
+  const protect = (name: string, requireReviews: boolean) =>
+    act(`Protect ${name}`, (root) => api.branchProtect(root, name, requireReviews, false), `Protected ${name}`)
+  const unprotect = (name: string) => act(`Remove protection from ${name}`, (root) => api.branchProtect(root, name, false, true), `${name} is no longer protected`)
+
+  /** One branch's details (`branch show`). */
+  const detail = shallowRef<BranchEntryReport | null>(null)
+  async function show(name: string) {
+    if (!repo.path) return
+    detail.value = null
+    actionError.value = null
+    try {
+      detail.value = await api.branchShow(repo.path, name)
+    } catch (e) {
+      actionError.value = toApiError(e)
+    }
+  }
 
   watch(
     () => repo.path,
     () => {
       token++
       list.value = []
+      remotes.value = []
+      detail.value = null
       current.value = null
       loaded.value = false
       error.value = null
@@ -79,5 +109,5 @@ export const useBranchesStore = defineStore('branches', () => {
     },
   )
 
-  return { list, current, loaded, loading, error, actionError, busy, switching, refresh, create, switchTo, remove, rename }
+  return { list, remotes, current, loaded, loading, error, actionError, busy, switching, detail, refresh, create, switchTo, checkoutRemote, remove, forgetRemote, rename, protect, unprotect, show }
 })

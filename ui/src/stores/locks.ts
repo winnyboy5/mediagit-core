@@ -29,6 +29,8 @@ export const useLocksStore = defineStore('locks', () => {
   const error = ref<ApiError | null>(null)
   const actionError = ref<ApiError | null>(null)
   const busy = ref<string | null>(null)
+  /** Which remote to talk to; null = the CLI's default (origin). */
+  const remote = ref<string | null>(null)
   /** The owner name locks made here are filed under; learned from the first lock this app creates. */
   const me = ref<string | null>(load<string | null>(OWNER_KEY, null))
   let token = 0
@@ -44,7 +46,7 @@ export const useLocksStore = defineStore('locks', () => {
     loading.value = true
     error.value = null
     try {
-      const r = await api.lockList(repo.path)
+      const r = await api.lockList(repo.path, remote.value ?? undefined)
       if (mine !== token) return
       locks.value = [...r.locks].sort((a, b) => a.path.localeCompare(b.path))
       loaded.value = true
@@ -72,16 +74,16 @@ export const useLocksStore = defineStore('locks', () => {
     }
   }
 
-  async function lock(path: string) {
+  async function lock(path: string, owner?: string) {
     return act(`lock:${path}`, `Lock ${path}`, async (root) => {
-      const made = await api.lockCreate(root, path)
+      const made = await api.lockCreate(root, path, owner?.trim() || undefined, remote.value ?? undefined)
       me.value = made.owner
       save(OWNER_KEY, made.owner)
     }, `Locked ${path}`)
   }
 
   const unlock = (l: LockReport, force: boolean) =>
-    act(`unlock:${l.lock_id}`, `${force ? 'Force unlock' : 'Unlock'} ${l.path}`, (root) => api.lockUnlock(root, l.lock_id, force), `Unlocked ${l.path}`)
+    act(`unlock:${l.lock_id}`, `${force ? 'Force unlock' : 'Unlock'} ${l.path}`, (root) => api.lockUnlock(root, l.lock_id, force, remote.value ?? undefined), `Unlocked ${l.path}`)
 
   watch(
     () => repo.path,
@@ -91,8 +93,9 @@ export const useLocksStore = defineStore('locks', () => {
       loaded.value = false
       error.value = null
       actionError.value = null
+      remote.value = null
     },
   )
 
-  return { locks, byPath, names, isMine, loaded, loading, error, actionError, busy, me, refresh, lock, unlock }
+  return { locks, byPath, names, isMine, loaded, loading, error, actionError, busy, me, remote, refresh, lock, unlock }
 })

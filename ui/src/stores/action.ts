@@ -23,6 +23,8 @@ export function useAction(after: () => Promise<unknown>) {
     warn?: (r: T) => boolean,
     /** The call carries a secret: no Retry closure may keep it alive in the activity store. */
     secret = false,
+    /** The view shows the result itself: no toast. */
+    quiet = false,
   ): Promise<{ value: T } | null> {
     if (!repo.path || busy.value) return null
     const root = repo.path
@@ -30,7 +32,7 @@ export function useAction(after: () => Promise<unknown>) {
     error.value = null
     try {
       const value = await ops.track(
-        { kind: 'other', label, retry: secret ? undefined : () => void run(label, fn, summarize, warn), noRetry: secret },
+        { kind: 'other', label, retry: secret ? undefined : () => void run(label, fn, summarize, warn, false, quiet), noRetry: secret, quiet },
         (report, id) => {
           opId.value = id
           return fn(root, report)

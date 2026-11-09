@@ -809,8 +809,7 @@ async fn fast_forward_to(
 ///
 /// Extracted from `execute` so it is assertable - `execute` needs a real
 /// repository, and the one behaviour worth pinning is that these REFUSE rather
-/// than silently do nothing. Same reason `merge::reject_strategy_option`
-/// exists.
+/// than silently do nothing.
 fn reject_dead_pull_flags(
     continue_pull: bool,
     strategy: Option<&str>,

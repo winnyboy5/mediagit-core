@@ -8,7 +8,11 @@ import { api } from '@/api'
 import BranchPill from '@/components/BranchPill.vue'
 import Button from '@/components/Button.vue'
 import ErrorState from '@/components/ErrorState.vue'
+import Dialog from '@/components/Dialog.vue'
 import IconButton from '@/components/IconButton.vue'
+import MoreOptions from '@/components/MoreOptions.vue'
+import TextField from '@/components/TextField.vue'
+import { refNameError } from '@/lib/inspect'
 import Kbd from '@/components/Kbd.vue'
 import { baseName, timeAgo } from '@/lib/persist'
 import { pickFolder, useOpenRepo } from '@/shell/useOpenRepo'
@@ -52,15 +56,29 @@ async function newRepo() {
     error.value = toApiError(e)
     return
   }
-  if (dir) await initIn(dir)
+  if (dir) {
+    initDir.value = dir
+    initBranch.value = ''
+    initOpen.value = true
+  }
 }
 
-async function initIn(dir: string) {
+const initOpen = ref(false)
+const initDir = ref('')
+const initBranch = ref('')
+const initBranchError = computed(() => (initBranch.value ? (refNameError(initBranch.value) ?? undefined) : undefined))
+function createHere() {
+  if (initBranchError.value) return
+  initOpen.value = false
+  void initIn(initDir.value, initBranch.value.trim() || undefined)
+}
+
+async function initIn(dir: string, branch?: string) {
   try {
-    await ops.track({ kind: 'init', label: `Create repository ${baseName(dir)}` }, () => api.init(dir), () => dir)
+    await ops.track({ kind: 'init', label: `Create repository ${baseName(dir)}` }, () => api.init(dir, branch), () => dir)
   } catch (e) {
     error.value = toApiError(e)
-    retry.value = () => void initIn(dir)
+    retry.value = () => void initIn(dir, branch)
     return
   }
   await guarded(() => openPath(dir), () => void openPath(dir))
@@ -122,10 +140,32 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
     <p class="foot mono">{{ version }}<template v-if="version"> · </template><Kbd>Ctrl</Kbd>+<Kbd>O</Kbd> to open</p>
 
     <CloneDialog v-model:open="cloneOpen" />
+
+    <Dialog v-model:open="initOpen" title="Create repository" description="Start tracking this folder with MediaGit.">
+      <form id="init-form" class="initform" @submit.prevent="createHere">
+        <p class="mono initdir">{{ initDir }}</p>
+        <MoreOptions data-testid="init-more">
+          <TextField v-model="initBranch" label="First branch name" hint="Leave empty for main." flag="--initial-branch" placeholder="main" :error="initBranchError" mono />
+        </MoreOptions>
+      </form>
+      <template #footer>
+        <Button @click="initOpen = false">Cancel</Button>
+        <Button type="submit" form="init-form" variant="primary" :disabled="!!initBranchError">Create</Button>
+      </template>
+    </Dialog>
   </div>
 </template>
 
 <style scoped>
+.initform {
+  display: grid;
+  gap: var(--space-3);
+}
+.initdir {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+}
 header {
   display: grid;
   justify-items: start;

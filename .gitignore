@@ -251,7 +251,7 @@ deck/
 crates/mediagit-desktop/gen/
 crates/mediagit-desktop/binaries/
 ui/dist/
-ui/test-results/
+ui/test-results*/
 ui/playwright-report/
 # impeccable design-skill working files (local only)
 ui/PRODUCT.md

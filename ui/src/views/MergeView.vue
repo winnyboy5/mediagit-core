@@ -8,7 +8,10 @@ import Dialog from '@/components/Dialog.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import ErrorState from '@/components/ErrorState.vue'
 import ProgressBar from '@/components/ProgressBar.vue'
+import MoreOptions from '@/components/MoreOptions.vue'
+import OptionCheck from '@/components/OptionCheck.vue'
 import Select from '@/components/Select.vue'
+import TextField from '@/components/TextField.vue'
 import SkeletonRows from '@/components/SkeletonRows.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import type { MergeStrategy } from '@/api'
@@ -34,18 +37,30 @@ const startOpen = ref(false)
 const pick = ref('')
 const strategy = ref<string>('recursive')
 const noFf = ref(false)
+const ffOnly = ref(false)
+const squash = ref(false)
+const noCommit = ref(false)
+const message = ref('')
 const others = computed(() => branches.list.filter((b) => b.name !== branches.current).map((b) => ({ value: b.name, label: b.name })))
 
 function openStart() {
   merge.error = null
   pick.value = others.value[0]?.value ?? ''
+  ffOnly.value = squash.value = noCommit.value = false
+  message.value = ''
   startOpen.value = true
 }
 async function start() {
   if (!pick.value || merge.busy) return
   // Close first: progress and any failure show on the page, not behind the dialog.
   startOpen.value = false
-  await merge.start(pick.value, strategy.value as MergeStrategy, noFf.value === true)
+  await merge.start(pick.value, strategy.value as MergeStrategy, {
+    noFf: noFf.value === true,
+    ffOnly: ffOnly.value === true,
+    squash: squash.value === true,
+    noCommit: noCommit.value === true,
+    message: message.value.trim() || undefined,
+  })
 }
 
 // Cancel -----------------------------------------------------------------
@@ -163,7 +178,13 @@ const theirsMissing = computed(() => !merge.theirsOid)
       <form id="start-merge" class="form" @submit.prevent="start">
         <Select v-model="pick" label="Merge this branch" :options="others" />
         <Select v-model="strategy" label="When files clash" :options="STRATEGIES" />
-        <Checkbox v-model="noFf" label="Always create a merge version" />
+        <Checkbox v-model="noFf" label="Always create a merge version" :disabled="ffOnly === true" />
+        <MoreOptions>
+          <TextField v-model="message" label="Message for the merge version" hint="Leave blank for the automatic one." flag="--message" />
+          <OptionCheck v-model="ffOnly" label="Only if it can simply catch up" flag="--ff-only" hint="Refuses when both branches have new work" :disabled="noFf === true || squash === true" />
+          <OptionCheck v-model="squash" label="Combine into one change" flag="--squash" hint="No merge link is kept to the other branch" :disabled="ffOnly === true" />
+          <OptionCheck v-model="noCommit" label="Let me look before it is saved" flag="--no-commit" hint="Files are merged but no version is made yet" />
+        </MoreOptions>
       </form>
       <template #footer>
         <Button @click="startOpen = false">Cancel</Button>

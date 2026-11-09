@@ -64,7 +64,7 @@ test.describe('Locks: filter and actions', () => {
     await expect(page.getByRole('table').getByRole('row')).toHaveCount(2)
     await expect(row(page, 'art/hero.psd')).toContainText('You')
     await row(page, 'art/hero.psd').getByRole('button', { name: 'Unlock' }).click()
-    await expect.poll(async () => (await ipcCalls(page, 'lock_unlock')).map((c) => c.args)).toEqual([{ repo: '/repos/hero-film', lockId: 'l-1', force: false }])
+    await expect.poll(async () => (await ipcCalls(page, 'lock_unlock')).map((c) => c.args)).toEqual([{ repo: '/repos/hero-film', lockId: 'l-1', force: false, remote: null }])
     await page.getByRole('button', { name: 'Others' }).click()
     await expect(page.getByRole('table').getByRole('row')).toHaveCount(3)
   })
@@ -99,7 +99,7 @@ test.describe('Locks: filter and actions', () => {
     expect(await ipcCalls(page, 'lock_unlock')).toHaveLength(0)
     await row(page, 'char/rig.fbx').getByRole('button', { name: 'Force unlock…' }).click()
     await page.getByRole('alertdialog').getByRole('button', { name: 'Force unlock' }).click()
-    await expect.poll(async () => (await ipcCalls(page, 'lock_unlock')).map((c) => c.args)).toEqual([{ repo: '/repos/hero-film', lockId: 'l-2', force: true }])
+    await expect.poll(async () => (await ipcCalls(page, 'lock_unlock')).map((c) => c.args)).toEqual([{ repo: '/repos/hero-film', lockId: 'l-2', force: true, remote: null }])
   })
 
   test('lock a file: path rules, duplicate check, then the lock is requested', async ({ page }) => {

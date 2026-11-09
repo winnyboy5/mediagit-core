@@ -161,6 +161,7 @@ export function healthy(extra: Record<string, unknown> = {}): Record<string, unk
     lock_list: { locks: [] },
     repo_log: { commits: [], refs: [] },
     media_info: {},
+    config_schema: { keys: [] },
     ...extra,
   }
 }

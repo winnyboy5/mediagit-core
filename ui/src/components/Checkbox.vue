@@ -3,12 +3,12 @@ import { CheckboxIndicator, CheckboxRoot } from 'reka-ui'
 import { Check, Minus } from 'lucide-vue-next'
 
 const model = defineModel<boolean | 'indeterminate'>({ default: false })
-defineProps<{ label?: string; disabled?: boolean; ariaLabel?: string }>()
+defineProps<{ label?: string; disabled?: boolean; ariaLabel?: string; id?: string; ariaDescribedby?: string }>()
 </script>
 
 <template>
   <label class="check" :class="{ disabled }">
-    <CheckboxRoot v-model="model" class="box" :disabled="disabled" :aria-label="ariaLabel">
+    <CheckboxRoot v-model="model" class="box" :disabled="disabled" :id="id" :aria-label="ariaLabel" :aria-describedby="ariaDescribedby">
       <CheckboxIndicator class="mark">
         <Minus v-if="model === 'indeterminate'" :size="14" :stroke-width="3" />
         <Check v-else :size="14" :stroke-width="3" />

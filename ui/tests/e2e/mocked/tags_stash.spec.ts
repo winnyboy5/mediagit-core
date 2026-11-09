@@ -82,7 +82,7 @@ test.describe('Tags & Stash: tags', () => {
     await page.getByLabel('Note (optional)').fill(' Final ')
     await create.click()
     await expect.poll(async () => (await ipcCalls(page, 'tag_create')).map((c) => c.args)).toEqual([
-      { repo: '/repos/hero-film', name: 'v1.0', commit: null, message: 'Final' },
+      { repo: '/repos/hero-film', name: 'v1.0', options: { commit: null, message: 'Final', tagger: null, email: null, force: false, confirmed: false } },
     ])
     await expect(page.getByLabel('Tag name')).toHaveValue('')
     await expect.poll(async () => (await ipcCalls(page, 'tag_list')).length).toBeGreaterThan(1)
@@ -118,7 +118,7 @@ test.describe('Tags & Stash: stash actions', () => {
     await page.getByRole('checkbox', { name: 'Include new files' }).click()
     await page.getByRole('button', { name: 'Stash my changes' }).click()
     await expect.poll(async () => (await ipcCalls(page, 'stash_save')).map((c) => c.args)).toMatchObject([
-      { repo: '/repos/hero-film', message: 'Grade pass', includeUntracked: true },
+      { repo: '/repos/hero-film', message: 'Grade pass', includeUntracked: true, paths: [] },
     ])
     await expect(page.getByLabel('Message (optional)')).toHaveValue('')
     await expect.poll(async () => (await ipcCalls(page, 'stash_list')).length).toBeGreaterThan(1)
@@ -144,7 +144,7 @@ test.describe('Tags & Stash: stash actions', () => {
     await ipcRelease(page)
     await expect(bar).toHaveCount(0)
     await expect(page.getByText('Applied to 3 files').first()).toBeVisible()
-    expect((await ipcCalls(page, 'stash_apply')).map((c) => c.args)).toMatchObject([{ repo: '/repos/hero-film', index: 0 }])
+    expect((await ipcCalls(page, 'stash_apply')).map((c) => c.args)).toMatchObject([{ repo: '/repos/hero-film', index: 0, restoreIndex: false, force: false }])
   })
 
   test('pop calls pop with the entry index', async ({ page }) => {

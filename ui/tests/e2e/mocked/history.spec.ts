@@ -99,7 +99,7 @@ test.describe('History: interaction', () => {
     await search.fill('sam')
     await expect(rowsOf(page)).toHaveCount(3)
     await expect(list(page).locator('svg.graph-cell')).toHaveCount(0)
-    await expect(page.getByText('The graph is hidden while you search.')).toBeVisible()
+    await expect(page.getByText('The graph is hidden while you search or filter.')).toBeVisible()
     await expectNoAxeViolations(page)
     await search.fill('zzzz')
     await expect(page.getByText('No versions match "zzzz".')).toBeVisible()

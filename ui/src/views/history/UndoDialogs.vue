@@ -6,13 +6,18 @@ import AlertDialog from '@/components/AlertDialog.vue'
 import Button from '@/components/Button.vue'
 import Checkbox from '@/components/Checkbox.vue'
 import Dialog from '@/components/Dialog.vue'
+import MoreOptions from '@/components/MoreOptions.vue'
+import OptionCheck from '@/components/OptionCheck.vue'
 import ProgressBar from '@/components/ProgressBar.vue'
+import TextField from '@/components/TextField.vue'
 import { shortOid } from '@/lib/history'
+import { useHistoryStore } from '@/stores/history'
 import { primaryBar } from '@/stores/ops'
 import { useRepoStore } from '@/stores/repo'
 import { useUndoStore } from '@/stores/undo'
 
 const undo = useUndoStore()
+const history = useHistoryStore()
 const repo = useRepoStore()
 
 const p = computed(() => undo.pending)
@@ -34,6 +39,30 @@ const resetText = computed(() =>
     ? 'The branch moves back and later versions leave it. Their changes stay ready to save, and your files are not touched.'
     : 'The branch moves back and later versions leave it. Their changes stay in your files, not yet staged. Nothing is deleted.',
 )
+// Revert options live here and are written into the pending action the confirm click reads.
+const revertMessage = ref('')
+const revertNoCommit = ref(false)
+const alsoPicked = ref(new Set<string>())
+const alsoChoices = computed(() => history.visible.filter((c) => c.oid !== p.value?.rev).slice(0, 12))
+function toggleAlso(oid: string, on: boolean) {
+  const s = new Set(alsoPicked.value)
+  if (on) s.add(oid)
+  else s.delete(oid)
+  alsoPicked.value = s
+}
+watch(revertOpen, (o) => {
+  if (!o) return
+  revertMessage.value = ''
+  revertNoCommit.value = false
+  alsoPicked.value = new Set()
+})
+watch([revertMessage, revertNoCommit, alsoPicked], () => {
+  const cur = undo.pending
+  if (cur?.kind !== 'revert') return
+  cur.message = revertMessage.value
+  cur.noCommit = revertNoCommit.value === true
+  cur.also = [...alsoPicked.value]
+})
 const bar = computed(() => (undo.running ? primaryBar(undo.running) : undefined))
 </script>
 
@@ -47,6 +76,8 @@ const bar = computed(() => (undo.running ? primaryBar(undo.running) : undefined)
 
     <div v-if="undo.revertConflicts.length" class="banner warn" role="alert" data-testid="revert-stopped">
       <span>The undo stopped: {{ undo.revertConflicts.length }} {{ undo.revertConflicts.length === 1 ? 'file clashes' : 'files clash' }} ({{ undo.revertConflicts.join(', ') }}).</span>
+      <Button size="sm" variant="primary" :disabled="undo.busy" @click="undo.revertControl('continue')">Continue undo</Button>
+      <Button size="sm" :disabled="undo.busy" @click="undo.revertControl('skip')">Skip this version</Button>
       <Button size="sm" variant="danger" :disabled="undo.busy" @click="undo.revertControl('abort')">Abandon undo</Button>
     </div>
 
@@ -64,13 +95,20 @@ const bar = computed(() => (undo.running ? primaryBar(undo.running) : undefined)
       @confirm="undo.confirm()"
     />
 
-    <AlertDialog
-      v-model:open="revertOpen"
-      :title="`Undo ${p?.kind === 'revert' ? p.summary || rev : ''}?`"
-      description="This adds a new version that reverses it. Nothing is deleted, and the original stays in History."
-      confirm-label="Undo this version"
-      @confirm="undo.confirm()"
-    />
+    <Dialog v-model:open="revertOpen" :title="`Undo ${p?.kind === 'revert' ? p.summary || rev : ''}?`" description="This adds a new version that reverses it. Nothing is deleted, and the original stays in History.">
+      <MoreOptions>
+        <TextField v-model="revertMessage" label="Message for the new version" hint="Leave blank for the automatic one." flag="--message" />
+        <OptionCheck v-model="revertNoCommit" label="Let me look before it is saved" flag="--no-commit" hint="Files change but no version is made yet" />
+        <fieldset class="also">
+          <legend>Also undo these versions</legend>
+          <Checkbox v-for="c in alsoChoices" :key="c.oid" :model-value="alsoPicked.has(c.oid)" :label="`${shortOid(c.oid)} · ${c.summary || '(no message)'}`" @update:model-value="toggleAlso(c.oid, $event === true)" />
+        </fieldset>
+      </MoreOptions>
+      <template #footer>
+        <Button @click="undo.open = false">Cancel</Button>
+        <Button variant="primary" :disabled="undo.busy" @click="undo.confirm()">Undo {{ alsoPicked.size ? `${alsoPicked.size + 1} versions` : 'this version' }}</Button>
+      </template>
+    </Dialog>
 
     <AlertDialog
       v-model:open="restoreOpen"
@@ -122,6 +160,23 @@ const bar = computed(() => (undo.running ? primaryBar(undo.running) : undefined)
   display: grid;
   gap: var(--space-2);
   margin: var(--space-3) var(--space-4) 0;
+  font-size: var(--fs-sm);
+}
+.also {
+  display: grid;
+  gap: var(--space-2);
+  max-height: 200px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  border: 0;
+}
+.also legend {
+  margin-bottom: var(--space-2);
+  font-size: var(--fs-md);
+}
+.flag {
+  color: var(--text-muted);
   font-size: var(--fs-sm);
 }
 .cons {

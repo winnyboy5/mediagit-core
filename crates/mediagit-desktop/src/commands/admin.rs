@@ -12,6 +12,10 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use tauri::ipc::Channel;
 
+use super::views_b::{
+    PickOpts, bisect_replay_argv, bisect_reset_argv, bisect_start_argv, pick_start_argv,
+    rebase_start_argv, target_ok,
+};
 use super::{
     Ops, RepoQueues, Secret, as_args, clone_source_ok, invalid, plain_arg, ref_name_ok, repo_path,
     rev_ok, stream_with,
@@ -82,26 +86,132 @@ fn with_passphrase(
     SecretCmd::with(argv, vec![passphrase])
 }
 
-fn gc_argv(dry_run: bool) -> Vec<String> {
+/// Options of `gc` beyond preview-or-run.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GcOptions {
+    /// Keep data nothing refers to (`--no-prune`).
+    pub no_prune: bool,
+    /// Only clean up when it is worth it (`--auto`).
+    pub auto: bool,
+    /// Pack loose objects together (`--repack`).
+    pub repack: bool,
+}
+
+/// A real clean-up deletes data; only a dry run may go ahead unconfirmed.
+fn gc_guard(dry_run: bool, confirmed: bool) -> Result<(), EngineError> {
+    if !dry_run && !confirmed {
+        return Err(invalid("clean-up", "not confirmed"));
+    }
+    Ok(())
+}
+
+fn gc_argv(dry_run: bool, o: &GcOptions) -> Vec<String> {
     let mut argv = vec!["gc".to_owned()];
     // Only a confirmed, real run may skip gc's own confirmation prompt.
     argv.push(if dry_run { "--dry-run" } else { "--yes" }.into());
-    argv
-}
-
-fn fsck_argv(deep: bool) -> Vec<String> {
-    vec![
-        "fsck".into(),
-        if deep { "--full" } else { "--quick" }.into(),
-    ]
-}
-
-fn verify_argv(quick: bool) -> Vec<String> {
-    let mut argv = vec!["verify".to_owned()];
-    if quick {
-        argv.push("--quick".into());
+    for (on, flag) in [
+        (o.no_prune, "--no-prune"),
+        (o.auto, "--auto"),
+        (o.repack, "--repack"),
+    ] {
+        if on {
+            argv.push(flag.into());
+        }
     }
     argv
+}
+
+/// Options of `fsck`. `repair` changes the repository, so a real repair needs `confirmed`;
+/// `dry_run` only makes sense with `repair` (it shows what a repair would do).
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FsckOptions {
+    /// Deep check (`--full`) instead of the quick one (`--quick`).
+    pub deep: bool,
+    /// List every object checked (`--all`).
+    pub all: bool,
+    /// List lost and dangling objects (`--lost-found`).
+    pub lost_found: bool,
+    /// Skip the dangling-object check (`--no-dangling`).
+    pub no_dangling: bool,
+    /// Try to fix what it finds (`--repair`).
+    pub repair: bool,
+    /// With `repair`: report only (`--dry-run`).
+    pub dry_run: bool,
+    /// The person has been told what repair does and agreed.
+    pub confirmed: bool,
+}
+
+fn fsck_argv(o: &FsckOptions) -> Result<Vec<String>, EngineError> {
+    if o.dry_run && !o.repair {
+        return Err(invalid("preview", "a preview needs repair switched on"));
+    }
+    if o.repair && !o.dry_run && !o.confirmed {
+        return Err(invalid("repair", "not confirmed"));
+    }
+    let mut argv = vec![
+        "fsck".to_owned(),
+        if o.deep { "--full" } else { "--quick" }.into(),
+    ];
+    for (on, flag) in [
+        (o.all, "--all"),
+        (o.lost_found, "--lost-found"),
+        (o.no_dangling, "--no-dangling"),
+        (o.repair, "--repair"),
+        (o.dry_run, "--dry-run"),
+    ] {
+        if on {
+            argv.push(flag.into());
+        }
+    }
+    Ok(argv)
+}
+
+/// Options of `verify`: the whole repository, one version (`commit`), or a stretch of history
+/// (`start`..`end`); a version and a range exclude each other.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct VerifyOptions {
+    pub quick: bool,
+    pub commit: Option<String>,
+    pub start: Option<String>,
+    pub end: Option<String>,
+    /// Check every checksum (`--checksums`).
+    pub checksums: bool,
+    /// Report each problem in detail (`--detailed`).
+    pub detailed: bool,
+}
+
+fn verify_argv(o: &VerifyOptions) -> Result<Vec<String>, EngineError> {
+    fn blank(s: &Option<String>) -> Option<&str> {
+        s.as_deref().map(str::trim).filter(|s| !s.is_empty())
+    }
+    let (commit, start, end) = (blank(&o.commit), blank(&o.start), blank(&o.end));
+    if commit.is_some() && (start.is_some() || end.is_some()) {
+        return Err(invalid("verify", "choose one version or a range, not both"));
+    }
+    let mut argv = vec!["verify".to_owned()];
+    for (on, flag) in [
+        (o.quick, "--quick"),
+        (o.checksums, "--checksums"),
+        (o.detailed, "--detailed"),
+    ] {
+        if on {
+            argv.push(flag.into());
+        }
+    }
+    for (v, flag) in [(start, "--start"), (end, "--end")] {
+        if let Some(v) = v {
+            target_ok("version", v)?;
+            argv.push(format!("{flag}={v}"));
+        }
+    }
+    if let Some(c) = commit {
+        target_ok("version", c)?;
+        argv.extend(["--".into(), c.into()]);
+    }
+    Ok(argv)
 }
 
 /// An http(s) server address.
@@ -167,34 +277,121 @@ fn key_recover_cmd(code: String, passphrase: Option<String>) -> Result<SecretCmd
     )
 }
 
-/// The settings the app edits; the CLI refuses any other key too.
-const CONFIG_KEYS: [&str; 4] = [
-    "author.name",
-    "author.email",
-    "performance.upload_concurrency",
-    "performance.download_concurrency",
-];
+/// `auth register --server=.. --username=.. --email=..`: username and email are flags, the
+/// new account's password is a secret on stdin.
+fn auth_register_cmd(
+    server: Option<&str>,
+    username: &str,
+    email: &str,
+    password: String,
+) -> Result<SecretCmd, EngineError> {
+    for (what, v) in [("username", username), ("email", email)] {
+        plain_arg(what, v)?;
+        if v.chars().any(char::is_control) || v.len() > 128 {
+            return Err(invalid(what, v));
+        }
+    }
+    if email.split_whitespace().count() != 1 || !email.contains('@') {
+        return Err(invalid("email", email));
+    }
+    let mut argv = vec!["auth".to_owned(), "register".into()];
+    server_flag(&mut argv, server)?;
+    argv.extend([format!("--username={username}"), format!("--email={email}")]);
+    SecretCmd::with(argv, vec![Some(password)])
+}
 
+/// `auth passwd [--server=..]`: the current and the new password, in that order, on stdin.
+fn auth_passwd_cmd(
+    server: Option<&str>,
+    current: String,
+    new: String,
+) -> Result<SecretCmd, EngineError> {
+    let mut argv = vec!["auth".to_owned(), "passwd".into()];
+    server_flag(&mut argv, server)?;
+    SecretCmd::with(argv, vec![Some(current), Some(new)])
+}
+
+/// `key rotate-master [--new-keyfile=<path>]`. Passphrases go on stdin in prompt order: the
+/// current one (only when this repository's key is passphrase-protected), then the new one
+/// (only when the new master is a passphrase).
+fn key_rotate_cmd(
+    new_keyfile: Option<&str>,
+    current: Option<String>,
+    new_passphrase: Option<String>,
+) -> Result<SecretCmd, EngineError> {
+    let mut argv = vec!["key".to_owned(), "rotate-master".into()];
+    if let Some(p) = new_keyfile.map(str::trim).filter(|p| !p.is_empty()) {
+        plain_arg("key file", p)?;
+        let path = Path::new(p);
+        if !path.is_absolute() || !path.is_file() || p.chars().any(char::is_control) {
+            return Err(invalid("key file", p));
+        }
+        if new_passphrase.is_some() {
+            return Err(invalid(
+                "new master",
+                "a key file or a passphrase, not both",
+            ));
+        }
+        argv.push(format!("--new-keyfile={p}"));
+    }
+    SecretCmd::with(argv, vec![current, new_passphrase])
+}
+
+/// The settings the app edits; the CLI refuses any other key too.
+/// A dotted settings key such as `performance.upload_concurrency` or `remotes.origin.url`.
+/// Which keys exist and what each accepts is the CLI's schema (`config schema`), checked again
+/// by `config set`; here only the shape is checked, so a key can never read as a flag.
 fn config_key_ok(key: &str) -> Result<(), EngineError> {
-    if CONFIG_KEYS.contains(&key) {
+    let segs: Vec<&str> = key.split('.').collect();
+    let seg_ok = |s: &&str| {
+        !s.is_empty()
+            && s.len() <= 64
+            && !s.starts_with('-')
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+    };
+    if (2..=5).contains(&segs.len()) && segs.iter().all(seg_ok) {
         Ok(())
     } else {
         Err(invalid("setting", key))
     }
 }
 
-fn config_set_argv(key: &str, value: &str) -> Result<Vec<String>, EngineError> {
+/// Settings whose value is a secret (the last part of the key). Their value goes on stdin only.
+const SECRET_LEAVES: [&str; 5] = [
+    "token",
+    "api_key",
+    "access_key_id",
+    "secret_access_key",
+    "password",
+];
+
+fn is_secret_key(key: &str) -> bool {
+    key.rsplit('.')
+        .next()
+        .is_some_and(|leaf| SECRET_LEAVES.contains(&leaf))
+}
+
+/// `config set -- <key> [<value>]`. A secret setting takes its value on stdin (`secret`), never
+/// in argv; a known secret key refused as plain text, whatever the caller says.
+fn config_set_cmd(key: &str, value: String, secret: bool) -> Result<SecretCmd, EngineError> {
     config_key_ok(key)?;
-    if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
-        return Err(invalid("value", value));
+    if is_secret_key(key) && !secret {
+        return Err(invalid(
+            "setting",
+            "this value is a secret and is sent privately",
+        ));
     }
-    Ok(vec![
-        "config".into(),
-        "set".into(),
-        "--".into(),
-        key.into(),
-        value.into(),
-    ])
+    let argv = vec!["config".to_owned(), "set".into(), "--".into(), key.into()];
+    if secret {
+        return SecretCmd::with(argv, vec![Some(value)]);
+    }
+    if value.is_empty() || value.len() > 1024 || value.chars().any(char::is_control) {
+        return Err(invalid("value", &value));
+    }
+    let mut argv = argv;
+    argv.push(value);
+    Ok(SecretCmd::plain(argv))
 }
 
 fn config_unset_argv(key: &str) -> Result<Vec<String>, EngineError> {
@@ -231,20 +428,6 @@ fn sparse_set_argv(patterns: &[String], pattern_mode: bool) -> Result<Vec<String
     Ok(argv)
 }
 
-/// A branch, tag or commit id.
-fn target_ok(what: &str, t: &str) -> Result<(), EngineError> {
-    if rev_ok(t).is_ok() {
-        Ok(())
-    } else {
-        ref_name_ok(what, t)
-    }
-}
-
-fn rebase_start_argv(upstream: &str) -> Result<Vec<String>, EngineError> {
-    target_ok("branch", upstream)?;
-    Ok(vec!["rebase".into(), "--".into(), upstream.into()])
-}
-
 /// `rebase|cherry-pick --continue|--abort|--skip`.
 fn control_argv(cmd: &str, action: &str) -> Result<Vec<String>, EngineError> {
     if !matches!(cmd, "rebase" | "cherry-pick") || !matches!(action, "continue" | "abort" | "skip")
@@ -252,28 +435,6 @@ fn control_argv(cmd: &str, action: &str) -> Result<Vec<String>, EngineError> {
         return Err(invalid("action", action));
     }
     Ok(vec![cmd.into(), format!("--{action}")])
-}
-
-fn pick_start_argv(commits: &[String]) -> Result<Vec<String>, EngineError> {
-    if commits.is_empty() {
-        return Err(invalid("commits", "none"));
-    }
-    let mut argv = vec!["cherry-pick".to_owned(), "--".into()];
-    for c in commits {
-        rev_ok(c)?;
-        argv.push(c.clone());
-    }
-    Ok(argv)
-}
-
-fn bisect_start_argv(bad: &str, good: Option<&str>) -> Result<Vec<String>, EngineError> {
-    target_ok("commit", bad)?;
-    let mut argv = vec!["bisect".to_owned(), "start".into(), "--".into(), bad.into()];
-    if let Some(g) = good {
-        target_ok("commit", g)?;
-        argv.push(g.into());
-    }
-    Ok(argv)
 }
 
 /// `bisect good|bad|skip [-- <commit>]`; no commit marks the one being tested.
@@ -376,14 +537,13 @@ pub async fn repo_gc(
     repo: String,
     dry_run: bool,
     confirmed: bool,
+    options: GcOptions,
     passphrase: Option<String>,
     on_progress: Channel<Progress>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    if !dry_run && !confirmed {
-        return Err(invalid("clean-up", "not confirmed"));
-    }
-    let cmd = with_passphrase(gc_argv(dry_run), passphrase)?;
+    gc_guard(dry_run, confirmed)?;
+    let cmd = with_passphrase(gc_argv(dry_run, &options), passphrase)?;
     // A dry run changes nothing, so it does not wait behind (or block) writes.
     let own = RepoQueues::default();
     let lane: &RepoQueues = if dry_run { &own } else { &queues };
@@ -407,12 +567,12 @@ pub async fn repo_fsck(
     engine: tauri::State<'_, Engine>,
     ops: tauri::State<'_, Ops>,
     repo: String,
-    deep: bool,
+    options: FsckOptions,
     passphrase: Option<String>,
     on_progress: Channel<Progress>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    let cmd = with_passphrase(fsck_argv(deep), passphrase)?;
+    let cmd = with_passphrase(fsck_argv(&options)?, passphrase)?;
     let lane = RepoQueues::default();
     stream_with(
         &engine,
@@ -434,12 +594,12 @@ pub async fn repo_verify(
     engine: tauri::State<'_, Engine>,
     ops: tauri::State<'_, Ops>,
     repo: String,
-    quick: bool,
+    options: VerifyOptions,
     passphrase: Option<String>,
     on_progress: Channel<Progress>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    let cmd = with_passphrase(verify_argv(quick), passphrase)?;
+    let cmd = with_passphrase(verify_argv(&options)?, passphrase)?;
     let lane = RepoQueues::default();
     stream_with(
         &engine,
@@ -481,6 +641,46 @@ pub async fn auth_run(
     let repo = optional_repo(repo.as_deref())?;
     let cmd = SecretCmd::plain(auth_argv(&action, server.as_deref(), all)?);
     run(&engine, repo.as_deref(), &cmd).await
+}
+
+/// Create an account on a server that allows sign-up. The password goes on stdin only.
+#[tauri::command]
+pub async fn auth_register(
+    engine: tauri::State<'_, Engine>,
+    server: Option<String>,
+    username: String,
+    email: String,
+    password: String,
+) -> Result<Value, EngineError> {
+    let cmd = auth_register_cmd(server.as_deref(), &username, &email, password)?;
+    run(&engine, None, &cmd).await
+}
+
+/// Change your own password. Both passwords go on stdin only.
+#[tauri::command]
+pub async fn auth_passwd(
+    engine: tauri::State<'_, Engine>,
+    server: Option<String>,
+    current: String,
+    new: String,
+) -> Result<Value, EngineError> {
+    let cmd = auth_passwd_cmd(server.as_deref(), current, new)?;
+    run(&engine, None, &cmd).await
+}
+
+/// Re-lock the repository's key under a new master key (a key file or a passphrase).
+#[tauri::command]
+pub async fn key_rotate_master(
+    engine: tauri::State<'_, Engine>,
+    queues: tauri::State<'_, RepoQueues>,
+    repo: String,
+    new_keyfile: Option<String>,
+    current: Option<String>,
+    new_passphrase: Option<String>,
+) -> Result<Value, EngineError> {
+    let repo = repo_path(&repo)?;
+    let cmd = key_rotate_cmd(new_keyfile.as_deref(), current, new_passphrase)?;
+    queues.write(&repo, run(&engine, Some(&repo), &cmd)).await
 }
 
 /// Whether the repository is encrypted and how it unlocks.
@@ -544,10 +744,22 @@ pub async fn config_set(
     repo: String,
     key: String,
     value: String,
+    secret: bool,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    let cmd = SecretCmd::plain(config_set_argv(&key, &value)?);
+    let cmd = config_set_cmd(&key, value, secret)?;
     queues.write(&repo, run(&engine, Some(&repo), &cmd)).await
+}
+
+/// Every setting the CLI knows: key, type, default, documentation, allowed values, secret or not.
+#[tauri::command]
+pub async fn config_schema(engine: tauri::State<'_, Engine>) -> Result<Value, EngineError> {
+    run(
+        &engine,
+        None,
+        &SecretCmd::plain(vec!["config".into(), "schema".into()]),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -628,16 +840,19 @@ pub async fn sparse_disable(
 
 /// Replay this branch onto `upstream`. A conflict is a normal result, with the paths.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn rebase_start(
     engine: tauri::State<'_, Engine>,
     ops: tauri::State<'_, Ops>,
     queues: tauri::State<'_, RepoQueues>,
     repo: String,
     upstream: String,
+    branch: Option<String>,
+    keep_empty: Option<bool>,
     on_progress: Channel<Progress>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    let argv = rebase_start_argv(&upstream)?;
+    let argv = rebase_start_argv(&upstream, branch.as_deref(), keep_empty.unwrap_or(false))?;
     stream_with(
         &engine,
         &ops,
@@ -687,10 +902,11 @@ pub async fn pick_start(
     queues: tauri::State<'_, RepoQueues>,
     repo: String,
     commits: Vec<String>,
+    opts: Option<PickOpts>,
     on_progress: Channel<Progress>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    let argv = pick_start_argv(&commits)?;
+    let argv = pick_start_argv(&commits, &opts.unwrap_or_default())?;
     stream_with(
         &engine,
         &ops,
@@ -707,6 +923,7 @@ pub async fn pick_start(
 
 /// Start a bisect between a bad version and (optionally) a good one.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn bisect_start(
     engine: tauri::State<'_, Engine>,
     ops: tauri::State<'_, Ops>,
@@ -714,10 +931,17 @@ pub async fn bisect_start(
     repo: String,
     bad: String,
     good: Option<String>,
+    restart: Option<bool>,
+    confirmed: Option<bool>,
     on_progress: Channel<Progress>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    let argv = bisect_start_argv(&bad, good.as_deref())?;
+    let argv = bisect_start_argv(
+        &bad,
+        good.as_deref(),
+        restart.unwrap_or(false),
+        confirmed.unwrap_or(false),
+    )?;
     stream_with(
         &engine,
         &ops,
@@ -766,10 +990,38 @@ pub async fn bisect_reset(
     ops: tauri::State<'_, Ops>,
     queues: tauri::State<'_, RepoQueues>,
     repo: String,
+    commit: Option<String>,
+    confirmed: Option<bool>,
     on_progress: Channel<Progress>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    let argv = vec!["bisect".to_owned(), "reset".into()];
+    let argv = bisect_reset_argv(commit.as_deref(), confirmed.unwrap_or(false))?;
+    stream_with(
+        &engine,
+        &ops,
+        &queues,
+        &repo,
+        &argv,
+        &[],
+        "",
+        false,
+        &on_progress,
+    )
+    .await
+}
+
+/// Replay a saved bisect log (an absolute path to a file).
+#[tauri::command]
+pub async fn bisect_replay(
+    engine: tauri::State<'_, Engine>,
+    ops: tauri::State<'_, Ops>,
+    queues: tauri::State<'_, RepoQueues>,
+    repo: String,
+    logfile: String,
+    on_progress: Channel<Progress>,
+) -> Result<Value, EngineError> {
+    let repo = repo_path(&repo)?;
+    let argv = bisect_replay_argv(&logfile)?;
     stream_with(
         &engine,
         &ops,
@@ -859,15 +1111,15 @@ mod tests {
         // Retrying any object-touching command with the passphrase.
         for argv in [
             vec!["stats".to_owned()],
-            gc_argv(true),
-            fsck_argv(true),
-            verify_argv(false),
+            gc_argv(true, &GcOptions::default()),
+            fsck_argv(&FsckOptions::default()).unwrap(),
+            verify_argv(&VerifyOptions::default()).unwrap(),
         ] {
             clean(&with_passphrase(argv, Some(PASS.into())).unwrap(), &[PASS]);
         }
         // No secret at all: no stdin lines, so the engine will not add --secret-stdin.
         assert!(
-            with_passphrase(fsck_argv(false), None)
+            with_passphrase(fsck_argv(&FsckOptions::default()).unwrap(), None)
                 .unwrap()
                 .secrets
                 .is_empty()
@@ -908,30 +1160,290 @@ mod tests {
 
     #[test]
     fn gc_only_skips_its_prompt_for_a_real_run_and_never_both() {
-        assert_eq!(gc_argv(true), ["gc", "--dry-run"]);
-        assert_eq!(gc_argv(false), ["gc", "--yes"]);
-        assert_eq!(fsck_argv(false), ["fsck", "--quick"]);
-        assert_eq!(fsck_argv(true), ["fsck", "--full"]);
-        assert_eq!(verify_argv(true), ["verify", "--quick"]);
-        assert_eq!(verify_argv(false), ["verify"]);
+        let gc = GcOptions::default();
+        assert!(matches!(
+            gc_guard(false, false),
+            Err(EngineError::InvalidArgument(_))
+        ));
+        assert!(gc_guard(false, true).is_ok());
+        assert!(gc_guard(true, false).is_ok());
+        assert_eq!(gc_argv(true, &gc), ["gc", "--dry-run"]);
+        assert_eq!(gc_argv(false, &gc), ["gc", "--yes"]);
+        let fsck = |f: &dyn Fn(&mut FsckOptions)| {
+            let mut o = FsckOptions::default();
+            f(&mut o);
+            fsck_argv(&o)
+        };
+        assert_eq!(fsck(&|_| {}).unwrap(), ["fsck", "--quick"]);
+        assert_eq!(fsck(&|o| o.deep = true).unwrap(), ["fsck", "--full"]);
+        let verify = |f: &dyn Fn(&mut VerifyOptions)| {
+            let mut o = VerifyOptions::default();
+            f(&mut o);
+            verify_argv(&o)
+        };
+        assert_eq!(verify(&|o| o.quick = true).unwrap(), ["verify", "--quick"]);
+        assert_eq!(verify(&|_| {}).unwrap(), ["verify"]);
+    }
+
+    #[test]
+    fn gc_options_are_plain_flags_and_a_real_run_still_says_yes() {
+        let o = GcOptions {
+            no_prune: true,
+            auto: true,
+            repack: true,
+        };
+        assert_eq!(
+            gc_argv(false, &o),
+            ["gc", "--yes", "--no-prune", "--auto", "--repack"]
+        );
+        assert_eq!(
+            gc_argv(
+                true,
+                &GcOptions {
+                    repack: true,
+                    ..GcOptions::default()
+                }
+            ),
+            ["gc", "--dry-run", "--repack"]
+        );
+    }
+
+    #[test]
+    fn fsck_repair_needs_confirmation_and_a_preview_needs_repair() {
+        let o = |repair, dry_run, confirmed| FsckOptions {
+            repair,
+            dry_run,
+            confirmed,
+            ..FsckOptions::default()
+        };
+        // Repair changes the repository: refused until the person has agreed.
+        assert!(bad(fsck_argv(&o(true, false, false))));
+        assert_eq!(
+            fsck_argv(&o(true, false, true)).unwrap(),
+            ["fsck", "--quick", "--repair"]
+        );
+        // A preview changes nothing, so it needs no confirmation, but it needs --repair.
+        assert_eq!(
+            fsck_argv(&o(true, true, false)).unwrap(),
+            ["fsck", "--quick", "--repair", "--dry-run"]
+        );
+        assert!(bad(fsck_argv(&o(false, true, false))));
+        // Confirmation alone repairs nothing.
+        assert_eq!(
+            fsck_argv(&o(false, false, true)).unwrap(),
+            ["fsck", "--quick"]
+        );
+    }
+
+    #[test]
+    fn fsck_listing_options_are_flags() {
+        let o = FsckOptions {
+            deep: true,
+            all: true,
+            lost_found: true,
+            no_dangling: true,
+            ..FsckOptions::default()
+        };
+        assert_eq!(
+            fsck_argv(&o).unwrap(),
+            ["fsck", "--full", "--all", "--lost-found", "--no-dangling"]
+        );
+    }
+
+    #[test]
+    fn verify_one_version_or_a_range_never_both_and_never_a_flag() {
+        let v = |commit: Option<&str>, start: Option<&str>, end: Option<&str>| VerifyOptions {
+            commit: commit.map(Into::into),
+            start: start.map(Into::into),
+            end: end.map(Into::into),
+            ..VerifyOptions::default()
+        };
+        assert_eq!(
+            verify_argv(&v(Some("main"), None, None)).unwrap(),
+            ["verify", "--", "main"]
+        );
+        assert_eq!(
+            verify_argv(&v(None, Some("abc1234"), Some("HEAD"))).unwrap(),
+            ["verify", "--start=abc1234", "--end=HEAD"]
+        );
+        assert_eq!(
+            verify_argv(&VerifyOptions {
+                checksums: true,
+                detailed: true,
+                ..VerifyOptions::default()
+            })
+            .unwrap(),
+            ["verify", "--checksums", "--detailed"]
+        );
+        assert!(bad(verify_argv(&v(Some("main"), Some("abc1234"), None))));
+        for x in ["--all", "a b", "x..y"] {
+            assert!(bad(verify_argv(&v(Some(x), None, None))), "{x:?}");
+            assert!(bad(verify_argv(&v(None, Some(x), None))), "{x:?}");
+        }
+        // Blank fields mean "not set".
+        assert_eq!(
+            verify_argv(&v(Some("  "), None, Some(""))).unwrap(),
+            ["verify"]
+        );
+    }
+
+    #[test]
+    fn register_and_passwd_keep_passwords_off_argv() {
+        let r =
+            auth_register_cmd(Some("https://s.example"), "mira", "m@x.io", PASS.into()).unwrap();
+        assert_eq!(
+            r.argv,
+            [
+                "auth",
+                "register",
+                "--server=https://s.example",
+                "--username=mira",
+                "--email=m@x.io"
+            ]
+        );
+        clean(&r, &[PASS]);
+        assert_eq!(r.secrets.len(), 1);
+        for (u, e) in [
+            ("--x", "a@b.c"),
+            ("mira", "no-at"),
+            ("mira", "a b@c.d"),
+            ("", "a@b.c"),
+            ("mira", "a\nb@c.d"),
+        ] {
+            assert!(
+                bad(auth_register_cmd(None, u, e, PASS.into())),
+                "{u:?} {e:?}"
+            );
+        }
+        assert!(bad(auth_register_cmd(
+            Some("ftp://h"),
+            "mira",
+            "m@x.io",
+            PASS.into()
+        )));
+        let p = auth_passwd_cmd(None, "old-pass".into(), "new-pass".into()).unwrap();
+        assert_eq!(p.argv, ["auth", "passwd"]);
+        assert_eq!(p.secrets.len(), 2);
+        clean(&p, &["old-pass", "new-pass"]);
+        assert!(bad(auth_passwd_cmd(None, "a\nb".into(), "x".into())));
+    }
+
+    #[test]
+    fn rotate_master_takes_a_real_key_file_or_a_passphrase_never_both() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = tmp.path().join("new.key");
+        std::fs::write(&key, b"k").unwrap();
+        let k = key.to_str().unwrap();
+        let by_file = key_rotate_cmd(Some(k), None, None).unwrap();
+        assert_eq!(
+            by_file.argv,
+            ["key", "rotate-master", &format!("--new-keyfile={k}")]
+        );
+        assert!(by_file.secrets.is_empty());
+        let by_pass = key_rotate_cmd(None, Some("old".into()), Some("new".into())).unwrap();
+        assert_eq!(by_pass.argv, ["key", "rotate-master"]);
+        assert_eq!(by_pass.secrets.len(), 2);
+        clean(&by_pass, &["old", "new"]);
+        assert!(bad(key_rotate_cmd(Some(k), None, Some("new".into()))));
+        for p in ["relative.key", "--x", "/no/such/file.key"] {
+            assert!(bad(key_rotate_cmd(Some(p), None, None)), "{p}");
+        }
+        // A blank key file is "not set"; an empty passphrase is refused rather than sent.
+        assert!(
+            key_rotate_cmd(Some("  "), None, None)
+                .unwrap()
+                .secrets
+                .is_empty()
+        );
+        assert!(key_rotate_cmd(None, None, Some(String::new())).is_err());
     }
 
     #[test]
     fn config_and_sparse_argv_keep_values_positional() {
         assert_eq!(
-            config_set_argv("author.name", "-Mira Okafor").unwrap(),
+            config_set_cmd("author.name", "-Mira Okafor".into(), false)
+                .unwrap()
+                .argv,
             ["config", "set", "--", "author.name", "-Mira Okafor"]
         );
         assert_eq!(
             config_unset_argv("author.email").unwrap(),
             ["config", "unset", "--", "author.email"]
         );
-        for k in ["--all", "core.editor", "", "author.name --global"] {
-            assert!(bad(config_set_argv(k, "v")), "{k}");
+        for k in [
+            "--all",
+            "x",
+            "",
+            "author.name --global",
+            "a..b",
+            "-a.b",
+            "a.b/c",
+            "a.b.c.d.e.f",
+        ] {
+            assert!(bad(config_set_cmd(k, "v".into(), false)), "{k}");
             assert!(bad(config_unset_argv(k)), "{k}");
         }
-        assert!(bad(config_set_argv("author.name", "")));
-        assert!(bad(config_set_argv("author.name", "a\nb")));
+        assert!(bad(config_set_cmd("author.name", String::new(), false)));
+        assert!(bad(config_set_cmd("author.name", "a\nb".into(), false)));
+    }
+
+    #[test]
+    fn every_schema_shaped_key_is_accepted_not_just_four() {
+        for k in [
+            "performance.pack_workers",
+            "storage.create_dirs",
+            "storage.credentials_path",
+            "remotes.origin.url",
+            "remotes.studio-2.fetch",
+        ] {
+            assert!(config_key_ok(k).is_ok(), "{k}");
+            assert!(config_unset_argv(k).is_ok(), "{k}");
+        }
+        assert_eq!(
+            config_set_cmd("storage.credentials_path", "C:/keys/sa.json".into(), false)
+                .unwrap()
+                .argv,
+            [
+                "config",
+                "set",
+                "--",
+                "storage.credentials_path",
+                "C:/keys/sa.json"
+            ]
+        );
+    }
+
+    #[test]
+    fn secret_settings_travel_on_stdin_and_a_secret_key_is_never_plain() {
+        let c = config_set_cmd("remotes.origin.token", PASS.into(), true).unwrap();
+        assert_eq!(c.argv, ["config", "set", "--", "remotes.origin.token"]);
+        clean(&c, &[PASS]);
+        assert_eq!(c.secrets.len(), 1);
+        for k in [
+            "remotes.origin.token",
+            "remotes.o.api_key",
+            "storage.access_key_id",
+            "storage.secret_access_key",
+        ] {
+            assert!(is_secret_key(k), "{k}");
+            // Even if the caller claims it is not a secret, the value is not put in argv.
+            assert!(bad(config_set_cmd(k, PASS.into(), false)), "{k}");
+        }
+        assert!(!is_secret_key("storage.region"));
+        assert!(bad(config_set_cmd(
+            "remotes.origin.token",
+            String::new(),
+            true
+        )));
+        assert!(bad(config_set_cmd(
+            "remotes.origin.token",
+            "a\nb".into(),
+            true
+        )));
+    }
+
+    #[test]
+    fn sparse_argv_keeps_patterns_positional() {
         assert_eq!(
             sparse_set_argv(&["art/".into(), "/video/".into()], true).unwrap(),
             [
@@ -956,9 +1468,12 @@ mod tests {
     #[test]
     fn sequencer_argv_guards_targets_and_actions() {
         let oid = "0123456789abcdef";
-        assert_eq!(rebase_start_argv("main").unwrap(), ["rebase", "--", "main"]);
-        assert!(bad(rebase_start_argv("--abort")));
-        assert!(bad(rebase_start_argv("a b")));
+        assert_eq!(
+            rebase_start_argv("main", None, false).unwrap(),
+            ["rebase", "--", "main"]
+        );
+        assert!(bad(rebase_start_argv("--abort", None, false)));
+        assert!(bad(rebase_start_argv("a b", None, false)));
         assert_eq!(
             control_argv("rebase", "skip").unwrap(),
             ["rebase", "--skip"]
@@ -970,21 +1485,24 @@ mod tests {
         assert!(bad(control_argv("merge", "abort")));
         assert!(bad(control_argv("rebase", "--abort")));
         assert_eq!(
-            pick_start_argv(&[oid.into(), "HEAD".into()]).unwrap(),
+            pick_start_argv(&[oid.into(), "HEAD".into()], &PickOpts::default()).unwrap(),
             ["cherry-pick", "--", oid, "HEAD"]
         );
-        assert!(bad(pick_start_argv(&[])));
-        assert!(bad(pick_start_argv(&["main".into()])));
-        assert!(bad(pick_start_argv(&["--no-commit".into()])));
+        assert!(bad(pick_start_argv(&[], &PickOpts::default())));
+        assert!(bad(pick_start_argv(&["main".into()], &PickOpts::default())));
+        assert!(bad(pick_start_argv(
+            &["--no-commit".into()],
+            &PickOpts::default()
+        )));
         assert_eq!(
-            bisect_start_argv("HEAD", Some(oid)).unwrap(),
+            bisect_start_argv("HEAD", Some(oid), false, false).unwrap(),
             ["bisect", "start", "--", "HEAD", oid]
         );
         assert_eq!(
-            bisect_start_argv("main", None).unwrap(),
+            bisect_start_argv("main", None, false, false).unwrap(),
             ["bisect", "start", "--", "main"]
         );
-        assert!(bad(bisect_start_argv("--reset", None)));
+        assert!(bad(bisect_start_argv("--reset", None, false, false)));
         assert_eq!(bisect_mark_argv("good", None).unwrap(), ["bisect", "good"]);
         assert_eq!(
             bisect_mark_argv("skip", Some(oid)).unwrap(),

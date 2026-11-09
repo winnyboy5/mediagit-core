@@ -140,19 +140,21 @@ test.describe('Sync: remotes', () => {
     await dlg.getByLabel('Address').fill('https://backup.example/hero')
     await dlg.getByRole('button', { name: 'Add remote' }).click()
     await expect.poll(async () => (await ipcCalls(page, 'remote_add')).map((c) => c.args)).toEqual([
-      { repo: '/repos/hero-film', name: 'backup', url: 'https://backup.example/hero' },
+      { repo: '/repos/hero-film', name: 'backup', url: 'https://backup.example/hero', fetch: false, token: null },
     ])
   })
 
   test('remove asks first and reassures that nothing is deleted on the server', async ({ page }) => {
     await boot(page)
-    await page.getByRole('button', { name: 'Remove origin' }).click()
+    await page.getByRole('button', { name: 'Actions for origin' }).click()
+    await page.getByRole('menuitem', { name: 'Remove…' }).click()
     const dlg = page.getByRole('alertdialog')
     await expect(dlg).toContainText('Nothing is deleted on the server')
     await expectNoAxeViolations(page)
     await dlg.getByRole('button', { name: 'Cancel' }).click()
     expect(await ipcCalls(page, 'remote_remove')).toHaveLength(0)
-    await page.getByRole('button', { name: 'Remove origin' }).click()
+    await page.getByRole('button', { name: 'Actions for origin' }).click()
+    await page.getByRole('menuitem', { name: 'Remove…' }).click()
     await page.getByRole('alertdialog').getByRole('button', { name: 'Remove remote' }).click()
     await expect.poll(async () => (await ipcCalls(page, 'remote_remove')).map((c) => c.args.name)).toEqual(['origin'])
   })

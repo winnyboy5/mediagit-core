@@ -95,7 +95,7 @@ test.describe('Maintenance: states', () => {
     await expectNoAxeViolations(page)
     await card(page, 'fsck').getByRole('checkbox', { name: 'Deep check (slow)' }).click()
     await card(page, 'fsck').getByRole('button', { name: 'Run integrity check' }).click()
-    await expect.poll(async () => (await ipcCalls(page, 'repo_fsck')).map((c) => c.args.deep)).toEqual([false, true])
+    await expect.poll(async () => (await ipcCalls(page, 'repo_fsck')).map((c) => (c.args.options as { deep: boolean }).deep)).toEqual([false, true])
   })
 
   test('integrity check that finds damage lists it, plainly', async ({ page }) => {
@@ -121,7 +121,7 @@ test.describe('Maintenance: states', () => {
     await card(page, 'verify').getByRole('checkbox', { name: 'Quick check' }).click()
     await card(page, 'verify').getByRole('button', { name: 'Verify' }).click()
     await expect(page.getByTestId('verify-result')).toContainText('No problems found')
-    expect((await ipcCalls(page, 'repo_verify')).map((c) => c.args)).toMatchObject([{ quick: true }])
+    expect((await ipcCalls(page, 'repo_verify')).map((c) => c.args)).toMatchObject([{ options: { quick: true } }])
   })
 
   test('a failed run is shown plainly and dismissable', async ({ page }) => {

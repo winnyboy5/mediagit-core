@@ -5,7 +5,10 @@ import { formatBytes } from '@/components/format'
 import AlertDialog from '@/components/AlertDialog.vue'
 import Button from '@/components/Button.vue'
 import Checkbox from '@/components/Checkbox.vue'
+import OptionCheck from '@/components/OptionCheck.vue'
+import MoreOptions from '@/components/MoreOptions.vue'
 import ProgressBar from '@/components/ProgressBar.vue'
+import TextField from '@/components/TextField.vue'
 import { timeAgo } from '@/lib/persist'
 import { primaryBar } from '@/stores/ops'
 import { useMaintenanceStore, type Task } from '@/stores/maintenance'
@@ -28,8 +31,50 @@ const n = (x: number) => x.toLocaleString('en-US')
 const warn = (sev: string) => /^warn/i.test(sev)
 const running = (t: Task) => m.task === t && !!m.running
 
+// More options (each is a CLI flag, shown as secondary text).
+const noPrune = ref(false)
+const auto = ref(false)
+const repack = ref(false)
+const gcOptions = () => ({ noPrune: noPrune.value === true, auto: auto.value === true, repack: repack.value === true })
+
+const all = ref(false)
+const lostFound = ref(false)
+const noDangling = ref(false)
+const repair = ref(false)
+const repairPreview = ref(true)
+const repairOpen = ref(false)
+const fsckOptions = (confirmed: boolean) => ({
+  deep: deep.value === true,
+  all: all.value === true,
+  lostFound: lostFound.value === true,
+  noDangling: noDangling.value === true,
+  repair: repair.value === true,
+  dryRun: repair.value === true && repairPreview.value === true,
+  confirmed,
+})
+function runFsck() {
+  // A real repair changes the repository: say what can be lost first.
+  if (repair.value === true && repairPreview.value !== true) repairOpen.value = true
+  else void m.runFsck(fsckOptions(false))
+}
+
+const vCommit = ref('')
+const vStart = ref('')
+const vEnd = ref('')
+const checksums = ref(false)
+const detailed = ref(false)
+const rangeClash = computed(() => (vCommit.value.trim() && (vStart.value.trim() || vEnd.value.trim()) ? 'Choose one version or a range, not both' : undefined))
+const verifyOptions = () => ({
+  quick: quick.value === true,
+  commit: vCommit.value.trim() || null,
+  start: vStart.value.trim() || null,
+  end: vEnd.value.trim() || null,
+  checksums: checksums.value === true,
+  detailed: detailed.value === true,
+})
+
 function runGc() {
-  if (preview.value === true) void m.runGc(true, false)
+  if (preview.value === true) void m.runGc(true, false, gcOptions())
   else confirmOpen.value = true
 }
 </script>
@@ -55,6 +100,11 @@ function runGc() {
         <h2 id="gc-h">Clean up storage</h2>
         <p class="muted">Remove data no version needs.</p>
         <Checkbox v-model="preview" label="Preview only" :disabled="m.busy" />
+        <MoreOptions>
+          <OptionCheck v-model="noPrune" label="Keep data nothing refers to" flag="--no-prune" :disabled="m.busy" />
+          <OptionCheck v-model="auto" label="Only if it is worth doing" flag="--auto" :disabled="m.busy" />
+          <OptionCheck v-model="repack" label="Pack loose data together" flag="--repack" :disabled="m.busy" />
+        </MoreOptions>
         <Button :variant="preview === true ? 'primary' : 'danger'" :disabled="m.busy" :loading="m.task === 'gc' && m.busy" @click="runGc">{{ preview === true ? 'Preview clean-up' : 'Clean up…' }}</Button>
         <span class="muted">{{ last('gc') }}</span>
         <div v-if="running('gc')" class="bar" role="status" data-testid="gc-progress">
@@ -86,8 +136,27 @@ function runGc() {
         <p class="muted">{{ t[2] }}</p>
         <Checkbox v-if="t[0] === 'fsck'" v-model="deep" label="Deep check (slow)" :disabled="m.busy" />
         <Checkbox v-else v-model="quick" label="Quick check" :disabled="m.busy" />
-        <Button :disabled="m.busy" :loading="m.task === t[0] && m.busy" @click="t[0] === 'fsck' ? m.runFsck(deep === true) : m.runVerify(quick === true)">
-          {{ t[0] === 'fsck' ? 'Run integrity check' : 'Verify' }}
+        <MoreOptions v-if="t[0] === 'fsck'">
+          <OptionCheck v-model="all" label="List every object checked" flag="--all" :disabled="m.busy" />
+          <OptionCheck v-model="lostFound" label="List lost and unused objects" flag="--lost-found" :disabled="m.busy" />
+          <OptionCheck v-model="noDangling" label="Skip the unused-objects check" flag="--no-dangling" :disabled="m.busy" />
+          <OptionCheck v-model="repair" label="Try to repair what it finds" flag="--repair" :disabled="m.busy" />
+          <OptionCheck v-if="repair === true" v-model="repairPreview" label="Only show what a repair would change" flag="--dry-run" :disabled="m.busy" />
+        </MoreOptions>
+        <MoreOptions v-else>
+          <TextField v-model="vCommit" label="Check only this version" placeholder="e.g. main, HEAD or a version id" hint="Leave empty to check everything." mono :error="rangeClash" />
+          <TextField v-model="vStart" label="From version" hint="Check history from here." flag="--start" mono />
+          <TextField v-model="vEnd" label="Up to version" hint="Check history up to here." flag="--end" mono />
+          <OptionCheck v-model="checksums" label="Check every checksum" flag="--checksums" :disabled="m.busy" />
+          <OptionCheck v-model="detailed" label="Describe each problem in detail" flag="--detailed" :disabled="m.busy" />
+        </MoreOptions>
+        <Button
+          :variant="t[0] === 'fsck' && repair === true && repairPreview !== true ? 'danger' : 'secondary'"
+          :disabled="m.busy || (t[0] === 'verify' && !!rangeClash)"
+          :loading="m.task === t[0] && m.busy"
+          @click="t[0] === 'fsck' ? runFsck() : m.runVerify(verifyOptions())"
+        >
+          {{ t[0] === 'fsck' ? (repair === true ? (repairPreview === true ? 'Preview repair' : 'Repair…') : 'Run integrity check') : 'Verify' }}
         </Button>
         <span class="muted">{{ last(t[0]) }}</span>
         <div v-if="running(t[0])" class="bar" role="status" :data-testid="`${t[0]}-progress`">
@@ -106,9 +175,27 @@ function runGc() {
             <dt>Damaged</dt><dd class="mono" :class="{ bad: m[t[0]]!.report.corrupted_objects }">{{ n(m[t[0]]!.report.corrupted_objects) }}</dd>
             <dt>Missing</dt><dd class="mono" :class="{ bad: m[t[0]]!.report.missing_objects }">{{ n(m[t[0]]!.report.missing_objects) }}</dd>
             <dt>Broken refs</dt><dd class="mono" :class="{ bad: m[t[0]]!.report.broken_refs }">{{ n(m[t[0]]!.report.broken_refs) }}</dd>
+            <template v-if="t[0] === 'fsck' && m.fsck?.repair">
+              <dt>{{ m.fsck.repair === 'preview' ? 'Would repair' : 'Repaired' }}</dt><dd class="mono">{{ n(m.fsck.report.repaired ?? 0) }}</dd>
+            </template>
           </dl>
           <ul v-if="m[t[0]]!.report.issues.length" class="issues" :aria-label="`${t[1]} findings`">
             <li v-for="(i, k) in m[t[0]]!.report.issues.slice(0, 50)" :key="k"><span class="chip" :class="warn(i.severity) ? 'warn' : 'bad'">{{ warn(i.severity) ? 'Warning' : 'Error' }}</span> {{ i.message }}</li>
+          </ul>
+        </div>
+        <div v-if="t[0] === 'verify' && m.verifyRange && !running('verify')" class="result" data-testid="verify-range-result" role="status">
+          <strong class="head2" :class="m.verifyRange.report.errors ? 'bad' : 'ok'">
+            <CircleCheck v-if="!m.verifyRange.report.errors" :size="16" aria-hidden="true" />
+            <TriangleAlert v-else :size="16" aria-hidden="true" />
+            {{ m.verifyRange.report.errors ? 'Problems found' : 'No problems found' }}
+          </strong>
+          <dl class="kv">
+            <dt>Versions looked at</dt><dd class="mono">{{ n(m.verifyRange.report.commits) }}</dd>
+            <dt>Verified</dt><dd class="mono">{{ n(m.verifyRange.report.verified) }}</dd>
+            <dt>Problems</dt><dd class="mono" :class="{ bad: m.verifyRange.report.errors }">{{ n(m.verifyRange.report.errors) }}</dd>
+          </dl>
+          <ul v-if="m.verifyRange.report.problems.length" class="issues" aria-label="Verify findings">
+            <li v-for="p in m.verifyRange.report.problems.slice(0, 50)" :key="p">{{ p }}</li>
           </ul>
         </div>
       </section>
@@ -120,7 +207,15 @@ function runGc() {
       description="Data that no version needs is removed for good. Versions, branches and tags are not touched, but removed data cannot be brought back."
       confirm-label="Clean up"
       destructive
-      @confirm="m.runGc(false, true)"
+      @confirm="m.runGc(false, true, gcOptions())"
+    />
+    <AlertDialog
+      v-model:open="repairOpen"
+      title="Repair the repository?"
+      description="Repair rewrites or removes damaged and unused data it finds. Data it removes cannot be brought back. Run the preview first to see what it would change."
+      confirm-label="Repair"
+      destructive
+      @confirm="m.runFsck(fsckOptions(true))"
     />
   </section>
 </template>

@@ -440,6 +440,22 @@ test.describe('Server: API keys', () => {
     expect(c!.args).toEqual({ server: LOCAL_URL, id: 'k1', confirm: true })
   })
 
+  test('limit what a key can do: ticked permissions are sent, none ticked sends none', async ({ page }) => {
+    await boot(page, admin({ server_key_create: op({ key: 'mgk_x', name: 'ci' }) }), {}, 'API keys')
+    await page.getByRole('button', { name: 'New key…' }).click()
+    const dlg = page.getByRole('dialog', { name: 'New API key' })
+    await dlg.getByLabel('Name').fill('ci')
+    await dlg.locator('summary').click()
+    await expect(dlg).toContainText('With nothing ticked it can do everything you can')
+    await expectNoAxeViolations(page)
+    await dlg.getByRole('checkbox', { name: /Look at repositories/ }).click()
+    await dlg.getByRole('checkbox', { name: /Change files/ }).click()
+    await dlg.getByRole('button', { name: 'Make key' }).click()
+    await expect.poll(async () => (await ipcCalls(page, 'server_key_create')).length).toBe(1)
+    const [c] = await ipcCalls(page, 'server_key_create')
+    expect(c!.args).toEqual({ server: LOCAL_URL, name: 'ci', permissions: ['repo:read', 'repo:write'] })
+  })
+
   test('empty and error states', async ({ page }) => {
     await boot(page, admin({ server_keys_list: op() }), {}, 'API keys')
     await expect(page.getByText('You have no API keys')).toBeVisible()
