@@ -5,6 +5,159 @@ All notable changes to MediaGit will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.8.0-rc.1] - Unreleased
+
+The headline is the **MediaGit desktop app** (preview). It drives the same
+`mediagit` program as the command line, so nothing it does is different from the
+CLI. Release candidates are not code-signed; see
+[the Desktop App guide](book/src/guides/desktop-app.md) for the first-run warnings
+on each OS. The CLI and the server changed along the way, and a few of those
+changes fix real bugs.
+
+### Added
+
+#### Desktop app
+
+- **Four areas plus Settings.** Files, History, Branches and Team, with Settings
+  for the rest, replace a 15-item sidebar. Every old page address still works and
+  opens its new place. The look is "Grey Card + Marigold": grey chrome, a marigold
+  accent, eight lanes in the history graph with the current branch always in ink.
+- **File explorer.** Files, All files lists every file in the working folder with
+  its status and stays fast with 100,000 files. A file watcher refreshes it when
+  files change outside the app (idle cost is effectively zero).
+- **Include checkboxes.** One Changes list with an Include checkbox on each row
+  replaces separate staged and not-staged lists. While files are added the app
+  shows files done, bytes, transfer rate and time left.
+- **History with thumbnails**, compare with a before/after media slider, tags,
+  merge with per-file conflict choices, stash (all or chosen files), undo menu,
+  rebase, cherry-pick, bisect and reflog, remote file browser and file locks.
+- **More options everywhere.** Each operation has a "More options" disclosure
+  that exposes the rest of the CLI flags in plain words, with the flag name as
+  small text and risky options behind a confirmation. A contract test
+  (`ui/parity.toml`) fails the build if a CLI command or flag is neither shown in
+  the app, marked as planned, nor excluded with a reason.
+- **Server panel.** Team, Server sets up, starts and stops a MediaGit server on
+  the same computer, on this computer only unless you opt in to your network.
+  Pick the server folder (empty or already a server, never inside a project, only
+  while stopped), create the first admin, and choose where repositories are
+  stored: the computer's folder, Amazon S3 or MinIO, Google Cloud, or Azure
+  (preview). **Test connection** writes, reads and deletes a probe object to prove
+  the credentials. Tabs for people, access, API keys and repositories; deleting a
+  repository needs its name typed and says up front when bucket data is kept.
+  The same panel can administer a server someone else runs.
+- **Single instance, window state and logs.** A second launch focuses the first
+  window; the window remembers its size and place; a log file (including crashes)
+  is written to the app's log folder.
+- **Keychain remote token.** A token for a remote is kept in the OS keychain, not
+  in the repository (see the CLI note below).
+- **Installers for three systems.** Windows NSIS, macOS dmg, Linux deb and
+  AppImage, built by the `desktop-v*` release workflow and CI on all three
+  systems. The app uses only the bundled `mediagit` and never searches `PATH`; a
+  missing one fails with `cli_not_found` and an explanation.
+- **Developer overrides.** `MEDIAGIT_DESKTOP_CLI`, `MEDIAGIT_DESKTOP_SERVER` and
+  `MEDIAGIT_DESKTOP_SERVER_DIR` (see `env-knobs.md`).
+- **Cancel pull.** Pull can be cancelled like clone, fetch and push.
+
+#### CLI
+
+- **`--machine` on every command.** Every subcommand except `completions` answers
+  with one JSON result on stdout and progress on stderr (previously several,
+  including `branch protect`, `remote rename`, `tag show`, `reflog` and most of
+  `auth`, replied `json_unsupported`). Destructive actions need `--yes` in this
+  mode. `--secret-stdin` (requires `--machine`) reads passphrases and passwords
+  from stdin, never from arguments or the environment.
+- **`mediagit ls-files`** lists every working-folder file with its status
+  (`unchanged`, `modified`, `new`, `deleted`, `ignored`) and whether it is staged,
+  using the same walk and ignore rules as `status`. `--ignored` includes ignored
+  files.
+- **`mediagit config schema`, `set`, `unset`.** The command now edits any of 18
+  documented keys (author, performance, storage, remotes), checks the value
+  against the real configuration, keeps comments and unknown keys, and replaces
+  the file atomically. `config schema` lists every key with its type, default and
+  limits. Secret keys are set with `--secret-stdin` (or a prompt) and never
+  printed.
+- **`mediagit remote repos list|create|delete`** administers repositories on a
+  server (admin only), with `--remote` or `--server` to choose it. `delete` asks
+  for confirmation or `--yes`, `--force` allows a non-empty repository, and the
+  command warns when the data stays in a cloud bucket.
+- **`remote add --token-stdin`** reads a token from stdin
+  (`--machine --secret-stdin`). `remote ls-tree` lists a remote directory without
+  cloning; `tag create` and `tag delete` support `--machine`.
+- **`auth admin disable-user|enable-user|list-grants|repo-access`.**
+
+#### Server
+
+- **Admin routes for hosted repositories.** `GET`, `POST` and `DELETE` on
+  `/admin/repos` list, create and delete repositories (admin only; names are
+  validated before any file is touched; delete needs `?confirm=<name>`, refuses a
+  non-empty repository without `force`, and reports `storage_retained`).
+  `GET /auth/users/:id/grants` and `GET /admin/repos/:name/grants` show who can
+  reach what, and `GET /auth/users` reports disabled accounts.
+- **`default_storage`.** A new server config setting: repositories created through
+  the admin API use it (filesystem, S3/MinIO, GCS or Azure) unless the request names
+  its own storage.
+- **`mediagit-server init --storage ...`.** `--storage`, `--storage-bucket`,
+  `--storage-region`, `--storage-endpoint`, `--storage-prefix`,
+  `--storage-container`, `--storage-account`, `--storage-project` and
+  `--storage-secret-stdin` write `default_storage`. Credentials are read from
+  stdin only, as `name=value` lines. `--admin-password-stdin` (with
+  `--non-interactive`) takes the first admin's password from stdin instead of
+  `MEDIAGIT_ADMIN_PASSWORD`.
+- **`mediagit-server storage-test`** checks storage credentials by writing,
+  reading back and deleting a probe object, and prints `{"ok":true}` or
+  `{"ok":false,"error":...}`.
+- **`--exit-on-stdin-eof`** lets a parent program stop the server gracefully by
+  closing its stdin, on every OS.
+
+### Changed
+
+- **`remote add --token` now stores the token in the OS keychain**, keyed by the
+  server address, and `config.toml` keeps no copy. If no keychain can be used
+  (none available, or `MEDIAGIT_NO_KEYRING` is set) the command is refused with
+  `keychain_unavailable` instead of writing the token in plain text; use
+  `MEDIAGIT_TOKEN` there. `config set remotes.<name>.token` still writes plain
+  text and says so.
+- **`auth logout` honours `MEDIAGIT_NO_KEYRING`.**
+- **Removed flags that were accepted but did nothing, or always failed.** clap now
+  rejects them with exit code 2: `pull --abort` (use `merge --abort`) and
+  `--no-commit`; `rebase --autosquash` and `--rebase-merges`; `gc --aggressive`;
+  `diff --word-diff` and `--unified`; `log --patch`; `show --stat`, `--patch`,
+  `--pretty` and `--unified`; `verify --file-integrity` (a duplicate of
+  `--checksums`); `branch list --sort`; `branch switch --no-guess`;
+  `merge -X`; `cherry-pick --edit`. `init --bare` stays as a documented alias.
+- **`diff PATHS` is a real path filter** in every mode.
+- **`stash push` takes paths, as in git;** put the message in `-m`.
+  `stash save MSG PATHS` is unchanged.
+
+### Fixed
+
+- **`stash push PATHS` stashed everything.** The paths were accepted and ignored,
+  so stashing one file stashed the whole working copy. It now stashes only tracked,
+  staged and untracked changes under the given paths and leaves the rest alone.
+- **Applying a stash overwrote later edits.** `stash apply` and `pop` rewrote every
+  unchanged file from the stash, destroying edits made since and blocking the pop.
+  They now touch only files that differ from the stash's parent.
+- **A tag could be read as an empty tree, hiding what it points to (about one tag
+  in 256).** Objects are found by trying commit, then tree, then tag, and the
+  decoder accepted trailing bytes, so a tag whose target started with a zero byte
+  looked like an empty tree. `gc` could then delete a commit reachable only through
+  that tag and `push` could leave it out. Each object type now rejects leftover
+  bytes, so only its own type decodes.
+- **Credentials from `MEDIAGIT_TOKEN` or `MEDIAGIT_API_KEY` were copied into the OS
+  keychain.** A script or CI job using an API key silently replaced your own saved
+  sign-in for that server, and once the key was revoked you were locked out. Values
+  taken from the environment are never cached now.
+- **`add --machine` showed no progress.** The progress tracker was dropped as soon
+  as its bar was built. It now streams a bytes bar and a files bar.
+- **`config` could not hold large numbers.** Values above the signed 64-bit range,
+  such as `cdc_seed`, which about half of all repositories have, are carried
+  through the editor unchanged.
+- **The server logged its JWT secret at startup.** The startup config line now goes
+  through the redaction that hides secrets, including the JWT secret and any
+  `default_storage` credentials.
+- **A multi-commit cherry-pick that hit an empty commit mid-way** now saves its
+  state so `--skip` can continue.
+
 ## [v0.7.0-rc.1] - 2026-11-03
 
 ### Security

@@ -123,7 +123,14 @@ git tag -a desktop-v0.8.0 -m "MediaGit Desktop 0.8.0"
 git push origin desktop-v0.8.0
 ```
 
-The bundles are not code-signed yet (no certificate); signing is deferred.
+The bundles are not code-signed yet (no certificate); signing is deferred. Say
+so in the release notes, because every OS warns on first run: Windows
+SmartScreen shows "Windows protected your PC" (More info, then Run anyway),
+macOS Gatekeeper refuses the dmg until the user opens it from the right-click
+menu or allows it under System Settings, Privacy & Security, and the Linux
+AppImage must be marked executable first. Each bundle contains the matching
+`mediagit` and `mediagit-server` programs; none is downloaded or looked up on
+`PATH` at run time.
 
 ## Versioning
 

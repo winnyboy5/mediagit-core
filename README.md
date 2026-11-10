@@ -127,6 +127,20 @@ Uploads and downloads bypass the server entirely when the backend supports signi
 
 ---
 
+## Desktop App (preview)
+
+Prefer a window to a terminal? The MediaGit desktop app (targets v0.8.0, release candidate) works on the same repositories as the CLI and runs the bundled `mediagit` program for every action. It has four main areas plus Settings:
+
+- **Files**: browse the whole working folder, tick **Include** on the changes you want, and **Save version**.
+- **History**: versions as a graph with thumbnails of the changed files, compare, and tags.
+- **Branches**: branches, merge, sync with a remote, and stash.
+- **Team**: file locks, remote files, and a **Server** panel that sets up and runs a MediaGit server on your own computer (local folder or S3/MinIO, Google Cloud or Azure storage, with a connection test).
+- **Settings**: repository settings, storage, maintenance, encryption keys and advanced tools.
+
+Release candidates are **not code-signed**, so Windows SmartScreen, macOS Gatekeeper and Linux file permissions will warn on first run. See the [Desktop App guide](book/src/guides/desktop-app.md) for installing and a tour of each area.
+
+---
+
 ## Quick Start
 
 ### Installation
@@ -259,6 +273,7 @@ All 35 MediaGit commands, grouped by workflow:
 | `mediagit add <path>...` | Stage files for the next commit (supports globs, `--all`) |
 | `mediagit commit -m <msg>` | Record staged changes as a new commit |
 | `mediagit status` | Show working tree status — staged, unstaged, untracked files |
+| `mediagit ls-files` | List every file in the working folder with its status (what the desktop file explorer shows) |
 | `mediagit diff [commit]` | Show changes between working tree and commits |
 
 ### History & Inspection
@@ -353,6 +368,8 @@ mediagit [--verbose] [--quiet] [--color always|auto|never] [-C <path>] <command>
 | `-q, --quiet` | Suppress non-essential output |
 | `--color <when>` | Colored output: `always`, `auto` (default), or `never` |
 | `-C <path>` | Run as if started in `<path>` (like `git -C`) |
+| `--machine` | For programs and the desktop app: one JSON result on stdout and progress on stderr. Every command supports it except `completions` |
+| `--secret-stdin` | With `--machine`: read passphrases and passwords from stdin, one line per prompt, never from arguments or the environment |
 
 ---
 

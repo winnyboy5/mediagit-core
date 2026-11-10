@@ -216,6 +216,12 @@ mediagit-server init --non-interactive --enable-auth \
   --admin-username alice --admin-email alice@example.com
 ```
 
+A program that wants to avoid the environment as well can pipe the password in
+with `--admin-password-stdin` (it needs `--non-interactive`, and wins over
+`MEDIAGIT_ADMIN_PASSWORD`). The same `init` also takes `--storage s3|gcs|azure`
+with `--storage-*` flags to make new repositories use a cloud bucket; see
+[Default storage for new repositories](CONFIGURATION.md#default-storage-for-new-repositories).
+
 Then start the server and log in from the client:
 
 ```bash

@@ -380,6 +380,7 @@ Every key in `ServerConfig` (`crates/mediagit-server/src/config.rs:45-175`), `#[
 | `encryption.master_key_path` | path \| absent | absent | File holding the server's master key, which wraps every repository key it stores. Required when `encryption.enabled = true`. |
 | `enable_auth` | bool | `false` | Enable JWT/API-key authentication. |
 | `jwt_secret` | string \| absent | absent | Required when `enable_auth = true` (or set via `MEDIAGIT_JWT_SECRET`, which takes precedence — see Part 3). |
+| `default_storage` | table \| absent | absent | Where repositories created through `POST /admin/repos` (and `mediagit remote repos create`) keep their objects, unless the request names its own. Absent means each repo keeps its own filesystem storage. A table with a `backend` key of `"s3"`, `"gcs"` or `"azure"` plus that backend's fields; see [Default storage for new repositories](#default-storage-for-new-repositories) below. Holds credentials when set, so keep the file private; the server logs its config with secrets redacted (the JWT secret included). |
 | `allow_open_registration` | bool | **`false`** | Whether `POST /auth/register` is open to anonymous callers. Only meaningful when `enable_auth = true`. **Defaulted to `true` until 2026-09-18, and was wired to nothing at all** — setting it to `false` had no effect, so an anonymous caller could register on any fresh authenticated server, receive `Role::Read`, and read every repository through the no-grants fallback. It is now both wired and closed by default; bootstrap with `mediagit-server admin create`, or set `true` explicitly to restore open signup. |
 | `log_format` | string | `"full"` | Log output format: `"full"` (tracing's default single-line form, what this server has always emitted), `"pretty"`, `"compact"` or `"json"`. `MEDIAGIT_LOG_FORMAT` overrides it. An unrecognised value is a hard startup error, not a silent fallback. `RUST_LOG` controls the filter and is unaffected. |
 | `presigned_url_ttl_seconds` | u64 | `43200` (12 h) | TTL for presigned PUT URLs issued for direct-to-bucket uploads. Lower this if your cloud credentials use short-lived STS sessions. |
@@ -485,7 +486,52 @@ already holds those bytes in memory.
 
 ### No `[storage]` section here
 
-Storage backend configuration is **per-repo**, living in each served repository's own `.mediagit/config.toml` under `[storage]` (see Part 1). `mediagit-server.toml` has no storage keys at all — including one would fail to parse due to `deny_unknown_fields`.
+Storage backend configuration is **per-repo**, living in each served repository's own `.mediagit/config.toml` under `[storage]` (see Part 1). `mediagit-server.toml` has no `[storage]` table — including one would fail to parse due to `deny_unknown_fields`. The one server-level storage setting is `default_storage`, described next.
+
+### Default storage for new repositories
+
+By default a repository created through the admin API (`POST /admin/repos`, or `mediagit remote repos create`) keeps its objects in its own folder under `repos_dir`. Set `default_storage` to make new repositories use a cloud bucket instead. A repository created with an explicit `storage` in the request keeps that one; existing repositories are not changed.
+
+```toml
+[default_storage]
+backend = "s3"            # "s3", "gcs" or "azure"
+bucket = "my-media-bucket"
+region = "us-east-1"
+endpoint = "http://localhost:9000"   # only for MinIO and other S3-compatible services
+prefix = ""               # optional folder inside the bucket
+access_key_id = "..."
+secret_access_key = "..."
+```
+
+Omit the two keys to use the standard AWS credential sources. GCS takes `bucket`, `project_id` and an optional `credentials_path` (a service-account JSON file; without it Application Default Credentials are used). Azure takes `container`, an optional `prefix` and an `auth` table, for example `auth = { type = "account_key", account_name = "...", account_key = "..." }` or `auth = { type = "connection_string", value = "..." }`. Azure support is in preview.
+
+You do not have to write this by hand. `mediagit-server init` takes `--storage s3|gcs|azure` and the `--storage-*` flags below, with secrets on stdin only, and `mediagit-server storage-test` checks the credentials before you rely on them:
+
+| Flag | Applies to | Meaning |
+|------|-----------|---------|
+| `--storage <KIND>` | all | `filesystem` (default, nothing is written), `s3`, `gcs` or `azure` |
+| `--storage-bucket <NAME>` | s3, gcs | Bucket name (required for both) |
+| `--storage-region <REGION>` | s3 | Region (default `us-east-1`) |
+| `--storage-endpoint <URL>` | s3 | S3-compatible endpoint such as MinIO or R2 |
+| `--storage-prefix <PREFIX>` | all cloud | Optional folder inside the bucket or container |
+| `--storage-container <NAME>` | azure | Container name (required) |
+| `--storage-account <NAME>` | azure | Storage account name (required with an account key) |
+| `--storage-project <ID>` | gcs | Google Cloud project ID (required) |
+| `--storage-secret-stdin` | all cloud | Read credentials from stdin as `name=value` lines |
+
+With `--storage-secret-stdin` the lines are `access-key-id` and `secret-access-key` (S3, both or neither), `credentials-path` (GCS), or `connection-string` or `account-key` (Azure; a connection string wins if both are given). When `--admin-password-stdin` is also used, the password is the first line and the `name=value` lines follow. Secrets are never accepted as flags, so they stay out of shell history and process lists.
+
+```bash
+# Check an S3 or MinIO bucket without changing any config
+printf 'access-key-id=KEY\nsecret-access-key=SECRET\n' | \
+  mediagit-server storage-test --storage s3 --storage-bucket media \
+    --storage-endpoint http://localhost:9000 --storage-secret-stdin
+# prints {"ok":true} and exits 0, or {"ok":false,"error":"..."} and exits 1
+```
+
+`storage-test` writes a small probe object, reads it back and deletes it. It needs `--storage s3`, `gcs` or `azure`.
+
+**Deleting a repository does not delete its cloud data.** `DELETE /admin/repos/:name` (and `mediagit remote repos delete`) reports `storage_retained: true` when the repository's objects live in a bucket, and leaves them there. Remove them in the bucket to reclaim the space.
 
 ### Config discovery
 
@@ -503,6 +549,7 @@ Storage backend configuration is **per-repo**, living in each served repository'
 | `--host <HOST>` | `host` |
 | `--data-dir <PATH>` | `repos_dir` |
 | `-c`, `--config <PATH>` | which config file is loaded (default `mediagit-server.toml`) |
+| `--exit-on-stdin-eof` | not a setting: shut down gracefully when standard input closes, so a parent program (the desktop app) can stop the server on any OS by closing the pipe |
 
 CLI flags are applied after the config file is loaded, so they win over whatever the file says.
 

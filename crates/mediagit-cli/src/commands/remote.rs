@@ -160,10 +160,9 @@ pub enum RemoteSubcommand {
         #[arg(short, long)]
         fetch: bool,
 
-        /// Bearer token to store as `remotes.<name>.token` in config.toml.
-        /// Kept out of the OS keychain deliberately -- an explicit config
-        /// token is meant to be an auditable, editable override (I11); use
-        /// `mediagit auth login` for the keychain-backed default instead.
+        /// Bearer token for this remote, stored in the OS keychain (never in
+        /// config.toml). Refused when no keychain is available. Prefer
+        /// `--token-stdin` so the token stays out of shell history.
         #[arg(long, conflicts_with = "token_stdin")]
         token: Option<String>,
 

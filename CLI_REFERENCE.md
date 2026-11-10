@@ -15,6 +15,7 @@ see [book/src/architecture/](book/src/architecture/README.md).
 | `add` | Stage file contents for commit with smart compression, chunking, and delta encoding | [book/src/cli/add.md](book/src/cli/add.md) |
 | `commit` | Record staged changes as a commit | [book/src/cli/commit.md](book/src/cli/commit.md) |
 | `status` | Show working tree status | [book/src/cli/status.md](book/src/cli/status.md) |
+| `ls-files` | List every working-folder file with its status | [book/src/cli/ls-files.md](book/src/cli/ls-files.md) |
 | `log` | Show commit history | [book/src/cli/log.md](book/src/cli/log.md) |
 | `diff` | Show changes between commits, the index, and the working tree | [book/src/cli/diff.md](book/src/cli/diff.md) |
 | `show` | Show object details | [book/src/cli/show.md](book/src/cli/show.md) |
@@ -86,7 +87,8 @@ mediagit -C <repo> --machine status
 
 | `error.code` | Meaning | Exit |
 |--------------|---------|------|
-| `json_unsupported` | The subcommand has no machine output yet | 2 |
+| `json_unsupported` | Only `completions`, which prints shell code and has no machine output | 2 |
+| `keychain_unavailable` | `remote add --token` or `--token-stdin` was refused because no OS keychain can be used (none present, or `MEDIAGIT_NO_KEYRING` is set) | 1 |
 | `needs_input` | A prompt (passphrase, confirmation) was reached; collect the input and re-run with it supplied | 1 |
 | `invalid_args` | Flags combined wrongly (currently `show`: `--output` without `<rev>:<path>`, `--tree` with `<rev>:<path>`) | 1 |
 | `empty_commit` | `cherry-pick` (including `--continue`) or `revert` would create a commit whose tree equals HEAD's; nothing is committed (`revert --no-commit` skips the check) | 1 |
@@ -104,7 +106,7 @@ Success exits 0. A panic exits 2 with no envelope.
 `unit` is `bytes` or `items`. Other stderr text is ordinary log output; ignore
 lines that are not `type:"progress"`.
 
-**Supported commands:** `status`, `version`, `log`, `show`, `branch`, `tag`,
+**Supported commands:** every subcommand except `completions` (the history of how this list grew follows; `ls-files` is the newest addition). Originally `status`, `version`, `log`, `show`, `branch`, `tag`,
 `add`, `commit`, `init`, `media`, `remote`, `lock`, `fetch`, `pull`, `push`,
 `clone`, `merge`, `diff`, `stash`, `reset`, `revert`, `download`. A `merge` or
 `revert` that stops on conflicts prints an `ok:true` envelope with
@@ -141,6 +143,17 @@ passphrase master even where an OS keychain exists (a key file named by
 `source` reports which master was used. A passphrase repository is unwrapped once
 per process, so `push`/`fetch`/`pull` read exactly one line. `key recover <CODE>` and `auth login --token/--api-key` are
 `invalid_args` in machine mode, because they put the secret in argv.
+
+Later additions: `ls-files` returns `{files:[{path, status, staged, size}]}`;
+`config schema` describes every settable key (type, default, docs, secret flag,
+limits); `config set` of a secret key reads the value from stdin with
+`--secret-stdin` and never prints it back; `remote add --token-stdin` reads a
+bearer token from stdin (needs `--machine --secret-stdin`) and `--token` is
+`invalid_args` in machine mode; `remote repos list|create|delete` administer
+repositories hosted on a server; `add` streams a bytes bar and a files bar.
+The hidden `__cli-tree` command prints the clap command tree as JSON; the
+desktop test suite checks it against `ui/parity.toml`, so a new flag cannot
+miss the GUI silently.
 
 `tag` supports `list`, `create` and `delete`. `remote ls-tree <remote> [path] [--ref <ref>]` lists one remote directory
 (`{remote, ref, path, entries:[{name, path, kind: file|dir, size|null, oid}]}`);

@@ -5,13 +5,16 @@ Manage remote repository connections.
 ## Synopsis
 
 ```bash
-mediagit remote add <NAME> <URL> [--fetch]
+mediagit remote add <NAME> <URL> [--fetch] [--token <TOKEN> | --token-stdin]
 mediagit remote remove <NAME>
 mediagit remote list [--verbose]
 mediagit remote rename <OLD> <NEW>
 mediagit remote set-url <NAME> <URL>
 mediagit remote show <NAME>
 mediagit remote ls-tree <REMOTE> [PATH] [--ref <REF>]
+mediagit remote repos list   [--remote <NAME> | --server <URL>]
+mediagit remote repos create [--remote <NAME> | --server <URL>] <NAME>
+mediagit remote repos delete [--remote <NAME> | --server <URL>] [--force] [--yes] <NAME>
 ```
 
 ## Description
@@ -92,6 +95,39 @@ Options:
 Prints one line per entry: `<type>\t<size>\t<path>`, where `type` is `blob` or
 `tree` and `size` is `-` for directories.
 
+### `repos`
+
+Administer the repositories a MediaGit server hosts. You need an administrator
+account on that server. Sign in first with [`mediagit auth login`](./auth.md), or
+set `MEDIAGIT_TOKEN` or `MEDIAGIT_API_KEY`.
+
+```bash
+mediagit remote repos list
+mediagit remote repos create <NAME>
+mediagit remote repos delete <NAME>
+```
+
+Which server is used:
+- `--remote <NAME>` — Use the server of this remote (default: `origin`)
+- `--server <URL>` — Use this server address instead (`scheme://host[:port]`); overrides `--remote`
+
+`list` prints one line per repository: name, size in bytes and last-modified time
+(Unix seconds). `create` makes an empty repository; if the server has a default
+storage configured (the `default_storage` setting) it uses that, otherwise it
+keeps the repository in its own folder on the server.
+
+`delete` unregisters a repository and cannot be undone. It asks you to confirm,
+or you can pass `--yes`, which is required when there is no terminal and under
+`--machine`.
+
+Options for `delete`:
+- `--force` — Delete even if the repository is not empty
+- `--yes` — Confirm the deletion without asking
+
+If the server keeps repositories in a cloud bucket, deleting removes the
+repository from the server but leaves its data in the bucket, and the command
+warns you; remove the data in the bucket yourself to reclaim the space.
+
 ## Examples
 
 ### Add a remote
@@ -160,10 +196,19 @@ url = "http://backup-server.example.com/my-project"
 
 `add`:
 - `-f`, `--fetch` — Fetch immediately after adding the remote
-- `--token <TOKEN>` — Bearer token stored as `remotes.<name>.token` in
-  `config.toml`. Deliberately kept OUT of the OS keychain: an explicit config
-  token is meant to be an auditable, editable override. For the
-  keychain-backed default, use [`mediagit auth login`](./auth.md) instead.
+- `--token <TOKEN>` — Bearer token for the remote. It is stored in the OS
+  keychain, keyed by the server address, and `config.toml` keeps no copy. If no
+  keychain can be used (none on this machine, or `MEDIAGIT_NO_KEYRING` is set),
+  the command is refused with the error `keychain_unavailable` and nothing is
+  saved, instead of writing the token in plain text. Set `MEDIAGIT_TOKEN`
+  instead on such machines.
+- `--token-stdin` — Read the token from standard input instead of the command
+  line, so it never appears in a process list. Needs `--machine --secret-stdin`
+  (this is how the desktop app adds a token remote). Cannot be combined with
+  `--token`. Under `--machine`, `--token` is refused with `invalid_args`.
+
+The environment variables `MEDIAGIT_TOKEN` and `MEDIAGIT_API_KEY` outrank a saved
+token, and credentials taken from them are never copied into the keychain.
 
 `set-url`:
 - `--push` — Set the push URL instead of the fetch URL
