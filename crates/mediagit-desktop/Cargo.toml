@@ -31,6 +31,11 @@ tauri-build = { version = "2.5", features = [] }
 # (at-rest key OnceLock, cwd, prompts) stays inside a child process.
 tauri = { version = "2.12", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"  # a second launch focuses the first window
+tauri-plugin-window-state = "2"  # remember window size and position
+tauri-plugin-log = "2"  # log file in the app log dir
+log = "0.4"
+notify-debouncer-mini = "0.7"  # working-tree watcher (re-exports notify)
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

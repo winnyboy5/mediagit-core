@@ -27,7 +27,7 @@ export default defineConfig({
       '@tauri-apps/plugin-dialog',
     ],
   },
-  build: { target: 'es2022', sourcemap: true },
+  build: { target: 'es2022', sourcemap: false },
   test: {
     environment: 'happy-dom',
     include: ['tests/unit/**/*.test.ts'],

@@ -3,6 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { join, resolve } from 'node:path'
 import { chromium, expect, test, type Browser, type Page } from '@playwright/test'
 import { expectNoAxeViolations } from '../mocked/helpers'
+import { sectionPath } from '../mocked/nav'
 import { readState, type E2EState } from './setup'
 
 // Gate G4: the REAL Tauri app (WebView2 over CDP) against a real repo, server and CLI.
@@ -20,12 +21,11 @@ const env = () => ({ ...process.env, ...st.env, MEDIAGIT_CDC_SEED: '20260716' })
 const cli = (cwd: string, ...args: string[]) => execFileSync(st.cli, args, { cwd, env: env(), encoding: 'utf8' })
 const shot = (name: string) => page.screenshot({ path: join(shots, `${name}.png`) })
 const go = async (view: string, heading: string) => {
-  await page.evaluate((v) => { window.location.hash = `#/${v}` }, view)
-  await expect(page.getByRole('heading', { name: heading, level: 2 })).toBeVisible()
+  await page.evaluate((v) => { window.location.hash = `#/${v}` }, sectionPath(view))
+  await expect(page.getByRole('heading', { name: heading, level: 2, exact: true }).first()).toBeVisible()
 }
 const refresh = () => page.evaluate(() => window.dispatchEvent(new Event('focus')))
-const unstaged = () => page.getByRole('tree', { name: 'Files not staged' })
-const staged = () => page.getByRole('tree', { name: 'Staged files' })
+const changes = () => page.getByRole('tree', { name: 'Changes' })
 
 test.beforeAll(async () => {
   st = readState()
@@ -73,9 +73,9 @@ test('c. on-disk edits show as modified and untracked; inspector shows the selec
   writeFileSync(join(st.repo, 'notes.txt'), 'second draft, edited outside the app\n')
   writeFileSync(join(st.repo, 'new-shot.txt'), 'brand new\n')
   await refresh()
-  await expect(unstaged().getByRole('treeitem', { name: /notes\.txt/ })).toBeVisible()
-  await expect(unstaged().getByRole('treeitem', { name: /new-shot\.txt/ })).toBeVisible()
-  await unstaged().getByRole('treeitem', { name: /notes\.txt/ }).click()
+  await expect(changes().getByRole('treeitem', { name: /notes\.txt/ })).toBeVisible()
+  await expect(changes().getByRole('treeitem', { name: /new-shot\.txt/ })).toBeVisible()
+  await changes().getByRole('treeitem', { name: /notes\.txt/ }).click()
   await expect(page.getByTestId('inspector').getByText('notes.txt').first()).toBeVisible()
   const porcelain = cli(st.repo, 'status', '--porcelain')
   expect(porcelain).toContain('notes.txt')
@@ -84,10 +84,10 @@ test('c. on-disk edits show as modified and untracked; inspector shows the selec
 })
 
 test('d. stage both and commit in the UI; the CLI agrees', async () => {
-  await page.getByRole('button', { name: 'Stage all', exact: true }).click()
-  await expect(staged().getByRole('treeitem')).toHaveCount(2)
+  await page.getByRole('button', { name: 'Include all', exact: true }).click()
+  await expect(changes().getByRole('checkbox', { checked: true })).toHaveCount(2)
   await page.getByLabel('Message').fill('G4 edit and add')
-  await page.getByRole('button', { name: 'Save version (commit)' }).click()
+  await page.getByRole('button', { name: 'Save version', exact: true }).click()
   await expect(page.getByText('No changes')).toBeVisible()
   expect(cli(st.repo, 'status', '--porcelain').trim()).toBe('')
   expect(cli(st.repo, 'log', '--oneline', '-n', '1')).toContain('G4 edit and add')
@@ -102,7 +102,7 @@ test('e. History shows the new commit on top with graph and changed files', asyn
   await expect(rows).toHaveCount(2)
   const detail = page.getByTestId('commit-detail')
   await expect(detail.getByRole('heading', { name: 'G4 edit and add' })).toBeVisible()
-  await expect(detail.getByRole('tab', { name: /Changes in this version · 2/ })).toBeVisible()
+  await expect(detail.getByRole('heading', { name: /Changes in this version\s+2/ })).toBeVisible()
   await expect(detail).toContainText('notes.txt')
   await expect(detail).toContainText('new-shot.txt')
   await shot('05-history')
@@ -145,7 +145,7 @@ test('g. Locks: lock the binary in the UI, see it listed, unlock; CLI agrees', a
 
 test('h. Sync: Send, then Get latest brings in a commit pushed from a second clone', async () => {
   await go('sync', 'Sync')
-  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await page.getByRole('button', { name: /^Send( \d+)?$/ }).click()
   await expect(page.getByText(/^Sent /).first()).toBeVisible({ timeout: 45_000 })
   await shot('08-sync-sent')
   expect(cli(st.repo, 'status', '-b', '--porcelain')).not.toMatch(/ahead/i)
@@ -164,11 +164,11 @@ test('h. Sync: Send, then Get latest brings in a commit pushed from a second clo
       if (document.querySelector('[data-testid="transfer-progress"]')) w.__sawProgress = true
     }).observe(document.body, { childList: true, subtree: true })
   })
-  await page.getByRole('button', { name: 'Get latest', exact: true }).click()
+  await page.getByRole('button', { name: /^Get latest( \d+)?$/ }).click()
   await expect.poll(() => existsSync(join(st.repo, 'from-clone.txt')), { timeout: 45_000 }).toBe(true)
   expect(await page.evaluate(() => (window as unknown as { __sawProgress: boolean }).__sawProgress)).toBe(true)
   expect(readFileSync(join(st.repo, 'from-clone.txt'), 'utf8')).toContain('second clone')
-  await expect(page.getByRole('button', { name: 'Get latest', exact: true })).toBeEnabled()
+  await expect(page.getByRole('button', { name: /^Get latest( \d+)?$/ })).toBeEnabled()
   await shot('09-sync-pulled')
   await go('history', 'History')
   const rows = page.getByRole('listbox', { name: 'Versions, newest first' }).getByRole('option')

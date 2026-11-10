@@ -3,6 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { join, resolve } from 'node:path'
 import { chromium, expect, test, type Browser, type Page } from '@playwright/test'
 import { formatBytes } from '../../../src/components/format'
+import { goTo } from './nav'
 import { readState, type E2EState } from './setup'
 
 // Gate G4, wave W3: Storage, Maintenance, Settings, Advanced and Security in the REAL app.
@@ -28,10 +29,7 @@ const cliPass = (cwd: string, ...args: string[]) => {
   }
 }
 const shot = (name: string) => page.screenshot({ path: join(shots, `${name}.png`) })
-const go = async (view: string, heading: string) => {
-  await page.evaluate((v) => { window.location.hash = `#/${v}` }, view)
-  await expect(page.getByRole('heading', { name: heading, level: 2 })).toBeVisible()
-}
+const go = (view: string, heading?: string) => goTo(page, view, heading)
 // Views load on mount: leave and come back so a view re-reads what the CLI changed.
 const goFresh = async (view: string, heading: string) => {
   await go('locks', 'Locks')
@@ -100,12 +98,12 @@ test('q. Maintenance: integrity check and verify are healthy; clean up via the c
 })
 
 test('r. Settings: author identity reaches config; theme and density survive a reload', async () => {
-  await go('settings', 'Settings')
+  await go('settings')
   const id = page.getByTestId('identity')
   await id.getByLabel('Name', { exact: true }).fill('Mira Okafor')
   await id.getByLabel('Email').fill('mira@studio.example')
   await id.getByRole('button', { name: 'Save' }).click()
-  await expect(page.getByTestId('config')).toContainText('mira@studio.example')
+  await expect.poll(() => cliJson(st.repo, 'config', 'get', 'author.email').entries[0]?.value).toBe('mira@studio.example')
   expect(cliJson(st.repo, 'config', 'get', 'author.name').entries[0].value).toBe('Mira Okafor')
   expect(cliJson(st.repo, 'config', 'get', 'author.email').entries[0].value).toBe('mira@studio.example')
   await shot('19-settings-identity')

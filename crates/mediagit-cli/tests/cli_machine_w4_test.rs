@@ -248,7 +248,9 @@ fn remote_add_token_is_refused_on_argv() {
         serde_json::json!([])
     );
 
-    // The token comes on stdin instead, and is stored but never echoed.
+    // The token comes on stdin instead. The tests run with the keychain off
+    // (MEDIAGIT_NO_KEYRING), so the add is refused with a clear error: the
+    // token is never written to config.toml, echoed, or half-saved.
     let token = "tok-Zq81-not-for-logs";
     let r = run_env(
         dir,
@@ -266,19 +268,19 @@ fn remote_add_token_is_refused_on_argv() {
 "
         )),
     );
-    assert_eq!(r.code, 0, "{}", r.stdout);
-    assert_no_leak(&r, token);
-    assert_eq!(r.json["data"]["remotes"][0]["name"], "o");
-    assert_no_leak(&run_env(dir, &[], &[], &["remote", "list"], None), token);
-    assert_no_leak(
-        &run_env(dir, &[], &[], &["remote", "show", "o"], None),
-        token,
+    assert_ne!(r.code, 0, "{}", r.stdout);
+    assert_eq!(
+        r.json["error"]["code"], "keychain_unavailable",
+        "{}",
+        r.stdout
     );
-    // PINNED CURRENT BEHAVIOUR, KNOWN GAP (not desired): an explicit remote
-    // token is stored in plain text in .mediagit/config.toml. Moving it to the
-    // keychain is a separate fix; when that lands, flip this assertion.
+    assert_no_leak(&r, token);
+    assert_eq!(
+        ok(dir, &["remote", "list"])["remotes"],
+        serde_json::json!([])
+    );
     let cfg = fs::read_to_string(dir.join(".mediagit/config.toml")).unwrap();
-    assert!(cfg.contains(token), "token should be in config.toml");
+    assert!(!cfg.contains(token), "token must not be in config.toml");
 
     // Without --secret-stdin the token prompt is needs_input, not a hang.
     let r = run_env(

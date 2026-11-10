@@ -478,11 +478,13 @@ impl RemoteCmd {
         let mut remote_config = mediagit_config::RemoteConfig::new(url);
         remote_config.fetch = Some(url.to_string());
         remote_config.push = Some(url.to_string());
-        if let Some(token) = token.filter(|t| !t.trim().is_empty()) {
-            remote_config.token = Some(token);
-        }
-
         config.remotes.insert(name.to_string(), remote_config);
+
+        // The token goes to the OS keychain, keyed by the remote's origin;
+        // config.toml keeps no secret. Fails before anything is saved.
+        if let Some(token) = token.filter(|t| !t.trim().is_empty()) {
+            crate::repo::store_remote_token(&config, name, &token)?;
+        }
 
         // Save config
         config.save(&repo_root)?;

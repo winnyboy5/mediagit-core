@@ -186,6 +186,9 @@ pub struct Engine {
     /// path. Held in this process's memory only (never written, logged or sent to the
     /// webview) and answered on stdin to commands in that repo. `lock` forgets one.
     unlocked: Arc<Mutex<HashMap<PathBuf, Secret>>>,
+    /// Set when [`Engine::locate`] failed: every run reports `cli_not_found`
+    /// (never a PATH lookup), so the UI's startup gate can show its error screen.
+    missing: Option<String>,
 }
 
 impl Engine {
@@ -194,6 +197,15 @@ impl Engine {
         Self {
             bin,
             unlocked: Arc::default(),
+            missing: None,
+        }
+    }
+
+    /// An engine with no CLI: every run fails with [`EngineError::CliNotFound`].
+    pub fn missing(what: String) -> Self {
+        Self {
+            missing: Some(what),
+            ..Self::new(PathBuf::new())
         }
     }
 
@@ -295,6 +307,9 @@ impl Engine {
         secrets: &[Secret],
         mut on_progress: impl FnMut(Progress),
     ) -> Result<Value, EngineError> {
+        if let Some(what) = &self.missing {
+            return Err(EngineError::CliNotFound(what.clone()));
+        }
         let explicit_empty = secrets.is_empty();
         let secrets = self.stdin_secrets(repo, args, secrets);
         let used_cached = !secrets.is_empty() && explicit_empty;
@@ -502,6 +517,14 @@ pub fn parse_envelope(stdout: &str) -> Result<Value, EngineError> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_missing_engine_reports_cli_not_found_and_never_searches_path() {
+        let e = Engine::missing("mediagit beside app".into());
+        let err = e.run(None, &["version"], |_| {}).await.unwrap_err();
+        assert_eq!(err.code(), "cli_not_found");
+        assert!(err.to_string().contains("beside app"));
+    }
 
     #[tokio::test]
     async fn kill_and_reap_leaves_no_running_child_behind() {

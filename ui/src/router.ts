@@ -34,7 +34,8 @@ export const router = createRouter({
     })),
     // Tags and Stash on one page; the hubs show them apart (History > Tags, Branches > Stash).
     { path: '/tags-stash', component: () => import('./views/TagsStashView.vue'), beforeEnter: () => (useRepoStore().path ? true : '/welcome'), meta: { title: 'Tags & Stash' } },
-    { path: '/kit', component: () => import('./kit/KitView.vue'), meta: { bare: true } },
+    // Component gallery: dev builds only, so the shipped app has no /kit.
+    ...(import.meta.env.DEV ? [{ path: '/kit', component: () => import('./kit/KitView.vue'), meta: { bare: true } }] : []),
   ],
 })
 

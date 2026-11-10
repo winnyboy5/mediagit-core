@@ -6,6 +6,7 @@
 mod commands;
 pub mod engine;
 pub mod server_manager;
+mod watcher;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -351,18 +352,58 @@ fn cancel_op(ops: tauri::State<'_, Ops>, op_id: String) -> bool {
     ops.cancel(&op_id)
 }
 
+/// Send panics to the log file before the default hook prints them. Call after
+/// the log plugin has installed its logger (its setup runs before ours).
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        log::error!("panic: {info}");
+        log::logger().flush();
+        previous(info);
+    }));
+}
+
 /// Build and run the app. A missing CLI is reported by the first command,
 /// so the window still opens and can show the error.
 pub fn run() {
-    // Extracted previews are a per-session cache; start each session clean.
+    // Previews are a per-process cache: start clean, and sweep dirs that
+    // crashed runs left behind.
     let _ = std::fs::remove_dir_all(commands::preview_dir());
-    let engine = Engine::locate().unwrap_or_else(|_| Engine::new(PathBuf::from("mediagit")));
+    commands::sweep_stale_previews(&commands::preview_root(), Duration::from_secs(24 * 3600));
+    // No PATH fallback: a missing CLI makes every command fail `cli_not_found`.
+    let engine = Engine::locate().unwrap_or_else(|e| match e {
+        EngineError::CliNotFound(what) => Engine::missing(what),
+        other => Engine::missing(other.to_string()),
+    });
     let app = tauri::Builder::default()
+        // Registered first, as the plugin requires: a second launch focuses the first window.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
+        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Info)
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                        file_name: Some("mediagit-desktop".into()),
+                    }),
+                ])
+                .build(),
+        )
         .plugin(tauri_plugin_dialog::init())
         .manage(engine)
         .manage(Ops::default())
         .manage(RepoQueues::default())
+        .manage(watcher::RepoWatcher::default())
         .setup(|app| {
+            install_panic_hook();
+            log::info!("MediaGit desktop {} started", env!("CARGO_PKG_VERSION"));
             let root = app.path().app_data_dir()?.join("server");
             app.manage(server_manager::ServerManager::new(root));
             Ok(())

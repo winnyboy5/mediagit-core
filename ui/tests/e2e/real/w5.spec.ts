@@ -25,10 +25,10 @@ const cli = (cwd: string, extra: Record<string, string>, ...args: string[]) => e
 const cliJson = (...args: string[]) => (JSON.parse(cli(st.root, {}, '--machine', ...args)) as { ok: boolean; data: Record<string, any> }).data // eslint-disable-line @typescript-eslint/no-explicit-any
 const shot = (name: string) => page.screenshot({ path: join(shots, `${name}.png`) })
 const go = async (tab?: string) => {
-  await page.evaluate(() => { window.location.hash = '#/locks' })
-  await page.evaluate(() => { window.location.hash = '#/server' })
-  await expect(page.getByRole('heading', { name: 'Server', level: 2 })).toBeVisible()
-  if (tab) await page.getByRole('tab', { name: tab }).click()
+  await page.evaluate(() => { window.location.hash = '#/team/locks' })
+  await page.evaluate(() => { window.location.hash = '#/team/server' })
+  await expect(page.getByRole('heading', { name: 'Server', level: 2, exact: true }).first()).toBeVisible()
+  if (tab) await page.getByRole('navigation', { name: 'Server pages' }).getByRole('button', { name: tab }).click()
 }
 const healthz = async () => {
   try {

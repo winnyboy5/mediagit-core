@@ -88,7 +88,7 @@ const onHub = (h: Hub) => inHub(route.path, h)
         <RouterLink :to="hubHome(h)" class="item" :class="{ on: onHub(h) }" :aria-current="onHub(h) ? 'page' : undefined" :aria-keyshortcuts="`Control+${i + 1}`">
           <component :is="h.icon" :size="20" aria-hidden="true" />
           <span class="lbl">{{ h.label }}</span>
-          <span v-if="h.id === 'files' && changes.counts.total" class="count" :aria-label="`${changes.counts.total} changed files`">{{ changes.counts.total }}</span>
+          <span v-if="h.id === 'files' && changes.counts.total" class="count" :aria-label="`${changes.counts.total} changed ${changes.counts.total === 1 ? 'file' : 'files'}`">{{ changes.counts.total }}</span>
           <span v-else-if="h.id === 'team' && locks.locks.length" class="count" >{{ locks.locks.length }} {{ locks.locks.length === 1 ? 'lock' : 'locks' }}</span>
         </RouterLink>
       </li>

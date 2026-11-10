@@ -48,9 +48,35 @@ fn invalid(what: &str, value: &str) -> EngineError {
     EngineError::InvalidArgument(format!("bad {what}: {value:?}"))
 }
 
-/// Directory for extracted blobs; the asset protocol scope allows exactly this.
-pub fn preview_dir() -> PathBuf {
+/// Parent of every per-process preview dir; the asset protocol scope allows `<this>/**`.
+pub fn preview_root() -> PathBuf {
     std::env::temp_dir().join("mediagit-desktop-preview")
+}
+
+/// Directory for extracted blobs: one per process, so a second app instance
+/// never wipes the first one's previews.
+pub fn preview_dir() -> PathBuf {
+    preview_root().join(std::process::id().to_string())
+}
+
+/// Delete preview dirs under `root` not modified for `max_age` (left behind by
+/// crashed runs). Best effort; this process's own dir is never touched.
+pub fn sweep_stale_previews(root: &Path, max_age: std::time::Duration) {
+    let own = std::process::id().to_string();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let stale = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age >= max_age);
+        if stale && e.file_name().to_string_lossy() != own {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -615,7 +641,11 @@ fn require_repo(dir: &Path) -> Result<(), EngineError> {
 /// previously opened repo stays allowed for the session.
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)] // tauri injects AppHandle by value
-pub fn repo_allow(app: tauri::AppHandle, repo: String) -> Result<(), EngineError> {
+pub fn repo_allow(
+    app: tauri::AppHandle,
+    watcher: tauri::State<'_, crate::watcher::RepoWatcher>,
+    repo: String,
+) -> Result<(), EngineError> {
     let repo = repo_path(&repo)?;
     require_repo(&repo)?;
     let scope = app.asset_protocol_scope();
@@ -623,7 +653,16 @@ pub fn repo_allow(app: tauri::AppHandle, repo: String) -> Result<(), EngineError
     scope
         .forbid_directory(repo.join(".mediagit"), true)
         .map_err(spawn)?;
-    scope.allow_directory(&repo, true).map_err(spawn)
+    scope.allow_directory(&repo, true).map_err(spawn)?;
+    // The UI re-reads status on `repo-changed`. A repo that cannot be watched
+    // (limits, network drive) still works: the UI also refreshes on focus.
+    let handle = app.clone();
+    if let Err(e) = watcher.watch(&repo, crate::watcher::DEBOUNCE, move || {
+        let _ = tauri::Emitter::emit(&handle, "repo-changed", ());
+    }) {
+        log::warn!("cannot watch {}: {e}", repo.display());
+    }
+    Ok(())
 }
 
 /// Commit list page (`log`), newest first, plus all refs.
@@ -1552,6 +1591,44 @@ mod tests {
         assert!(bad(extract_argv(repo, "main", "a.png", &out)));
         assert!(bad(extract_argv(repo, oid, "../a.png", &out)));
         assert!(bad(extract_argv(repo, oid, "-x", &out)));
+    }
+
+    #[test]
+    fn preview_dir_is_a_per_process_child_of_the_root() {
+        let d = preview_dir();
+        assert_eq!(d.parent().unwrap(), preview_root());
+        assert_eq!(
+            d.file_name().unwrap().to_string_lossy(),
+            std::process::id().to_string()
+        );
+    }
+
+    #[test]
+    fn sweep_removes_only_stale_dirs_and_never_our_own() {
+        let root = tempfile::tempdir().unwrap();
+        let own = root.path().join(std::process::id().to_string());
+        let old = root.path().join("111");
+        let fresh = root.path().join("222");
+        for d in [&own, &old, &fresh] {
+            std::fs::create_dir(d).unwrap();
+        }
+        let two_days = std::time::SystemTime::now() - Duration::from_secs(2 * 86400);
+        for d in [&own, &old] {
+            let mut o = std::fs::OpenOptions::new();
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                // Directories open only with FILE_FLAG_BACKUP_SEMANTICS.
+                o.write(true).custom_flags(0x0200_0000);
+            }
+            #[cfg(not(windows))]
+            o.read(true);
+            o.open(d).unwrap().set_modified(two_days).unwrap();
+        }
+        sweep_stale_previews(root.path(), Duration::from_secs(86400));
+        assert!(own.exists(), "own dir survives even when old");
+        assert!(!old.exists(), "stale dir is removed");
+        assert!(fresh.exists(), "fresh dir survives");
     }
 
     #[test]

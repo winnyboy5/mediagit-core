@@ -368,6 +368,33 @@ pub fn remember_credentials_for_origin(origin: &str, creds: &mediagit_protocol::
     }
 }
 
+/// Store an explicit remote bearer token in the OS keychain (never in
+/// config.toml). Unlike [`remember_credentials`] this is not best-effort: a
+/// missing keychain (`MEDIAGIT_NO_KEYRING`, headless box without a secret
+/// service) is an error, so the token is never silently written in plaintext.
+pub fn store_remote_token(
+    config: &mediagit_config::Config,
+    remote_name: &str,
+    token: &str,
+) -> anyhow::Result<()> {
+    let unavailable = |why: String| {
+        crate::output::CodedError::new(
+            "keychain_unavailable",
+            format!(
+                "cannot store the remote token: {why}. Tokens are kept in the OS keychain, \
+                 not config.toml; set MEDIAGIT_TOKEN instead, or run where a keychain is available"
+            ),
+        )
+    };
+    if keyring_disabled() {
+        return Err(unavailable("the keychain is disabled (MEDIAGIT_NO_KEYRING)".into()).into());
+    }
+    keyring::Entry::new(KEYRING_SERVICE, &keyring_account(config, remote_name))
+        .and_then(|e| e.set_password(&format!("bearer:{token}")))
+        .map_err(|e| unavailable(e.to_string()))?;
+    Ok(())
+}
+
 /// Resolve credentials for a bare server origin, with no repo/config
 /// context: env `MEDIAGIT_TOKEN`/`MEDIAGIT_API_KEY`, then the OS keychain
 /// keyed by `origin`, then `None`. Used by `mediagit auth *` when given an

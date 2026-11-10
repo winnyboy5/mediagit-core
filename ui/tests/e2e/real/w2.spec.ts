@@ -3,6 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statS
 import { join, resolve } from 'node:path'
 import { deflateSync } from 'node:zlib'
 import { chromium, expect, test, type Browser, type Page } from '@playwright/test'
+import { goTo } from './nav'
 import { readState, type E2EState } from './setup'
 
 // Gate G4, wave W2: Tags, Stash, Compare, Undo, Merge and the Remote Browser in the REAL
@@ -19,10 +20,7 @@ let page: Page
 const env = () => ({ ...process.env, ...st.env, MEDIAGIT_CDC_SEED: '20260716' })
 const cli = (cwd: string, ...args: string[]) => execFileSync(st.cli, args, { cwd, env: env(), encoding: 'utf8' })
 const shot = (name: string) => page.screenshot({ path: join(shots, `${name}.png`) })
-const go = async (view: string, heading: string) => {
-  await page.evaluate((v) => { window.location.hash = `#/${v}` }, view)
-  await expect(page.getByRole('heading', { name: heading, level: 2 })).toBeVisible()
-}
+const go = (view: string, heading?: string) => goTo(page, view, heading)
 const refresh = () => page.evaluate(() => window.dispatchEvent(new Event('focus')))
 const notes = () => join(st.repo, 'notes.txt')
 const NOTES = 'second draft, edited outside the app\n' // notes.txt as committed by app.spec.ts d
@@ -77,7 +75,8 @@ test.afterAll(async () => {
 })
 
 test('j. Tags: tag the latest version, see it listed, delete it via the confirm; CLI agrees', async () => {
-  await go('tags', 'Tags & Stash')
+  await go('tags')
+  await page.getByText('New tag', { exact: true }).click()
   await page.getByLabel('Tag name').fill('v1.0-e2e')
   await page.getByLabel('Note (optional)').fill('E2E delivery')
   await page.getByRole('button', { name: 'Tag the latest version' }).click()
@@ -86,7 +85,8 @@ test('j. Tags: tag the latest version, see it listed, delete it via the confirm;
   await expect(row).toContainText('E2E delivery')
   expect(cli(st.repo, 'tag', 'list')).toContain('v1.0-e2e')
   await shot('11-tags-created')
-  await row.getByRole('button', { name: 'Delete tag v1.0-e2e' }).click()
+  await row.getByRole('button', { name: 'Actions for tag v1.0-e2e' }).click()
+  await page.getByRole('menuitem', { name: 'Delete tag…' }).click()
   await confirm('Delete tag')
   await expect(row).toHaveCount(0)
   expect(cli(st.repo, 'tag', 'list')).not.toContain('v1.0-e2e')
@@ -97,7 +97,7 @@ test('k. Stash: park an edit, file is restored on disk, pop brings it back', asy
   const EDIT = 'stash me\n'
   writeFileSync(notes(), EDIT)
   await refresh()
-  await go('tags', 'Tags & Stash')
+  await go('tags-stash')
   await page.getByLabel('Message (optional)').fill('E2E parked')
   const stashBtn = page.getByRole('button', { name: 'Stash my changes' })
   await expect(stashBtn).toBeEnabled()
@@ -150,7 +150,7 @@ test('m. Undo: move the branch back one version via the menu, then return', asyn
   await rows.nth(1).click()
   const detail = page.getByTestId('commit-detail')
   await expect(detail.getByRole('heading', { name: 'G4 edit and add' })).toBeVisible()
-  await detail.getByRole('button', { name: 'Undo…' }).click()
+  await detail.getByRole('button', { name: 'Undo this version' }).click()
   await page.getByRole('menuitem', { name: 'Move branch back here, keep changes ready to save' }).click()
   await shot('14-undo-confirm')
   await confirm('Move branch back')
