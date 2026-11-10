@@ -31,5 +31,18 @@ export default defineConfig({
   test: {
     environment: 'happy-dom',
     include: ['tests/unit/**/*.test.ts'],
+    coverage: {
+      provider: 'v8',
+      include: ['src/stores/**', 'src/lib/**', 'src/api/**'],
+      exclude: ['src/api/generated/**', 'src/api/types.ts'],
+      reporter: ['text-summary', 'json-summary'],
+      reportOnFailure: true,
+      // CI gate: `vitest run --coverage` fails when any of these dirs drops below 85% of lines.
+      thresholds: {
+        'src/stores/**': { lines: 85 },
+        'src/lib/**': { lines: 85 },
+        'src/api/**': { lines: 85 },
+      },
+    },
   },
 })

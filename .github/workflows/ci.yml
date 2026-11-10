@@ -493,8 +493,8 @@ jobs:
       - name: Typecheck
         run: pnpm --dir ui typecheck
 
-      - name: Unit tests (vitest)
-        run: pnpm --dir ui test
+      - name: Unit tests (vitest, coverage gate)
+        run: pnpm --dir ui test -- --coverage
 
       - name: Build UI
         run: pnpm --dir ui build
