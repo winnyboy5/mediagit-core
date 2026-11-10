@@ -83,6 +83,8 @@ pub struct ServerManager {
     /// Explicit server binary (tests); else [`ServerManager::locate_bin`].
     bin: Option<PathBuf>,
     running: Mutex<Option<Running>>,
+    /// Held for a whole `start`, so overlapping starts cannot both spawn.
+    starting: Mutex<()>,
 }
 
 /// The app data dir: home of the saved folder choice, and a folder the server must not swallow.
@@ -121,6 +123,7 @@ impl ServerManager {
             located,
             bin: None,
             running: Mutex::new(None),
+            starting: Mutex::new(()),
         }
     }
 
@@ -131,6 +134,7 @@ impl ServerManager {
             located: None,
             bin: Some(bin),
             running: Mutex::new(None),
+            starting: Mutex::new(()),
         }
     }
 
@@ -328,6 +332,7 @@ impl ServerManager {
 
     /// Start the server and wait for it to answer `/healthz`.
     pub async fn start(&self) -> Result<LocalStatus, EngineError> {
+        let _starting = self.starting.lock().await;
         let status = self.status().await;
         match status.state {
             "not_set_up" => return Err(err("needs_setup", "set up the local server first")),

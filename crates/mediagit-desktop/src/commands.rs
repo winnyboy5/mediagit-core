@@ -355,10 +355,13 @@ fn stash_clear_argv() -> Vec<String> {
 }
 
 /// `reset --soft|--mixed|--hard -- <rev>`. The mode is always spelled out.
-fn reset_argv(mode: &str, rev: &str) -> Result<Vec<String>, EngineError> {
+fn reset_argv(mode: &str, rev: &str, confirmed: bool) -> Result<Vec<String>, EngineError> {
     rev_ok(rev)?;
     if !matches!(mode, "soft" | "mixed" | "hard") {
         return Err(invalid("reset mode", mode));
+    }
+    if mode == "hard" && !confirmed {
+        return Err(invalid("reset --hard", "needs the person's confirmation"));
     }
     Ok(vec![
         "reset".into(),
@@ -1350,7 +1353,7 @@ pub async fn repo_reset(
     if mode == "hard" {
         return Err(invalid("reset mode", &mode));
     }
-    write(&engine, &queues, &repo, &reset_argv(&mode, &rev)?).await
+    write(&engine, &queues, &repo, &reset_argv(&mode, &rev, false)?).await
 }
 
 /// Move HEAD to `rev` and overwrite the working folder with it. Unsaved work is lost.
@@ -1361,10 +1364,11 @@ pub async fn repo_reset_hard(
     queues: tauri::State<'_, RepoQueues>,
     repo: String,
     rev: String,
+    confirmed: bool,
     on_progress: Channel<Progress>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    let argv = reset_argv("hard", &rev)?;
+    let argv = reset_argv("hard", &rev, confirmed)?;
     stream(
         &engine,
         &ops,
@@ -1816,21 +1820,23 @@ mod tests {
     fn reset_always_names_its_mode_and_revert_guards_the_revision() {
         let oid = "0123456789abcdef";
         assert_eq!(
-            reset_argv("soft", oid).unwrap(),
+            reset_argv("soft", oid, false).unwrap(),
             ["reset", "--soft", "--", oid]
         );
         assert_eq!(
-            reset_argv("mixed", "HEAD").unwrap(),
+            reset_argv("mixed", "HEAD", false).unwrap(),
             ["reset", "--mixed", "--", "HEAD"]
         );
         assert_eq!(
-            reset_argv("hard", oid).unwrap(),
+            reset_argv("hard", oid, true).unwrap(),
             ["reset", "--hard", "--", oid]
         );
-        assert!(bad(reset_argv("", oid)));
-        assert!(bad(reset_argv("--hard", oid)));
-        assert!(bad(reset_argv("hard", "main")));
-        assert!(bad(reset_argv("hard", "--soft")));
+        // `--hard` discards unsaved work: never without the person's yes.
+        assert!(bad(reset_argv("hard", oid, false)));
+        assert!(bad(reset_argv("", oid, true)));
+        assert!(bad(reset_argv("--hard", oid, true)));
+        assert!(bad(reset_argv("hard", "main", true)));
+        assert!(bad(reset_argv("hard", "--soft", true)));
         for a in ["continue", "abort", "skip"] {
             assert_eq!(
                 revert_control_argv(a).unwrap(),

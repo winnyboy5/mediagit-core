@@ -114,6 +114,18 @@ async fn start_serves_healthz_and_stop_ends_it() {
 }
 
 #[tokio::test]
+async fn overlapping_starts_leave_exactly_one_child() {
+    let tmp = tempfile::tempdir().unwrap();
+    let m = manager(tmp.path());
+    set_up(&m).await;
+    let (a, b) = tokio::join!(m.start(), m.start());
+    let (a, b) = (a.unwrap(), b.unwrap());
+    assert_eq!((a.state, b.state), ("running", "running"));
+    assert_eq!(a.pid, b.pid, "a second start spawned its own server");
+    m.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn a_server_that_never_answers_times_out_and_is_killed() {
     let tmp = tempfile::tempdir().unwrap();
     let m = manager(tmp.path());

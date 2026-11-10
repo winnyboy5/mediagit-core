@@ -151,7 +151,7 @@ Both 404 when `[encryption]` is off server-side, so a server without the feature
 | GET | `/admin/repos` | Admin | List hosted repos: `[{name, size_bytes, object_count, last_modified}]` (size is a bounded dir walk) |
 | GET | `/auth/users/:id/grants` | Admin | List one user's per-repo grants, sorted by repo (`GET /auth/users` also reports which accounts are disabled) |
 | GET | `/admin/repos/:name/grants` | Admin | List who has a grant on one repo |
-| POST | `/admin/repos` | Admin | Create an empty repo `{"name"}` and optionally `"storage"` (a backend object such as `{"backend":"s3","bucket":"...","region":"..."}`) to override the server's `default_storage` for this repo; 409 if it exists; names are a single segment |
+| POST | `/admin/repos` | Admin | Create an empty repo `{"name"}` using the server's `default_storage` (a client cannot choose the backend); 409 if it exists; 400 for names that are not a single portable segment (trailing `.` or space, Windows device names such as `CON`/`NUL`/`COM1`) |
 | DELETE | `/admin/repos/:name?confirm=<name>[&force=true]` | Admin | 400 if `confirm` differs; 409 if the repo has refs/locks (needs `force`) or active transfers (never overridable); 200 `{deleted, storage_retained, backend}` (retained = non-filesystem backend data kept) |
 
 See [Authentication](./authentication.md) for the auth model, persistence, and grant semantics.

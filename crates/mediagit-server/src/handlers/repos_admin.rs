@@ -29,9 +29,6 @@ pub struct AdminRepoInfo {
 #[derive(Deserialize)]
 pub struct CreateRepoRequest {
     pub name: String,
-    /// Overrides the server's `default_storage` for this repo.
-    #[serde(default)]
-    pub storage: Option<mediagit_config::StorageConfig>,
 }
 
 #[derive(Deserialize)]
@@ -80,10 +77,22 @@ fn admin_gate(state: &AppState, auth_user: Option<&AuthUser>) -> Result<String, 
     Ok(auth_user.map(|u| u.user_id.clone()).unwrap_or_default())
 }
 
+/// CON, PRN, AUX, NUL, COM1-9, LPT1-9, with or without an extension. Refused on
+/// every platform so a repo created on Linux stays portable.
+fn is_windows_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+}
+
 fn valid_admin_repo_name(name: &str) -> Result<(), StatusCode> {
     let bad = name.is_empty()
         || name.contains('/')
         || name.starts_with('.')
+        || name.ends_with(['.', ' '])
+        || is_windows_device_name(name)
         || crate::security::validate_repo_name(name).is_err();
     if bad {
         tracing::warn!(repo = %name, "repo admin refused: invalid repository name");
@@ -211,11 +220,7 @@ pub async fn create_repo(
         tokio::fs::create_dir_all(repo_path.join(".mediagit"))
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        if let Some(storage) = req
-            .storage
-            .clone()
-            .or_else(|| state.default_storage.clone())
-        {
+        if let Some(storage) = state.default_storage.clone() {
             let cfg = mediagit_config::Config {
                 storage,
                 ..Default::default()

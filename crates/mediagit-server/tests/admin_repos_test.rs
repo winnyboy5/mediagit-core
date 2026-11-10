@@ -411,13 +411,14 @@ fn repo_storage(fx: &Fx, name: &str) -> mediagit_config::StorageConfig {
 }
 
 #[tokio::test]
-async fn create_writes_server_default_storage_and_request_override_wins() {
+async fn create_writes_server_default_storage_and_ignores_request_storage() {
     let (dflt, other) = (TempDir::new().unwrap(), TempDir::new().unwrap());
     let fx = fixture_with(Some(fs_storage(dflt.path()))).await;
 
     assert_eq!(create(&fx, "plain").await, StatusCode::CREATED);
     assert_eq!(repo_storage(&fx, "plain"), fs_storage(dflt.path()));
 
+    // A client-supplied `storage` must not pick the backend (SSRF / path write).
     let body = serde_json::json!({ "name": "custom", "storage": fs_storage(other.path()) });
     let r = req(
         "POST",
@@ -426,5 +427,21 @@ async fn create_writes_server_default_storage_and_request_override_wins() {
         Some(&body.to_string()),
     );
     assert_eq!(call(&fx, r).await.0, StatusCode::CREATED);
-    assert_eq!(repo_storage(&fx, "custom"), fs_storage(other.path()));
+    assert_eq!(repo_storage(&fx, "custom"), fs_storage(dflt.path()));
+}
+
+#[tokio::test]
+async fn trailing_dot_space_and_device_names_are_400() {
+    let fx = fixture().await;
+    for name in ["foo.", "foo ", "CON", "nul", "Aux.txt", "com1", "LPT9.log"] {
+        assert_eq!(
+            create(&fx, name).await,
+            StatusCode::BAD_REQUEST,
+            "create {name:?}"
+        );
+        let seg = name.replace(' ', "%20");
+        let uri = format!("/admin/repos/{seg}?confirm={seg}&force=true");
+        let (s, _) = call(&fx, req("DELETE", &uri, Some(&fx.admin), None)).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "delete {name:?}");
+    }
 }

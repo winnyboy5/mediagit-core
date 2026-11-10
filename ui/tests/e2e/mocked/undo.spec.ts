@@ -127,7 +127,7 @@ test.describe('Undo: menu and dialogs', () => {
     await expect(page.getByRole('button', { name: 'Discard and go back' })).toBeDisabled()
     await page.getByRole('checkbox', { name: 'I understand my unsaved work will be lost' }).click()
     await page.getByRole('button', { name: 'Discard and go back' }).click()
-    await expect.poll(async () => (await ipcCalls(page, 'repo_reset_hard')).map((c) => c.args)).toMatchObject([{ repo: '/repos/hero-film', rev: SECOND }])
+    await expect.poll(async () => (await ipcCalls(page, 'repo_reset_hard')).map((c) => c.args)).toMatchObject([{ repo: '/repos/hero-film', rev: SECOND, confirmed: true }])
     expect(await ipcCalls(page, 'repo_reset')).toHaveLength(0)
   })
 
@@ -213,7 +213,7 @@ test.describe('Undo: Changes view', () => {
     await expectNoAxeViolations(page)
     await dlg.getByRole('checkbox', { name: 'I understand my unsaved work will be lost' }).click()
     await dlg.getByRole('button', { name: 'Discard and go back' }).click()
-    await expect.poll(async () => (await ipcCalls(page, 'repo_reset_hard')).map((c) => c.args)).toMatchObject([{ repo: '/repos/hero-film', rev: 'HEAD' }])
+    await expect.poll(async () => (await ipcCalls(page, 'repo_reset_hard')).map((c) => c.args)).toMatchObject([{ repo: '/repos/hero-film', rev: 'HEAD', confirmed: true }])
   })
 
   test('with nothing changed the menu is disabled', async ({ page }) => {

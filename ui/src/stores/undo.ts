@@ -37,7 +37,7 @@ export const useUndoStore = defineStore('undo', () => {
     if (p.kind === 'reset') {
       const { mode } = p
       if (mode === 'hard') {
-        const r = await run(`Go back to ${shortOid(p.rev)} and replace files`, (root, report) => api.resetHard(root, p.rev, report), () => 'Files now match that version')
+        const r = await run(`Go back to ${shortOid(p.rev)} and replace files`, (root, report) => api.resetHard(root, p.rev, true, report), () => 'Files now match that version')
         return !!r
       }
       const r = await run(`Move branch back to ${shortOid(p.rev)}`, (root) => api.reset(root, p.rev, mode), () => 'Branch moved; your files were not touched')

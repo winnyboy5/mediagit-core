@@ -248,7 +248,7 @@ static SCHEMA: &[KeySpec] = &[
         ..spec(
             "remotes.<name>.token",
             Ty::String,
-            "Bearer token for this remote. Stored in plain text in config.toml.",
+            "Bearer token for this remote. Stored in the OS keychain, never in config.toml.",
         )
     },
     KeySpec {
@@ -376,7 +376,7 @@ impl ConfigCmd {
         }
         let repo_root = find_repo_root()?;
         // A config that cannot be loaded is reported, not edited around.
-        Config::load(&repo_root).await?;
+        let cfg = Config::load(&repo_root).await?;
         let path = repo_root.join(".mediagit/config.toml");
         let mut doc = read_doc(&path)?;
 
@@ -426,7 +426,7 @@ impl ConfigCmd {
                 let (spec, segs) = lookup(&opts.key)?;
                 let raw = value_for_set(spec, opts)?;
                 let item = coerce(spec, raw.trim())?;
-                store_value(&mut doc, spec, &segs, item)?;
+                store_value(&cfg, &mut doc, spec, &segs, item, raw.trim())?;
                 commit_doc(&repo_root, &path, &doc)
                     .with_context(|| format!("Failed to save {}", opts.key))?;
                 let shown = shown_value(spec, Some(raw.trim().to_string()));
@@ -451,7 +451,7 @@ impl ConfigCmd {
 
             ConfigSubcommand::Unset(opts) => {
                 let (spec, segs) = lookup(&opts.key)?;
-                clear_value(&mut doc, spec, &segs);
+                clear_value(&cfg, &mut doc, spec, &segs);
                 commit_doc(&repo_root, &path, &doc)
                     .with_context(|| format!("Failed to save {}", opts.key))?;
                 if output::machine_mode() {
@@ -684,15 +684,37 @@ fn read_value(doc: &DocumentMut, segs: &[String]) -> Option<String> {
     })
 }
 
-/// The one place a `config set` value is written. `remotes.<name>.token` is
-/// meant to move to the OS keychain: route `spec.secret` keys from here (and
-/// from `clear_value`) instead of into `config.toml`.
-fn store_value(doc: &mut DocumentMut, _spec: &KeySpec, segs: &[String], item: Item) -> Result<()> {
+/// `remotes.<name>.token` -> `<name>`. That one key lives in the OS keychain.
+fn remote_token_name(segs: &[String]) -> Option<&str> {
+    match segs {
+        [r, name, t] if r == "remotes" && t == "token" => Some(name),
+        _ => None,
+    }
+}
+
+/// The one place a `config set` value is written. `remotes.<name>.token` goes
+/// to the OS keychain (an error if there is none), never into `config.toml`.
+fn store_value(
+    cfg: &Config,
+    doc: &mut DocumentMut,
+    _spec: &KeySpec,
+    segs: &[String],
+    item: Item,
+    raw: &str,
+) -> Result<()> {
+    if let Some(name) = remote_token_name(segs) {
+        crate::repo::store_remote_token(cfg, name, raw)?;
+        remove_item(doc, segs); // drop any stale plaintext copy
+        return Ok(());
+    }
     set_item(doc, segs, item)
 }
 
 /// The one place a `config unset` is applied; see [`store_value`].
-fn clear_value(doc: &mut DocumentMut, _spec: &KeySpec, segs: &[String]) {
+fn clear_value(cfg: &Config, doc: &mut DocumentMut, _spec: &KeySpec, segs: &[String]) {
+    if let Some(name) = remote_token_name(segs) {
+        crate::repo::forget_credentials(cfg, name);
+    }
     remove_item(doc, segs);
 }
 
@@ -769,7 +791,14 @@ fn commit_doc(repo_root: &Path, path: &Path, doc: &DocumentMut) -> Result<()> {
     ));
     {
         use std::io::Write;
-        let mut f = std::fs::File::create(&tmp)?;
+        let mut oo = std::fs::OpenOptions::new();
+        oo.write(true).create(true).truncate(true);
+        // Owner-only from creation: the file can hold other secrets.
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut oo, 0o600);
+        let mut f = oo.open(&tmp)?;
+        #[cfg(not(unix))]
+        mediagit_security::fsperm::restrict_to_owner_or_warn(&tmp);
         f.write_all(text.as_bytes())?;
         f.sync_all()?;
     }
@@ -995,5 +1024,39 @@ mod tests {
             let concrete = s.key.replace("<name>", "origin");
             assert_eq!(lookup(&concrete).unwrap().0.key, s.key);
         }
+    }
+
+    /// With no keychain, setting a remote token fails and writes nothing to
+    /// config.toml; unset still drops any stale plaintext copy.
+    #[test]
+    #[allow(unsafe_code)]
+    fn remote_token_goes_to_keychain_never_the_doc() {
+        let _g = crate::commands::utils::test_support::REPO_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MEDIAGIT_NO_KEYRING", "1") };
+        let cfg = Config::default();
+        let mut d = doc("[remotes.origin]\nurl = \"http://h/r\"\ntoken = \"old\"\n");
+        let (spec, segs) = lookup("remotes.origin.token").unwrap();
+        let item = coerce(spec, "s3cret").unwrap();
+        let r = store_value(&cfg, &mut d, spec, &segs, item, "s3cret");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MEDIAGIT_NO_KEYRING") };
+        assert!(r.is_err(), "token must not fall back to plaintext");
+        assert!(!d.to_string().contains("s3cret"));
+        clear_value(&cfg, &mut d, spec, &segs);
+        assert!(!d.to_string().contains("old"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn committed_config_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".mediagit/config.toml");
+        commit_doc(tmp.path(), &path, &doc("")).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 }

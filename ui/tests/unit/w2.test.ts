@@ -309,7 +309,7 @@ describe('undo store', () => {
     expect(api.resetHard).not.toHaveBeenCalled()
     u.ask({ kind: 'reset', mode: 'hard', rev: 'HEAD' })
     await u.confirm()
-    expect(api.resetHard).toHaveBeenCalledWith('/repos/hero', 'HEAD', expect.any(Function))
+    expect(api.resetHard).toHaveBeenCalledWith('/repos/hero', 'HEAD', true, expect.any(Function))
     expect(api.reset).toHaveBeenCalledTimes(2)
     expect(api.log).toHaveBeenCalled()
     expect(u.open).toBe(false)

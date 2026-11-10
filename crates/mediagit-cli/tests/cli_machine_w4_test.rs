@@ -1317,7 +1317,8 @@ fn config_secret_keys_come_from_stdin_and_are_never_shown() {
     );
     assert_eq!(r.json["error"]["code"], "needs_input", "{}", r.stdout);
 
-    // On stdin: stored, reported as "set", never echoed.
+    // On stdin the token goes to the keychain. The harness has none
+    // (MEDIAGIT_NO_KEYRING), so it is refused and never lands in config.toml.
     let r = run_env(
         dir,
         &[],
@@ -1325,31 +1326,24 @@ fn config_secret_keys_come_from_stdin_and_are_never_shown() {
         &["config", "set", "remotes.origin.token"],
         Some(&format!("{secret}\n")),
     );
-    assert_eq!(r.code, 0, "{}", r.stdout);
-    assert_eq!(r.json["data"]["entries"][0]["value"], "set");
-    assert_eq!(r.json["data"]["entries"][0]["secret"], true);
+    assert_eq!(
+        r.json["error"]["code"], "keychain_unavailable",
+        "{}",
+        r.stdout
+    );
     assert_no_leak(&r, secret);
     assert!(
-        config_text(dir).contains(secret),
-        "pinned: tokens are stored in plain text"
+        !config_text(dir).contains(secret),
+        "token reached config.toml"
     );
 
-    let r = run_env(
-        dir,
-        &[],
-        &[],
-        &["config", "get", "remotes.origin.token"],
-        None,
-    );
-    assert_eq!(r.json["data"]["entries"][0]["value"], "set");
-    assert_no_leak(&r, secret);
     let r = run_env(dir, &[], &[], &["config", "list"], None);
     assert_no_leak(&r, secret);
     let listed = r.json["data"]["entries"].as_array().unwrap();
     assert!(
         listed
             .iter()
-            .any(|e| e["key"] == "remotes.origin.token" && e["value"] == "set")
+            .any(|e| e["key"] == "remotes.origin.token" && e["secret"] == true)
     );
 }
 

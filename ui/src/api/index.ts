@@ -307,8 +307,8 @@ export const api = {
   /** Move the current branch to `rev`, keeping every file as it is. Never touches files. */
   reset: (repo: string, rev: string, mode: 'soft' | 'mixed') => invoke<ResetReport>('repo_reset', { repo, rev, mode }),
   /** Move the branch to `rev` and overwrite the working folder. Unsaved work is lost. */
-  resetHard: (repo: string, rev: string, onProgress: Report) =>
-    invoke<ResetReport>('repo_reset_hard', { repo, rev, onProgress: channel(onProgress) }),
+  resetHard: (repo: string, rev: string, confirmed: boolean, onProgress: Report) =>
+    invoke<ResetReport>('repo_reset_hard', { repo, rev, confirmed, onProgress: channel(onProgress) }),
   revert: (repo: string, revs: string[], opts?: { noCommit?: boolean; message?: string }) =>
     invoke<RevertReport>('repo_revert', { repo, revs, ...(opts ? { opts } : {}) }),
   revertControl: (repo: string, action: 'continue' | 'abort' | 'skip') =>

@@ -491,6 +491,10 @@ impl StashCmd {
             message: message.clone(),
             timestamp: chrono::Utc::now().to_rfc3339(),
             branch: self.get_current_branch(&refdb).await?,
+            staged: staged
+                .iter()
+                .map(|e| e.path.to_string_lossy().replace('\\', "/"))
+                .collect(),
         };
 
         self.save_stash_entry(&mediagit_dir, stash_entry)?;
@@ -605,6 +609,17 @@ impl StashCmd {
         // content, and writing those back would destroy later edits to them.
         let checkout_mgr = CheckoutManager::new(&odb, &repo_root);
         let changed = Self::stash_changes(&repo_root, &odb, &stash_oid).await?;
+        // --index: restage what was staged at save time (only paths the stash changed).
+        let restage: Vec<(PathBuf, Oid, u32)> = if opts.index {
+            let staged: HashSet<PathBuf> = stash_entry.staged.iter().map(PathBuf::from).collect();
+            changed
+                .iter()
+                .filter(|(p, _)| staged.contains(*p))
+                .map(|(p, (oid, mode))| (p.clone(), *oid, mode.as_u32()))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let files_updated = checkout_mgr
             .write_entries(
                 changed
@@ -613,6 +628,15 @@ impl StashCmd {
                     .collect(),
             )
             .await?;
+        if !restage.is_empty() {
+            let mut index = Index::load(&repo_root)?;
+            for (path, oid, mode) in restage {
+                index.add_entry(mediagit_versioning::IndexEntry::new(
+                    path, oid, mode, 0, None,
+                ));
+            }
+            index.save(&repo_root)?;
+        }
 
         if !quiet(opts.quiet) {
             println!("{} Applied stash entry {}", style("✓").green(), stash_index);
@@ -984,6 +1008,9 @@ struct StashEntry {
     message: String,
     timestamp: String,
     branch: Option<String>,
+    /// Paths that were staged when stashed, so `apply --index` can restage them.
+    #[serde(default)]
+    staged: Vec<String>,
 }
 
 #[cfg(test)]
@@ -1142,6 +1169,84 @@ mod tests {
         let cmd = parse(&["show", "0"]).unwrap();
         let err = execute_in(temp.path(), &cmd).await.unwrap_err();
         assert!(err.to_string().contains("Stash entry 0 not found"));
+    }
+
+    /// Commit `m.txt`, then stage a modification of it and a new `n.txt`.
+    async fn stage_modified_and_new(root: &Path) {
+        use mediagit_versioning::{FileMode, IndexEntry, Ref, Signature, TreeEntry};
+        let storage = create_storage_backend(root).await.unwrap();
+        let odb = ObjectDatabase::with_smart_compression(storage, 1000);
+        let refdb = RefDatabase::new(root.join(".mediagit"));
+        let base = odb.write(ObjectType::Blob, b"one").await.unwrap();
+        let mut tree = Tree::new();
+        tree.add_entry(TreeEntry::new("m.txt".into(), FileMode::Regular, base));
+        let tree_oid = tree.write(&odb).await.unwrap();
+        let sig = Signature::now("T".to_string(), "t@example.com".to_string());
+        let parent = refdb.resolve("refs/heads/main").await.unwrap();
+        let mut commit = Commit::new(tree_oid, sig.clone(), sig, "add m".to_string());
+        commit.parents = vec![parent];
+        let oid = commit.write(&odb).await.unwrap();
+        refdb
+            .write(&Ref::new_direct("refs/heads/main".to_string(), oid))
+            .await
+            .unwrap();
+        std::fs::write(root.join("m.txt"), "two").unwrap();
+        std::fs::write(root.join("n.txt"), "new").unwrap();
+        let mut index = Index::new();
+        for (name, body) in [("m.txt", "two"), ("n.txt", "new")] {
+            let blob = odb.write(ObjectType::Blob, body.as_bytes()).await.unwrap();
+            index.add_entry(IndexEntry::new(
+                PathBuf::from(name),
+                blob,
+                0o100644,
+                3,
+                None,
+            ));
+        }
+        index.save(root).unwrap();
+    }
+
+    fn staged_paths(root: &Path) -> Vec<String> {
+        let mut v: Vec<String> = Index::load(root)
+            .unwrap()
+            .entries()
+            .map(|e| e.path.to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[tokio::test]
+    async fn apply_and_pop_index_restage_only_with_flag() {
+        for sub in ["apply", "pop"] {
+            for with_index in [true, false] {
+                let temp = TempDir::new().unwrap();
+                init_repo_with_commit(temp.path()).await;
+                stage_modified_and_new(temp.path()).await;
+                execute_in(temp.path(), &parse(&["save", "-m", "s"]).unwrap())
+                    .await
+                    .unwrap();
+                assert!(staged_paths(temp.path()).is_empty());
+
+                let mut args = vec![sub];
+                if with_index {
+                    args.push("--index");
+                }
+                execute_in(temp.path(), &parse(&args).unwrap())
+                    .await
+                    .unwrap();
+                let want: Vec<String> = if with_index {
+                    vec!["m.txt".into(), "n.txt".into()]
+                } else {
+                    vec![]
+                };
+                assert_eq!(staged_paths(temp.path()), want, "{sub} index={with_index}");
+                assert_eq!(
+                    std::fs::read_to_string(temp.path().join("m.txt")).unwrap(),
+                    "two"
+                );
+            }
+        }
     }
 
     /// A worktree file at or above the streaming threshold must be chunked
