@@ -891,29 +891,33 @@ impl StatusCmd {
                 continue;
             }
 
+            // `file_type` comes from the directory listing, so it still answers
+            // for names a path lookup rewrites (trailing dot, BUG-009).
+            let ft = entry.file_type()?;
+            let is_file = path.is_file() || ft.is_file();
+            let is_dir = !is_file && (path.is_dir() || ft.is_dir());
+
             // Check .mediagitignore
             if let Some(m) = matcher
                 && let Ok(rel) = path.strip_prefix(repo_root)
+                && m.is_ignored(rel, is_dir)
             {
-                let is_dir = path.is_dir();
-                if m.is_ignored(rel, is_dir) {
-                    if path.is_file() {
-                        // Track ignored files for --ignored output
-                        let normalized = PathBuf::from(rel.to_string_lossy().replace('\\', "/"));
-                        ignored_files.insert(normalized);
-                    }
-                    // For dirs: prune entire subtree silently (don't enumerate children)
-                    continue;
+                if is_file {
+                    // Track ignored files for --ignored output
+                    let normalized = PathBuf::from(rel.to_string_lossy().replace('\\', "/"));
+                    ignored_files.insert(normalized);
                 }
+                // For dirs: prune entire subtree silently (don't enumerate children)
+                continue;
             }
 
-            if path.is_file() {
+            if is_file {
                 // Store as relative path with normalized separators
                 if let Ok(rel_path) = path.strip_prefix(repo_root) {
                     let normalized = PathBuf::from(rel_path.to_string_lossy().replace('\\', "/"));
                     files.insert(normalized);
                 }
-            } else if path.is_dir() {
+            } else if is_dir {
                 self.scan_directory_recursive(repo_root, &path, matcher, ignored_files, files)?;
             }
         }

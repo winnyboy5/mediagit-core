@@ -155,6 +155,9 @@ limits); `config set` of a secret key reads the value from stdin with
 bearer token from stdin (needs `--machine --secret-stdin`) and `--token` is
 `invalid_args` in machine mode; `remote repos list|create|delete` administer
 repositories hosted on a server; `add` streams a bytes bar and a files bar.
+`add` warns by name and exits 1 for a file it cannot store under a
+repo-relative path (a name ending in `.` on Windows), after staging the rest;
+`fsck` reports an absolute or `..` path inside a stored version as an error.
 The hidden `__cli-tree` command prints the clap command tree as JSON; the
 desktop test suite checks it against `ui/parity.toml`, so a new flag cannot
 miss the GUI silently.

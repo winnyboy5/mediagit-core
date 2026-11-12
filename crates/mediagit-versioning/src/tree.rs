@@ -153,6 +153,36 @@ pub struct Tree {
     pub entries: BTreeMap<String, TreeEntry>,
 }
 
+/// Refuse a tracked path that is absolute, drive-rooted or contains `..`.
+///
+/// Delegates to `mediagit_storage::validate_object_key`, the same validator
+/// that guards object keys.
+pub(crate) fn check_tracked_path(path: &str) -> anyhow::Result<()> {
+    // The validator rejects `X:name` as a drive path on every platform. Off
+    // Windows that is a legal file name (checkout's `worktree_path` accepts
+    // it), so judge it with a neutral first letter. `X:/...` and `X:\...` stay
+    // rejected everywhere.
+    let b = path.as_bytes();
+    let plain_colon_name = !cfg!(windows)
+        && b.len() >= 3
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && b[2] != b'/'
+        && b[2] != b'\\';
+    let probe;
+    let judged = if plain_colon_name {
+        probe = format!("_{}", &path[1..]);
+        probe.as_str()
+    } else {
+        path
+    };
+    mediagit_storage::validate_object_key(judged).map_err(|_| {
+        anyhow::anyhow!(
+            "refusing to track unsafe path '{path}': absolute or '..' paths are not allowed"
+        )
+    })
+}
+
 impl Tree {
     /// Create a new empty tree
     pub fn new() -> Self {
@@ -200,6 +230,11 @@ impl Tree {
 
     /// Serialize tree to bytes
     pub fn serialize(&self) -> anyhow::Result<Vec<u8>> {
+        // BUG-008: every tree writer serializes here; an absolute or `..`
+        // name would make every later checkout of this tree fail.
+        for name in self.entries.keys() {
+            check_tracked_path(name)?;
+        }
         crate::format::serialize(self)
             .map_err(|e| anyhow::anyhow!("Tree serialization failed: {}", e))
     }
@@ -259,6 +294,59 @@ impl Default for Tree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tree_with(name: &str) -> Tree {
+        let mut t = Tree::new();
+        t.add_entry(TreeEntry::new(
+            name.to_string(),
+            FileMode::Regular,
+            Oid::hash(b"x"),
+        ));
+        t
+    }
+
+    #[test]
+    fn test_tree_serialize_refuses_absolute_and_parent_names() {
+        for bad in [
+            "//?/D:/work/repo/a.txt",
+            "D:/work/a.txt",
+            "/etc/passwd",
+            "../a.txt",
+            "dir/../../a.txt",
+        ] {
+            let err = tree_with(bad).serialize().unwrap_err();
+            assert!(
+                format!("{err:#}").contains(bad),
+                "error must name {bad}: {err:#}"
+            );
+        }
+    }
+
+    /// `a:b.txt` is a legal file name off Windows; `a:/b` never is.
+    #[cfg(not(windows))]
+    #[test]
+    fn test_tree_serialize_accepts_colon_names_off_windows() {
+        tree_with("a:b.txt").serialize().unwrap();
+        tree_with("dir/x:y").serialize().unwrap();
+        assert!(tree_with("a:/b").serialize().is_err());
+        assert!(tree_with("a:\\b").serialize().is_err());
+    }
+
+    #[test]
+    fn test_tree_serialize_accepts_legitimate_names() {
+        let deep = vec!["d"; 40].join("/");
+        for ok in [
+            "plain.txt",
+            "my dir/with space.txt",
+            "caf\u{e9}/\u{65e5}\u{672c}.psd",
+            "a..b/c.txt",
+            deep.as_str(),
+        ] {
+            tree_with(ok)
+                .serialize()
+                .unwrap_or_else(|e| panic!("{ok}: {e:#}"));
+        }
+    }
 
     #[test]
     fn test_file_mode_values() {

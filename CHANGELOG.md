@@ -162,6 +162,20 @@ changes fix real bugs.
 - **A multi-commit cherry-pick that hit an empty commit mid-way** now saves its
   state so `--skip` can continue.
 
+### Fixed — a file with a very long path made the whole version impossible to check out (BUG-008, BUG-009)
+
+On Windows a path over 260 characters, a reserved name such as `aux.txt`, or a
+name ending in a dot was stored in the version as an absolute `//?/D:/...` path.
+`add` and `commit` said nothing, but `reset --hard`, checkout and clone of that
+version then failed for every file in it, and the version carried the user's
+local folder name. These files are now stored under their repo-relative path and
+come back on checkout. The index and trees refuse any absolute or `..` path when
+they are written. A file `add` still cannot store (a name ending in a dot on
+Windows) is named in a warning and `add` exits 1 after staging the rest; `status`
+lists it as untracked instead of hiding it. `fsck` now reports an absolute or
+`..` path inside an existing version as an error. Versions already holding such
+a path are not rewritten.
+
 ### Fixed — `push --force-with-lease` overwrote work pushed by someone else (BUG-032)
 
 The lease was the server's own fresh answer, so it always matched and the push

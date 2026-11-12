@@ -974,6 +974,25 @@ impl FsckChecker {
             for entry in tree.entries.values() {
                 referenced_objects.insert(entry.oid);
 
+                // BUG-008: an absolute or `..` path makes checkout of every
+                // version holding this tree fail. Not repairable: the stored
+                // name is wrong, not missing. Reported once per tree (the
+                // `visited` guard above), and the walk carries on.
+                if crate::tree::check_tracked_path(&entry.name).is_err() {
+                    report.add_issue(
+                        FsckIssue::new(
+                            IssueSeverity::Error,
+                            IssueCategory::InvalidFormat,
+                            format!(
+                                "Tree {} holds the unsafe path '{}' (absolute or '..'); \
+                                 checkout of this version will fail",
+                                tree_oid, entry.name
+                            ),
+                        )
+                        .with_oid(*tree_oid),
+                    );
+                }
+
                 // Already judged via an earlier commit or path: skip before
                 // any I/O (the first verdict, including "missing", stands).
                 if !visited.blobs.insert(entry.oid) {
@@ -3820,6 +3839,59 @@ mod tests {
             missing
         );
         assert!(report.has_errors());
+    }
+
+    /// BUG-008: a tree that already holds an absolute or `..` path (written
+    /// before the write-side guard existed) makes checkout fail for the whole
+    /// version. fsck must name the path; it cannot be repaired by fetching.
+    #[tokio::test]
+    async fn test_fsck_flags_unsafe_paths_in_trees() {
+        use crate::{Commit, FileMode, ObjectType, Signature, Tree, TreeEntry};
+        use mediagit_storage::LocalBackend;
+
+        for bad in ["//?/D:/work/repo/a.txt", "../escape.txt"] {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let storage: Arc<dyn StorageBackend> =
+                Arc::new(LocalBackend::new(tmp.path()).await.unwrap());
+            let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
+            let blob = odb.write(ObjectType::Blob, b"payload").await.unwrap();
+            let mut tree = Tree::new();
+            tree.add_entry(TreeEntry::new(
+                "ok.txt".to_string(),
+                FileMode::Regular,
+                blob,
+            ));
+            tree.add_entry(TreeEntry::new(bad.to_string(), FileMode::Regular, blob));
+            // Bypass `Tree::serialize`, which now refuses these names.
+            let bytes = crate::format::serialize(&tree).unwrap();
+            let tree_oid = odb.write(ObjectType::Tree, &bytes).await.unwrap();
+            let sig = Signature::now("t".to_string(), "t@e".to_string());
+            let commit = Commit::new(tree_oid, sig.clone(), sig, "msg".to_string());
+            let commit_oid = commit.write(&odb).await.unwrap();
+            let refdb = RefDatabase::new(tmp.path());
+            refdb
+                .write(&Ref::new_direct("refs/heads/main".to_string(), commit_oid))
+                .await
+                .unwrap();
+            let checker = FsckChecker::new_with_refdb(storage.clone(), Some(refdb))
+                .with_repo_root(tmp.path());
+
+            let report = checker.check(FsckOptions::default()).await.unwrap();
+            let hits: Vec<_> = report
+                .issues
+                .iter()
+                .filter(|i| i.message.contains(bad))
+                .collect();
+            assert_eq!(
+                hits.len(),
+                1,
+                "exactly one issue naming {bad}: {:?}",
+                report.issues
+            );
+            assert_eq!(hits[0].severity, IssueSeverity::Error);
+            assert!(!hits[0].repairable, "an unsafe path is not repairable");
+            assert!(report.has_errors());
+        }
     }
 
     /// The healthy-repo half of the guard above: an intact repo must stay

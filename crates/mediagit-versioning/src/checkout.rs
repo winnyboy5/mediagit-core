@@ -2227,7 +2227,11 @@ mod tests {
         for good in ["a_good.txt", "z_good.txt"] {
             tree.add_entry(TreeEntry::new(good.to_string(), FileMode::Regular, blob));
         }
-        let tree_oid = tree.write(&odb).await?;
+        // Bypass `Tree::serialize`: it now refuses these names (BUG-008), and
+        // this test is about a tree written by an older or hostile peer.
+        let tree_oid = odb
+            .write(ObjectType::Tree, &crate::format::serialize(&tree)?)
+            .await?;
         let commit = Commit::new(
             tree_oid,
             Signature::now("Test".to_string(), "test@example.com".to_string()),

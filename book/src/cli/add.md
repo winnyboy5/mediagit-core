@@ -174,6 +174,15 @@ Changes to be committed:
 - **1**: One or more files could not be added
 - **2**: Invalid options or arguments
 
+### Files that cannot be tracked
+
+Every file is stored under its path relative to the repository folder, never an
+absolute path. If a file cannot be stored that way, `add` prints a warning that
+names the file, stages everything else, and exits with status 1. On Windows this
+happens to names that the normal file API cannot address, such as a name ending
+in a dot (`shot.v1.`). Rename the file and add it again. Such a file still
+appears in `status` as untracked, so it is not silently left out.
+
 ## Notes
 
 ### Performance Tips

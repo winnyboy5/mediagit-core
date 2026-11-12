@@ -16,6 +16,10 @@ Verifies the connectivity and validity of objects in the repository database. Ch
 - Commit graph connectivity issues
 - Dangling (unreferenced) objects
 - Broken or excessively deep chunk-delta chains
+- Unsafe paths in a version's file list (an absolute path such as
+  `//?/D:/work/file.txt`, or one containing `..`). Checkout of that version
+  fails, so fsck reports it as an error naming the path. It is not repairable;
+  versions created by this release cannot contain such a path.
 
 By default fsck checks objects, refs, connectivity, and chunk-delta chains, but
 skips the dangling-object scan (it's the most expensive pass). `--full` adds

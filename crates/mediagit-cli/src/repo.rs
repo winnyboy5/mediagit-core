@@ -12,11 +12,52 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// Drop a Windows verbatim prefix (`\\?\C:\x` to `C:\x`, `\\?\UNC\h\s` to
+/// `\\h\s`). `dunce` keeps the prefix for paths over 260 characters, reserved
+/// names (`aux.txt`) and trailing dots; the repository root never carries it,
+/// so a plain `strip_prefix` between the two fails (BUG-008).
+fn strip_verbatim(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        p.to_path_buf()
+    }
+}
+
+/// The one way to turn an absolute path into the repo-relative, `/`-separated
+/// path that goes into the index and trees.
+///
+/// Both sides are brought to the same form first. A path that is not under
+/// `repo_root`, or whose result is absolute or contains `..`, is an error:
+/// falling back to the absolute path stored the user's local folder in history
+/// and made every later checkout of that version fail (BUG-008).
+pub fn repo_relative(repo_root: &Path, abs: &Path) -> Result<PathBuf> {
+    let root = strip_verbatim(repo_root);
+    let abs_plain = strip_verbatim(abs);
+    let rel = abs_plain.strip_prefix(&root).map_err(|_| {
+        anyhow::anyhow!(
+            "'{}' is not inside the repository at '{}'",
+            abs.display(),
+            repo_root.display()
+        )
+    })?;
+    let rel = rel.to_string_lossy().replace('\\', "/");
+    mediagit_storage::validate_object_key(&rel)
+        .map_err(|e| anyhow::anyhow!("'{}' cannot be tracked: {e}", abs.display()))?;
+    Ok(PathBuf::from(rel))
+}
+
 /// Normalize a file path to a repo-relative path with forward slashes.
 ///
 /// Handles `./`, `.\`, backslash separators, and non-canonical paths by:
-/// 1. Attempting `dunce::canonicalize()` + `strip_prefix(repo_root)`
+/// 1. Attempting `dunce::canonicalize()` + [`repo_relative`]
 /// 2. Falling back to manual normalization if canonicalization fails
+///
+/// A relative `path` is taken to already be repo-relative. An absolute path
+/// outside `repo_root` is an error, never returned as-is.
 ///
 /// # Arguments
 /// * `path` - The path to normalize (absolute or relative)
@@ -24,12 +65,12 @@ use std::sync::Arc;
 ///
 /// # Returns
 /// A repo-relative `PathBuf` with forward slashes (e.g. `dir/file.txt`)
-pub fn normalize_path(path: &Path, repo_root: &Path) -> PathBuf {
-    // Try canonicalize + strip_prefix first (handles symlinks, 8.3 names, etc.)
+pub fn normalize_path(path: &Path, repo_root: &Path) -> Result<PathBuf> {
+    // Try canonicalize + repo_relative first (handles symlinks, 8.3 names, etc.)
     if let Ok(abs) = dunce::canonicalize(path)
-        && let Ok(rel) = abs.strip_prefix(repo_root)
+        && let Ok(rel) = repo_relative(repo_root, &abs)
     {
-        return PathBuf::from(rel.to_string_lossy().replace('\\', "/"));
+        return Ok(rel);
     }
 
     // Fallback: manual normalization
@@ -45,14 +86,13 @@ pub fn normalize_path(path: &Path, repo_root: &Path) -> PathBuf {
     let normalized = stripped.replace('\\', "/");
     let clean: PathBuf = Path::new(&normalized).components().collect();
 
-    // If still absolute, try strip_prefix as last resort
-    if clean.is_absolute() {
-        clean
-            .strip_prefix(repo_root)
-            .map(|p| PathBuf::from(p.to_string_lossy().replace('\\', "/")))
-            .unwrap_or(clean)
+    if clean.is_absolute() || strip_verbatim(&clean) != clean {
+        repo_relative(repo_root, &clean)
     } else {
-        PathBuf::from(clean.to_string_lossy().replace('\\', "/"))
+        let rel = clean.to_string_lossy().replace('\\', "/");
+        mediagit_storage::validate_object_key(&rel)
+            .map_err(|e| anyhow::anyhow!("'{}' cannot be tracked: {e}", path.display()))?;
+        Ok(PathBuf::from(rel))
     }
 }
 
@@ -923,6 +963,48 @@ mod tests {
     }
 
     #[test]
+    fn strip_verbatim_drops_only_the_prefix() {
+        assert_eq!(
+            strip_verbatim(Path::new(r"\\?\C:\a\b.txt")),
+            PathBuf::from(r"C:\a\b.txt")
+        );
+        assert_eq!(
+            strip_verbatim(Path::new(r"\\?\UNC\host\share\x")),
+            PathBuf::from(r"\\host\share\x")
+        );
+        assert_eq!(
+            strip_verbatim(Path::new(r"C:\a\b.txt")),
+            PathBuf::from(r"C:\a\b.txt")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn repo_relative_handles_verbatim_and_refuses_outside() {
+        let root = Path::new(r"C:\work\repo");
+        // The shape `dunce::canonicalize` returns for >260 chars, reserved names.
+        assert_eq!(
+            repo_relative(root, Path::new(r"\\?\C:\work\repo\r\aux.txt")).unwrap(),
+            PathBuf::from("r/aux.txt")
+        );
+        assert_eq!(
+            repo_relative(root, Path::new(r"C:\work\repo\a b\c.txt")).unwrap(),
+            PathBuf::from("a b/c.txt")
+        );
+        let err = repo_relative(root, Path::new(r"\\?\D:\elsewhere\x.txt")).unwrap_err();
+        assert!(format!("{err:#}").contains("elsewhere"), "{err:#}");
+        // Never falls back to returning an absolute path.
+        assert!(repo_relative(root, Path::new(r"C:\work\other\x.txt")).is_err());
+        assert!(normalize_path(Path::new(r"D:\elsewhere\x.txt"), root).is_err());
+    }
+
+    #[test]
+    fn repo_relative_refuses_parent_dirs() {
+        let root = std::env::temp_dir();
+        assert!(repo_relative(&root, &root.join("a").join("..").join("..").join("x")).is_err());
+    }
+
+    #[test]
     fn test_normalize_path_strips_dot_slash() {
         let temp = TempDir::new().unwrap();
         let repo_root = dunce::canonicalize(temp.path()).unwrap();
@@ -933,7 +1015,7 @@ mod tests {
 
         // ./test.ai should normalize to test.ai
         let dot_slash = Path::new("./test.ai");
-        let result = normalize_path(dot_slash, &repo_root);
+        let result = normalize_path(dot_slash, &repo_root).unwrap();
         assert_eq!(result, PathBuf::from("test.ai"));
     }
 
@@ -946,7 +1028,7 @@ mod tests {
         std::fs::create_dir_all(file_path.parent().unwrap()).unwrap();
         std::fs::write(&file_path, "test").unwrap();
 
-        let result = normalize_path(&file_path, &repo_root);
+        let result = normalize_path(&file_path, &repo_root).unwrap();
         assert_eq!(result, PathBuf::from("subdir/file.psd"));
     }
 
@@ -956,7 +1038,7 @@ mod tests {
         let repo_root = dunce::canonicalize(temp.path()).unwrap();
 
         // Simulate Windows-style path
-        let result = normalize_path(Path::new(".\\test.ai"), &repo_root);
+        let result = normalize_path(Path::new(".\\test.ai"), &repo_root).unwrap();
         assert_eq!(result, PathBuf::from("test.ai"));
     }
 

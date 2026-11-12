@@ -117,6 +117,12 @@ impl Index {
     pub fn save(&self, repo_root: &Path) -> Result<()> {
         let index_path = repo_root.join(".mediagit/index");
 
+        // BUG-008: every writer saves through here, so this is the one place
+        // that stops an absolute or `..` path from ever reaching a tree.
+        for path in self.entries.keys().chain(self.deleted_entries.iter()) {
+            crate::tree::check_tracked_path(&path.to_string_lossy())?;
+        }
+
         let contents = serde_json::to_string_pretty(self).context("Failed to serialize index")?;
 
         // VC-4: atomic replace. A plain `fs::write` truncates first, so a
@@ -263,6 +269,56 @@ mod tests {
         assert!(index.is_empty());
         assert_eq!(index.len(), 0);
         assert_eq!(index.version, 1);
+    }
+
+    fn index_with(path: &str) -> Index {
+        let mut index = Index::new();
+        let entry = IndexEntry::new(PathBuf::from(path), Oid::hash(b"x"), 0o100644, 1, None);
+        index.add_entry(entry);
+        index
+    }
+
+    #[test]
+    fn test_index_save_refuses_absolute_and_parent_paths() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir_all(temp.path().join(".mediagit")).unwrap();
+        for bad in [
+            "//?/D:/work/repo/a.txt",
+            "D:/work/repo/a.txt",
+            "/etc/passwd",
+            "../a.txt",
+            "dir/../../a.txt",
+        ] {
+            let err = index_with(bad).save(temp.path()).unwrap_err();
+            assert!(
+                format!("{err:#}").contains(bad),
+                "error must name {bad}: {err:#}"
+            );
+            assert!(
+                !temp.path().join(".mediagit/index").exists(),
+                "{bad} must not be written"
+            );
+        }
+    }
+
+    #[test]
+    fn test_index_save_accepts_legitimate_paths() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir_all(temp.path().join(".mediagit")).unwrap();
+        let deep = vec!["d"; 40].join("/");
+        for ok in [
+            "plain.txt",
+            "my dir/with space.txt",
+            "caf\u{e9}/\u{65e5}\u{672c}.psd",
+            "shot.v1.final.exr",
+            "a..b/c.txt",
+            ".hidden/.file",
+            deep.as_str(),
+        ] {
+            index_with(ok)
+                .save(temp.path())
+                .unwrap_or_else(|e| panic!("{ok}: {e:#}"));
+        }
     }
 
     #[test]

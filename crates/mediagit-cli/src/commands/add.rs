@@ -69,9 +69,10 @@ pub async fn stage_files_for_commit(paths: &[String], repo_root: &std::path::Pat
     for path_str in paths {
         // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- local CLI arg
         let path = std::path::Path::new(path_str);
-        if path.is_file()
-            && let Ok(abs_path) = dunce::canonicalize(path)
-        {
+        if path.is_file() {
+            // Never skip an existing file just because it cannot be
+            // canonicalized (BUG-009): fall back to the plain absolute path.
+            let abs_path = dunce::canonicalize(path).or_else(|_| std::path::absolute(path))?;
             match AddCmd::process_single_file(
                 &abs_path,
                 &repo_root,
@@ -214,6 +215,33 @@ fn add_max_inflight_bytes() -> u64 {
         }),
         Err(_) => DEFAULT_ADD_MAX_INFLIGHT_BYTES,
     }
+}
+
+/// A file `add` cannot record under a repo-relative path (BUG-008/009).
+/// Carried as an `anyhow` error so the add loops can name it, carry on with
+/// the other files, and still exit non-zero at the end.
+#[derive(Debug)]
+struct Untrackable(String);
+
+impl std::fmt::Display for Untrackable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Untrackable {}
+
+/// If `e` is an [`Untrackable`], warn (unless quiet), remember it and return
+/// true so the caller moves on to the next file.
+fn note_untrackable(e: &anyhow::Error, list: &mut Vec<String>, quiet: bool) -> bool {
+    let Some(u) = e.downcast_ref::<Untrackable>() else {
+        return false;
+    };
+    if !quiet {
+        crate::output::warning(&format!("Cannot track {u}"));
+    }
+    list.push(u.to_string());
+    true
 }
 
 /// Result from processing a single file in parallel
@@ -391,6 +419,9 @@ impl AddCmd {
         let mut modified_count = 0u64;
         let mut staged_bytes = 0u64;
         let mut skipped_count = 0u64;
+        // Files that cannot be stored under a repo-relative path (BUG-008/009):
+        // named in a warning, then `add` exits non-zero after saving the rest.
+        let mut untrackable: Vec<String> = Vec::new();
 
         if !self.dry_run && !files_to_add.is_empty() {
             if use_parallel {
@@ -521,6 +552,9 @@ impl AddCmd {
                             // Skipped
                         }
                         Ok(Err(e)) => {
+                            if note_untrackable(&e, &mut untrackable, self.quiet) {
+                                continue;
+                            }
                             if !self.force {
                                 return Err(e);
                             }
@@ -613,6 +647,9 @@ impl AddCmd {
                             }
                         }
                         Err(e) => {
+                            if note_untrackable(&e, &mut untrackable, self.quiet) {
+                                continue;
+                            }
                             if !self.force {
                                 return Err(e);
                             }
@@ -635,8 +672,7 @@ impl AddCmd {
 
         let working_files: std::collections::HashSet<PathBuf> = files_to_add
             .iter()
-            .filter_map(|p| p.strip_prefix(&repo_root).ok())
-            .map(|p| p.to_path_buf())
+            .filter_map(|p| crate::repo::repo_relative(&repo_root, p).ok())
             .collect();
 
         // Pathspec prefixes (repo-relative, '/'-normalized) that scope which
@@ -652,9 +688,7 @@ impl AddCmd {
                     } else {
                         std::env::current_dir().unwrap_or_default().join(p)
                     };
-                    let rel = joined
-                        .strip_prefix(&repo_root)
-                        .map(|r| r.to_path_buf())
+                    let rel = crate::repo::repo_relative(&repo_root, &joined)
                         .unwrap_or_else(|_| PathBuf::from(p));
                     let s = rel.to_string_lossy().replace('\\', "/");
                     if s == "." { String::new() } else { s }
@@ -750,6 +784,14 @@ impl AddCmd {
             }
         }
 
+        if !untrackable.is_empty() {
+            anyhow::bail!(
+                "{} file(s) could not be tracked and were not staged:\n  {}",
+                untrackable.len(),
+                untrackable.join("\n  ")
+            );
+        }
+
         // Best-effort auto-gc after add. Re-staging a file before commit
         // orphans the previous version's chunks immediately; the threshold
         // gate (50 MiB or 100 orphans) makes trivial adds a no-op.
@@ -794,10 +836,12 @@ impl AddCmd {
         delta_enabled: bool,
         on_bytes: Option<Arc<dyn Fn(u64) + Send + Sync>>,
     ) -> Result<(Option<FileResult>, u64)> {
-        let metadata = tokio::fs::metadata(file_path).await.context(format!(
-            "Failed to read file metadata: {}",
-            file_path.display()
-        ))?;
+        let metadata = tokio::fs::metadata(file_path).await.map_err(|e| {
+            anyhow::Error::new(Untrackable(format!(
+                "{}: cannot read file metadata ({e})",
+                file_path.display()
+            )))
+        })?;
 
         let file_size = metadata.len();
         // Aligns with should_use_chunking() minimum.
@@ -807,12 +851,14 @@ impl AddCmd {
         // chunking; all others stay on StreamCDC for maximum delta-compressibility.
         use super::utils::STREAMING_THRESHOLD;
 
-        let relative_path = file_path
-            .strip_prefix(repo_root)
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|_| crate::repo::normalize_path(file_path, repo_root));
-        // Normalize separators for cross-platform consistency
-        let relative_path = PathBuf::from(relative_path.to_string_lossy().replace('\\', "/"));
+        // BUG-008: one helper, an error instead of falling back to the
+        // absolute path.
+        let relative_path = if file_path.is_absolute() {
+            crate::repo::repo_relative(repo_root, file_path)
+        } else {
+            crate::repo::normalize_path(file_path, repo_root)
+        }
+        .map_err(|e| anyhow::Error::new(Untrackable(format!("{e:#}"))))?;
 
         // Stat-cache check: skip if file hasn't changed since last staging
         let file_mtime = metadata
@@ -1012,10 +1058,12 @@ impl AddCmd {
 
     /// Check if path is outside .mediagit directory
     fn is_outside_mediagit(path: &Path, mediagit_dir: &Path) -> bool {
-        if let Ok(abs_path) = dunce::canonicalize(path) {
-            !abs_path.starts_with(mediagit_dir)
-        } else {
-            false
+        // BUG-009: a path that cannot be canonicalized (trailing dot, ...) was
+        // reported "inside .mediagit" and silently dropped from the walk. Judge
+        // it lexically instead.
+        match dunce::canonicalize(path) {
+            Ok(abs_path) => !abs_path.starts_with(mediagit_dir),
+            Err(_) => !path.starts_with(mediagit_dir),
         }
     }
 
@@ -1024,11 +1072,8 @@ impl AddCmd {
     /// walk started from `add .`), which silently skipped the ignore check
     /// (BUG-GD-1). Canonicalizing first makes the match relative-path-safe.
     fn ignore_relative_path(path: &Path, repo_root: &Path) -> Option<PathBuf> {
-        dunce::canonicalize(path)
-            .ok()?
-            .strip_prefix(repo_root)
-            .ok()
-            .map(|p| p.to_path_buf())
+        let abs = dunce::canonicalize(path).or_else(|_| std::path::absolute(path));
+        crate::repo::repo_relative(repo_root, &abs.ok()?).ok()
     }
 
     /// Expand paths (globs, directories) into a list of files to add.
@@ -1086,8 +1131,8 @@ impl AddCmd {
                 &mut candidates,
             )?;
             for path in candidates {
-                if let Ok(rel) = path.strip_prefix(repo_root)
-                    && tracked_paths.contains(rel)
+                if let Ok(rel) = crate::repo::repo_relative(repo_root, &path)
+                    && tracked_paths.contains(&rel)
                 {
                     files.push(path);
                 }
@@ -1219,13 +1264,16 @@ impl AddCmd {
                 }
             }
 
-            if path.is_file() {
+            // `file_type` comes from the directory listing itself, so it still
+            // answers for names a path lookup rewrites (trailing dot, BUG-009).
+            let ft = entry.file_type()?;
+            if path.is_file() || ft.is_file() {
                 if let Ok(abs_path) = dunce::canonicalize(&path) {
                     files.push(abs_path);
                 } else {
                     files.push(path);
                 }
-            } else if path.is_dir() {
+            } else if path.is_dir() || ft.is_dir() {
                 self.collect_files_recursive(&path, repo_root, mediagit_dir, matcher, files)?;
             }
         }

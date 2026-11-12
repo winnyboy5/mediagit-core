@@ -717,3 +717,139 @@ fn test_add_many_small_files_performance() {
     println!("Add 100 small files: {:?}", duration);
     println!("Files per second: {:.2}", 100.0 / duration.as_secs_f64());
 }
+
+// ============================================================================
+// BUG-008 / BUG-009: paths Windows rewrites (over 260 characters, reserved
+// names, trailing dots) must be stored repo-relative and come back on checkout
+// ============================================================================
+
+/// The form of `p` that Windows accepts verbatim (no name rewriting, no
+/// 260-character limit). Identity elsewhere.
+fn verbatim(p: &Path) -> PathBuf {
+    if cfg!(windows) {
+        let s = p.to_string_lossy().replace('/', "\\");
+        if s.starts_with(r"\\?\") {
+            PathBuf::from(s)
+        } else {
+            PathBuf::from(format!(r"\\?\{s}"))
+        }
+    } else {
+        p.to_path_buf()
+    }
+}
+
+/// Create `rel` (relative, '/'-separated) under `root` with `body`.
+fn write_verbatim(root: &Path, rel: &str, body: &[u8]) {
+    let full = verbatim(&root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR)));
+    fs::create_dir_all(full.parent().unwrap()).unwrap();
+    fs::write(&full, body).unwrap();
+}
+
+fn read_verbatim(root: &Path, rel: &str) -> Option<Vec<u8>> {
+    fs::read(verbatim(
+        &root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR)),
+    ))
+    .ok()
+}
+
+fn odd_paths_fixture() -> Vec<(String, Vec<u8>)> {
+    let deep = (0..9)
+        .map(|i| format!("sequence_{i:02}_{}", "x".repeat(28)))
+        .collect::<Vec<_>>()
+        .join("/");
+    vec![
+        ("ok/plain.txt".to_string(), b"plain".to_vec()),
+        (format!("{deep}/final.txt"), b"long path body".to_vec()),
+        ("r/aux.txt".to_string(), b"reserved name".to_vec()),
+        ("d/shot.v1.".to_string(), b"trailing dot".to_vec()),
+        ("d/trailing space .txt".to_string(), b"space".to_vec()),
+    ]
+}
+
+#[test]
+fn test_add_odd_paths_round_trip_repo_relative() {
+    let temp_dir = TempDir::new().unwrap();
+    let root = temp_dir.path();
+    init_repo(root);
+    let files = odd_paths_fixture();
+    for (rel, body) in &files {
+        write_verbatim(root, rel, body);
+    }
+    assert!(
+        root.to_string_lossy().len() + files[1].0.len() > 260,
+        "fixture must exceed the 260-character limit"
+    );
+
+    // Windows cannot create `shot.v1.` through the normal API (the dot is
+    // dropped), so checkout could never put it back. `add` must say so, name
+    // the file and exit non-zero, but still stage everything else (BUG-009).
+    let refused = |rel: &str| cfg!(windows) && rel.ends_with('.');
+    let add = mediagit()
+        .args(["add", "--all"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&add.stdout),
+        String::from_utf8_lossy(&add.stderr)
+    );
+    if files.iter().any(|(rel, _)| refused(rel)) {
+        assert!(!add.status.success(), "add must exit non-zero: {said}");
+        assert!(said.contains("shot.v1."), "add must name the file: {said}");
+    } else {
+        assert!(add.status.success(), "add failed: {said}");
+    }
+    let files: Vec<_> = files.into_iter().filter(|(rel, _)| !refused(rel)).collect();
+    mediagit()
+        .args(["commit", "-m", "odd"])
+        .current_dir(root)
+        .assert()
+        .success();
+
+    // Nothing absolute is stored.
+    for sub in [vec!["ls-files"], vec!["status", "--porcelain"]] {
+        let out = mediagit().args(&sub).current_dir(root).output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        assert!(
+            !text.contains("//?/"),
+            "{sub:?} shows a verbatim path:\n{text}"
+        );
+        assert!(
+            !text.contains(":/") && !text.contains(":\\"),
+            "{sub:?} shows a drive path:\n{text}"
+        );
+    }
+
+    // A file add refused is still visible to status (BUG-009), not dropped.
+    if cfg!(windows) {
+        let out = mediagit()
+            .args(["status", "--porcelain"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("shot.v1."),
+            "status must list the refused file"
+        );
+    }
+
+    // Wipe the working files, then restore from the commit.
+    for (rel, _) in &files {
+        let _ = fs::remove_file(verbatim(
+            &root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR)),
+        ));
+    }
+    mediagit()
+        .args(["reset", "--hard", "HEAD"])
+        .current_dir(root)
+        .assert()
+        .success();
+    for (rel, body) in &files {
+        assert_eq!(
+            read_verbatim(root, rel).as_deref(),
+            Some(body.as_slice()),
+            "{rel} not restored byte-identical"
+        );
+    }
+}
