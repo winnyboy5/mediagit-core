@@ -705,8 +705,11 @@ impl FsckChecker {
                     if let Some(target) = &r.target {
                         // Verify the target reference exists
                         if r.name == "HEAD" && !any_ref_value {
-                            // Unborn: healthy unless saved versions exist.
-                            if self.store_has_a_commit(report).await? {
+                            // Unborn: healthy only if the store provably holds no
+                            // commit. A commit found, or data that could not be
+                            // read (it might be the commit), is an error.
+                            let (found, unreadable) = self.store_commit_scan(report).await?;
+                            if found {
                                 report.add_issue(
                                     FsckIssue::new(
                                         IssueSeverity::Error,
@@ -715,6 +718,20 @@ impl FsckChecker {
                                             "There are saved versions, but no branch points to \
                                              them: {} names {}, which does not exist",
                                             r.name, target
+                                        ),
+                                    )
+                                    .with_ref(r.name.clone()),
+                                );
+                            } else if unreadable > 0 {
+                                report.add_issue(
+                                    FsckIssue::new(
+                                        IssueSeverity::Error,
+                                        IssueCategory::BrokenReference,
+                                        format!(
+                                            "No branch exists ({} names {}) and {} saved \
+                                             object(s) could not be read, so it cannot be \
+                                             told whether there are saved versions",
+                                            r.name, target, unreadable
                                         ),
                                     )
                                     .with_ref(r.name.clone()),
@@ -1505,10 +1522,13 @@ impl FsckChecker {
     /// checksum) and is reported as a `ChecksumMismatch` issue rather than
     /// silently skipped — silently skipping would just reproduce the
     /// "0 objects, PERFECT" blind spot for a corrupted pack.
-    /// Is any object in the store a commit? Stops at the first one. Chunked
-    /// blobs (manifests) are skipped: a commit is never chunked, and reading
-    /// one would reassemble it in memory.
-    async fn store_has_a_commit(&self, report: &mut FsckReport) -> anyhow::Result<bool> {
+    /// Is any object in the store a commit? Returns (found, unreadable): stops
+    /// at the first commit; counts objects that could not be read at all
+    /// (those might have been the commit, so "none found" is then not proof).
+    /// Chunked blobs (manifests) are skipped: a commit is never chunked, and
+    /// reading one would reassemble it in memory.
+    async fn store_commit_scan(&self, report: &mut FsckReport) -> anyhow::Result<(bool, usize)> {
+        let mut unreadable = 0usize;
         for oid in self.list_all_objects(report).await? {
             if self
                 .storage
@@ -1518,13 +1538,16 @@ impl FsckChecker {
             {
                 continue;
             }
-            if let Ok(data) = self.odb.read(&oid).await
-                && crate::format::deserialize_exact::<Commit>(&data).is_ok()
-            {
-                return Ok(true);
+            match self.odb.read(&oid).await {
+                Ok(data) => {
+                    if crate::format::deserialize_exact::<Commit>(&data).is_ok() {
+                        return Ok((true, unreadable));
+                    }
+                }
+                Err(_) => unreadable += 1,
             }
         }
-        Ok(false)
+        Ok((false, unreadable))
     }
 
     async fn list_all_objects(&self, report: &mut FsckReport) -> anyhow::Result<Vec<Oid>> {

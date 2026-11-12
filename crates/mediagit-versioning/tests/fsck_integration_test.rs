@@ -1243,3 +1243,43 @@ async fn test_fsck_unborn_head_with_only_loose_blobs_is_healthy() {
         report.issues
     );
 }
+
+/// No branch exists and the only saved data cannot be read: it might be the
+/// commit, so the HEAD check must not call the repository clean. (The object
+/// pass is off so only the HEAD logic can raise this.)
+#[tokio::test]
+async fn test_fsck_unborn_head_with_unreadable_data_is_an_error() {
+    let repo = Layout::new().await;
+    let odb = ObjectDatabase::with_smart_compression(repo.storage.clone(), 100);
+    let blob = odb.write(ObjectType::Blob, &photo_bytes()).await.unwrap();
+    repo.storage.put(&blob.to_hex(), b"corrupt").await.unwrap();
+    repo.refdb()
+        .write(&Ref::new_symbolic(
+            "HEAD".to_string(),
+            "refs/heads/main".to_string(),
+        ))
+        .await
+        .unwrap();
+
+    let report = repo
+        .checker()
+        .check(FsckOptions {
+            check_objects: false,
+            ..FsckOptions::default()
+        })
+        .await
+        .unwrap();
+
+    let head = report
+        .issues
+        .iter()
+        .find(|i| i.ref_name.as_deref() == Some("HEAD"))
+        .expect("unreadable data must not read as a clean fresh repository");
+    assert_eq!(head.severity, IssueSeverity::Error);
+    assert!(!head.repairable);
+    assert!(
+        head.message.contains("could not be read"),
+        "{}",
+        head.message
+    );
+}

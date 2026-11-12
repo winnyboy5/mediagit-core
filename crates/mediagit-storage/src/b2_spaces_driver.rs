@@ -980,21 +980,17 @@ impl StorageBackend for B2SpacesDriver {
                         Ok(true)
                     }
                     Err(e) => {
-                        let error_message = e.to_string().to_lowercase();
-                        // Check for various "not found" patterns from real and emulated S3 services
-                        if error_message.contains("404")
-                            || error_message.contains("not found")
-                            || error_message.contains("notfound")
-                            || error_message.contains("nosuchkey")
-                            || error_message.contains("does not exist")
-                            || error_message.contains("no such key")
-                            // LocalStack emulator sometimes returns generic "service error" for non-existent objects
-                            || (error_message.contains("service error") && error_message.len() < 50)
-                        {
+                        // Absent only on the response's own word (404 / NoSuchKey /
+                        // NotFound). A 403, 500 or 503 is an error, not "absent".
+                        if crate::s3_error::is_not_found(&e) {
                             debug!("Object does not exist: {}", key);
                             Ok(false)
                         } else {
-                            Err(anyhow!("Failed to check object existence: {}", e))
+                            Err(anyhow!(
+                                "Failed to check object existence: {} ({})",
+                                e,
+                                crate::s3_error::describe(&e)
+                            ))
                         }
                     }
                 }
@@ -1020,18 +1016,14 @@ impl StorageBackend for B2SpacesDriver {
                 match client.head_object().bucket(&bucket).key(&key).send().await {
                     Ok(resp) => Ok(Some(resp.content_length().unwrap_or(0) as u64)),
                     Err(e) => {
-                        let emsg = e.to_string().to_lowercase();
-                        if emsg.contains("404")
-                            || emsg.contains("not found")
-                            || emsg.contains("notfound")
-                            || emsg.contains("nosuchkey")
-                            || emsg.contains("does not exist")
-                            || emsg.contains("no such key")
-                            || (emsg.contains("service error") && emsg.len() < 50)
-                        {
+                        if crate::s3_error::is_not_found(&e) {
                             Ok(None)
                         } else {
-                            Err(anyhow!("Failed to head object: {}", e))
+                            Err(anyhow!(
+                                "Failed to head object: {} ({})",
+                                e,
+                                crate::s3_error::describe(&e)
+                            ))
                         }
                     }
                 }

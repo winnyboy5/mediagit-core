@@ -109,6 +109,7 @@ pub mod local;
 pub mod minio;
 pub mod mock;
 pub mod namespaced;
+pub(crate) mod s3_error;
 
 use async_trait::async_trait;
 use std::fmt::Debug;
