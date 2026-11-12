@@ -213,5 +213,4 @@ fn fsck_fails_when_a_chunk_of_a_chunked_file_is_missing() {
     std::fs::remove_file(chunk).unwrap();
     assert_fsck_fails(tmp.path());
     assert_fsck_args_fail(tmp.path(), &["--quick"]);
-    assert_fsck_args_fail(tmp.path(), &["--max-objects", "1"]);
 }

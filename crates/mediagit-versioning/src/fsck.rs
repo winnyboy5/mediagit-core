@@ -334,6 +334,18 @@ pub fn scan_hex_oids(text: &str) -> Vec<Oid> {
     out
 }
 
+/// Ids already handled during one graph walk. Trees are flat (full path
+/// keys), so without the blob and chunk sets every commit would re-probe every
+/// file it shares with its parent. Separate sets: a blob id and a chunk id can
+/// coincide (a file equal to one chunk of another) yet need different probes.
+#[derive(Default)]
+struct Seen {
+    /// Commits and trees.
+    oids: HashSet<Oid>,
+    blobs: HashSet<Oid>,
+    chunks: HashSet<Oid>,
+}
+
 /// FSCK integrity checker
 pub struct FsckChecker {
     /// Storage backend for file operations
@@ -693,7 +705,7 @@ impl FsckChecker {
         debug!("Checking commit graph connectivity");
 
         let refs = self.list_all_refs().await?;
-        let mut visited = HashSet::new();
+        let mut visited = Seen::default();
         let mut referenced_objects = HashSet::new();
 
         // Traverse from all branch heads
@@ -719,7 +731,7 @@ impl FsckChecker {
 
         info!(
             "Connectivity check complete, visited {} commits, {} total objects referenced",
-            visited.len(),
+            visited.oids.len(),
             referenced_objects.len()
         );
 
@@ -730,16 +742,16 @@ impl FsckChecker {
     fn traverse_commit<'a>(
         &'a self,
         oid: &'a Oid,
-        visited: &'a mut HashSet<Oid>,
+        visited: &'a mut Seen,
         referenced_objects: &'a mut HashSet<Oid>,
         report: &'a mut FsckReport,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + 'a>> {
         Box::pin(async move {
             // Detect circular references
-            if visited.contains(oid) {
+            if visited.oids.contains(oid) {
                 return Ok(());
             }
-            visited.insert(*oid);
+            visited.oids.insert(*oid);
             referenced_objects.insert(*oid);
 
             // Read via the ODB (not raw storage) so compressed/smart-compressed
@@ -804,7 +816,7 @@ impl FsckChecker {
         &self,
         commit_oid: &Oid,
         tree: &Oid,
-        visited: &mut HashSet<Oid>,
+        visited: &mut Seen,
         referenced_objects: &mut HashSet<Oid>,
         report: &mut FsckReport,
     ) -> anyhow::Result<()> {
@@ -832,7 +844,7 @@ impl FsckChecker {
     /// caller reports those.
     pub async fn check_commits(&self, commits: &[Oid]) -> anyhow::Result<FsckReport> {
         let mut report = FsckReport::new();
-        let mut visited = HashSet::new();
+        let mut visited = Seen::default();
         let mut referenced = HashSet::new();
         for oid in commits {
             let Ok(data) = self.odb.read(oid).await else {
@@ -873,12 +885,12 @@ impl FsckChecker {
     fn check_tree_entries<'a>(
         &'a self,
         tree_oid: &'a Oid,
-        visited: &'a mut HashSet<Oid>,
+        visited: &'a mut Seen,
         referenced_objects: &'a mut HashSet<Oid>,
         report: &'a mut FsckReport,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + 'a>> {
         Box::pin(async move {
-            if !visited.insert(*tree_oid) {
+            if !visited.oids.insert(*tree_oid) {
                 return Ok(());
             }
 
@@ -895,7 +907,17 @@ impl FsckChecker {
             for entry in tree.entries.values() {
                 referenced_objects.insert(entry.oid);
 
-                if !self.odb.exists(&entry.oid).await? {
+                // Already judged via an earlier commit or path: skip before
+                // any I/O (the first verdict, including "missing", stands).
+                if !visited.blobs.insert(entry.oid) {
+                    continue;
+                }
+
+                // `?`: a storage error aborts the walk on purpose; an unknown
+                // answer must never be read as "present" or as "missing".
+                // `object_exists`, not `odb.exists`: the latter does not know
+                // delta-stored (`deltas/<oid>`) blobs.
+                if !self.object_exists(&entry.oid).await? {
                     report.add_issue(
                         FsckIssue::new(
                             IssueSeverity::Error,
@@ -915,6 +937,11 @@ impl FsckChecker {
                 if let Ok(Some(manifest)) = self.odb.get_chunk_manifest(&entry.oid).await {
                     for chunk in &manifest.chunks {
                         referenced_objects.insert(chunk.id);
+                        if !visited.chunks.insert(chunk.id) {
+                            continue;
+                        }
+                        // `?` aborts on a storage error, intentionally (see above).
+                        // `chunk_exists` covers loose, delta-sidecar and packed chunks.
                         if !self.odb.chunk_exists(&chunk.id).await? {
                             report.add_issue(
                                 FsckIssue::new(
@@ -958,7 +985,7 @@ impl FsckChecker {
         &self,
         r: &Ref,
         oid: Oid,
-        visited: &mut HashSet<Oid>,
+        visited: &mut Seen,
         referenced_objects: &mut HashSet<Oid>,
         report: &mut FsckReport,
     ) -> anyhow::Result<bool> {
@@ -974,7 +1001,7 @@ impl FsckChecker {
             return Ok(false);
         };
 
-        visited.insert(oid);
+        visited.oids.insert(oid);
         referenced_objects.insert(oid);
 
         // Validate: target exists.
@@ -3611,5 +3638,265 @@ mod tests {
 
         let report = checker.check(FsckOptions::quick()).await.unwrap();
         assert_names_missing(&report, &blob.to_hex());
+    }
+
+    /// Commit `entries` (path, blob) on `storage`, return a cold checker.
+    async fn commit_entries(
+        storage: &Arc<dyn StorageBackend>,
+        odb: &ObjectDatabase,
+        tmp: &tempfile::TempDir,
+        entries: &[(&str, Oid)],
+    ) -> FsckChecker {
+        use crate::{FileMode, Signature, TreeEntry};
+        let mut tree = Tree::new();
+        for (name, blob) in entries {
+            tree.add_entry(TreeEntry::new(name.to_string(), FileMode::Regular, *blob));
+        }
+        let tree_oid = tree.write(odb).await.unwrap();
+        let sig = Signature::now("t".to_string(), "t@e".to_string());
+        let commit = Commit::new(tree_oid, sig.clone(), sig, "m".to_string());
+        let commit_oid = commit.write(odb).await.unwrap();
+        let refdb = RefDatabase::new(tmp.path());
+        refdb
+            .write(&Ref::new_direct("refs/heads/main".to_string(), commit_oid))
+            .await
+            .unwrap();
+        FsckChecker::new_with_refdb(storage.clone(), Some(refdb))
+    }
+
+    fn assert_no_missing(report: &FsckReport) {
+        assert!(
+            !report
+                .issues
+                .iter()
+                .any(|i| i.category == IssueCategory::MissingObject),
+            "false 'missing' on a present object: {:?}",
+            report.issues
+        );
+    }
+
+    /// A blob stored as `deltas/<oid>` + `.meta` has no bare key and no
+    /// manifest; `ObjectDatabase::exists` does not know it (core.rs `exists`
+    /// probes cache, loose key, manifest, packs only). The walk must still
+    /// find it.
+    #[tokio::test]
+    async fn test_fsck_walk_sees_delta_stored_blob() {
+        use mediagit_storage::LocalBackend;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let storage: Arc<dyn StorageBackend> =
+            Arc::new(LocalBackend::new(tmp.path()).await.unwrap());
+        let odb = ObjectDatabase::new(storage.clone(), 100);
+
+        let mut base = vec![b'a'; 10_000];
+        base.extend_from_slice(b"UNIQUE_TAIL_BASE");
+        let base_oid = odb.write(ObjectType::Blob, &base).await.unwrap();
+        let mut target = vec![b'a'; 10_000];
+        target.extend_from_slice(b"UNIQUE_TAIL_TARG");
+        let delta_oid = odb
+            .write_delta_against_base(ObjectType::Blob, &target, "f.bin", base_oid)
+            .await
+            .unwrap()
+            .expect("fixture: delta must be accepted");
+        assert!(
+            storage
+                .exists(&format!("deltas/{}.meta", delta_oid.to_hex()))
+                .await
+                .unwrap()
+                && !storage.exists(&delta_oid.to_hex()).await.unwrap(),
+            "fixture: blob must be delta-stored only"
+        );
+
+        let checker = commit_entries(
+            &storage,
+            &odb,
+            &tmp,
+            &[("base.bin", base_oid), ("target.bin", delta_oid)],
+        )
+        .await;
+        for options in [FsckOptions::default(), FsckOptions::quick()] {
+            assert_no_missing(&checker.check(options).await.unwrap());
+        }
+    }
+
+    /// After `repack(remove_loose)` every blob, manifest-owned chunk and tree
+    /// lives only in a pack; a clean repository must stay clean.
+    #[tokio::test]
+    async fn test_fsck_walk_clean_on_packed_only_repo() {
+        use crate::chunking::ChunkStrategy;
+        use mediagit_storage::LocalBackend;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let storage: Arc<dyn StorageBackend> =
+            Arc::new(LocalBackend::new(tmp.path()).await.unwrap());
+        let odb = ObjectDatabase::with_optimizations(
+            storage.clone(),
+            100,
+            Some(ChunkStrategy::Fixed { size: 256 * 1024 }),
+            false,
+            0,
+        );
+        let small = odb.write(ObjectType::Blob, b"small").await.unwrap();
+        let data: Vec<u8> = (0..2 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        let big = odb
+            .write_chunked(ObjectType::Blob, &data, "big.bin")
+            .await
+            .unwrap();
+        let checker =
+            commit_entries(&storage, &odb, &tmp, &[("s.txt", small), ("big.bin", big)]).await;
+
+        odb.repack(10_000, true).await.unwrap();
+        let manifest = odb.get_chunk_manifest(&big).await.unwrap().unwrap();
+        assert!(
+            !storage
+                .exists(&format!("chunks/{}", manifest.chunks[0].id.to_hex()))
+                .await
+                .unwrap(),
+            "fixture: chunks must be packed-only"
+        );
+
+        for options in [FsckOptions::default(), FsckOptions::quick()] {
+            let report = checker.check(options).await.unwrap();
+            assert!(!report.has_errors(), "got: {:?}", report.issues);
+        }
+    }
+
+    /// Counts `exists` probes per key; everything else is the mock.
+    #[derive(Debug)]
+    struct CountingBackend {
+        inner: MockBackend,
+        exists_calls: std::sync::Mutex<std::collections::HashMap<String, usize>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StorageBackend for CountingBackend {
+        async fn get(&self, key: &str) -> anyhow::Result<Vec<u8>> {
+            self.inner.get(key).await
+        }
+        async fn put(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
+            self.inner.put(key, data).await
+        }
+        async fn exists(&self, key: &str) -> anyhow::Result<bool> {
+            *self
+                .exists_calls
+                .lock()
+                .unwrap()
+                .entry(key.to_string())
+                .or_default() += 1;
+            self.inner.exists(key).await
+        }
+        async fn delete(&self, key: &str) -> anyhow::Result<()> {
+            self.inner.delete(key).await
+        }
+        async fn list_objects(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
+            self.inner.list_objects(prefix).await
+        }
+        async fn head(&self, key: &str) -> anyhow::Result<Option<u64>> {
+            self.inner.head(key).await
+        }
+    }
+
+    /// Many commits that share the same files must cost one probe per
+    /// distinct blob and chunk, not one per commit.
+    #[tokio::test]
+    async fn test_fsck_walk_probes_each_blob_and_chunk_once() {
+        use crate::chunking::ChunkStrategy;
+        use crate::{FileMode, Signature, TreeEntry};
+        let backend = Arc::new(CountingBackend {
+            inner: MockBackend::new(),
+            exists_calls: Default::default(),
+        });
+        let storage: Arc<dyn StorageBackend> = backend.clone();
+        let odb = ObjectDatabase::with_optimizations(
+            storage.clone(),
+            100,
+            Some(ChunkStrategy::Fixed { size: 256 * 1024 }),
+            false,
+            0,
+        );
+        let a = odb.write(ObjectType::Blob, b"shared a").await.unwrap();
+        let b = odb.write(ObjectType::Blob, b"shared b").await.unwrap();
+        let data: Vec<u8> = (0..2 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        let big = odb
+            .write_chunked(ObjectType::Blob, &data, "big.bin")
+            .await
+            .unwrap();
+        // Shares every chunk but the last with `big`: chunk dedup must work
+        // across different blobs, not only across commits.
+        let mut data2 = data.clone();
+        *data2.last_mut().unwrap() ^= 0xFF;
+        let big2 = odb
+            .write_chunked(ObjectType::Blob, &data2, "big2.bin")
+            .await
+            .unwrap();
+        let chunk_ids: Vec<Oid> = odb
+            .get_chunk_manifest(&big)
+            .await
+            .unwrap()
+            .unwrap()
+            .chunks
+            .iter()
+            .map(|c| c.id)
+            .collect();
+        assert!(chunk_ids.len() > 2, "fixture: file must be chunked");
+
+        let sig = Signature::now("t".to_string(), "t@e".to_string());
+        let mut parent: Vec<Oid> = Vec::new();
+        for i in 0..6 {
+            let unique = odb
+                .write(ObjectType::Blob, format!("unique {i}").as_bytes())
+                .await
+                .unwrap();
+            let mut tree = Tree::new();
+            for (name, oid) in [
+                ("a", a),
+                ("b", b),
+                ("big.bin", big),
+                ("big2.bin", big2),
+                ("u", unique),
+            ] {
+                tree.add_entry(TreeEntry::new(name.to_string(), FileMode::Regular, oid));
+            }
+            let tree_oid = tree.write(&odb).await.unwrap();
+            let commit = Commit::with_parents(
+                tree_oid,
+                parent.clone(),
+                sig.clone(),
+                sig.clone(),
+                "m".into(),
+            );
+            parent = vec![commit.write(&odb).await.unwrap()];
+        }
+        let tmp = tempfile::TempDir::new().unwrap();
+        let refdb = RefDatabase::new(tmp.path());
+        refdb
+            .write(&Ref::new_direct("refs/heads/main".to_string(), parent[0]))
+            .await
+            .unwrap();
+        let checker = FsckChecker::new_with_refdb(storage, Some(refdb));
+        backend.exists_calls.lock().unwrap().clear();
+
+        let report = checker
+            .check(FsckOptions {
+                check_objects: false,
+                check_refs: false,
+                check_dangling: false,
+                check_chunk_deltas: false,
+                check_connectivity: true,
+                ..FsckOptions::default()
+            })
+            .await
+            .unwrap();
+        assert!(!report.has_errors(), "got: {:?}", report.issues);
+
+        let calls = backend.exists_calls.lock().unwrap();
+        for blob in [a, b] {
+            assert_eq!(calls.get(&blob.to_hex()), Some(&1), "blob {blob}");
+        }
+        for chunk in chunk_ids {
+            assert_eq!(
+                calls.get(&format!("chunks/{}", chunk.to_hex())),
+                Some(&1),
+                "chunk {chunk}"
+            );
+        }
     }
 }
