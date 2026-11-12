@@ -190,8 +190,12 @@ push is refused and the server is unchanged; with no tracking ref it asks you to
 fetch first. The server now enforces the lease atomically (one lock per
 repository over the compare and the write) and also refuses a lease that
 expects a branch to be absent when it exists, or present when it was deleted.
-Leases apply to branches only. A lease push of several branches is all or
-nothing: if one branch is stale, nothing is written and the stale branch is named.
+Leases apply to branches only. A push of several branches is now all or
+nothing on the server: every check (stale lease, fast-forward, file locks,
+protected current branch, missing branch on delete) runs before the first
+write, and if any ref is rejected nothing is written and the reason is shown.
+Only a disk error during the write itself can leave a push partly applied; the
+response then lists which refs were applied and `push` updates their tracking refs.
 
 ### Fixed — `fsck` could not detect a missing object
 

@@ -660,6 +660,69 @@ fn old_oid_mismatch(req: &RefUpdateRequest, expected: Option<&str>, current: Opt
     }
 }
 
+/// Every per-ref condition that can be checked before any write. `Ok(Some)`
+/// is a rejection reason; `Err` aborts the whole request.
+#[allow(clippy::too_many_arguments)]
+async fn validate_ref_update(
+    state: &AppState,
+    repo: &str,
+    repo_path: &std::path::Path,
+    refdb: &RefDatabase,
+    odb: &Arc<ObjectDatabase>,
+    req: &RefUpdateRequest,
+    update: &mediagit_protocol::RefUpdate,
+    pusher: Option<&str>,
+) -> Result<Option<String>, StatusCode> {
+    let current = refdb.read(&update.name).await.ok().and_then(|r| r.oid);
+    let current_hex = current.map(|o| o.to_hex());
+
+    if update.delete {
+        // HEAD protection: prevent deleting the currently active branch
+        if let Ok(head) = refdb.read("HEAD").await
+            && head.target.as_deref() == Some(&update.name)
+        {
+            return Ok(Some(format!(
+                "refusing to delete the current branch: '{}'",
+                update.name
+            )));
+        }
+        if old_oid_mismatch(req, update.old_oid.as_deref(), current_hex.as_deref()) {
+            return Ok(Some("ref changed since last fetch".to_string()));
+        }
+        if refdb.read(&update.name).await.is_err() {
+            return Ok(Some(format!("ref '{}' does not exist", update.name)));
+        }
+        return Ok(None);
+    }
+
+    if old_oid_mismatch(req, update.old_oid.as_deref(), current_hex.as_deref()) {
+        return Ok(Some(if req.force_with_lease {
+            "ref changed since last fetch".to_string()
+        } else {
+            "non-fast-forward".to_string()
+        }));
+    }
+    let new_oid = Oid::from_hex(&update.new_oid).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    // Ancestry check: when neither force mode is set and the ref already
+    // exists, require a fast-forward. `force_with_lease` waives exactly this
+    // and nothing else - the CAS above still applies.
+    if !req.force
+        && !req.force_with_lease
+        && let Some(current_oid) = &current
+    {
+        let lca = LcaFinder::new(Arc::clone(odb));
+        match lca.is_ancestor(current_oid, &new_oid).await {
+            Ok(true) => {}
+            Ok(false) => return Ok(Some("non-fast-forward".to_string())),
+            Err(e) => return Ok(Some(format!("ancestry check failed: {}", e))),
+        }
+    }
+
+    // B3: server-enforced file locking.
+    crate::locks::check_push_locks(state, repo, repo_path, odb, current, new_oid, pusher).await
+}
+
 /// POST /:repo/refs/update - Update repository refs
 pub async fn update_refs(
     Path(repo): Path<String>,
@@ -699,96 +762,42 @@ pub async fn update_refs(
 
     let updates = std::mem::take(&mut req.updates);
 
-    // BUG-032: a lease request is all-or-nothing. Validate every lease first
-    // (under the lock); if any ref is stale, write nothing so the client's
-    // tracking refs stay truthful.
-    if req.force_with_lease {
-        let mut stale = false;
-        let mut checked = Vec::new();
-        for update in &updates {
-            let current = refdb.read(&update.name).await.ok().and_then(|r| r.oid);
-            let current_hex = current.map(|o| o.to_hex());
-            let bad = old_oid_mismatch(&req, update.old_oid.as_deref(), current_hex.as_deref());
-            stale |= bad;
-            checked.push(bad);
-        }
-        if stale {
-            let results = updates
-                .iter()
-                .zip(checked)
-                .map(|(u, bad)| RefUpdateResult {
-                    ref_name: u.name.clone(),
-                    success: false,
-                    error: Some(if bad {
-                        "ref changed since last fetch".to_string()
-                    } else {
-                        "not applied: another ref in this push changed since last fetch".to_string()
-                    }),
-                })
-                .collect();
-            return Ok(Json(RefUpdateResponse {
-                success: false,
-                results,
-            }));
-        }
+    // BUG-032: all-or-nothing. Check every condition that can be checked
+    // before the first write (under the lock); if any ref is rejected, write
+    // nothing so the client's tracking refs stay truthful. Only a storage
+    // error during the write phase can leave a push partly applied; the
+    // response then says per ref whether it was applied.
+    let pusher = auth_user.as_ref().map(|u| u.user_id.as_str());
+    let mut rejections = Vec::with_capacity(updates.len());
+    for update in &updates {
+        rejections.push(
+            validate_ref_update(
+                &state, &repo, &repo_path, &refdb, &odb, &req, update, pusher,
+            )
+            .await?,
+        );
     }
+    if rejections.iter().any(Option::is_some) {
+        let results = updates
+            .iter()
+            .zip(rejections)
+            .map(|(u, why)| RefUpdateResult {
+                ref_name: u.name.clone(),
+                success: false,
+                error: Some(why.unwrap_or_else(|| {
+                    "not applied: another ref in this push was rejected".into()
+                })),
+            })
+            .collect();
+        return Ok(Json(RefUpdateResponse {
+            success: false,
+            results,
+        }));
+    }
+
     for update in updates {
         // Handle ref deletion
         if update.delete {
-            // HEAD protection: prevent deleting the currently active branch
-            if let Ok(head) = refdb.read("HEAD").await
-                && head.target.as_deref() == Some(&update.name)
-            {
-                tracing::warn!(
-                    "Refusing to delete '{}': it is the current HEAD",
-                    update.name
-                );
-                results.push(RefUpdateResult {
-                    ref_name: update.name.clone(),
-                    success: false,
-                    error: Some(format!(
-                        "refusing to delete the current branch: '{}'",
-                        update.name
-                    )),
-                });
-                all_success = false;
-                continue;
-            }
-
-            // Safety check: verify old_oid matches (see `old_oid_mismatch`).
-            let current = refdb.read(&update.name).await.ok().and_then(|r| r.oid);
-            let current_hex = current.map(|o| o.to_hex());
-            if old_oid_mismatch(&req, update.old_oid.as_deref(), current_hex.as_deref()) {
-                tracing::warn!(
-                    "Ref delete rejected for '{}': expected {:?}, got {:?}",
-                    update.name,
-                    update.old_oid,
-                    current_hex
-                );
-                results.push(RefUpdateResult {
-                    ref_name: update.name.clone(),
-                    success: false,
-                    error: Some("ref changed since last fetch".to_string()),
-                });
-                all_success = false;
-                continue;
-            }
-
-            // Verify ref exists before deleting
-            match refdb.read(&update.name).await {
-                Ok(_) => {}
-                Err(_) => {
-                    tracing::warn!("Ref '{}' does not exist, cannot delete", update.name);
-                    results.push(RefUpdateResult {
-                        ref_name: update.name.clone(),
-                        success: false,
-                        error: Some(format!("ref '{}' does not exist", update.name)),
-                    });
-                    all_success = false;
-                    continue;
-                }
-            }
-
             // Delete the ref
             match refdb.delete(&update.name).await {
                 Ok(_) => {
@@ -812,71 +821,6 @@ pub async fn update_refs(
             continue;
         }
 
-        // Check old_oid (see `old_oid_mismatch`).
-        let current = refdb.read(&update.name).await.ok().and_then(|r| r.oid);
-        let current_hex = current.map(|o| o.to_hex());
-        if old_oid_mismatch(&req, update.old_oid.as_deref(), current_hex.as_deref()) {
-            tracing::warn!(
-                "Ref update rejected: expected {:?}, got {:?}",
-                update.old_oid,
-                current_hex
-            );
-            results.push(RefUpdateResult {
-                ref_name: update.name.clone(),
-                success: false,
-                error: Some(if req.force_with_lease {
-                    "ref changed since last fetch".to_string()
-                } else {
-                    "non-fast-forward".to_string()
-                }),
-            });
-            all_success = false;
-            continue;
-        }
-
-        // Ancestry check: when neither force mode is set and the ref already
-        // exists, require that the new commit is a descendant of the current
-        // tip (fast-forward only). `force_with_lease` waives exactly this and
-        // nothing else — the CAS above still applies.
-        if !req.force
-            && !req.force_with_lease
-            && !update.delete
-            && let Ok(current_ref) = refdb.read(&update.name).await
-            && let Some(current_oid) = &current_ref.oid
-        {
-            let new_oid_parsed =
-                Oid::from_hex(&update.new_oid).map_err(|_| StatusCode::BAD_REQUEST)?;
-            let lca = LcaFinder::new(Arc::clone(&odb));
-            match lca.is_ancestor(current_oid, &new_oid_parsed).await {
-                Ok(true) => {} // fast-forward: current is ancestor of new — allowed
-                Ok(false) => {
-                    tracing::warn!(
-                        "Non-fast-forward push rejected for '{}': {} is not ancestor of {}",
-                        update.name,
-                        current_oid.to_hex(),
-                        update.new_oid
-                    );
-                    results.push(RefUpdateResult {
-                        ref_name: update.name.clone(),
-                        success: false,
-                        error: Some("non-fast-forward".to_string()),
-                    });
-                    all_success = false;
-                    continue;
-                }
-                Err(e) => {
-                    tracing::error!("Ancestry check failed for '{}': {}", update.name, e);
-                    results.push(RefUpdateResult {
-                        ref_name: update.name.clone(),
-                        success: false,
-                        error: Some(format!("ancestry check failed: {}", e)),
-                    });
-                    all_success = false;
-                    continue;
-                }
-            }
-        }
-
         // Capture the pre-write OID for reflog
         let pre_write_oid = match refdb.read(&update.name).await {
             Ok(current_ref) => current_ref.oid,
@@ -884,36 +828,6 @@ pub async fn update_refs(
         };
 
         let new_oid = Oid::from_hex(&update.new_oid).map_err(|_| StatusCode::BAD_REQUEST)?;
-
-        // B3: server-enforced file locking. Reject the push if any commit
-        // between the current tip (pre_write_oid) and new_oid touches a path
-        // locked by someone other than the pusher. check_push_locks
-        // short-circuits before any tree walk when the repo has zero locks.
-        let pusher = auth_user.as_ref().map(|u| u.user_id.as_str());
-        match crate::locks::check_push_locks(
-            &state,
-            &repo,
-            &repo_path,
-            &odb,
-            pre_write_oid,
-            new_oid,
-            pusher,
-        )
-        .await
-        {
-            Ok(Some(lock_error)) => {
-                tracing::warn!("Push to '{}' rejected: {}", update.name, lock_error);
-                results.push(RefUpdateResult {
-                    ref_name: update.name.clone(),
-                    success: false,
-                    error: Some(lock_error),
-                });
-                all_success = false;
-                continue;
-            }
-            Ok(None) => {}
-            Err(status) => return Err(status),
-        }
 
         // Update the ref
         let ref_update = Ref::new_direct(update.name.clone(), new_oid);

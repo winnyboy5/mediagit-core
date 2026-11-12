@@ -880,13 +880,41 @@ impl PushCmd {
             stats.objects_sent = push_stats.objects_count as u64;
 
             if !result.success {
+                // A storage error mid-write can leave some refs applied: keep
+                // their tracking refs truthful so the next lease matches.
+                for r in result.results.iter().filter(|r| r.success) {
+                    if let (Some(u), Some(branch)) = (
+                        updates.iter().find(|u| u.name == r.ref_name),
+                        r.ref_name.strip_prefix("refs/heads/"),
+                    ) && let Ok(oid) = mediagit_versioning::Oid::from_hex(&u.new_oid)
+                    {
+                        let t = mediagit_versioning::Ref::new_direct(
+                            format!("refs/remotes/{remote}/{branch}"),
+                            oid,
+                        );
+                        let _ = refdb.write(&t).await;
+                    }
+                }
                 let errors: Vec<_> = result
                     .results
                     .iter()
                     .filter(|r| !r.success)
                     .filter_map(|r| r.error.as_ref().map(|e| format!("{}: {}", r.ref_name, e)))
                     .collect();
-                anyhow::bail!("Push failed: {}", errors.join(", "));
+                let applied: Vec<_> = result
+                    .results
+                    .iter()
+                    .filter(|r| r.success)
+                    .map(|r| r.ref_name.as_str())
+                    .collect();
+                if applied.is_empty() {
+                    anyhow::bail!("Push failed: {}", errors.join(", "));
+                }
+                anyhow::bail!(
+                    "Push failed: {} (already applied: {})",
+                    errors.join(", "),
+                    applied.join(", ")
+                );
             }
 
             pushed_updates = updates

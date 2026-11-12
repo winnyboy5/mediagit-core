@@ -298,6 +298,16 @@ async fn delete_with_stale_lease_is_refused_and_fresh_lease_deletes() {
     let args = ["push", "--delete", "--force-with-lease", "origin", "feat"];
     let out = mediagit().args(args).current_dir(&s.ana).output().unwrap();
     assert!(!out.status.success(), "stale delete must fail");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        text.contains("ref changed since last fetch"),
+        "must be the server's lease refusal, not the client fetch-first bail:
+{text}"
+    );
     assert_eq!(
         server_branch(s.repos_root.path(), "lease-repo", "feat").await,
         feat_before,

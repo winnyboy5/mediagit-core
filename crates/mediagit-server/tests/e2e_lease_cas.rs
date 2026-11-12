@@ -84,3 +84,93 @@ async fn lease_expecting_absent_is_refused_when_branch_exists_and_vice_versa() {
     let tip = RefDatabase::new(&mg).read("refs/heads/main").await.unwrap();
     assert_eq!(tip.oid, Some(a));
 }
+
+fn set(name: &str, old: Option<Oid>, new: Oid, delete: bool) -> RefUpdate {
+    RefUpdate {
+        name: name.to_string(),
+        old_oid: old.map(|o| o.to_hex()),
+        new_oid: new.to_hex(),
+        delete,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_invalid_ref_leaves_the_others_unwritten() {
+    let repos = TempDir::new().unwrap();
+    let mg = repos.path().join("r").join(".mediagit");
+    tokio::fs::create_dir_all(mg.join("refs/heads"))
+        .await
+        .unwrap();
+    let refdb = RefDatabase::new(&mg);
+    let base = start(repos.path().to_path_buf()).await;
+    let client = ProtocolClient::new(format!("{base}/r"));
+    let (a, b) = (Oid::hash(b"a"), Oid::hash(b"b"));
+    refdb
+        .write(&Ref::new_direct("refs/heads/main".into(), a))
+        .await
+        .unwrap();
+    refdb
+        .write(&Ref::new_symbolic("HEAD".into(), "refs/heads/main".into()))
+        .await
+        .unwrap();
+
+    for (force, lease) in [(false, false), (true, false), (false, true)] {
+        // Ref 1 valid, ref 2 invalid for a non-stale reason.
+        let missing = set("refs/heads/ghost", None, b, true);
+        let head = set("refs/heads/main", Some(a), b, true);
+        for bad in [missing, head] {
+            let req = RefUpdateRequest {
+                updates: vec![set("refs/heads/fresh", None, a, false), bad.clone()],
+                force,
+                force_with_lease: lease,
+            };
+            let resp = client.update_refs(req).await.unwrap();
+            assert!(!resp.success);
+            assert!(
+                resp.results.iter().all(|r| !r.success),
+                "{:?}",
+                resp.results
+            );
+            assert!(
+                resp.results[0]
+                    .error
+                    .as_deref()
+                    .unwrap()
+                    .starts_with("not applied"),
+                "{:?}",
+                resp.results
+            );
+            assert!(resp.results[1].error.is_some());
+            assert!(
+                refdb.read("refs/heads/fresh").await.is_err(),
+                "ref 1 must not be written (force={force} lease={lease} bad={})",
+                bad.name
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn storage_error_in_write_phase_reports_applied_per_ref() {
+    let repos = TempDir::new().unwrap();
+    let mg = repos.path().join("r").join(".mediagit");
+    // refs/heads/blocked is a directory, so writing that ref fails.
+    tokio::fs::create_dir_all(mg.join("refs/heads/blocked"))
+        .await
+        .unwrap();
+    let base = start(repos.path().to_path_buf()).await;
+    let client = ProtocolClient::new(format!("{base}/r"));
+    let a = Oid::hash(b"a");
+    let req = RefUpdateRequest {
+        updates: vec![
+            set("refs/heads/one", None, a, false),
+            set("refs/heads/blocked", None, a, false),
+        ],
+        force: true,
+        force_with_lease: false,
+    };
+    let resp = client.update_refs(req).await.unwrap();
+    assert!(!resp.success);
+    assert!(resp.results[0].success && resp.results[0].ref_name == "refs/heads/one");
+    assert!(!resp.results[1].success && resp.results[1].error.is_some());
+}
