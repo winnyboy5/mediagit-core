@@ -231,6 +231,21 @@ happened and the output still said "Successfully repaired 1 issue(s)".
 - `fsck --repair --machine` adds `restored`, `quarantined`, `refs_removed` and
   `unrestorable_files`; existing fields are unchanged.
 - `--dry-run` prints the same plan and changes nothing on disk.
+- Repair order: the working file, then an intact copy in a pack, then the
+  remote (`origin`, or the only remote), then quarantine. If the remote cannot
+  help, one plain line says why (no remote, server not reachable, login
+  refused, object not on the server). Missing files are repaired the same way.
+- **Repair never deletes.** The quarantine folder `.mediagit/quarantine` holds
+  every damaged copy that could not be replaced. `gc` never touches it.
+- Every `fsck` run deletes a quarantined copy once its object is healthy again,
+  and prints the number and size of the copies it holds
+  (`quarantine_count`, `quarantine_bytes` with `--machine`).
+- New `fsck --purge-quarantine` deletes every quarantined copy. It asks first,
+  needs `--yes` without a terminal and with `--machine`, runs no repair, and
+  repeats which files can no longer be restored.
+- A new repository (`HEAD` names a branch with no commit yet) is no longer
+  reported as having a broken reference.
+- Dangling objects are `gc`'s job, not repair's (see above).
 
 ## [v0.7.0-rc.1] - 2026-11-03
 

@@ -31,8 +31,10 @@ connectivity and chunk-delta checks.
 | `--all` | Show all objects checked |
 | `--lost-found` | Show lost/dangling objects |
 | `--no-dangling` | Don't check for dangling objects |
-| `--repair` | Attempt to repair issues automatically |
+| `--repair` | Repair damaged and missing files (restore, or quarantine; never delete) |
 | `--dry-run` | Dry run (show what would be repaired without making changes) |
+| `--purge-quarantine` | Delete every copy in `.mediagit/quarantine` (asks first; runs no check and no repair) |
+| `--yes` | Do not ask for confirmation (with `--purge-quarantine`; required with `--machine`) |
 | `--max-objects <N>` | Limit number of objects to check (0 = unlimited) [default: 0] |
 | `-q`, `--quiet` | Quiet mode (only errors) |
 | `-v`, `--verbose` | Verbose mode (detailed progress) |
@@ -121,13 +123,53 @@ $ mediagit fsck --repair
 ✅ Successfully repaired 2 issue(s)
 ```
 
-If none of the repairable issues could actually be fixed (for example, a
-packed object that only a targeted delete can't reach), fsck reports that
-explicitly instead of a false "0 issue(s) repaired" success line:
+### How repair works
+
+Repair never deletes a damaged object. For each damaged or missing file it
+looks for a good copy, in this order:
+
+1. The file in your working folder, if it still matches the saved version.
+2. A pack file in the repository that holds an intact copy.
+3. The remote (`origin`, or the only remote), if one is configured.
+
+If none has a good copy, the damaged bytes are moved to
+`.mediagit/quarantine/<kind>/<object id>`. The object is then missing, so
+`fsck` stays red and exits non-zero, and the output lists the files that can
+no longer be restored:
 
 ```bash
-✖ Repaired 0 of 2 issue(s) — no repair succeeded. See the warnings above for why each was skipped.
+✖ 1 file(s) can no longer be restored:
+    photo.bin
 ```
+
+If the remote cannot help, fsck says why in one line: no remote is
+configured, the server could not be reached, the login was refused, or the
+server did not have a good copy.
+
+After repair, fsck checks again and reports only what the second check
+confirms. The exit code describes the repository as it is afterwards.
+
+Broken references are removed. `HEAD` is never removed. Dangling objects are
+not repaired: `mediagit gc` owns them.
+
+### The quarantine folder
+
+Every `fsck` run deletes a quarantined copy when its object is healthy again
+in the repository. That is the only automatic deletion. `fsck` prints the
+number of copies and their size when the folder is not empty. `gc` never
+touches the folder.
+
+`mediagit fsck --purge-quarantine` deletes every copy. It asks first. Without
+a terminal it refuses unless you pass `--yes`. With `--machine` it always
+needs `--yes`. It prints how many copies and bytes it deleted and repeats the
+files that can no longer be restored. It runs no repair.
+
+### Machine output
+
+`mediagit --machine fsck` adds `quarantine_count` and `quarantine_bytes`.
+After `--repair` it also reports `restored`, `quarantined`, `refs_removed`
+and `unrestorable_files`. `--purge-quarantine` reports `deleted_count`,
+`deleted_bytes` and `unrestorable_files`.
 
 ### Errors found
 
@@ -187,7 +229,10 @@ SEE ALSO:
 ## Exit Status
 
 - **0**: No errors found (warnings/info do not fail the command)
-- non-zero: Integrity errors found, or fsck failed to run (e.g. not a repository)
+- non-zero: Integrity errors found, files remain that can no longer be restored, a purge was not confirmed, or fsck failed to run (e.g. not a repository)
+
+A new repository with no versions yet is healthy: `HEAD` naming a branch that
+has no commit yet is not reported.
 
 ## See Also
 

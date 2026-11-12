@@ -124,7 +124,11 @@ account `identity` to compare with lock owners), `key`, `stats`, `gc`, `fsck`,
 `verify` (whole repository only), `config`, `sparse-checkout`, `rebase`,
 `cherry-pick`, `bisect` (not `replay`) and `reflog` (one ref's entries). `rebase`,
 `cherry-pick` and `revert` conflicts use the same `status:"conflict"` shape as
-`merge`; `fsck`/`verify`/`gc` that find errors print their report with
+`merge`; `fsck --repair` adds `restored`, `quarantined`, `refs_removed` and
+`unrestorable_files`, and every `fsck` adds `quarantine_count` and
+`quarantine_bytes`; `fsck --purge-quarantine` needs `--yes` and returns
+`deleted_count`, `deleted_bytes` and `unrestorable_files`;
+`fsck`/`verify`/`gc` that find errors print their report with
 `healthy:false` / non-empty `errors` and exit 1. `config get` of an unset key
 returns `value:null`. `rebase` drops a replayed commit that adds nothing unless
 `--keep-empty` is given. `key init` returns the one-time `recovery_code` in its
