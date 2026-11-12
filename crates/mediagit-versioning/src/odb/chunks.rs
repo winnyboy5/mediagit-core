@@ -2114,6 +2114,14 @@ impl ObjectDatabase {
     /// the whole-pack checksum is not re-verified per read (it is still checked
     /// by fsck and on pack import). If the same oid is packed more than once, a
     /// copy that fails its hash falls through to the next one.
+    /// Does a pack hold an intact copy of `oid`? Loose copies are ignored, so
+    /// this answers "would the object survive losing its loose file?".
+    pub async fn packed_copy_is_intact(&self, oid: &Oid) -> bool {
+        self.read_from_packs(oid)
+            .await
+            .is_ok_and(|d| Oid::hash(&d) == *oid)
+    }
+
     pub(super) async fn read_from_packs(&self, oid: &Oid) -> anyhow::Result<Vec<u8>> {
         debug!(oid = %oid, "Searching for object in pack files");
 

@@ -2121,14 +2121,28 @@ impl FsckRepair {
                 });
             }
         }
+        // Next best: a pack still holds an intact copy (a crash in the middle
+        // of `repack` leaves objects both loose and packed). `read` prefers
+        // the loose file, so damage there hides the good packed one.
+        if odb.packed_copy_is_intact(oid).await {
+            return Some(Source::Pack);
+        }
         None
     }
 
     /// Write `source` back and read it back through the ODB (cache cleared, so
     /// the bytes on disk are what is judged).
-    async fn restore(&self, odb: &ObjectDatabase, oid: &Oid, source: Source) -> bool {
-        let is_chunk = matches!(source, Source::Chunk(_));
+    async fn restore(
+        &self,
+        odb: &ObjectDatabase,
+        oid: &Oid,
+        source: Source,
+        is_chunk: bool,
+    ) -> bool {
         let written = match source {
+            // Nothing to write: with the damaged loose file quarantined, reads
+            // fall through to the pack. The read-back below proves it.
+            Source::Pack => true,
             Source::Chunk(data) => odb.write_full_chunk(oid, &data).await.is_ok(),
             Source::File { path, name } => match tokio::fs::read(&path).await {
                 Ok(data) => matches!(
@@ -2239,7 +2253,7 @@ impl FsckRepair {
         odb.invalidate_cache(oid).await;
 
         let restored = match source {
-            Some(source) => self.restore(odb, oid, source).await,
+            Some(source) => self.restore(odb, oid, source, is_chunk).await,
             None => false,
         };
         if restored {
@@ -2375,6 +2389,8 @@ pub async fn sweep_quarantine(
 enum Source {
     /// The exact bytes of one chunk, cut from a working file.
     Chunk(Vec<u8>),
+    /// An intact copy inside a pack file.
+    Pack,
     /// A working file that hashes to the object id.
     File { path: PathBuf, name: String },
 }

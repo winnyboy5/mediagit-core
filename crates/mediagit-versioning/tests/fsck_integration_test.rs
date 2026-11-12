@@ -543,3 +543,43 @@ async fn test_fsck_max_objects_limit() {
     // Should only check 5 objects
     assert_eq!(report.objects_checked, 5);
 }
+
+/// A crash in the middle of `repack` leaves an object both loose and packed.
+/// `read` prefers the loose copy, so damage there hides an intact packed one.
+#[tokio::test]
+async fn test_fsck_repair_restores_damaged_loose_object_from_pack() {
+    let repo = Layout::new().await;
+    let data = photo_bytes();
+    let blob = repo.commit_photo(&data).await;
+    let odb = ObjectDatabase::with_smart_compression(repo.storage.clone(), 100);
+    odb.repack(10_000, false).await.unwrap();
+    assert!(
+        repo.storage.exists(&blob.to_hex()).await.unwrap(),
+        "fixture: loose copy must remain next to the pack"
+    );
+    let damaged = repo.damage(blob).await;
+    std::fs::remove_file(repo.root.join("photo.bin")).unwrap();
+
+    let checker = repo.checker();
+    let report = checker.check(FsckOptions::default()).await.unwrap();
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|i| i.category == IssueCategory::ChecksumMismatch && i.oid == Some(blob)),
+        "fixture: damage unseen: {:?}",
+        report.issues
+    );
+
+    let done = repo.repair(&checker).repair(&report, false).await.unwrap();
+
+    assert_eq!(done.restored, vec![blob], "the pack holds a good copy");
+    assert!(done.unrestorable_files.is_empty());
+    let kept: Vec<_> = snapshot(&repo.root.join(".mediagit/quarantine"))
+        .into_keys()
+        .collect();
+    assert_eq!(kept.len(), 1, "damaged loose bytes are kept, not deleted");
+    assert_eq!(std::fs::read(&kept[0]).unwrap(), damaged);
+    let again = repo.checker().check(FsckOptions::default()).await.unwrap();
+    assert!(!again.has_errors(), "{:?}", again.issues);
+}
