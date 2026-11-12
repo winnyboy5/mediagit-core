@@ -2820,8 +2820,15 @@ impl ObjectDatabase {
         let key = oid.to_hex();
         let storage_data = match self.storage.get(&key).await {
             Ok(data) => data,
-            Err(_) => {
-                // Loose object not found - fallback to pack files
+            Err(e) => {
+                // Only a genuinely absent key falls back to the packs. A key
+                // that is there but unreadable (I/O error, lock, EMFILE) is an
+                // error, not "not found": callers judge damage by this result.
+                if self.storage.exists(&key).await.map_err(|x| {
+                    anyhow::anyhow!("object {oid} could not be read ({e}) or probed ({x})")
+                })? {
+                    return Err(e.context(format!("object {oid} is present but unreadable")));
+                }
                 debug!(oid = %oid, "Loose object not found, trying pack files");
                 return self.read_packed_object(oid).await;
             }
@@ -3237,13 +3244,22 @@ impl ObjectDatabase {
                     }
                 }
             }
-            Err(_) => self.read_from_packs(&base_id).await.map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to read base chunk {}: not found loose or in packs: {}",
-                    base_id,
-                    e
-                )
-            })?,
+            Err(e) => {
+                // Same rule as `read`: a present but unreadable base chunk is
+                // an error, not a reason to look in the packs.
+                if self.storage.exists(&base_key).await? {
+                    return Err(
+                        e.context(format!("base chunk {base_id} is present but unreadable"))
+                    );
+                }
+                self.read_from_packs(&base_id).await.map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to read base chunk {}: not found loose or in packs: {}",
+                        base_id,
+                        e
+                    )
+                })?
+            }
         };
 
         // ST-1: verify the base chunk before building on it.

@@ -483,11 +483,22 @@ async fn test_fsck_repair_never_removes_head() {
         report
             .issues
             .iter()
-            .any(|i| i.category == IssueCategory::BrokenReference && i.repairable),
-        "fixture: this HEAD must be reported: {:?}",
+            .any(|i| i.category == IssueCategory::BrokenReference && !i.repairable),
+        "fixture: this HEAD must be reported, not repairable: {:?}",
         report.issues
     );
-    repo.repair(&checker).repair(&report, false).await.unwrap();
+    // Even a forged repairable report cannot make repair remove HEAD.
+    let mut forged = mediagit_versioning::FsckReport::new();
+    forged.add_issue(
+        mediagit_versioning::FsckIssue::new(
+            IssueSeverity::Warning,
+            IssueCategory::BrokenReference,
+            "forged".to_string(),
+        )
+        .with_ref("HEAD".to_string())
+        .repairable(),
+    );
+    repo.repair(&checker).repair(&forged, false).await.unwrap();
 
     assert!(repo.refdb().exists("HEAD").await.unwrap());
 }
@@ -625,6 +636,7 @@ async fn test_fsck_repair_restores_damaged_loose_object_from_pack() {
 struct Probe {
     inner: Arc<LocalBackend>,
     fail_exists: std::sync::Mutex<Option<String>>,
+    fail_get: std::sync::Mutex<Option<String>>,
     fail_delete_nth: std::sync::Mutex<Option<usize>>,
     deletes: std::sync::atomic::AtomicUsize,
     gets: std::sync::Mutex<Vec<String>>,
@@ -635,6 +647,7 @@ impl Probe {
         Arc::new(Probe {
             inner,
             fail_exists: Default::default(),
+            fail_get: Default::default(),
             fail_delete_nth: Default::default(),
             deletes: Default::default(),
             gets: Default::default(),
@@ -646,6 +659,9 @@ impl Probe {
 impl StorageBackend for Probe {
     async fn get(&self, key: &str) -> anyhow::Result<Vec<u8>> {
         self.gets.lock().unwrap().push(key.to_string());
+        if self.fail_get.lock().unwrap().as_deref() == Some(key) {
+            anyhow::bail!("injected I/O error reading {key}");
+        }
         self.inner.get(key).await
     }
     async fn put(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
@@ -863,41 +879,68 @@ async fn test_fsck_walk_does_not_read_delta_stored_blobs() {
     );
 }
 
-/// A saved ref is dropped once a ref of that name exists again, and kept
-/// while it does not.
+/// A saved ref is dropped only when the live ref of that name has the SAME
+/// value and that commit reads. A different value, or no ref, keeps it.
 #[tokio::test]
-async fn test_fsck_sweep_drops_saved_ref_when_the_ref_is_back() {
+async fn test_fsck_sweep_drops_saved_ref_only_for_the_same_readable_value() {
     let repo = Layout::new().await;
-    let fake = Oid::hash(b"nonexistent");
-    repo.refdb()
-        .write(&Ref::new_direct("refs/heads/broken".to_string(), fake))
+    repo.commit_photo(&photo_bytes()).await;
+    let head = repo
+        .refdb()
+        .read("refs/heads/main")
         .await
+        .unwrap()
+        .oid
         .unwrap();
-    let checker = repo.checker();
-    let report = checker.check(FsckOptions::default()).await.unwrap();
-    repo.repair(&checker).repair(&report, false).await.unwrap();
     let saved = repo
         .root
-        .join(".mediagit/quarantine/refs/refs/heads/broken");
-    assert!(saved.exists());
-
+        .join(".mediagit/quarantine/refs/refs/heads/feature");
+    std::fs::create_dir_all(saved.parent().unwrap()).unwrap();
+    std::fs::write(&saved, format!("{}\n", head.to_hex())).unwrap();
     let odb = ObjectDatabase::with_smart_compression(repo.storage.clone(), 10);
     let refdb = repo.refdb();
-    let st = mediagit_versioning::sweep_quarantine(&odb, Some(&refdb), &repo.root, true)
-        .await
-        .unwrap();
-    assert!(saved.exists(), "ref is still gone: keep the saved value");
-    assert_eq!((st.removed, st.count), (0, 1));
+    let sweep = || async {
+        mediagit_versioning::sweep_quarantine(&odb, Some(&refdb), &repo.root, true)
+            .await
+            .unwrap()
+    };
 
+    // No live ref of that name.
+    assert_eq!(sweep().await.removed, 0);
+    assert!(saved.exists());
+
+    // A live ref of that name at ANOTHER value: the saved one is the only
+    // record of `head`, keep it.
     refdb
-        .write(&Ref::new_direct("refs/heads/broken".to_string(), fake))
+        .write(&Ref::new_direct(
+            "refs/heads/feature".to_string(),
+            Oid::hash(b"somewhere else"),
+        ))
         .await
         .unwrap();
-    let st = mediagit_versioning::sweep_quarantine(&odb, Some(&refdb), &repo.root, true)
+    assert_eq!(sweep().await.removed, 0);
+    assert!(
+        saved.exists(),
+        "a different value must not delete the record"
+    );
+
+    // Same value, and that commit reads: the saved copy is redundant.
+    refdb
+        .write(&Ref::new_direct("refs/heads/feature".to_string(), head))
         .await
         .unwrap();
-    assert!(!saved.exists(), "ref is back: the saved copy goes");
-    assert_eq!((st.removed, st.count), (1, 0));
+    assert_eq!(sweep().await.removed, 1);
+    assert!(!saved.exists());
+
+    // Same value but the commit does not read: keep.
+    let ghost = Oid::hash(b"ghost commit");
+    std::fs::write(&saved, format!("{}\n", ghost.to_hex())).unwrap();
+    refdb
+        .write(&Ref::new_direct("refs/heads/feature".to_string(), ghost))
+        .await
+        .unwrap();
+    assert_eq!(sweep().await.removed, 0);
+    assert!(saved.exists());
 }
 
 /// The report is older than the repair: an object that reads fine now must
@@ -935,14 +978,13 @@ async fn test_fsck_repair_reports_a_partly_failed_quarantine() {
     let data = photo_bytes();
     let chunk = Oid::hash(&data);
     odb.write_full_chunk(&chunk, &data).await.unwrap();
-    let chunk_key = format!("chunks/{}", chunk.to_hex());
-    let meta_key = format!("chunk-deltas/{}.meta", chunk.to_hex());
-    repo.storage
-        .put(&chunk_key, b"damaged chunk")
+    let meta_key = format!("chunk-deltas/{}", chunk.to_hex());
+    // Well-formed but wrong content: an integrity failure, not a decode error.
+    odb.write_full_chunk(&chunk, b"not the real chunk")
         .await
         .unwrap();
     repo.storage
-        .put(&meta_key, b"damaged sidecar")
+        .put(&meta_key, b"stray delta payload")
         .await
         .unwrap();
 
@@ -1009,4 +1051,123 @@ async fn test_paths_referencing_follows_annotated_tags() {
 
     let files = found.get(&blob).expect("named through the tag");
     assert_eq!(files[0].path, "only-in-tag.bin");
+}
+
+/// `paths_referencing` must not decode a commit as a Tag (postcard accepts a
+/// prefix): a file reachable through a lightweight tag is still found (F3).
+#[tokio::test]
+async fn test_paths_referencing_through_a_lightweight_tag() {
+    let repo = Layout::new().await;
+    let odb = ObjectDatabase::with_smart_compression(repo.storage.clone(), 100);
+    let blob = odb.write(ObjectType::Blob, &photo_bytes()).await.unwrap();
+    let commit = repo.commit_entries(&odb, &[("tagged.bin", blob)]).await;
+    repo.refdb().delete("refs/heads/main").await.unwrap();
+    repo.refdb()
+        .write(&Ref::new_direct("refs/tags/lw".to_string(), commit))
+        .await
+        .unwrap();
+    let checker = repo.checker();
+    let found = repo
+        .repair(&checker)
+        .paths_referencing(&[blob])
+        .await
+        .unwrap();
+    assert_eq!(found.get(&blob).expect("found")[0].path, "tagged.bin");
+}
+
+/// A transient read error is not damage: the object stays where it is and
+/// repair says it could not re-check it (F5).
+#[tokio::test]
+async fn test_fsck_repair_leaves_an_object_it_cannot_re_read() {
+    let repo = Layout::new().await;
+    let blob = repo.commit_photo(&photo_bytes()).await;
+    let mut report = mediagit_versioning::FsckReport::new();
+    report.add_issue(
+        mediagit_versioning::FsckIssue::new(
+            IssueSeverity::Error,
+            IssueCategory::ChecksumMismatch,
+            "listed as damaged".to_string(),
+        )
+        .with_oid(blob)
+        .repairable(),
+    );
+    let probe = Probe::new(repo.storage.clone());
+    *probe.fail_get.lock().unwrap() = Some(blob.to_hex());
+    let checker = repo.probe_checker(&probe);
+
+    let done = repo
+        .probe_repair(&probe, &checker)
+        .repair(&report, false)
+        .await
+        .unwrap();
+
+    assert!(done.quarantined.is_empty() && done.restored.is_empty());
+    assert!(repo.storage.exists(&blob.to_hex()).await.unwrap());
+    assert!(
+        snapshot(&repo.root.join(".mediagit/quarantine")).is_empty(),
+        "a good object must not be moved because a read failed"
+    );
+    assert!(
+        done.errors.iter().any(|e| e.contains("re-check")),
+        "{:?}",
+        done.errors
+    );
+}
+
+/// The saved copy restore reads is the one THIS run wrote (`~n` on repeat),
+/// never an older one (F6).
+#[tokio::test]
+async fn test_fsck_repair_reports_the_saved_ref_path_it_wrote() {
+    let repo = Layout::new().await;
+    let first = Oid::hash(b"first lost commit");
+    let second = Oid::hash(b"second lost commit");
+    let checker = repo.checker();
+    let mut paths = Vec::new();
+    for oid in [first, second] {
+        repo.refdb()
+            .write(&Ref::new_direct("refs/heads/x".to_string(), oid))
+            .await
+            .unwrap();
+        let report = checker.check(FsckOptions::default()).await.unwrap();
+        let done = repo.repair(&checker).repair(&report, false).await.unwrap();
+        let (name, path) = done
+            .saved_refs
+            .first()
+            .expect("saved path reported")
+            .clone();
+        assert_eq!(name, "refs/heads/x");
+        paths.push(path);
+    }
+    assert_ne!(paths[0], paths[1]);
+    assert_eq!(
+        std::fs::read_to_string(&paths[0]).unwrap().trim(),
+        first.to_hex()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&paths[1]).unwrap().trim(),
+        second.to_hex()
+    );
+}
+
+/// HEAD is "unborn" (healthy) only in a repository with no refs AND an empty
+/// object store (F7).
+#[tokio::test]
+async fn test_fsck_head_is_reported_when_history_exists_but_every_ref_is_gone() {
+    let repo = Layout::new().await;
+    repo.commit_photo(&photo_bytes()).await;
+    repo.refdb().delete("refs/heads/main").await.unwrap();
+    repo.refdb()
+        .write(&Ref::new_symbolic(
+            "HEAD".to_string(),
+            "refs/heads/main".to_string(),
+        ))
+        .await
+        .unwrap();
+    let report = repo.checker().check(FsckOptions::default()).await.unwrap();
+    let head = report
+        .issues
+        .iter()
+        .find(|i| i.ref_name.as_deref() == Some("HEAD"))
+        .expect("history exists, so a HEAD without a branch is reported");
+    assert!(!head.repairable);
 }

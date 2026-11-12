@@ -636,7 +636,18 @@ impl FsckChecker {
         // A fresh repository has a HEAD naming a branch that has no commit
         // yet. That is healthy; only a repository that has commits somewhere
         // can have lost its branch.
-        let has_commits = refs.iter().any(|r| r.oid.is_some());
+        //
+        // "Fresh" means no ref points anywhere AND the object store holds
+        // nothing but its LAYOUT marker (a listing check; objects are not
+        // typed). A repository whose every ref is gone but whose store has
+        // history is not fresh: its HEAD is reported (not repairable).
+        let has_commits = refs.iter().any(|r| r.oid.is_some())
+            || self
+                .storage
+                .list_objects("")
+                .await
+                .map(|keys| keys.iter().any(|k| !k.ends_with("LAYOUT")))
+                .unwrap_or(true);
 
         for r in refs {
             report.refs_checked += 1;
@@ -711,8 +722,7 @@ impl FsckChecker {
                                         r.name, target
                                     ),
                                 )
-                                .with_ref(r.name.clone())
-                                .repairable(),
+                                .with_ref(r.name.clone()),
                             );
                         }
                     } else {
@@ -1668,6 +1678,8 @@ pub struct RepairOutcome {
     pub unrestorable_files: Vec<String>,
     /// (damaged or missing object, file that needs it) behind `unrestorable_files`.
     pub lost: Vec<(Oid, String)>,
+    /// (ref name, saved copy path) for each ref this run removed.
+    pub saved_refs: Vec<(String, PathBuf)>,
     /// Things that went wrong mid-repair (a move to quarantine failed, ...).
     /// The object concerned is neither restored nor counted as quarantined.
     pub errors: Vec<String>,
@@ -1682,6 +1694,9 @@ impl RepairOutcome {
     /// The distinct objects no source could restore yet.
     pub fn lost_oids(&self) -> Vec<Oid> {
         let mut v: Vec<Oid> = self.lost.iter().map(|(o, _)| *o).collect();
+        // A quarantined commit/tree/manifest has no referencing file, so it
+        // is not in `lost`, but it still needs a remote copy.
+        v.extend(self.quarantined.iter().copied());
         v.sort_unstable();
         v.dedup();
         v
@@ -1691,8 +1706,11 @@ impl RepairOutcome {
     /// "quarantined"/"lost" to "restored".
     pub fn mark_restored(&mut self, healthy: &[Oid]) {
         for oid in healthy {
+            let was_quarantined = self.quarantined.contains(oid);
             self.quarantined.retain(|q| q != oid);
-            if self.lost.iter().any(|(o, _)| o == oid) && !self.restored.contains(oid) {
+            if (was_quarantined || self.lost.iter().any(|(o, _)| o == oid))
+                && !self.restored.contains(oid)
+            {
                 self.restored.push(*oid);
             }
             self.lost.retain(|(o, _)| o != oid);
@@ -1843,7 +1861,9 @@ impl FsckRepair {
                 }
                 IssueCategory::BrokenReference => {
                     if let Some(ref_name) = &issue.ref_name
-                        && self.repair_broken_reference(ref_name, dry_run).await?
+                        && self
+                            .repair_broken_reference(ref_name, dry_run, &mut out.saved_refs)
+                            .await?
                     {
                         out.refs_removed.push(ref_name.clone());
                     }
@@ -1997,11 +2017,11 @@ impl FsckRepair {
             let Ok(data) = odb.read(&commit_oid).await else {
                 continue;
             };
-            if maybe_tag && let Ok(tag) = crate::format::deserialize::<Tag>(&data) {
+            if maybe_tag && let Ok(tag) = crate::format::deserialize_exact::<Tag>(&data) {
                 commits.push((tag.target, true));
                 continue;
             }
-            let Ok(commit) = crate::format::deserialize::<Commit>(&data) else {
+            let Ok(commit) = crate::format::deserialize_exact::<Commit>(&data) else {
                 continue;
             };
             commits.extend(commit.parents.iter().map(|p| (*p, false)));
@@ -2068,26 +2088,58 @@ impl FsckRepair {
     /// Does `oid` read back intact right now (cache cleared)? Works for whole
     /// objects and chunks alike.
     pub async fn is_healthy(&self, oid: &Oid) -> bool {
+        matches!(self.health(oid).await, Health::Healthy)
+    }
+
+    /// Read `oid` back and say what that showed. "Damaged" is claimed only
+    /// for an integrity failure; any other failure to read is `Unknown`, and
+    /// "missing" only when nothing is stored under the id.
+    async fn health(&self, oid: &Oid) -> Health {
         let Some(odb) = &self.odb else {
-            return false;
+            return Health::Unknown("no object database attached".to_string());
         };
         odb.invalidate_cache(oid).await;
         // Judge the kind of copy that is actually stored: `get_chunk` also
         // finds a blob's packed copy, which would hide a damaged loose file.
         let pieces = self.stored_pieces(oid).await;
-        let chunk_ok =
-            || async { matches!(odb.get_chunk(oid).await, Ok(d) if Oid::hash(&d) == *oid) };
-        let object_ok = || async {
-            odb.stream_object_to(oid, &mut tokio::io::sink())
-                .await
-                .is_ok()
+        let stored = !pieces.is_empty();
+        let classify = |e: &anyhow::Error| {
+            let msg = format!("{e:#}");
+            let lower = msg.to_lowercase();
+            if lower.contains("integrity check") {
+                Health::Damaged
+            } else if !stored && lower.contains("not found") {
+                Health::Missing
+            } else {
+                Health::Unknown(msg)
+            }
+        };
+        let chunk = || async {
+            match odb.get_chunk(oid).await {
+                Ok(d) if Oid::hash(&d) == *oid => Health::Healthy,
+                Ok(_) => Health::Damaged,
+                Err(e) => classify(&e),
+            }
+        };
+        let object = || async {
+            match odb.stream_object_to(oid, &mut tokio::io::sink()).await {
+                Ok(_) => Health::Healthy,
+                Err(e) => classify(&e),
+            }
         };
         if pieces.iter().any(|(kind, _)| *kind != "loose") {
-            chunk_ok().await
-        } else if !pieces.is_empty() {
-            object_ok().await
+            chunk().await
+        } else if stored {
+            object().await
         } else {
-            object_ok().await || chunk_ok().await
+            match object().await {
+                Health::Healthy => Health::Healthy,
+                first => match chunk().await {
+                    Health::Healthy => Health::Healthy,
+                    Health::Unknown(m) => Health::Unknown(m),
+                    _ => first,
+                },
+            }
         }
     }
 
@@ -2298,8 +2350,17 @@ impl FsckRepair {
     ) -> anyhow::Result<()> {
         // The report may be older than this repair: an object that reads fine
         // now is left alone and not mentioned.
-        if self.is_healthy(oid).await {
-            return Ok(());
+        match self.health(oid).await {
+            Health::Healthy => return Ok(()),
+            Health::Unknown(why) => {
+                // A failed read is not damage: leave the object where it is.
+                warn!("Cannot re-check {oid}: {why}; left untouched");
+                out.errors.push(format!(
+                    "{oid}: could not be re-checked ({why}); left untouched, run repair again"
+                ));
+                return Ok(());
+            }
+            Health::Damaged | Health::Missing => {}
         }
         let pieces = self.stored_pieces(oid).await;
         // `missing`: the walk found nothing stored under this id, so there is
@@ -2423,7 +2484,7 @@ impl FsckRepair {
 
     /// Write a ref's name and value to `.mediagit/quarantine/refs/<name>`
     /// (never overwriting: a repeat gets `~n`).
-    async fn save_ref(&self, ref_name: &str, r: &Ref) -> anyhow::Result<()> {
+    async fn save_ref(&self, ref_name: &str, r: &Ref) -> anyhow::Result<PathBuf> {
         use tokio::io::AsyncWriteExt;
         let base = self
             .quarantine_dir()
@@ -2461,7 +2522,7 @@ impl FsckRepair {
                 Ok(mut f) => {
                     f.write_all(value.as_bytes()).await?;
                     f.sync_all().await?;
-                    return Ok(());
+                    return Ok(path);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
                 Err(e) => return Err(e.into()),
@@ -2472,7 +2533,12 @@ impl FsckRepair {
     /// Remove a broken reference through `RefDatabase` (refs are files, not
     /// storage keys). `HEAD` is never removed: it names an unborn branch in
     /// every fresh repository.
-    async fn repair_broken_reference(&self, ref_name: &str, dry_run: bool) -> anyhow::Result<bool> {
+    async fn repair_broken_reference(
+        &self,
+        ref_name: &str,
+        dry_run: bool,
+        saved: &mut Vec<(String, PathBuf)>,
+    ) -> anyhow::Result<bool> {
         let Some(refdb) = &self.refdb else {
             warn!(
                 "Cannot remove broken reference {}: repair was built without a RefDatabase \
@@ -2515,9 +2581,12 @@ impl FsckRepair {
 
         // The ref's value is the only pointer to a lost commit (and what a
         // remote restore needs): keep it before the file goes.
-        if let Err(e) = self.save_ref(ref_name, &current).await {
-            warn!("Not removing {ref_name}: its value could not be saved first: {e}");
-            return Ok(false);
+        match self.save_ref(ref_name, &current).await {
+            Ok(path) => saved.push((ref_name.to_string(), path)),
+            Err(e) => {
+                warn!("Not removing {ref_name}: its value could not be saved first: {e}");
+                return Ok(false);
+            }
         }
         warn!("Removing broken reference: {}", ref_name);
         if let Err(e) = refdb.delete(ref_name).await {
@@ -2526,6 +2595,15 @@ impl FsckRepair {
         }
         Ok(true)
     }
+}
+
+/// What reading an object back showed.
+enum Health {
+    Healthy,
+    Damaged,
+    Missing,
+    /// The read failed for a reason that is not an integrity failure.
+    Unknown(String),
 }
 
 /// What is left in `.mediagit/quarantine` after a sweep.
@@ -2627,12 +2705,20 @@ pub async fn sweep_quarantine(
     for entry in list_quarantine(repo_root).await? {
         // A saved ref is obsolete once a ref of that name exists again.
         if entry.kind == "ref" {
-            let back = match (&entry.ref_name, refdb) {
-                (Some(name), Some(db)) => db.exists(name).await.unwrap_or(false),
-                _ => false,
-            };
-            if back && delete {
-                tokio::fs::remove_file(&entry.path).await?;
+            // Redundant only when the live ref of that name holds the SAME
+            // value and that commit reads: a different value would make the
+            // saved one the only record of the lost commit.
+            let mut back = false;
+            if let (Some(name), Some(db)) = (&entry.ref_name, refdb)
+                && let Ok(text) = tokio::fs::read_to_string(&entry.path).await
+                && let Ok(saved) = Oid::from_hex(text.trim())
+                && let Ok(live) = db.read(name).await
+                && live.oid == Some(saved)
+                && let Ok(bytes) = odb.read(&saved).await
+            {
+                back = crate::format::deserialize_exact::<Commit>(&bytes).is_ok();
+            }
+            if back && delete && tokio::fs::remove_file(&entry.path).await.is_ok() {
                 status.removed += 1;
             } else {
                 status.count += 1;
@@ -2653,8 +2739,9 @@ pub async fn sweep_quarantine(
             }
             None => false,
         };
-        if healthy && delete {
-            tokio::fs::remove_file(&entry.path).await?;
+        // A file that cannot be removed (locked by a scanner) is kept and
+        // counted; it must not abort the sweep.
+        if healthy && delete && tokio::fs::remove_file(&entry.path).await.is_ok() {
             status.removed += 1;
         } else {
             status.count += 1;
