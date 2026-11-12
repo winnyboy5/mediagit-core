@@ -230,8 +230,30 @@ fn note(msg: &str) {
     }
 }
 
+/// Error text is printed to a terminal: drop `user:password@` from any URL in
+/// it and every control character (a server controls part of this text).
+fn scrub(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("://") {
+        let (head, tail) = rest.split_at(i + 3);
+        out.push_str(head);
+        let end = tail
+            .find(|c: char| c == '/' || c.is_whitespace())
+            .unwrap_or(tail.len());
+        let authority = &tail[..end];
+        let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+        out.push_str(host);
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out.chars()
+        .filter(|c| !c.is_control() || *c == '\n')
+        .collect()
+}
+
 fn describe_remote_error(remote: &str, e: &anyhow::Error) -> String {
-    let text = format!("{e:#}");
+    let text = scrub(&format!("{e:#}"));
     let lower = text.to_lowercase();
     if ["401", "403", "unauthorized", "forbidden"]
         .iter()
@@ -264,8 +286,11 @@ async fn restore_removed_refs(
     odb: &mediagit_versioning::ObjectDatabase,
     done: &mut RepairOutcome,
 ) {
-    for name in done.refs_removed.clone() {
-        let saved = repo_path.join(".mediagit/quarantine/refs").join(&name);
+    let _ = repo_path;
+    for (name, saved) in done.saved_refs.clone() {
+        if !done.refs_removed.contains(&name) {
+            continue;
+        }
         let Ok(text) = tokio::fs::read_to_string(&saved).await else {
             continue;
         };
@@ -274,10 +299,10 @@ async fn restore_removed_refs(
         };
         // A real read that parses as a commit, not just "the file exists".
         let readable = match odb.read(&oid).await {
-            Ok(bytes) => {
-                mediagit_versioning::format::deserialize::<mediagit_versioning::Commit>(&bytes)
-                    .is_ok()
-            }
+            Ok(bytes) => mediagit_versioning::format::deserialize_exact::<
+                mediagit_versioning::Commit,
+            >(&bytes)
+            .is_ok(),
             Err(_) => false,
         };
         if !readable {
@@ -383,11 +408,11 @@ async fn restore_from_remote(
         }
         done.mark_restored(&healthy);
         restore_removed_refs(repo_path, &refdb, &odb, done).await;
-        if done.lost.is_empty() && done.refs_removed.is_empty() {
+        if done.lost_oids().is_empty() && done.refs_removed.is_empty() {
             return;
         }
     }
-    if !done.lost.is_empty() {
+    if !done.lost_oids().is_empty() {
         note(&format!(
             "The server for '{name}' did not have a good copy of {} object(s).",
             done.lost_oids().len()
@@ -485,7 +510,9 @@ impl FsckCmd {
 
             // Last source before giving up: the remote.
             if !self.dry_run
-                && (!done.unrestorable_files.is_empty() || !done.refs_removed.is_empty())
+                && (!done.unrestorable_files.is_empty()
+                    || !done.quarantined.is_empty()
+                    || !done.refs_removed.is_empty())
             {
                 restore_from_remote(&repo_path, &mediagit_dir, &repair, &mut done).await;
             } else if self.dry_run && !done.unrestorable_files.is_empty() && !output::machine_mode()
@@ -592,12 +619,13 @@ impl FsckCmd {
             .context("Failed to open repository. Is this a MediaGit repository?")?;
         let checker = FsckChecker::new_with_refdb(storage.clone(), None);
 
-        // Copies whose object is healthy again are not "lost": drop them first.
+        // Copies whose object is healthy again are not "lost": drop them first
+        // (never in a dry run).
         sweep_quarantine(
             &checker.odb(),
             Some(&RefDatabase::new(mediagit_dir)),
             repo_path,
-            true,
+            !self.dry_run,
         )
         .await?;
         let entries = list_quarantine(repo_path).await?;
@@ -612,6 +640,46 @@ impl FsckCmd {
                 });
             }
             println!("The quarantine is empty. Nothing to delete.");
+            return Ok(());
+        }
+
+        // Name the files before the evidence goes.
+        let oids: Vec<_> = entries.iter().filter_map(|e| e.oid).collect();
+        let repair = FsckRepair::new(storage)
+            .with_odb(checker.odb())
+            .with_refdb(RefDatabase::new(mediagit_dir));
+        let mut lost: Vec<String> = repair
+            .paths_referencing(&oids)
+            .await?
+            .into_values()
+            .flatten()
+            .map(|f| f.path)
+            .collect();
+        lost.sort();
+        lost.dedup();
+
+        if self.dry_run {
+            if output::machine_mode() {
+                return output::emit_ok(&FsckPurgeReport {
+                    deleted_count: 0,
+                    deleted_bytes: 0,
+                    unrestorable_files: lost,
+                });
+            }
+            println!(
+                "[DRY RUN] Would delete {} quarantined cop(ies), {} bytes. Nothing was deleted.",
+                entries.len(),
+                bytes
+            );
+            if !lost.is_empty() {
+                println!(
+                    "{} file(s) have saved versions that could no longer be restored:",
+                    lost.len()
+                );
+                for f in &lost {
+                    println!("    {f}");
+                }
+            }
             return Ok(());
         }
 
@@ -636,29 +704,34 @@ impl FsckCmd {
             }
         }
 
-        // Name the files before the evidence goes.
-        let oids: Vec<_> = entries.iter().filter_map(|e| e.oid).collect();
-        let repair = FsckRepair::new(storage)
-            .with_odb(checker.odb())
-            .with_refdb(RefDatabase::new(mediagit_dir));
-        let mut lost: Vec<String> = repair
-            .paths_referencing(&oids)
-            .await?
-            .into_values()
-            .flatten()
-            .map(|f| f.path)
-            .collect();
-        lost.sort();
-        lost.dedup();
-
         for e in &entries {
             tokio::fs::remove_file(&e.path)
                 .await
                 .with_context(|| format!("deleting {}", e.path.display()))?;
         }
-        // Every file in it was listed and removed above; what is left is
-        // empty folders, and a failure here is harmless.
-        let _ = tokio::fs::remove_dir_all(mediagit_dir.join("quarantine")).await;
+        // Only the listed (and confirmed) files were deleted. Folders go only
+        // if now empty, deepest first; anything else in there stays.
+        let mut dirs: Vec<std::path::PathBuf> = entries
+            .iter()
+            .filter_map(|e| e.path.parent().map(|p| p.to_path_buf()))
+            .collect();
+        dirs.sort();
+        dirs.dedup();
+        dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
+        let root = mediagit_dir.join("quarantine");
+        for d in dirs {
+            let mut cur = d.as_path();
+            while cur.starts_with(&root) && cur != root {
+                if tokio::fs::remove_dir(cur).await.is_err() {
+                    break;
+                }
+                match cur.parent() {
+                    Some(p) => cur = p,
+                    None => break,
+                }
+            }
+        }
+        let _ = tokio::fs::remove_dir(&root).await;
 
         if output::machine_mode() {
             return output::emit_ok(&FsckPurgeReport {
@@ -873,5 +946,20 @@ impl FsckCmd {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod scrub_tests {
+    use super::scrub;
+
+    #[test]
+    fn scrub_drops_credentials_and_control_characters() {
+        assert_eq!(
+            scrub("error sending request for url (https://bob:s3cret@host:9/r/info)"),
+            "error sending request for url (https://host:9/r/info)"
+        );
+        assert_eq!(scrub("plain \u{1b}[31mred"), "plain [31mred");
+        assert_eq!(scrub("no url here"), "no url here");
     }
 }

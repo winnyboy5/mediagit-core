@@ -162,15 +162,22 @@ not repaired: `mediagit gc` owns them.
 
 ### The quarantine folder
 
-Every `fsck` run deletes a quarantined copy when its object is healthy again
-in the repository. That is the only automatic deletion. `fsck` prints the
-number of copies and their size when the folder is not empty. `gc` never
-touches the folder.
+Every `fsck` run (not `--dry-run`) deletes a quarantined copy when its object
+reads back correctly in that same run, and a saved reference when a reference
+of the same name now holds the same commit and that commit reads. Nothing else
+is deleted automatically. `fsck` prints the number of entries (copies and saved
+references) and their size when the folder is not empty. `gc` never touches the
+folder.
+
+A reference that repair removed comes back when the remote delivers its
+commit.
 
 `mediagit fsck --purge-quarantine` deletes every copy. It asks first. Without
 a terminal it refuses unless you pass `--yes`. With `--machine` it always
 needs `--yes`. It prints how many copies and bytes it deleted and repeats the
-files that can no longer be restored. It runs no repair.
+files that can no longer be restored. It runs no repair. With `--dry-run` it
+only lists what it would delete. It deletes only the files it listed, never
+other files you put in the folder.
 
 ### Machine output
 

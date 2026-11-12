@@ -245,7 +245,6 @@ happened and the output still said "Successfully repaired 1 issue(s)".
   repeats which files can no longer be restored.
 - A new repository (`HEAD` names a branch with no commit yet) is no longer
   reported as having a broken reference.
-- Dangling objects are `gc`'s job, not repair's (see above).
 - Repair is careful with references. A read error is never read as "missing":
   an unreadable commit is reported and not repairable. Repair checks again
   before it removes a reference, saves the reference's value under
@@ -257,6 +256,14 @@ happened and the output still said "Successfully repaired 1 issue(s)".
   copy may be fine. With a bucket as the object store, quarantined bytes are
   kept on the local disk.
 - `fsck` no longer reads a delta-stored blob in full just to see that it exists.
+- The remote is tried for every object repair could not restore locally,
+  including commits and trees. A removed reference comes back when the remote
+  delivers its commit. `--purge-quarantine --dry-run` only lists. Purge deletes
+  only the files it listed. A saved reference is dropped only when the live
+  reference holds the same commit and that commit reads. A failed read is no
+  longer taken for damage: that object stays where it is and shows up in
+  `repair_errors`. A `HEAD` with no branch is healthy only in a repository with
+  no references and an empty object store.
 
 ## [v0.7.0-rc.1] - 2026-11-03
 

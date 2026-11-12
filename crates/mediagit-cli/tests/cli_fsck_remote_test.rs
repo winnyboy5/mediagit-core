@@ -248,3 +248,33 @@ async fn fsck_repair_puts_a_ref_back_when_the_remote_has_its_commit() {
         "the saved ref goes once the ref is back"
     );
 }
+
+/// A damaged commit or tree has no referencing file, but the remote still
+/// has it: the remote step must run for it too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fsck_repair_restores_a_damaged_commit_from_the_remote() {
+    let repos = TempDir::new().unwrap();
+    let (base, _server) = start_test_server(repos.path().to_path_buf()).await;
+    std::fs::create_dir_all(repos.path().join("r")).unwrap();
+    let work = TempDir::new().unwrap();
+    let repo = work.path();
+    run(repo, &["init", "-q"]);
+    std::fs::write(repo.join("a.txt"), "a").unwrap();
+    run(repo, &["add", "a.txt"]);
+    let before = object_files(repo);
+    run(repo, &["commit", "-m", "a"]);
+    let made: Vec<PathBuf> = object_files(repo).difference(&before).cloned().collect();
+    run(repo, &["remote", "add", "origin", &format!("{base}/r")]);
+    run(repo, &["push", "-u", "origin"]);
+    for f in &made {
+        let mut bytes = std::fs::read(f).unwrap();
+        let mid = bytes.len() / 2;
+        bytes[mid] ^= 0xFF;
+        std::fs::write(f, bytes).unwrap();
+    }
+
+    let (ok, text) = fsck(repo, &["--repair"]);
+    assert!(ok, "the server has them: {text}");
+    let (ok, text) = fsck(repo, &["--full"]);
+    assert!(ok, "{text}");
+}

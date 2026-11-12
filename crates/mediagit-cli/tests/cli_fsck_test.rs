@@ -325,12 +325,14 @@ fn quarantine_of_a_still_missing_object_survives_fsck_and_gc() {
     // the quarantine folder is.
     let _ = fsck_text(repo, &[]);
     let _ = fsck_text(repo, &["--repair"]);
-    let _ = mediagit().args(["gc"]).current_dir(repo).output().unwrap();
-    let _ = mediagit()
-        .args(["gc", "--repack"])
-        .current_dir(repo)
-        .output()
-        .unwrap();
+    for args in [&["gc"][..], &["gc", "--repack"][..]] {
+        let out = mediagit().args(args).current_dir(repo).output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            text.contains("reachability"),
+            "gc must get as far as walking the repository, else this proves nothing: {args:?} {text}"
+        );
+    }
 
     assert_eq!(
         before,
@@ -521,4 +523,29 @@ fn sweep_deletes_a_copy_only_after_the_object_verifies_in_this_run() {
     let (ok, text) = fsck_text(repo, &[]);
     assert!(ok, "{text}");
     assert!(!copy.exists(), "verified now: the copy goes");
+}
+
+#[test]
+fn purge_quarantine_dry_run_deletes_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    quarantined_repo(repo, &random_bytes(64 * 1024));
+    let before = quarantine_bytes(repo);
+    let (ok, text) = purge(repo, &["--dry-run", "--yes"]);
+    assert!(ok, "{text}");
+    assert_eq!(before, quarantine_bytes(repo), "dry run deleted: {text}");
+    assert!(text.contains("photo.bin"), "it lists what would go: {text}");
+}
+
+#[test]
+fn purge_quarantine_deletes_only_what_it_listed() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    quarantined_repo(repo, &random_bytes(64 * 1024));
+    let stray = repo.join(".mediagit/quarantine/notes.txt");
+    std::fs::write(&stray, "mine").unwrap();
+    let (ok, text) = purge(repo, &["--yes"]);
+    assert!(ok, "{text}");
+    assert!(stray.exists(), "a file that was never listed must survive");
+    assert!(files_under(&repo.join(".mediagit/quarantine/loose")).is_empty());
 }
