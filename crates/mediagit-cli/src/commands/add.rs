@@ -231,6 +231,15 @@ impl std::fmt::Display for Untrackable {
 
 impl std::error::Error for Untrackable {}
 
+/// Windows drops a trailing dot or space when it opens a name, so such a file
+/// cannot be read back by its own name and checkout would recreate it under a
+/// different one. Returns the reason in plain words.
+fn windows_unstorable_name(path: &Path) -> Option<&'static str> {
+    let name = path.file_name()?.to_string_lossy();
+    (name.ends_with('.') || name.ends_with(' '))
+        .then_some("Windows cannot keep a name that ends in a dot or a space; rename the file")
+}
+
 /// If `e` is an [`Untrackable`], warn (unless quiet), remember it and return
 /// true so the caller moves on to the next file.
 fn note_untrackable(e: &anyhow::Error, list: &mut Vec<String>, quiet: bool) -> bool {
@@ -333,6 +342,21 @@ impl AddCmd {
         // Load the index
         let mut index = Index::load(&repo_root)?;
 
+        // BUG-008 way out: an index entry left by an older release (absolute or
+        // `..` path) is dropped here; the file, if it still exists, is re-added
+        // below under its repo-relative path.
+        let unsafe_staged: Vec<PathBuf> = index
+            .entries()
+            .map(|e| e.path.clone())
+            .filter(|p| mediagit_versioning::check_tracked_path(&p.to_string_lossy()).is_err())
+            .collect();
+        for p in &unsafe_staged {
+            if !self.quiet {
+                output::warning(&format!("Dropping unsafe staged path {}", p.display()));
+            }
+            index.remove_entry(p);
+        }
+
         // Build index lookup for stat-cache change detection (size + mtime)
         let index_files: Arc<HashMap<PathBuf, (u64, Option<u64>)>> = {
             let mut map = HashMap::new();
@@ -370,7 +394,16 @@ impl AddCmd {
             .collect();
 
         // Expand paths (globs, directories) into file list
-        let files_to_add = self.expand_paths(&repo_root, &tracked_paths)?;
+        let (files_to_add, refused) = self.expand_paths(&repo_root, &tracked_paths)?;
+        // Files the walk refused up front (Windows-unstorable names, symlinks
+        // that leave the repository): named now, counted into the exit status.
+        let mut untrackable: Vec<String> = Vec::new();
+        for msg in refused {
+            if !self.quiet {
+                output::warning(&format!("Cannot track {msg}"));
+            }
+            untrackable.push(msg);
+        }
 
         // Calculate total bytes for progress bar. Statting every file up
         // front can take a while on large trees with no feedback yet, so
@@ -419,9 +452,6 @@ impl AddCmd {
         let mut modified_count = 0u64;
         let mut staged_bytes = 0u64;
         let mut skipped_count = 0u64;
-        // Files that cannot be stored under a repo-relative path (BUG-008/009):
-        // named in a warning, then `add` exits non-zero after saving the rest.
-        let mut untrackable: Vec<String> = Vec::new();
 
         if !self.dry_run && !files_to_add.is_empty() {
             if use_parallel {
@@ -701,6 +731,22 @@ impl AddCmd {
             .context("Failed to load sparse-checkout patterns")?;
 
         for head_path in head_files.as_ref().keys() {
+            // BUG-008 way out: the last commit holds an absolute or `..` path.
+            // Stage its removal whatever the pathspec or --ignore-removal; the
+            // file itself, if present, was re-added above under its real path.
+            if mediagit_versioning::check_tracked_path(&head_path.to_string_lossy()).is_err() {
+                if !self.quiet {
+                    output::warning(&format!(
+                        "Removing unsafe path {} from the next version",
+                        head_path.display()
+                    ));
+                }
+                if !self.dry_run {
+                    index.mark_deleted(head_path.clone());
+                }
+                deleted_count += 1;
+                continue;
+            }
             if !sparse.is_included(head_path) {
                 continue;
             }
@@ -1067,6 +1113,32 @@ impl AddCmd {
         }
     }
 
+    /// Decide how a walked or named file enters the add list: the canonical
+    /// path, or a plain-words reason it cannot be tracked (BUG-008/009).
+    /// Refusing here, with the path the user knows, beats failing later on
+    /// the canonical target.
+    fn resolve_entry(path: &Path, repo_root: &Path) -> std::result::Result<PathBuf, String> {
+        if cfg!(windows)
+            && let Some(why) = windows_unstorable_name(path)
+        {
+            return Err(format!("{}: {why}", path.display()));
+        }
+        let Ok(canon) = dunce::canonicalize(path) else {
+            return Ok(path.to_path_buf());
+        };
+        if crate::repo::repo_relative(repo_root, &canon).is_err()
+            && let Ok(lexical) = std::path::absolute(path)
+            && crate::repo::repo_relative(repo_root, &lexical).is_ok()
+        {
+            return Err(format!(
+                "{}: this is a symbolic link that points outside the repository. \
+                 Add a rule for it to .mediagitignore to stop this warning",
+                path.display()
+            ));
+        }
+        Ok(canon)
+    }
+
     /// Resolve `path` to a repo-relative path for `.mediagitignore` matching.
     /// `strip_prefix(repo_root)` alone fails when `path` is relative (e.g. a
     /// walk started from `add .`), which silently skipped the ignore check
@@ -1083,11 +1155,12 @@ impl AddCmd {
         &self,
         repo_root: &Path,
         tracked_paths: &std::collections::HashSet<PathBuf>,
-    ) -> Result<Vec<PathBuf>> {
+    ) -> Result<(Vec<PathBuf>, Vec<String>)> {
         use crate::ignore_rules::IgnoreMatcher;
         use crate::output;
 
         let mut files = Vec::new();
+        let mut refused: Vec<String> = Vec::new();
         let mediagit_dir = dunce::canonicalize(repo_root.join(".mediagit"))
             .unwrap_or_else(|_| repo_root.join(".mediagit"));
 
@@ -1115,8 +1188,9 @@ impl AddCmd {
                 &mediagit_dir,
                 &matcher,
                 &mut files,
+                &mut refused,
             )?;
-            return Ok(files);
+            return Ok((files, refused));
         }
 
         // If --update (-u) is set, collect only already-tracked files that
@@ -1129,6 +1203,7 @@ impl AddCmd {
                 &mediagit_dir,
                 &matcher,
                 &mut candidates,
+                &mut refused,
             )?;
             for path in candidates {
                 if let Ok(rel) = crate::repo::repo_relative(repo_root, &path)
@@ -1137,7 +1212,7 @@ impl AddCmd {
                     files.push(path);
                 }
             }
-            return Ok(files);
+            return Ok((files, refused));
         }
 
         for path_str in &self.paths {
@@ -1165,10 +1240,9 @@ impl AddCmd {
                                             }
                                             continue;
                                         }
-                                        if let Ok(abs_path) = dunce::canonicalize(&p) {
-                                            files.push(abs_path);
-                                        } else {
-                                            files.push(p);
+                                        match Self::resolve_entry(&p, repo_root) {
+                                            Ok(f) => files.push(f),
+                                            Err(m) => refused.push(m),
                                         }
                                     }
                                 }
@@ -1210,17 +1284,23 @@ impl AddCmd {
                     }
                     continue;
                 }
-                if let Ok(abs_path) = dunce::canonicalize(path) {
-                    files.push(abs_path);
-                } else {
-                    files.push(path.to_path_buf());
+                match Self::resolve_entry(path, repo_root) {
+                    Ok(f) => files.push(f),
+                    Err(m) => refused.push(m),
                 }
             } else if path.is_dir() {
-                self.collect_files_recursive(path, repo_root, &mediagit_dir, &matcher, &mut files)?;
+                self.collect_files_recursive(
+                    path,
+                    repo_root,
+                    &mediagit_dir,
+                    &matcher,
+                    &mut files,
+                    &mut refused,
+                )?;
             }
         }
 
-        Ok(files)
+        Ok((files, refused))
     }
 
     /// Recursively collect all files from a directory, respecting .mediagitignore.
@@ -1232,6 +1312,7 @@ impl AddCmd {
         mediagit_dir: &Path,
         matcher: &Option<crate::ignore_rules::IgnoreMatcher>,
         files: &mut Vec<PathBuf>,
+        refused: &mut Vec<String>,
     ) -> Result<()> {
         use crate::output;
 
@@ -1268,13 +1349,26 @@ impl AddCmd {
             // answers for names a path lookup rewrites (trailing dot, BUG-009).
             let ft = entry.file_type()?;
             if path.is_file() || ft.is_file() {
-                if let Ok(abs_path) = dunce::canonicalize(&path) {
-                    files.push(abs_path);
-                } else {
-                    files.push(path);
+                match Self::resolve_entry(&path, repo_root) {
+                    Ok(f) => files.push(f),
+                    Err(m) => refused.push(m),
                 }
             } else if path.is_dir() || ft.is_dir() {
-                self.collect_files_recursive(&path, repo_root, mediagit_dir, matcher, files)?;
+                // A folder Windows cannot address would fail to open below.
+                if cfg!(windows)
+                    && let Some(why) = windows_unstorable_name(&path)
+                {
+                    refused.push(format!("{}: {why}", path.display()));
+                    continue;
+                }
+                self.collect_files_recursive(
+                    &path,
+                    repo_root,
+                    mediagit_dir,
+                    matcher,
+                    files,
+                    refused,
+                )?;
             }
         }
 
@@ -1380,6 +1474,33 @@ impl AddCmd {
             "eps" | "svg" => true,
             // Unknown: Conservative approach (allow if large)
             _ => data.len() > 50 * 1024 * 1024,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_unstorable_name_flags_trailing_dot_and_space_only() {
+        for bad in ["d/shot.v1.", "d/name ", "shot.", "x/y/z "] {
+            assert!(
+                windows_unstorable_name(Path::new(bad)).is_some(),
+                "{bad} must be flagged"
+            );
+        }
+        for ok in [
+            "d/shot.v1",
+            "d/a b.txt",
+            "d/.hidden",
+            "d/trailing space .txt",
+            "d/dir.ext/file",
+        ] {
+            assert!(
+                windows_unstorable_name(Path::new(ok)).is_none(),
+                "{ok} must pass"
+            );
         }
     }
 }

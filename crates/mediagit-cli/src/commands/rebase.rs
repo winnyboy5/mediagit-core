@@ -200,6 +200,8 @@ impl RebaseCmd {
 
         // WT-3: rebase had no pre-flight dirty check at all. Refuse before
         // any ref or working-tree write.
+        // BUG-008: an unsafe path is the more useful thing to report first.
+        crate::repo::ensure_no_unsafe_paths(&odb, &repo_root, &[current_oid, upstream_oid]).await?;
         crate::worktree_guard::AtRisk::check(
             &repo_root,
             &odb,
@@ -254,6 +256,9 @@ impl RebaseCmd {
             }
             return Ok(Outcome::new("nothing_to_rebase", Some(current_oid), None));
         }
+
+        let replayed: Vec<Oid> = commits_to_rebase.iter().map(|(oid, _)| *oid).collect();
+        crate::repo::ensure_no_unsafe_paths(&odb, &repo_root, &replayed).await?;
 
         if !self.quiet() {
             println!("  Rebasing {} commit(s)...", commits_to_rebase.len());

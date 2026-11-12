@@ -156,7 +156,10 @@ bearer token from stdin (needs `--machine --secret-stdin`) and `--token` is
 `invalid_args` in machine mode; `remote repos list|create|delete` administer
 repositories hosted on a server; `add` streams a bytes bar and a files bar.
 `add` warns by name and exits 1 for a file it cannot store under a
-repo-relative path (a name ending in `.` on Windows), after staging the rest;
+repo-relative path (a name ending in `.` or a space on Windows, a symlink that
+leaves the repository), after staging the rest; `add --all` also repairs an
+existing absolute or `..` entry, and `commit`, `merge`, `rebase`, `cherry-pick`,
+`revert` and `stash` refuse such a version up front and name the way out;
 `fsck` reports an absolute or `..` path inside a stored version as an error.
 The hidden `__cli-tree` command prints the clap command tree as JSON; the
 desktop test suite checks it against `ui/parity.toml`, so a new flag cannot

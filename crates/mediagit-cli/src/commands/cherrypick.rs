@@ -160,6 +160,7 @@ impl CherryPickCmd {
         // modified half is knowable up front (the target tree is the result
         // of a merge computed per commit); untracked collisions are handled
         // by `apply_commit`.
+        crate::repo::ensure_no_unsafe_paths(&odb, repo_root, &[current_oid]).await?;
         crate::worktree_guard::AtRisk::check(repo_root, &odb, Some(&current_oid), None)
             .await?
             .ensure_clean("cherry-pick")?;
@@ -300,6 +301,7 @@ impl CherryPickCmd {
         crate::worktree_guard::AtRisk::check(repo_root, odb, Some(&current_oid), Some(commit_oid))
             .await?
             .ensure_clean("cherry-pick")?;
+        crate::repo::ensure_no_unsafe_paths(odb, repo_root, &[*commit_oid]).await?;
 
         // Perform three-way merge: current HEAD vs commit being cherry-picked
         let merger = MergeEngine::new(odb.clone());

@@ -157,13 +157,19 @@ pub struct Tree {
 ///
 /// Delegates to `mediagit_storage::validate_object_key`, the same validator
 /// that guards object keys.
-pub(crate) fn check_tracked_path(path: &str) -> anyhow::Result<()> {
+pub fn check_tracked_path(path: &str) -> anyhow::Result<()> {
+    check_tracked_path_for(path, cfg!(windows))
+}
+
+/// [`check_tracked_path`] with the platform as a parameter, so both
+/// behaviours are testable on any host.
+pub(crate) fn check_tracked_path_for(path: &str, windows: bool) -> anyhow::Result<()> {
     // The validator rejects `X:name` as a drive path on every platform. Off
     // Windows that is a legal file name (checkout's `worktree_path` accepts
     // it), so judge it with a neutral first letter. `X:/...` and `X:\...` stay
     // rejected everywhere.
     let b = path.as_bytes();
-    let plain_colon_name = !cfg!(windows)
+    let plain_colon_name = !windows
         && b.len() >= 3
         && b[0].is_ascii_alphabetic()
         && b[1] == b':'
@@ -178,7 +184,10 @@ pub(crate) fn check_tracked_path(path: &str) -> anyhow::Result<()> {
     };
     mediagit_storage::validate_object_key(judged).map_err(|_| {
         anyhow::anyhow!(
-            "refusing to track unsafe path '{path}': absolute or '..' paths are not allowed"
+            "refusing to track unsafe path '{path}': absolute or '..' paths are not allowed. \
+             To get out: run 'mediagit add --all' (it drops the bad entry and re-adds the \
+             file under its repo-relative path), or 'mediagit reset -- <path>' for an \
+             entry that is only in the index"
         )
     })
 }
@@ -322,14 +331,29 @@ mod tests {
         }
     }
 
-    /// `a:b.txt` is a legal file name off Windows; `a:/b` never is.
-    #[cfg(not(windows))]
+    /// `a:b.txt` is a legal file name off Windows; `a:/b` never is. The
+    /// platform is a parameter so both halves run on any host.
     #[test]
-    fn test_tree_serialize_accepts_colon_names_off_windows() {
-        tree_with("a:b.txt").serialize().unwrap();
-        tree_with("dir/x:y").serialize().unwrap();
-        assert!(tree_with("a:/b").serialize().is_err());
-        assert!(tree_with("a:\\b").serialize().is_err());
+    fn test_check_tracked_path_colon_names_per_platform() {
+        assert!(check_tracked_path_for("dir/x:y", true).is_ok());
+        for ok in ["a:b.txt", "v:take1.psd"] {
+            assert!(check_tracked_path_for(ok, false).is_ok(), "unix {ok}");
+            assert!(check_tracked_path_for(ok, true).is_err(), "windows {ok}");
+        }
+        for bad in ["a:/b", "a:\\b", "C:/x", "/x", "../x"] {
+            assert!(check_tracked_path_for(bad, false).is_err(), "unix {bad}");
+            assert!(check_tracked_path_for(bad, true).is_err(), "windows {bad}");
+        }
+    }
+
+    #[test]
+    fn test_check_tracked_path_error_names_path_and_way_out() {
+        let msg = check_tracked_path_for("//?/C:/x/a.txt", true)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("//?/C:/x/a.txt"), "{msg}");
+        assert!(msg.contains("mediagit add --all"), "{msg}");
+        assert!(msg.contains("mediagit reset --"), "{msg}");
     }
 
     #[test]

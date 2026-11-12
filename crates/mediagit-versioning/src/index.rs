@@ -119,7 +119,9 @@ impl Index {
 
         // BUG-008: every writer saves through here, so this is the one place
         // that stops an absolute or `..` path from ever reaching a tree.
-        for path in self.entries.keys().chain(self.deleted_entries.iter()) {
+        // Deleted paths are exempt: staging the removal of a bad entry is the
+        // way out of a repository that already holds one.
+        for path in self.entries.keys() {
             crate::tree::check_tracked_path(&path.to_string_lossy())?;
         }
 
@@ -299,6 +301,18 @@ mod tests {
                 "{bad} must not be written"
             );
         }
+    }
+
+    /// The way out of a repository that already holds a bad path: staging its
+    /// removal must be saveable.
+    #[test]
+    fn test_index_save_accepts_deletion_of_unsafe_path() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir_all(temp.path().join(".mediagit")).unwrap();
+        let mut index = Index::new();
+        index.mark_deleted(PathBuf::from("//?/D:/work/repo/a.txt"));
+        index.save(temp.path()).unwrap();
+        assert_eq!(Index::load(temp.path()).unwrap().deleted_count(), 1);
     }
 
     #[test]

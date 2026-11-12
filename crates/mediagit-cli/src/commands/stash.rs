@@ -286,6 +286,8 @@ impl StashCmd {
             .await
             .context("Failed to resolve HEAD")?;
 
+        crate::repo::ensure_no_unsafe_paths(&odb, &repo_root, &[current_oid]).await?;
+
         // Load HEAD commit tree to detect working-tree modifications
         let head_data = odb
             .read(&current_oid)

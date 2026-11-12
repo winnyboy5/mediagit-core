@@ -266,6 +266,7 @@ impl RevertCmd {
         // can only materialize paths from ours (all tracked) or from the
         // reverted commit's parent, so checking collisions against the parent
         // is exact.
+        crate::repo::ensure_no_unsafe_paths(odb, repo_root, &[head_oid, *parent_oid]).await?;
         crate::worktree_guard::AtRisk::check(repo_root, odb, Some(&head_oid), Some(parent_oid))
             .await?
             .ensure_clean("revert")?;

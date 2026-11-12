@@ -171,10 +171,15 @@ version then failed for every file in it, and the version carried the user's
 local folder name. These files are now stored under their repo-relative path and
 come back on checkout. The index and trees refuse any absolute or `..` path when
 they are written. A file `add` still cannot store (a name ending in a dot on
-Windows) is named in a warning and `add` exits 1 after staging the rest; `status`
-lists it as untracked instead of hiding it. `fsck` now reports an absolute or
-`..` path inside an existing version as an error. Versions already holding such
-a path are not rewritten.
+Windows, or a symlink that leaves the repository) is named in a warning, with the
+reason, and `add` exits 1 after staging the rest; `status` lists it as untracked
+instead of hiding it. `fsck` now reports an absolute or `..` path inside an
+existing version as an error. Versions already holding such a path are not
+rewritten, but there is a way out: `commit`, `merge`, `rebase`, `cherry-pick`,
+`revert` and `stash` refuse to build on them before changing anything and name
+the path, and `mediagit add --all` removes the bad entry and re-adds the file
+under its repo-relative path. A name like `v:take1.psd` stays trackable on
+Linux and macOS.
 
 ### Fixed — `push --force-with-lease` overwrote work pushed by someone else (BUG-032)
 

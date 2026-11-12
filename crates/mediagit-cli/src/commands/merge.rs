@@ -185,6 +185,8 @@ impl MergeCmd {
 
         // WT-3: merge had no pre-flight dirty check at all. Refuse before any
         // ref or working-tree write, so a refusal leaves nothing half done.
+        // BUG-008: an unsafe path is the more useful thing to report first.
+        crate::repo::ensure_no_unsafe_paths(&odb, &repo_root, &[our_oid, their_oid]).await?;
         crate::worktree_guard::AtRisk::check(&repo_root, &odb, Some(&our_oid), Some(&their_oid))
             .await?
             .ensure_clean("merge")?;

@@ -44,8 +44,21 @@ pub fn repo_relative(repo_root: &Path, abs: &Path) -> Result<PathBuf> {
             repo_root.display()
         )
     })?;
-    let rel = rel.to_string_lossy().replace('\\', "/");
-    mediagit_storage::validate_object_key(&rel)
+    if rel.as_os_str().is_empty() {
+        anyhow::bail!(
+            "'{}' is the repository folder itself, not a file",
+            abs.display()
+        );
+    }
+    // A backslash is a separator only on Windows; elsewhere it is a legal
+    // name character.
+    let rel = rel.to_string_lossy();
+    let rel = if cfg!(windows) {
+        rel.replace('\\', "/")
+    } else {
+        rel.into_owned()
+    };
+    mediagit_versioning::check_tracked_path(&rel)
         .map_err(|e| anyhow::anyhow!("'{}' cannot be tracked: {e}", abs.display()))?;
     Ok(PathBuf::from(rel))
 }
@@ -90,10 +103,37 @@ pub fn normalize_path(path: &Path, repo_root: &Path) -> Result<PathBuf> {
         repo_relative(repo_root, &clean)
     } else {
         let rel = clean.to_string_lossy().replace('\\', "/");
-        mediagit_storage::validate_object_key(&rel)
+        mediagit_versioning::check_tracked_path(&rel)
             .map_err(|e| anyhow::anyhow!("'{}' cannot be tracked: {e}", path.display()))?;
         Ok(PathBuf::from(rel))
     }
+}
+
+/// Refuse, before anything is written, to build on an index or commits that
+/// hold an absolute or `..` path (left by releases before BUG-008 was fixed).
+/// Without this the same refusal fires at tree-write time, after refs or
+/// merge/rebase state may already have moved. The error names the path and the
+/// way out (`mediagit add --all`, or `mediagit reset -- PATH`).
+pub async fn ensure_no_unsafe_paths(
+    odb: &ObjectDatabase,
+    repo_root: &Path,
+    commits: &[mediagit_versioning::Oid],
+) -> Result<()> {
+    let index = mediagit_versioning::Index::load(repo_root)?;
+    for e in index.entries() {
+        mediagit_versioning::check_tracked_path(&e.path.to_string_lossy())
+            .map_err(|e| anyhow::anyhow!("The staging area holds an unsafe path: {e}"))?;
+    }
+    for oid in commits {
+        let commit = mediagit_versioning::Commit::deserialize(&odb.read(oid).await?)?;
+        let tree = mediagit_versioning::Tree::deserialize(&odb.read(&commit.tree).await?)?;
+        for entry in tree.iter() {
+            mediagit_versioning::check_tracked_path(&entry.name).map_err(|e| {
+                anyhow::anyhow!("Commit {} holds an unsafe path: {e}", oid.to_hex())
+            })?;
+        }
+    }
+    Ok(())
 }
 
 /// Find the root of the MediaGit repository by walking up from current directory.
@@ -996,6 +1036,12 @@ mod tests {
         // Never falls back to returning an absolute path.
         assert!(repo_relative(root, Path::new(r"C:\work\other\x.txt")).is_err());
         assert!(normalize_path(Path::new(r"D:\elsewhere\x.txt"), root).is_err());
+    }
+
+    #[test]
+    fn repo_relative_refuses_the_repository_folder_itself() {
+        let root = std::env::temp_dir();
+        assert!(repo_relative(&root, &root).is_err());
     }
 
     #[test]

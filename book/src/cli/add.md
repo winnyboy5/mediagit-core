@@ -179,9 +179,24 @@ Changes to be committed:
 Every file is stored under its path relative to the repository folder, never an
 absolute path. If a file cannot be stored that way, `add` prints a warning that
 names the file, stages everything else, and exits with status 1. On Windows this
-happens to names that the normal file API cannot address, such as a name ending
-in a dot (`shot.v1.`). Rename the file and add it again. Such a file still
-appears in `status` as untracked, so it is not silently left out.
+happens to names that the normal file API cannot address: a name ending in a
+dot or a space (`shot.v1.`), because Windows drops the last character and
+checkout would recreate the file under a different name. The warning says so.
+Rename the file and add it again. Such a file still appears in `status` as
+untracked, so it is not silently left out. A symbolic link that points outside
+the repository is refused the same way, and the warning names the link; add a
+rule for it to `.mediagitignore` to stop the warning.
+
+### Repositories that already hold an unsafe path
+
+Versions made by older releases may hold an absolute path (for example
+`//?/D:/work/file.txt`) or one containing `..`. `commit`, `merge`, `rebase`,
+`cherry-pick`, `revert` and `stash` refuse to build on such a version before they
+change anything, and the message names the path. Run `mediagit add --all`: it
+drops the bad entry and, if the file still exists, adds it again under its
+repo-relative path; then `commit`. If the bad path is only in the staging area,
+`mediagit reset -- PATH` also removes it. The old version stays in history, so
+`fsck` keeps reporting that one version.
 
 ## Notes
 

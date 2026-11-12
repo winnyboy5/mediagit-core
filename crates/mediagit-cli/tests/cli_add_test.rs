@@ -763,6 +763,9 @@ fn odd_paths_fixture() -> Vec<(String, Vec<u8>)> {
         ("r/aux.txt".to_string(), b"reserved name".to_vec()),
         ("d/shot.v1.".to_string(), b"trailing dot".to_vec()),
         ("d/trailing space .txt".to_string(), b"space".to_vec()),
+        // A sibling without the dot: the dotted file must not be merged into it.
+        ("d/shot.v1".to_string(), b"sibling".to_vec()),
+        ("d/name ".to_string(), b"trailing space".to_vec()),
     ]
 }
 
@@ -783,7 +786,7 @@ fn test_add_odd_paths_round_trip_repo_relative() {
     // Windows cannot create `shot.v1.` through the normal API (the dot is
     // dropped), so checkout could never put it back. `add` must say so, name
     // the file and exit non-zero, but still stage everything else (BUG-009).
-    let refused = |rel: &str| cfg!(windows) && rel.ends_with('.');
+    let refused = |rel: &str| cfg!(windows) && (rel.ends_with('.') || rel.ends_with(' '));
     let add = mediagit()
         .args(["add", "--all"])
         .current_dir(root)
@@ -797,6 +800,14 @@ fn test_add_odd_paths_round_trip_repo_relative() {
     if files.iter().any(|(rel, _)| refused(rel)) {
         assert!(!add.status.success(), "add must exit non-zero: {said}");
         assert!(said.contains("shot.v1."), "add must name the file: {said}");
+        assert!(
+            said.contains("d/name ") || said.contains(r"d\name "),
+            "must name the space file: {said}"
+        );
+        assert!(
+            said.contains("dot or a space"),
+            "must say why in plain words: {said}"
+        );
     } else {
         assert!(add.status.success(), "add failed: {said}");
     }
