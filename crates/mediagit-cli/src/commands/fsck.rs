@@ -255,6 +255,44 @@ fn describe_remote_error(remote: &str, e: &anyhow::Error) -> String {
     }
 }
 
+/// A ref that repair removed (its commit was missing) comes back when the
+/// remote delivered that commit: the saved value under quarantine/refs is the
+/// pointer. The saved copy goes with it.
+async fn restore_removed_refs(
+    repo_path: &std::path::Path,
+    refdb: &RefDatabase,
+    odb: &mediagit_versioning::ObjectDatabase,
+    done: &mut RepairOutcome,
+) {
+    for name in done.refs_removed.clone() {
+        let saved = repo_path.join(".mediagit/quarantine/refs").join(&name);
+        let Ok(text) = tokio::fs::read_to_string(&saved).await else {
+            continue;
+        };
+        let Ok(oid) = mediagit_versioning::Oid::from_hex(text.trim()) else {
+            continue;
+        };
+        // A real read that parses as a commit, not just "the file exists".
+        let readable = match odb.read(&oid).await {
+            Ok(bytes) => {
+                mediagit_versioning::format::deserialize::<mediagit_versioning::Commit>(&bytes)
+                    .is_ok()
+            }
+            Err(_) => false,
+        };
+        if !readable {
+            continue;
+        }
+        let r = mediagit_versioning::Ref::new_direct(name.clone(), oid);
+        if refdb.write(&r).await.is_ok() {
+            let _ = tokio::fs::remove_file(&saved).await;
+            done.refs_removed.retain(|n| n != &name);
+            done.restored.push(oid);
+            note(&format!("Restored reference {name} from the remote."));
+        }
+    }
+}
+
 /// Try to fetch what no local source could restore. Every failure is one
 /// plain line and falls through to quarantine; nothing here may hang (the
 /// client's own connect, read and pull-deadline timeouts apply).
@@ -319,6 +357,7 @@ async fn restore_from_remote(
     branches.sort_by_key(|b| Some(b) != current.as_ref());
 
     let Some(odb) = repair.odb() else { return };
+    let refdb = RefDatabase::new(mediagit_dir);
     for branch in branches {
         match client.pull_streaming(&odb, &branch, vec![]).await {
             Ok(chunked) if !chunked.is_empty() => {
@@ -343,7 +382,8 @@ async fn restore_from_remote(
             }
         }
         done.mark_restored(&healthy);
-        if done.lost.is_empty() {
+        restore_removed_refs(repo_path, &refdb, &odb, done).await;
+        if done.lost.is_empty() && done.refs_removed.is_empty() {
             return;
         }
     }
@@ -444,7 +484,9 @@ impl FsckCmd {
                 .context("Repair failed")?;
 
             // Last source before giving up: the remote.
-            if !self.dry_run && !done.unrestorable_files.is_empty() {
+            if !self.dry_run
+                && (!done.unrestorable_files.is_empty() || !done.refs_removed.is_empty())
+            {
                 restore_from_remote(&repo_path, &mediagit_dir, &repair, &mut done).await;
             } else if self.dry_run && !done.unrestorable_files.is_empty() && !output::machine_mode()
             {
@@ -483,11 +525,18 @@ impl FsckCmd {
         // The one automatic deletion: a quarantined copy whose object has
         // verified healthy again. A dry run only counts.
         let sweep_odb = FsckChecker::new_with_refdb(storage.clone(), None).odb();
+        // Never in a dry run, and not after a check that could not read
+        // something (an InvalidFormat issue): then nothing is "known good".
+        let can_delete = !self.dry_run
+            && !report
+                .issues
+                .iter()
+                .any(|i| i.category == mediagit_versioning::IssueCategory::InvalidFormat);
         let quarantine = sweep_quarantine(
             &sweep_odb,
             Some(&RefDatabase::new(&mediagit_dir)),
             &repo_path,
-            !self.dry_run,
+            can_delete,
         )
         .await
         .context("Failed to read the quarantine folder")?;

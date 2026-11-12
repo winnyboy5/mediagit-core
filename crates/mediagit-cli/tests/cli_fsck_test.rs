@@ -492,3 +492,33 @@ fn fsck_repair_words_the_loss_as_saved_versions() {
         "{text}"
     );
 }
+
+/// The sweep deletes a quarantined copy only when the store object verifies
+/// NOW, in this run: present-but-damaged does not count, and a dry run never
+/// deletes.
+#[test]
+fn sweep_deletes_a_copy_only_after_the_object_verifies_in_this_run() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let added = commit_file(repo, "photo.bin", &random_bytes(64 * 1024));
+    let obj = &added[0];
+    let good = std::fs::read(obj).unwrap();
+    let hex = obj.file_name().unwrap().to_string_lossy().into_owned();
+    let copy = repo.join(".mediagit/quarantine/loose").join(&hex);
+    std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+    std::fs::write(&copy, b"an old damaged copy").unwrap();
+
+    // The object exists but is damaged: not verified, so the copy stays.
+    flip_byte(obj);
+    let _ = fsck_text(repo, &[]);
+    assert!(copy.exists(), "present is not verified");
+
+    // Healthy again, but a dry run changes nothing.
+    std::fs::write(obj, &good).unwrap();
+    let (ok, text) = fsck_text(repo, &["--dry-run"]);
+    assert!(ok && copy.exists(), "dry run must not delete: {text}");
+
+    let (ok, text) = fsck_text(repo, &[]);
+    assert!(ok, "{text}");
+    assert!(!copy.exists(), "verified now: the copy goes");
+}

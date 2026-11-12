@@ -201,3 +201,50 @@ fn fsck_repair_without_a_remote_says_none_is_configured() {
     assert!(!ok, "{text}");
     assert!(text.contains("No remote is configured"), "{text}");
 }
+
+/// A branch whose commit is gone locally but still on the server: repair
+/// removes the broken ref, fetches the commit, and puts the saved ref value back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fsck_repair_puts_a_ref_back_when_the_remote_has_its_commit() {
+    let repos = TempDir::new().unwrap();
+    let (base, _server) = start_test_server(repos.path().to_path_buf()).await;
+    std::fs::create_dir_all(repos.path().join("r")).unwrap();
+    let work = TempDir::new().unwrap();
+    let repo = work.path();
+    run(repo, &["init", "-q"]);
+    std::fs::write(repo.join("a.txt"), "a").unwrap();
+    run(repo, &["add", "a.txt"]);
+    run(repo, &["commit", "-m", "a"]);
+    run(repo, &["remote", "add", "origin", &format!("{base}/r")]);
+    run(repo, &["push", "-u", "origin"]);
+    run(repo, &["branch", "create", "feature"]);
+    run(repo, &["branch", "switch", "feature"]);
+    std::fs::write(repo.join("b.txt"), "b").unwrap();
+    run(repo, &["add", "b.txt"]);
+    let before = object_files(repo);
+    run(repo, &["commit", "-m", "b"]);
+    let made: Vec<PathBuf> = object_files(repo).difference(&before).cloned().collect();
+    run(repo, &["push", "-u", "origin"]);
+    run(repo, &["branch", "switch", "main"]);
+    for f in &made {
+        std::fs::remove_file(f).unwrap();
+    }
+
+    let (ok, text) = fsck(repo, &["--repair"]);
+    assert!(ok, "the server has the commit: {text}");
+    let (ok, text) = fsck(repo, &["--full"]);
+    assert!(ok, "{text}");
+    let out = mediagit()
+        .args(["branch", "list"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("feature"),
+        "the branch must be back"
+    );
+    assert!(
+        files_under(&repo.join(".mediagit/quarantine")).is_empty(),
+        "the saved ref goes once the ref is back"
+    );
+}
