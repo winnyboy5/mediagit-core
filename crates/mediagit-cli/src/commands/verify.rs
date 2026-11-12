@@ -49,9 +49,9 @@ pub struct VerifyRangeReport {
 /// The verify command performs a fast integrity check focusing on:
 /// - Object checksum verification
 /// - Reference validation
+/// - Missing-object detection (connectivity walk from every ref)
 ///
-/// For comprehensive checks including connectivity and dangling objects,
-/// use `mediagit fsck --full` instead.
+/// For dangling-object detection, use `mediagit fsck --full` instead.
 #[derive(Parser, Debug)]
 #[command(after_help = "EXAMPLES:
     # Quick verification
@@ -64,9 +64,9 @@ pub struct VerifyRangeReport {
     mediagit verify --start abc123 --end def456
 
 VERIFY vs FSCK:
-    verify  - Fast integrity check (checksums + refs only)
+    verify  - Fast integrity check (checksums + refs + missing objects)
             - Use for quick health checks and CI pipelines
-            - Does NOT check connectivity or dangling objects
+            - Does NOT check dangling objects
 
     fsck    - Comprehensive integrity check (full graph analysis)
             - Use for thorough repository audits
@@ -140,19 +140,22 @@ impl VerifyCmd {
                 .await;
         }
 
-        // Create FSCK checker (verify is a lightweight wrapper)
-        let checker = FsckChecker::new(storage);
+        // Same checker construction as `fsck`: refdb + repo root, so the
+        // connectivity walk can see every ref and report missing objects.
+        let checker = FsckChecker::new_with_refdb(storage, Some(RefDatabase::new(&mediagit_dir)))
+            .with_repo_root(&repo_path);
 
-        // Configure options - verify uses quick mode by default
+        // Dangling detection stays off (expensive), but connectivity is on in
+        // every mode: a missing blob/tree/manifest is only found by the walk.
         let mut options = if self.quick {
             FsckOptions::quick()
         } else {
             FsckOptions {
-                check_connectivity: false,
                 check_dangling: false,
                 ..Default::default()
             }
         };
+        options.check_connectivity = true;
 
         options.verbose = self.verbose || self.detailed;
 
