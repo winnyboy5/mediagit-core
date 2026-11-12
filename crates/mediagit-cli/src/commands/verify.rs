@@ -145,17 +145,13 @@ impl VerifyCmd {
         let checker = FsckChecker::new_with_refdb(storage, Some(RefDatabase::new(&mediagit_dir)))
             .with_repo_root(&repo_path);
 
-        // Dangling detection stays off (expensive), but connectivity is on in
-        // every mode: a missing blob/tree/manifest is only found by the walk.
+        // Dangling detection stays off (expensive). Both presets keep the
+        // connectivity walk on: it is the only thing that sees a deleted object.
         let mut options = if self.quick {
             FsckOptions::quick()
         } else {
-            FsckOptions {
-                check_dangling: false,
-                ..Default::default()
-            }
+            FsckOptions::default()
         };
-        options.check_connectivity = true;
 
         options.verbose = self.verbose || self.detailed;
 
