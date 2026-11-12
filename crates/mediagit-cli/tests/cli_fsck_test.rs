@@ -214,3 +214,64 @@ fn fsck_fails_when_a_chunk_of_a_chunked_file_is_missing() {
     assert_fsck_fails(tmp.path());
     assert_fsck_args_fail(tmp.path(), &["--quick"]);
 }
+
+/// A keyed (at-rest encrypted) repository: repair must never put plaintext
+/// into the store, and a restored object must be sealed like its neighbours.
+#[test]
+fn fsck_repair_on_keyed_repo_never_writes_plaintext() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let keyfile = tmp.path().join("master.key");
+    std::fs::write(&keyfile, "5e".repeat(32)).unwrap();
+    let keyed = || {
+        let mut c = mediagit();
+        c.env("MEDIAGIT_ENCRYPTION_KEYFILE", &keyfile)
+            .env("MEDIAGIT_NO_KEYRING", "1");
+        c
+    };
+    let go = |args: &[&str]| keyed().args(args).current_dir(&repo).assert();
+
+    go(&["init", "-q"]).success();
+    go(&["key", "init"]).success();
+    let data = random_bytes(64 * 1024);
+    std::fs::write(repo.join("photo.bin"), &data).unwrap();
+    let before = object_files(&repo);
+    go(&["add", "photo.bin"]).success();
+    let added: Vec<PathBuf> = object_files(&repo).difference(&before).cloned().collect();
+    go(&["commit", "-m", "c"]).success();
+    assert_eq!(added.len(), 1);
+    assert!(
+        std::fs::read(&added[0]).unwrap().starts_with(b"MGEN"),
+        "fixture: sealed"
+    );
+    flip_byte(&added[0]);
+
+    let out = keyed()
+        .args(["fsck", "--repair"])
+        .current_dir(&repo)
+        .assert()
+        .get_output()
+        .clone();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Object files only: the LAYOUT marker is legitimately plaintext.
+    for f in object_files(&repo)
+        .into_iter()
+        .filter(|f| f.file_name().is_some_and(|n| n.len() == 64))
+    {
+        assert!(
+            std::fs::read(&f).unwrap().starts_with(b"MGEN"),
+            "plaintext object written into a keyed store: {} / {text}",
+            f.display()
+        );
+    }
+    assert!(out.status.success(), "keyed repair must restore: {text}");
+    std::fs::remove_file(repo.join("photo.bin")).unwrap();
+    go(&["reset", "--hard", "HEAD"]).success();
+    assert_eq!(std::fs::read(repo.join("photo.bin")).unwrap(), data);
+}

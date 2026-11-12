@@ -13,4 +13,20 @@ healthy: boolean, objects_checked: number, refs_checked: number, corrupted_objec
 /**
  * `--repair`: issues actually repaired (`--dry-run`: that would be).
  */
-repaired: number | null, issues: Array<FsckIssueReport>, };
+repaired: number | null, 
+/**
+ * `--repair`: damaged objects rewritten from a good copy (confirmed by a re-check).
+ */
+restored: number | null, 
+/**
+ * `--repair`: damaged objects moved to `.mediagit/quarantine`.
+ */
+quarantined: number | null, 
+/**
+ * `--repair`: broken refs removed (confirmed by a re-check).
+ */
+refs_removed: number | null, 
+/**
+ * `--repair`: files that can no longer be restored (empty otherwise).
+ */
+unrestorable_files: Array<string>, issues: Array<FsckIssueReport>, };
