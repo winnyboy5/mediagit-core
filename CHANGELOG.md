@@ -131,6 +131,10 @@ changes fix real bugs.
 
 ### Fixed
 
+- **Sparse checkout: `add --all` / `add -u` deleted the excluded files from the
+  next version.** Files outside the sparse set are absent by design, but the add
+  scan staged them as deleted, so the following commit dropped them from history.
+  They are now skipped, and `diff` no longer lists them as deleted either.
 - **`stash push PATHS` stashed everything.** The paths were accepted and ignored,
   so stashing one file stashed the whole working copy. It now stashes only tracked,
   staged and untracked changes under the given paths and leaves the rest alone.

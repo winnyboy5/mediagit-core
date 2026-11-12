@@ -344,11 +344,17 @@ impl DiffCmd {
         let mut deleted = Vec::new();
         let mut added = Vec::new();
 
+        // Sparse-excluded paths are absent by design, not deleted (BUG-041).
+        let sparse = mediagit_versioning::SparseFilter::load(repo_root)
+            .context("Failed to load sparse-checkout patterns")?;
+
         // Check for modified and deleted files
         for (path, head_oid) in &head_files {
             let full_path = repo_root.join(path);
             if !working_files.contains(path) {
-                deleted.push(path.clone());
+                if sparse.is_included(path) {
+                    deleted.push(path.clone());
+                }
             } else {
                 // Hash working tree file and compare
                 // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- read-only probe of local worktree

@@ -662,7 +662,14 @@ impl AddCmd {
                 .collect()
         };
 
+        // Sparse-excluded paths are absent by design, not deleted (BUG-041).
+        let sparse = mediagit_versioning::SparseFilter::load(&repo_root)
+            .context("Failed to load sparse-checkout patterns")?;
+
         for head_path in head_files.as_ref().keys() {
+            if !sparse.is_included(head_path) {
+                continue;
+            }
             let head_path_normalized =
                 PathBuf::from(head_path.to_string_lossy().replace('\\', "/"));
 

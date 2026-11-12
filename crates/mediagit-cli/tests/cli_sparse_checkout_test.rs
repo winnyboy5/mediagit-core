@@ -286,3 +286,101 @@ fn status_does_not_report_sparse_excluded_files_as_deleted() {
         "sparse-excluded file must not appear in --json deleted[]: {deleted:?}"
     );
 }
+
+// ---- BUG-041: whole-tree `add` must not treat sparse-excluded files as deleted ----
+
+fn run(dir: &Path, args: &[&str]) -> String {
+    let out = mediagit().args(args).current_dir(dir).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{args:?} failed: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// keep/k.txt in the cone; big/b1.txt and big/b2.txt outside it.
+fn keep_big_repo() -> TempDir {
+    let temp = TempDir::new().unwrap();
+    init_repo(temp.path());
+    commit_file(temp.path(), "keep/k.txt", "k1", "k");
+    commit_file(temp.path(), "big/b1.txt", "b1 content", "b1");
+    commit_file(temp.path(), "big/b2.txt", "b2 content", "b2");
+    temp
+}
+
+fn whole_tree_add_keeps_excluded(flag: &str) {
+    let temp = keep_big_repo();
+    let d = temp.path();
+    run(d, &["sparse-checkout", "set", "keep"]);
+    fs::write(d.join("keep/k.txt"), "k2 edited").unwrap();
+
+    let out = run(d, &["add", flag]);
+    assert!(!out.contains("deletion"), "no deletion staged: {out}");
+    run(d, &["commit", "-m", "v2"]);
+
+    let diff = run(d, &["diff", "HEAD~1", "HEAD"]);
+    assert!(diff.contains("k.txt"), "edit must be committed: {diff}");
+    assert!(
+        !diff.contains("b1.txt") && !diff.contains("b2.txt"),
+        "excluded files must be untouched by the commit: {diff}"
+    );
+
+    run(d, &["sparse-checkout", "disable"]);
+    assert_eq!(
+        fs::read_to_string(d.join("big/b1.txt")).unwrap(),
+        "b1 content"
+    );
+    assert_eq!(
+        fs::read_to_string(d.join("big/b2.txt")).unwrap(),
+        "b2 content"
+    );
+}
+
+#[test]
+fn sparse_add_all_does_not_stage_excluded_as_deleted() {
+    whole_tree_add_keeps_excluded("--all");
+}
+
+#[test]
+fn sparse_add_update_does_not_stage_excluded_as_deleted() {
+    whole_tree_add_keeps_excluded("-u");
+}
+
+#[test]
+fn sparse_add_all_still_stages_real_deletion_inside_cone() {
+    let temp = keep_big_repo();
+    let d = temp.path();
+    commit_file(d, "keep/gone.txt", "bye", "gone");
+    run(d, &["sparse-checkout", "set", "keep"]);
+    fs::remove_file(d.join("keep/gone.txt")).unwrap();
+
+    let out = run(d, &["add", "--all"]);
+    assert!(out.contains("Staged 1 deletion"), "{out}");
+    run(d, &["commit", "-m", "rm"]);
+    let diff = run(d, &["diff", "HEAD~1", "HEAD"]);
+    assert!(diff.contains("gone.txt"), "{diff}");
+    assert!(!diff.contains("b1.txt"), "{diff}");
+}
+
+#[test]
+fn non_sparse_add_all_still_stages_deletion() {
+    let temp = keep_big_repo();
+    let d = temp.path();
+    fs::remove_file(d.join("big/b1.txt")).unwrap();
+    let out = run(d, &["add", "--all"]);
+    assert!(out.contains("Staged 1 deletion"), "{out}");
+}
+
+#[test]
+fn sparse_diff_working_tree_does_not_list_excluded_as_deleted() {
+    let temp = keep_big_repo();
+    let d = temp.path();
+    run(d, &["sparse-checkout", "set", "keep"]);
+    let diff = run(d, &["diff"]);
+    assert!(
+        !diff.contains("b1.txt") && !diff.contains("b2.txt"),
+        "{diff}"
+    );
+}
