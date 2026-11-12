@@ -134,6 +134,32 @@ pub struct PushCmd {
     pub repair: bool,
 }
 
+/// Lease value for `--force-with-lease` (BUG-032): what THIS clone last saw of
+/// the remote branch (`refs/remotes/<remote>/<branch>`), never the server's
+/// fresh answer. `None` means "expect the branch to be absent on the server".
+async fn lease_old_oid(
+    refdb: &mediagit_versioning::RefDatabase,
+    remote: &str,
+    ref_name: &str,
+    remote_oid: Option<String>,
+) -> Result<Option<String>> {
+    let Some(branch) = ref_name.strip_prefix("refs/heads/") else {
+        anyhow::bail!("--force-with-lease only supports branches, not '{ref_name}'");
+    };
+    match refdb
+        .read(&format!("refs/remotes/{remote}/{branch}"))
+        .await
+        .ok()
+        .and_then(|r| r.oid)
+    {
+        Some(oid) => Ok(Some(oid.to_hex())),
+        None if remote_oid.is_some() => anyhow::bail!(
+            "--force-with-lease: no remote-tracking ref for '{remote}/{branch}';              run 'mediagit fetch {remote}' first"
+        ),
+        None => Ok(None),
+    }
+}
+
 impl PushCmd {
     /// Human chatter is silent under `--machine` (stdout is the envelope only).
     fn quiet(&self) -> bool {
@@ -316,9 +342,14 @@ impl PushCmd {
                     continue;
                 }
 
+                let old_oid = if self.force_with_lease {
+                    lease_old_oid(&refdb, remote, &full_ref, remote_oid).await?
+                } else {
+                    remote_oid
+                };
                 updates.push(mediagit_protocol::RefUpdate {
                     name: full_ref,
-                    old_oid: remote_oid,
+                    old_oid,
                     new_oid: String::new(), // ignored for delete
                     delete: true,
                 });
@@ -593,9 +624,14 @@ impl PushCmd {
                 continue;
             }
 
+            let old_oid = if self.force_with_lease {
+                lease_old_oid(&refdb, remote, ref_to_push, remote_oid).await?
+            } else {
+                remote_oid
+            };
             updates.push(mediagit_protocol::RefUpdate {
                 name: ref_to_push.clone(),
-                old_oid: remote_oid,
+                old_oid,
                 new_oid: local_oid_str,
                 delete: false,
             });

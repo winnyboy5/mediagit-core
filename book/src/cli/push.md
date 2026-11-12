@@ -34,7 +34,7 @@ with `-u`.
 | `--follow-tags` | Also push tags that are ancestors of a pushed branch tip |
 | `--dry-run` | Report what would be pushed without sending anything |
 | `-f`, `--force` | Force-update remote refs, ignoring divergence |
-| `--force-with-lease` | Force-update, but refuse if the remote ref has moved since it was last seen locally |
+| `--force-with-lease` | Force-update, but refuse if the remote branch is no longer where this clone last saw it (`refs/remotes/<remote>/<branch>`). Fetch first if there is no such ref. Branches only |
 | `-d`, `--delete` | Delete the given ref(s) on the remote; requires at least one `REFSPEC` |
 | `-u`, `--set-upstream` | Record the pushed branch's upstream as `REMOTE`/branch |
 | `--no-track` | Push a new branch without setting an upstream |
@@ -77,6 +77,9 @@ mediagit push --follow-tags
 ```bash
 mediagit push --force-with-lease
 ```
+
+If someone pushed since your last fetch, the push is refused and nothing on the
+server changes. Run `mediagit fetch`, look at their work, then try again.
 
 ### Delete a remote branch
 

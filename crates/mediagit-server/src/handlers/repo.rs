@@ -634,12 +634,35 @@ pub async fn request_objects(
     Ok(Json(WantResponse { request_id }))
 }
 
+/// Per-repo mutex serialising `update_refs` (compare-and-swap atomicity).
+fn ref_update_lock(repo_path: &std::path::Path) -> Arc<tokio::sync::Mutex<()>> {
+    type LockMap = std::sync::Mutex<
+        std::collections::HashMap<std::path::PathBuf, Arc<tokio::sync::Mutex<()>>>,
+    >;
+    static LOCKS: std::sync::OnceLock<LockMap> = std::sync::OnceLock::new();
+    let mut map = LOCKS.get_or_init(Default::default).lock().unwrap();
+    Arc::clone(map.entry(repo_path.to_path_buf()).or_default())
+}
+
+/// True when the client's expected old value forbids this update.
+/// Lease: the ref must be exactly where the client last saw it (including
+/// absent). Force: no check. Otherwise: only when both sides exist and differ.
+fn old_oid_mismatch(req: &RefUpdateRequest, expected: Option<&str>, current: Option<&str>) -> bool {
+    if req.force_with_lease {
+        expected != current
+    } else if req.force {
+        false
+    } else {
+        matches!((expected, current), (Some(e), Some(c)) if e != c)
+    }
+}
+
 /// POST /:repo/refs/update - Update repository refs
 pub async fn update_refs(
     Path(repo): Path<String>,
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
-    Json(req): Json<RefUpdateRequest>,
+    Json(mut req): Json<RefUpdateRequest>,
 ) -> Result<Json<RefUpdateResponse>, StatusCode> {
     tracing::info!("POST /{}/refs/update ({} updates)", repo, req.updates.len());
 
@@ -662,10 +685,17 @@ pub async fn update_refs(
     let odb = Arc::new(get_or_init_odb(&state, &repo_path).await?);
     let reflog = Reflog::new(repo_path.join(".mediagit"));
 
+    // BUG-032: refs live on the server's local disk for every storage
+    // backend, so one per-repo lock over the whole compare-and-write loop
+    // makes the lease check atomic with the ref write.
+    let ref_lock = ref_update_lock(&repo_path);
+    let _ref_guard = ref_lock.lock().await;
+
     let mut results = Vec::new();
     let mut all_success = true;
 
-    for update in req.updates {
+    let updates = std::mem::take(&mut req.updates);
+    for update in updates {
         // Handle ref deletion
         if update.delete {
             // HEAD protection: prevent deleting the currently active branch
@@ -688,31 +718,23 @@ pub async fn update_refs(
                 continue;
             }
 
-            // Safety check: verify old_oid matches (if provided)
-            if let Some(expected_old) = &update.old_oid
-                && let Ok(current_ref) = refdb.read(&update.name).await
-                && let Some(current_oid) = &current_ref.oid
-            {
-                let current_oid_str = current_oid.to_hex();
-                // The lease survives `force_with_lease` — that mode exists to keep
-                // this check while dropping the ancestry one. Plain `force` still
-                // bypasses it. Applies to deletes too: "delete it, but only if
-                // nobody else moved it" is the same guarantee.
-                if &current_oid_str != expected_old && (!req.force || req.force_with_lease) {
-                    tracing::warn!(
-                        "Ref delete rejected for '{}': expected {}, got {}",
-                        update.name,
-                        expected_old,
-                        current_oid_str
-                    );
-                    results.push(RefUpdateResult {
-                        ref_name: update.name.clone(),
-                        success: false,
-                        error: Some("ref changed since last fetch".to_string()),
-                    });
-                    all_success = false;
-                    continue;
-                }
+            // Safety check: verify old_oid matches (see `old_oid_mismatch`).
+            let current = refdb.read(&update.name).await.ok().and_then(|r| r.oid);
+            let current_hex = current.map(|o| o.to_hex());
+            if old_oid_mismatch(&req, update.old_oid.as_deref(), current_hex.as_deref()) {
+                tracing::warn!(
+                    "Ref delete rejected for '{}': expected {:?}, got {:?}",
+                    update.name,
+                    update.old_oid,
+                    current_hex
+                );
+                results.push(RefUpdateResult {
+                    ref_name: update.name.clone(),
+                    success: false,
+                    error: Some("ref changed since last fetch".to_string()),
+                });
+                all_success = false;
+                continue;
             }
 
             // Verify ref exists before deleting
@@ -753,30 +775,26 @@ pub async fn update_refs(
             continue;
         }
 
-        // Check if old_oid matches (if provided)
-        if let Some(expected_old) = &update.old_oid
-            && let Ok(current_ref) = refdb.read(&update.name).await
-            && let Some(current_oid) = &current_ref.oid
-        {
-            let current_oid_str = current_oid.to_hex();
-            // The lease survives `force_with_lease` — that mode exists to keep
-            // this check while dropping the ancestry one. Plain `force` still
-            // bypasses it. Applies to deletes too: "delete it, but only if
-            // nobody else moved it" is the same guarantee.
-            if &current_oid_str != expected_old && (!req.force || req.force_with_lease) {
-                tracing::warn!(
-                    "Ref update rejected: expected {}, got {}",
-                    expected_old,
-                    current_oid_str
-                );
-                results.push(RefUpdateResult {
-                    ref_name: update.name.clone(),
-                    success: false,
-                    error: Some("non-fast-forward".to_string()),
-                });
-                all_success = false;
-                continue;
-            }
+        // Check old_oid (see `old_oid_mismatch`).
+        let current = refdb.read(&update.name).await.ok().and_then(|r| r.oid);
+        let current_hex = current.map(|o| o.to_hex());
+        if old_oid_mismatch(&req, update.old_oid.as_deref(), current_hex.as_deref()) {
+            tracing::warn!(
+                "Ref update rejected: expected {:?}, got {:?}",
+                update.old_oid,
+                current_hex
+            );
+            results.push(RefUpdateResult {
+                ref_name: update.name.clone(),
+                success: false,
+                error: Some(if req.force_with_lease {
+                    "ref changed since last fetch".to_string()
+                } else {
+                    "non-fast-forward".to_string()
+                }),
+            });
+            all_success = false;
+            continue;
         }
 
         // Ancestry check: when neither force mode is set and the ref already

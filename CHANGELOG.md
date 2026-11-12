@@ -162,6 +162,17 @@ changes fix real bugs.
 - **A multi-commit cherry-pick that hit an empty commit mid-way** now saves its
   state so `--skip` can continue.
 
+### Fixed — `push --force-with-lease` overwrote work pushed by someone else (BUG-032)
+
+The lease was the server's own fresh answer, so it always matched and the push
+behaved like `--force`. It is now this clone's remote-tracking ref
+(`refs/remotes/<remote>/<branch>`). If someone pushed since your last fetch the
+push is refused and the server is unchanged; with no tracking ref it asks you to
+fetch first. The server now enforces the lease atomically (one lock per
+repository over the compare and the write) and also refuses a lease that
+expects a branch to be absent when it exists, or present when it was deleted.
+Leases apply to branches only.
+
 ### Fixed — `fsck` could not detect a missing object
 
 `mediagit fsck` is documented as detecting "corruption or missing objects", and
