@@ -310,6 +310,24 @@ fn keep_big_repo() -> TempDir {
     temp
 }
 
+/// The committed tree (not just diff text) still holds both excluded files
+/// with their original bytes.
+fn assert_big_intact(d: &Path) {
+    let tree = run(d, &["show", "--tree", "HEAD"]);
+    assert!(
+        tree.contains("big/b1.txt") && tree.contains("big/b2.txt"),
+        "HEAD tree lost excluded files: {tree}"
+    );
+    assert_eq!(
+        run(d, &["show", "HEAD:big/b1.txt"]).trim_end(),
+        "b1 content"
+    );
+    assert_eq!(
+        run(d, &["show", "HEAD:big/b2.txt"]).trim_end(),
+        "b2 content"
+    );
+}
+
 fn whole_tree_add_keeps_excluded(flag: &str) {
     let temp = keep_big_repo();
     let d = temp.path();
@@ -322,10 +340,7 @@ fn whole_tree_add_keeps_excluded(flag: &str) {
 
     let diff = run(d, &["diff", "HEAD~1", "HEAD"]);
     assert!(diff.contains("k.txt"), "edit must be committed: {diff}");
-    assert!(
-        !diff.contains("b1.txt") && !diff.contains("b2.txt"),
-        "excluded files must be untouched by the commit: {diff}"
-    );
+    assert_big_intact(d);
 
     run(d, &["sparse-checkout", "disable"]);
     assert_eq!(
@@ -383,4 +398,42 @@ fn sparse_diff_working_tree_does_not_list_excluded_as_deleted() {
         !diff.contains("b1.txt") && !diff.contains("b2.txt"),
         "{diff}"
     );
+}
+
+/// Other add forms under sparse checkout: the excluded files must survive a commit.
+fn add_form_keeps_excluded(target: &str) {
+    let temp = keep_big_repo();
+    let d = temp.path();
+    run(d, &["sparse-checkout", "set", "keep"]);
+    fs::write(d.join("keep/k.txt"), "k2 edited").unwrap();
+
+    // Some forms may refuse (nothing on disk); the commit still must not lose files.
+    let _ = mediagit()
+        .args(["add", target])
+        .current_dir(d)
+        .output()
+        .unwrap();
+    run(d, &["add", "keep"]);
+    run(d, &["commit", "-m", "v2"]);
+    assert_big_intact(d);
+}
+
+#[test]
+fn sparse_add_dot_keeps_excluded() {
+    add_form_keeps_excluded(".");
+}
+
+#[test]
+fn sparse_add_included_dir_keeps_excluded() {
+    add_form_keeps_excluded("keep");
+}
+
+#[test]
+fn sparse_add_excluded_dir_keeps_excluded() {
+    add_form_keeps_excluded("big");
+}
+
+#[test]
+fn sparse_add_excluded_file_by_name_keeps_excluded() {
+    add_form_keeps_excluded("big/b1.txt");
 }
