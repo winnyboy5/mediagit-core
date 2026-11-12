@@ -53,6 +53,26 @@ async fn server_tip(repos_root: &Path, repo: &str) -> String {
         .to_hex()
 }
 
+async fn tracking(dir: &Path, branch: &str) -> Option<String> {
+    let refdb = mediagit_versioning::RefDatabase::new(dir.join(".mediagit"));
+    refdb
+        .read(&format!("refs/remotes/origin/{branch}"))
+        .await
+        .ok()
+        .and_then(|r| r.oid)
+        .map(|o| o.to_hex())
+}
+
+async fn server_branch(repos_root: &Path, repo: &str, branch: &str) -> Option<String> {
+    let refdb = mediagit_versioning::RefDatabase::new(repos_root.join(repo).join(".mediagit"));
+    refdb
+        .read(&format!("refs/heads/{branch}"))
+        .await
+        .ok()
+        .and_then(|r| r.oid)
+        .map(|o| o.to_hex())
+}
+
 struct Setup {
     repos_root: TempDir,
     _parents: TempDir,
@@ -97,6 +117,7 @@ async fn stale_ana() -> Setup {
 async fn stale_lease_is_rejected_and_server_keeps_bens_work() {
     let s = stale_ana().await;
     let before = server_tip(s.repos_root.path(), "lease-repo").await;
+    let tracking_before = tracking(&s.ana, "main").await;
 
     let out = mediagit()
         .args(["push", "--force-with-lease", "origin", "main"])
@@ -109,10 +130,25 @@ async fn stale_lease_is_rejected_and_server_keeps_bens_work() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        text.contains("changed since last fetch"),
+        "message:
+{text}"
+    );
     assert_eq!(
         server_tip(s.repos_root.path(), "lease-repo").await,
         before,
         "Ben's tip must survive"
+    );
+    assert_eq!(
+        tracking(&s.ana, "main").await,
+        tracking_before,
+        "tracking ref must not move on a refused push"
     );
     let _ = &s.ben;
 }
@@ -150,4 +186,134 @@ async fn lease_without_tracking_ref_says_fetch_first() {
     );
     assert!(text.contains("fetch"), "expected fetch-first hint:\n{text}");
     assert_eq!(server_tip(s.repos_root.path(), "lease-repo").await, before);
+}
+
+/// Two branches (main, feat) at v1 on the server; Ben advances feat only.
+/// Ana has both branches locally with fresh tracking for main, stale for feat.
+async fn stale_feat() -> Setup {
+    let repos_root = TempDir::new().unwrap();
+    let (base_url, server) = start_test_server(repos_root.path().to_path_buf()).await;
+    fs::create_dir_all(repos_root.path().join("lease-repo")).unwrap();
+    let url = format!("{}/lease-repo", base_url);
+
+    let source = TempDir::new().unwrap();
+    run(source.path(), &["init", "-q"]).success();
+    commit_file(
+        source.path(),
+        "a.txt",
+        "v1
+",
+        "v1",
+    );
+    run(source.path(), &["branch", "create", "feat"]).success();
+    run(source.path(), &["remote", "add", "origin", &url]).success();
+    run(source.path(), &["push", "-u", "origin"]).success();
+    run(source.path(), &["push", "origin", "feat"]).success();
+
+    let parents = TempDir::new().unwrap();
+    let ana = parents.path().join("ana");
+    let ben = parents.path().join("ben");
+    run(parents.path(), &["clone", &url, ana.to_str().unwrap()]).success();
+    run(parents.path(), &["clone", &url, ben.to_str().unwrap()]).success();
+
+    run(&ben, &["branch", "create", "feat"]).success();
+    run(&ben, &["branch", "switch", "feat"]).success();
+    commit_file(
+        &ben, "b.txt", "b1
+", "b1",
+    );
+    run(&ben, &["push", "origin", "feat"]).success();
+
+    run(&ana, &["branch", "create", "feat"]).success();
+    Setup {
+        repos_root,
+        _parents: parents,
+        ana,
+        ben,
+        _server: server,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn push_all_with_one_stale_branch_changes_nothing_and_names_it() {
+    let s = stale_feat().await;
+    commit_file(
+        &s.ana,
+        "c.txt",
+        "a1
+",
+        "a1 on main",
+    );
+    run(&s.ana, &["branch", "switch", "feat"]).success();
+    commit_file(
+        &s.ana,
+        "d.txt",
+        "a2
+",
+        "a2 on feat",
+    );
+
+    let main_before = server_branch(s.repos_root.path(), "lease-repo", "main").await;
+    let feat_before = server_branch(s.repos_root.path(), "lease-repo", "feat").await;
+    let main_tracking = tracking(&s.ana, "main").await;
+
+    let out = mediagit()
+        .args(["push", "--all", "--force-with-lease", "origin"])
+        .current_dir(&s.ana)
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.status.success(),
+        "must fail:
+{text}"
+    );
+    assert!(
+        text.contains("refs/heads/feat: ref changed since last fetch"),
+        "must name the stale branch:
+{text}"
+    );
+    assert_eq!(
+        server_branch(s.repos_root.path(), "lease-repo", "main").await,
+        main_before,
+        "fresh branch must not be written when another is stale"
+    );
+    assert_eq!(
+        server_branch(s.repos_root.path(), "lease-repo", "feat").await,
+        feat_before
+    );
+    assert_eq!(tracking(&s.ana, "main").await, main_tracking);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_with_stale_lease_is_refused_and_fresh_lease_deletes() {
+    let s = stale_feat().await;
+    let feat_before = server_branch(s.repos_root.path(), "lease-repo", "feat").await;
+    assert!(feat_before.is_some());
+
+    let args = ["push", "--delete", "--force-with-lease", "origin", "feat"];
+    let out = mediagit().args(args).current_dir(&s.ana).output().unwrap();
+    assert!(!out.status.success(), "stale delete must fail");
+    assert_eq!(
+        server_branch(s.repos_root.path(), "lease-repo", "feat").await,
+        feat_before,
+        "remote branch must stay"
+    );
+
+    run(&s.ana, &["fetch", "origin", "feat"]).success();
+    let out = mediagit().args(args).current_dir(&s.ana).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        server_branch(s.repos_root.path(), "lease-repo", "feat").await,
+        None
+    );
 }

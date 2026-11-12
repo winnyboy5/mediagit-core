@@ -154,7 +154,7 @@ async fn lease_old_oid(
     {
         Some(oid) => Ok(Some(oid.to_hex())),
         None if remote_oid.is_some() => anyhow::bail!(
-            "--force-with-lease: no remote-tracking ref for '{remote}/{branch}';              run 'mediagit fetch {remote}' first"
+            "--force-with-lease: no remote-tracking ref for '{remote}/{branch}'; run 'mediagit fetch {remote}' first"
         ),
         None => Ok(None),
     }

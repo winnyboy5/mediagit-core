@@ -640,8 +640,11 @@ fn ref_update_lock(repo_path: &std::path::Path) -> Arc<tokio::sync::Mutex<()>> {
         std::collections::HashMap<std::path::PathBuf, Arc<tokio::sync::Mutex<()>>>,
     >;
     static LOCKS: std::sync::OnceLock<LockMap> = std::sync::OnceLock::new();
+    // Canonical key: two spellings of one repo path (case, separators on
+    // Windows) must share one lock.
+    let key = std::fs::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
     let mut map = LOCKS.get_or_init(Default::default).lock().unwrap();
-    Arc::clone(map.entry(repo_path.to_path_buf()).or_default())
+    Arc::clone(map.entry(key).or_default())
 }
 
 /// True when the client's expected old value forbids this update.
@@ -695,6 +698,40 @@ pub async fn update_refs(
     let mut all_success = true;
 
     let updates = std::mem::take(&mut req.updates);
+
+    // BUG-032: a lease request is all-or-nothing. Validate every lease first
+    // (under the lock); if any ref is stale, write nothing so the client's
+    // tracking refs stay truthful.
+    if req.force_with_lease {
+        let mut stale = false;
+        let mut checked = Vec::new();
+        for update in &updates {
+            let current = refdb.read(&update.name).await.ok().and_then(|r| r.oid);
+            let current_hex = current.map(|o| o.to_hex());
+            let bad = old_oid_mismatch(&req, update.old_oid.as_deref(), current_hex.as_deref());
+            stale |= bad;
+            checked.push(bad);
+        }
+        if stale {
+            let results = updates
+                .iter()
+                .zip(checked)
+                .map(|(u, bad)| RefUpdateResult {
+                    ref_name: u.name.clone(),
+                    success: false,
+                    error: Some(if bad {
+                        "ref changed since last fetch".to_string()
+                    } else {
+                        "not applied: another ref in this push changed since last fetch".to_string()
+                    }),
+                })
+                .collect();
+            return Ok(Json(RefUpdateResponse {
+                success: false,
+                results,
+            }));
+        }
+    }
     for update in updates {
         // Handle ref deletion
         if update.delete {

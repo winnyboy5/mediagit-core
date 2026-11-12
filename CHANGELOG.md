@@ -185,7 +185,8 @@ push is refused and the server is unchanged; with no tracking ref it asks you to
 fetch first. The server now enforces the lease atomically (one lock per
 repository over the compare and the write) and also refuses a lease that
 expects a branch to be absent when it exists, or present when it was deleted.
-Leases apply to branches only.
+Leases apply to branches only. A lease push of several branches is all or
+nothing: if one branch is stale, nothing is written and the stale branch is named.
 
 ### Fixed — `fsck` could not detect a missing object
 
