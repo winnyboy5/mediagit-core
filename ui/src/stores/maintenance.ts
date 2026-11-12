@@ -16,6 +16,8 @@ export interface Run<T> {
   preview?: boolean
   /** fsck only: `preview` = what a repair would change; `done` = a repair ran. */
   repair?: 'preview' | 'done'
+  /** fsck only: the repository this result belongs to. */
+  root?: string | null
 }
 
 const isRange = (r: FsckCliReport | VerifyRangeReport): r is VerifyRangeReport => 'commits' in r
@@ -76,6 +78,7 @@ export const useMaintenanceStore = defineStore('maintenance', () => {
 
   /** A repair changes the repository: the caller sets `options.confirmed` once the person agreed. */
   async function runFsck(options: FsckOptions = {}) {
+    const root = repo.path
     const r = await exec(
       'fsck',
       options.repair ? (options.dryRun ? 'Preview repair' : 'Repair repository') : options.deep ? 'Deep integrity check' : 'Integrity check',
@@ -83,9 +86,10 @@ export const useMaintenanceStore = defineStore('maintenance', () => {
       (x) => (x.healthy ? `${x.objects_checked} objects checked, no problems` : 'Problems found'),
       (x) => !x.healthy,
     )
-    if (r) {
+    // A result that lands after the person switched repository belongs to the old one: drop it.
+    if (r && root === repo.path) {
       purged.value = null
-      fsck.value = { report: r.value, at: Date.now(), repair: options.repair ? (options.dryRun ? 'preview' : 'done') : undefined }
+      fsck.value = { report: r.value, at: Date.now(), repair: options.repair ? (options.dryRun ? 'preview' : 'done') : undefined, root }
     }
     return !!r
   }
@@ -94,18 +98,24 @@ export const useMaintenanceStore = defineStore('maintenance', () => {
   const fsckGood = computed(() => {
     const f = fsck.value
     if (!f) return false
+    if (purged.value?.unrestorable_files.length) return false
     return f.repair === 'done' ? repairVerdict(f.report) === 'clean' : f.report.healthy
   })
 
   /** What the quarantine holds, or null when it is empty (then nothing can be deleted). */
   const quarantine = computed(() => {
-    const r = fsck.value?.report
+    const f = fsck.value
+    const r = f && f.root === repo.path ? f.report : null
     return r && r.quarantine_count > 0 ? { count: r.quarantine_count, bytes: r.quarantine_bytes } : null
   })
 
   /** Deletes the quarantined copies for good: only when `confirmed` and the quarantine holds something. */
   async function purgeQuarantine(confirmed: boolean) {
     if (!confirmed || !quarantine.value || !fsck.value) return false
+    if (busy.value) {
+      error.value = { code: 'busy', message: 'Another task is running. Wait for it to finish, then try again.' }
+      return false
+    }
     const r = await exec(
       'fsck',
       'Delete quarantined copies',

@@ -174,9 +174,9 @@ test.describe('Maintenance: repair result and quarantine', () => {
     const res = page.getByTestId('fsck-result')
     await expect(res).toContainText('Repair finished. No problems found')
     await expect(res).toContainText('Restored')
-    await expect(res).toContainText('Moved to quarantine')
-    await expect(res).toContainText('References removed')
-    await expect(page.getByTestId('quarantine')).toContainText('1 copy of damaged data (2.0 KB)')
+    await expect(res).toContainText('Moved aside (quarantine)')
+    await expect(res).toContainText('Broken branch or tag links removed')
+    await expect(page.getByTestId('quarantine')).toContainText('It holds 1 copy (2.0 KB). It is kept')
     await expectNoAxeViolations(page)
   })
 
@@ -213,6 +213,12 @@ test.describe('Maintenance: repair result and quarantine', () => {
     const q = page.getByTestId('quarantine')
     await expect(q).toContainText('Deleted 1 copy (2.0 KB) from quarantine')
     await expect(q.getByRole('list', { name: 'Files that can no longer be restored' })).toContainText('art/hero.psd')
+    // The repair was clean, but the purge lost files: no success head, and focus lands on the message.
+    const res = page.getByTestId('fsck-result')
+    await expect(res).toContainText('Some files can no longer be restored')
+    await expect(res.locator('.head2.ok')).toHaveCount(0)
+    await expect(page.locator('#purged-msg')).toBeFocused()
+    await expect(page.locator('[role=status] button')).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Delete quarantined copies…' })).toHaveCount(0)
     const sent = (await ipcCalls(page, 'repo_fsck')).map((c) => c.args.options)
     expect(sent.at(-1)).toMatchObject({ purgeQuarantine: true, confirmed: true })
@@ -225,5 +231,27 @@ test.describe('Maintenance: repair result and quarantine', () => {
     await expect(page.getByTestId('fsck-result')).toContainText('No problems found')
     await expect(page.getByTestId('quarantine')).toHaveCount(0)
     await expect(page.getByRole('button', { name: /Delete quarantined copies/ })).toHaveCount(0)
+  })
+
+  for (const [name, extra, head] of [
+    ['errors', { repair_errors: ['could not write pack-03'] }, 'The repair ran into errors'],
+    ['problems', { healthy: false }, 'Problems remain after the repair'],
+    ['partly lost', { restored: 2, unrestorable_files: ['art/hero.psd'] }, 'Some files could not be restored'],
+  ] as const) {
+    test(`a repair that ends with ${name} has its own headline, never a success`, async ({ page }) => {
+      await boot(page, { repo_fsck: { ...REPAIR, ...extra } })
+      await repairNow(page)
+      const res = page.getByTestId('fsck-result')
+      await expect(res).toContainText(head)
+      await expect(res.locator('.head2.ok')).toHaveCount(0)
+    })
+  }
+
+  test('the delete action is plain about a single copy', async ({ page }) => {
+    await boot(page, { repo_fsck: REPAIR })
+    await repairNow(page)
+    await expect(page.getByTestId('quarantine')).toContainText('sets damaged data aside')
+    await page.getByRole('button', { name: 'Delete quarantined copies…' }).click()
+    await expect(page.getByRole('alertdialog')).toContainText('any file that needs it')
   })
 })

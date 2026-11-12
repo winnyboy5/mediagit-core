@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { CircleCheck, TriangleAlert } from 'lucide-vue-next'
 import { formatBytes } from '@/components/format'
 import AlertDialog from '@/components/AlertDialog.vue'
@@ -22,6 +22,16 @@ const deep = ref<boolean | 'indeterminate'>(false)
 const quick = ref<boolean | 'indeterminate'>(false)
 const confirmOpen = ref(false)
 const purgeOpen = ref(false)
+// If the quarantine empties (or the repository changes) behind an open dialog, close it.
+watch(() => m.quarantine, (q) => {
+  if (!q) purgeOpen.value = false
+})
+async function purge() {
+  if (await m.purgeQuarantine(true)) {
+    await nextTick()
+    document.getElementById('purged-msg')?.focus()
+  }
+}
 
 const bar = computed(() => (m.running ? primaryBar(m.running) : undefined))
 const last = (t: Task) => {
@@ -37,6 +47,7 @@ const copies = (c: number) => `${n(c)} ${c === 1 ? 'copy' : 'copies'}`
 const good = (t: 'fsck' | 'verify') => (t === 'fsck' ? m.fsckGood : !!m.verify?.report.healthy)
 function headline(t: 'fsck' | 'verify') {
   const f = m.fsck
+  if (t === 'fsck' && m.purged?.unrestorable_files.length) return 'Some files can no longer be restored'
   if (t === 'fsck' && f?.repair === 'done') {
     const v = repairVerdict(f.report)
     if (v === 'lost') return (f.report.restored ?? 0) === 0 ? 'Nothing could be restored. Some files are lost' : 'Some files could not be restored'
@@ -197,8 +208,8 @@ function runGc() {
             </template>
             <template v-if="t[0] === 'fsck' && repaired">
               <dt>Restored</dt><dd class="mono">{{ n(repaired.restored ?? 0) }}</dd>
-              <dt>Moved to quarantine</dt><dd class="mono">{{ n(repaired.quarantined ?? 0) }}</dd>
-              <dt>References removed</dt><dd class="mono">{{ n(repaired.refs_removed ?? 0) }}</dd>
+              <dt>Moved aside (quarantine)</dt><dd class="mono">{{ n(repaired.quarantined ?? 0) }}</dd>
+              <dt>Broken branch or tag links removed</dt><dd class="mono">{{ n(repaired.refs_removed ?? 0) }}</dd>
             </template>
           </dl>
           <template v-if="t[0] === 'fsck' && repaired">
@@ -215,18 +226,18 @@ function runGc() {
           <ul v-if="m[t[0]]!.report.issues.length" class="issues" :aria-label="`${t[1]} findings`">
             <li v-for="(i, k) in m[t[0]]!.report.issues.slice(0, 50)" :key="k"><span class="chip" :class="warn(i.severity) ? 'warn' : 'bad'">{{ warn(i.severity) ? 'Warning' : 'Error' }}</span> {{ i.message }}</li>
           </ul>
-          <div v-if="t[0] === 'fsck' && (m.quarantine || m.purged)" class="quar" data-testid="quarantine">
-            <template v-if="m.quarantine">
-              <span>Quarantine holds {{ copies(m.quarantine.count) }} of damaged data ({{ formatBytes(m.quarantine.bytes) }}). They are kept in case they help bring a file back.</span>
-              <Button size="sm" variant="danger" :disabled="m.busy" @click="purgeOpen = true">Delete quarantined copies…</Button>
-            </template>
-            <template v-else-if="m.purged">
-              <span>Deleted {{ copies(m.purged.deleted_count) }} ({{ formatBytes(m.purged.deleted_bytes) }}) from quarantine.</span>
-              <ul v-if="purgedLost.length" class="issues" aria-label="Files that can no longer be restored">
-                <li v-for="f in purgedLost" :key="f" class="mono">{{ f }}</li>
-              </ul>
-            </template>
-          </div>
+        </div>
+        <div v-if="t[0] === 'fsck' && !running('fsck') && (m.quarantine || m.purged)" class="quar" data-testid="quarantine">
+          <template v-if="m.quarantine">
+            <span>Quarantine is a folder where repair sets damaged data aside instead of deleting it. It holds {{ copies(m.quarantine.count) }} ({{ formatBytes(m.quarantine.bytes) }}). {{ m.quarantine.count === 1 ? 'It is' : 'They are' }} kept in case {{ m.quarantine.count === 1 ? 'it helps' : 'they help' }} bring a file back.</span>
+            <Button size="sm" variant="danger" :disabled="m.busy" @click="purgeOpen = true">Delete quarantined copies…</Button>
+          </template>
+          <template v-else-if="m.purged">
+            <span id="purged-msg" tabindex="-1">Deleted {{ copies(m.purged.deleted_count) }} ({{ formatBytes(m.purged.deleted_bytes) }}) from quarantine.</span>
+            <ul v-if="purgedLost.length" class="issues" aria-label="Files that can no longer be restored">
+              <li v-for="f in purgedLost" :key="f" class="mono">{{ f }}</li>
+            </ul>
+          </template>
         </div>
         <div v-if="t[0] === 'verify' && m.verifyRange && !running('verify')" class="result" data-testid="verify-range-result" role="status">
           <strong class="head2" :class="m.verifyRange.report.errors ? 'bad' : 'ok'">
@@ -265,10 +276,10 @@ function runGc() {
     <AlertDialog
       v-model:open="purgeOpen"
       title="Delete quarantined copies?"
-      :description="m.quarantine ? `This deletes ${copies(m.quarantine.count)} of damaged data (${formatBytes(m.quarantine.bytes)}) for good. This cannot be undone, and any file that depended on them can no longer be restored.` : 'The quarantine is empty.'"
+      :description="m.quarantine ? `This deletes ${copies(m.quarantine.count)} of damaged data (${formatBytes(m.quarantine.bytes)}) for good. This cannot be undone, and any file that needs ${m.quarantine.count === 1 ? 'it' : 'them'} can no longer be restored.` : 'The quarantine is empty.'"
       confirm-label="Delete copies"
       destructive
-      @confirm="m.purgeQuarantine(true)"
+      @confirm="purge"
     />
   </section>
 </template>

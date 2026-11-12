@@ -96,3 +96,52 @@ describe('quarantine purge', () => {
     expect(m.purged).toBeNull()
   })
 })
+
+describe('fix round 1', () => {
+  it('a purge that names lost files turns a clean repair into a failure', async () => {
+    const m = useMaintenanceStore()
+    api.fsck.mockResolvedValue(report({ restored: 1, quarantine_count: 1, quarantine_bytes: 10 }))
+    await m.runFsck({ repair: true, confirmed: true })
+    expect(m.fsckGood).toBe(true)
+    api.purgeQuarantine.mockResolvedValue({ deleted_count: 1, deleted_bytes: 10, unrestorable_files: ['a.psd'] })
+    await m.purgeQuarantine(true)
+    expect(m.fsckGood).toBe(false)
+  })
+
+  it('a result from another repository offers no purge and the purge refuses', async () => {
+    const m = useMaintenanceStore()
+    api.fsck.mockResolvedValue(report({ quarantine_count: 2, quarantine_bytes: 10 }))
+    await m.runFsck({})
+    expect(m.fsck?.root).toBe('/repos/hero')
+    useRepoStore().path = '/repos/other'
+    // the repo watcher clears it; also force a stale record to prove the root check itself
+    m.fsck = { report: report({ quarantine_count: 2, quarantine_bytes: 10 }) as never, at: 1, root: '/repos/hero' }
+    expect(m.quarantine).toBeNull()
+    expect(await m.purgeQuarantine(true)).toBe(false)
+    expect(api.purgeQuarantine).not.toHaveBeenCalled()
+  })
+
+  it('a check that lands after the repository changed is dropped', async () => {
+    const m = useMaintenanceStore()
+    let release!: (v: unknown) => void
+    api.fsck.mockImplementation(() => new Promise((r) => (release = r)))
+    const p = m.runFsck({})
+    useRepoStore().path = '/repos/other'
+    release(report({ quarantine_count: 2 }))
+    await p
+    expect(m.fsck).toBeNull()
+  })
+
+  it('a purge confirmed while busy says so instead of doing nothing', async () => {
+    const m = useMaintenanceStore()
+    api.fsck.mockResolvedValue(report({ quarantine_count: 2, quarantine_bytes: 10 }))
+    await m.runFsck({})
+    let release!: (v: unknown) => void
+    api.fsck.mockImplementation(() => new Promise((r) => (release = r)))
+    const other = m.runFsck({})
+    expect(await m.purgeQuarantine(true)).toBe(false)
+    expect(m.error?.message).toMatch(/running/i)
+    release(report())
+    await other
+  })
+})
