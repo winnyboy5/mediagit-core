@@ -114,6 +114,40 @@ fn verify_fails_when_a_referenced_blob_is_missing() {
     assert_verify_fails(tmp.path(), &["--quick"]);
 }
 
+/// Two commits; the second adds `b.txt`, whose blob is then deleted.
+fn two_commits_second_blob_missing(repo: &Path) {
+    commit_file(repo, "a.txt", b"first");
+    std::fs::write(repo.join("b.txt"), b"second").unwrap();
+    let before = object_files(repo);
+    run(repo, &["add", "b.txt"]);
+    let added: Vec<PathBuf> = object_files(repo).difference(&before).cloned().collect();
+    run(repo, &["commit", "-m", "second"]);
+    assert_eq!(added.len(), 1, "fixture: add should write exactly the blob");
+    std::fs::remove_file(&added[0]).unwrap();
+}
+
+#[test]
+fn verify_commit_form_fails_when_a_blob_is_missing() {
+    let tmp = TempDir::new().unwrap();
+    two_commits_second_blob_missing(tmp.path());
+    assert_verify_fails(tmp.path(), &["HEAD"]);
+}
+
+#[test]
+fn verify_range_form_fails_when_a_blob_is_missing() {
+    let tmp = TempDir::new().unwrap();
+    two_commits_second_blob_missing(tmp.path());
+    assert_verify_fails(tmp.path(), &["--start", "HEAD~1", "--end", "HEAD"]);
+}
+
+#[test]
+fn verify_commit_and_range_forms_pass_on_an_intact_repository() {
+    let tmp = TempDir::new().unwrap();
+    commit_file(tmp.path(), "a.txt", b"first");
+    run(tmp.path(), &["verify", "HEAD"]);
+    run(tmp.path(), &["verify", "--start", "HEAD", "--end", "HEAD"]);
+}
+
 #[test]
 fn verify_fails_when_a_chunk_of_a_chunked_file_is_missing() {
     let tmp = TempDir::new().unwrap();

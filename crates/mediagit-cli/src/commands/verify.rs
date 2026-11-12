@@ -369,6 +369,21 @@ impl VerifyCmd {
             }
         }
 
+        // Tree contents: the loop above stops at `commit.tree`. Same
+        // existence walk fsck uses, restricted to the selected commits.
+        let checker = FsckChecker::new_with_refdb(storage, Some(RefDatabase::new(mediagit_dir)));
+        let contents = checker
+            .check_commits(&commits_in_range)
+            .await
+            .context("Verification failed")?;
+        for issue in contents.issues_by_severity(IssueSeverity::Error) {
+            errors += 1;
+            problems.push(issue.message.clone());
+            if !self.quiet {
+                println!("  {} {}", style("✗").red(), issue.message);
+            }
+        }
+
         if crate::output::machine_mode() {
             // Failures are data here, not just an exit code.
             crate::output::emit_ok(&VerifyRangeReport {

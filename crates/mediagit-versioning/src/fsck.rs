@@ -785,20 +785,8 @@ impl FsckChecker {
             // notice an object that is *gone*. Only a walk down from the refs
             // can, and this one stopped one level short — so deleting every
             // blob in the repo left `fsck` reporting a clean bill of health.
-            referenced_objects.insert(commit.tree);
-            if !self.object_exists(&commit.tree).await? {
-                report.add_issue(
-                    FsckIssue::new(
-                        IssueSeverity::Error,
-                        IssueCategory::MissingObject,
-                        format!("Commit {} references missing tree {}", oid, commit.tree),
-                    )
-                    .with_oid(*oid),
-                );
-            } else {
-                self.check_tree_entries(&commit.tree, visited, referenced_objects, report)
-                    .await?;
-            }
+            self.check_commit_tree(oid, &commit.tree, visited, referenced_objects, report)
+                .await?;
 
             // Traverse parent commits
             for parent in &commit.parents {
@@ -809,6 +797,61 @@ impl FsckChecker {
 
             Ok(())
         })
+    }
+
+    /// Tree-existence step shared by [`Self::traverse_commit`] and
+    /// [`Self::check_commits`].
+    async fn check_commit_tree(
+        &self,
+        commit_oid: &Oid,
+        tree: &Oid,
+        visited: &mut HashSet<Oid>,
+        referenced_objects: &mut HashSet<Oid>,
+        report: &mut FsckReport,
+    ) -> anyhow::Result<()> {
+        referenced_objects.insert(*tree);
+        if !self.object_exists(tree).await? {
+            report.add_issue(
+                FsckIssue::new(
+                    IssueSeverity::Error,
+                    IssueCategory::MissingObject,
+                    format!("Commit {} references missing tree {}", commit_oid, tree),
+                )
+                .with_oid(*commit_oid),
+            );
+        } else {
+            self.check_tree_entries(tree, visited, referenced_objects, report)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Existence-check the contents (tree, blobs, manifests, chunks) of the
+    /// given commits only, without walking parents. For callers that already
+    /// selected a commit range (`verify <COMMIT>` / `--start` / `--end`).
+    /// Commits that are themselves missing or unparseable are skipped: the
+    /// caller reports those.
+    pub async fn check_commits(&self, commits: &[Oid]) -> anyhow::Result<FsckReport> {
+        let mut report = FsckReport::new();
+        let mut visited = HashSet::new();
+        let mut referenced = HashSet::new();
+        for oid in commits {
+            let Ok(data) = self.odb.read(oid).await else {
+                continue;
+            };
+            let Ok(commit) = crate::format::deserialize::<Commit>(&data) else {
+                continue;
+            };
+            self.check_commit_tree(
+                oid,
+                &commit.tree,
+                &mut visited,
+                &mut referenced,
+                &mut report,
+            )
+            .await?;
+        }
+        Ok(report)
     }
 
     /// Verify every object a reachable tree points at is actually present.
