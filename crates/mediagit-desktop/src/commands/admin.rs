@@ -141,9 +141,28 @@ pub struct FsckOptions {
     pub dry_run: bool,
     /// The person has been told what repair does and agreed.
     pub confirmed: bool,
+    /// Delete the quarantined copies instead of checking (`--purge-quarantine --yes`).
+    pub purge_quarantine: bool,
 }
 
 fn fsck_argv(o: &FsckOptions) -> Result<Vec<String>, EngineError> {
+    // A purge deletes for good and runs no check: it stands alone and needs the person's yes.
+    if o.purge_quarantine {
+        if o.repair || o.dry_run || o.deep || o.all || o.lost_found || o.no_dangling {
+            return Err(invalid(
+                "purge",
+                "cannot be combined with a check or repair",
+            ));
+        }
+        if !o.confirmed {
+            return Err(invalid("purge", "not confirmed"));
+        }
+        return Ok(vec![
+            "fsck".to_owned(),
+            "--purge-quarantine".into(),
+            "--yes".into(),
+        ]);
+    }
     if o.dry_run && !o.repair {
         return Err(invalid("preview", "a preview needs repair switched on"));
     }
@@ -1233,6 +1252,54 @@ mod tests {
             fsck_argv(&o(false, false, true)).unwrap(),
             ["fsck", "--quick"]
         );
+    }
+
+    #[test]
+    fn fsck_purge_needs_confirmation_and_never_mixes_with_a_check_or_repair() {
+        let purge = |confirmed| FsckOptions {
+            purge_quarantine: true,
+            confirmed,
+            ..FsckOptions::default()
+        };
+        assert!(bad(fsck_argv(&purge(false))));
+        assert_eq!(
+            fsck_argv(&purge(true)).unwrap(),
+            ["fsck", "--purge-quarantine", "--yes"]
+        );
+        // Never together with repair (real or preview) or any check switch.
+        for mixed in [
+            FsckOptions {
+                repair: true,
+                ..purge(true)
+            },
+            FsckOptions {
+                repair: true,
+                dry_run: true,
+                ..purge(true)
+            },
+            FsckOptions {
+                dry_run: true,
+                ..purge(true)
+            },
+            FsckOptions {
+                deep: true,
+                ..purge(true)
+            },
+            FsckOptions {
+                all: true,
+                ..purge(true)
+            },
+            FsckOptions {
+                lost_found: true,
+                ..purge(true)
+            },
+            FsckOptions {
+                no_dangling: true,
+                ..purge(true)
+            },
+        ] {
+            assert!(bad(fsck_argv(&mixed)));
+        }
     }
 
     #[test]
