@@ -2877,4 +2877,139 @@ mod tests {
             found
         );
     }
+
+    fn missing_oids(report: &FsckReport) -> Vec<Oid> {
+        report
+            .issues
+            .iter()
+            .filter(|i| i.category == IssueCategory::MissingObject)
+            .filter_map(|i| i.oid)
+            .collect()
+    }
+
+    /// A reachable commit whose tree object is gone: `fsck` with default
+    /// options must name the tree's commit as having a missing tree.
+    #[tokio::test]
+    async fn test_fsck_detects_missing_tree_of_commit() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (checker, _blob, tree, commit, storage) = repo_with_one_commit(&tmp).await;
+
+        storage.delete(&tree.to_hex()).await.unwrap();
+        assert!(!storage.exists(&tree.to_hex()).await.unwrap());
+
+        let report = checker.check(FsckOptions::default()).await.unwrap();
+
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.category == IssueCategory::MissingObject
+                    && i.oid == Some(commit)
+                    && i.message.contains(&tree.to_string())),
+            "a missing tree must be reported against its commit, got: {:?}",
+            report.issues
+        );
+        assert!(report.has_errors());
+    }
+
+    /// One-commit repo whose only file is a 2 MB chunked blob (manifest +
+    /// chunks). Returns (checker, blob_oid, first_chunk_key, storage).
+    async fn repo_with_chunked_blob(
+        tmp: &tempfile::TempDir,
+    ) -> (FsckChecker, Oid, String, Arc<dyn StorageBackend>) {
+        use crate::chunking::{ChunkManifest, ChunkStrategy};
+        use crate::{Commit, FileMode, Signature, Tree, TreeEntry};
+        use mediagit_storage::LocalBackend;
+
+        let storage: Arc<dyn StorageBackend> =
+            Arc::new(LocalBackend::new(tmp.path()).await.unwrap());
+        let odb = ObjectDatabase::with_optimizations(
+            storage.clone(),
+            100,
+            Some(ChunkStrategy::Fixed { size: 256 * 1024 }),
+            false,
+            0,
+        );
+        let data: Vec<u8> = (0..2 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        let blob = odb
+            .write_chunked(ObjectType::Blob, &data, "big.bin")
+            .await
+            .unwrap();
+        let manifest_bytes = storage
+            .get(&format!("manifests/{}", blob.to_hex()))
+            .await
+            .unwrap();
+        let manifest = ChunkManifest::from_bytes(&manifest_bytes).unwrap();
+        let chunk_key = format!("chunks/{}", manifest.chunks[0].id.to_hex());
+
+        let mut tree = Tree::new();
+        tree.add_entry(TreeEntry::new(
+            "big.bin".to_string(),
+            FileMode::Regular,
+            blob,
+        ));
+        let tree_oid = tree.write(&odb).await.unwrap();
+        let sig = Signature::now("t".to_string(), "t@e".to_string());
+        let commit = Commit::new(tree_oid, sig.clone(), sig, "msg".to_string());
+        let commit_oid = commit.write(&odb).await.unwrap();
+
+        let refdb = RefDatabase::new(tmp.path());
+        refdb
+            .write(&Ref::new_direct("refs/heads/main".to_string(), commit_oid))
+            .await
+            .unwrap();
+        let checker = FsckChecker::new_with_refdb(storage.clone(), Some(refdb));
+        (checker, blob, chunk_key, storage)
+    }
+
+    /// Intact chunked repo stays clean, so the two tests below cannot pass
+    /// by reporting unconditionally.
+    #[tokio::test]
+    async fn test_fsck_intact_chunked_repo_is_clean() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (checker, _blob, _chunk, _storage) = repo_with_chunked_blob(&tmp).await;
+        let report = checker.check(FsckOptions::default()).await.unwrap();
+        assert!(!report.has_errors(), "got: {:?}", report.issues);
+    }
+
+    /// A chunked blob's manifest is its identity: delete it and the tree
+    /// entry points at nothing.
+    #[tokio::test]
+    async fn test_fsck_detects_missing_manifest_of_chunked_blob() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (checker, blob, _chunk, storage) = repo_with_chunked_blob(&tmp).await;
+
+        storage
+            .delete(&format!("manifests/{}", blob.to_hex()))
+            .await
+            .unwrap();
+
+        let report = checker.check(FsckOptions::default()).await.unwrap();
+
+        assert!(
+            missing_oids(&report).contains(&blob),
+            "a chunked blob with no manifest must be reported missing, got: {:?}",
+            report.issues
+        );
+    }
+
+    /// With the manifest intact but a chunk gone, the default `check` must
+    /// still fail. (Existence of chunks is `check_objects`' job, not the
+    /// connectivity walk's; this pins the end-to-end default path.)
+    #[tokio::test]
+    async fn test_fsck_detects_missing_chunk_of_chunked_blob_end_to_end() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (checker, _blob, chunk_key, storage) = repo_with_chunked_blob(&tmp).await;
+
+        storage.delete(&chunk_key).await.unwrap();
+        assert!(!storage.exists(&chunk_key).await.unwrap());
+
+        let report = checker.check(FsckOptions::default()).await.unwrap();
+
+        assert!(
+            report.has_errors(),
+            "a missing chunk must fail default fsck, got: {:?}",
+            report.issues
+        );
+    }
 }
