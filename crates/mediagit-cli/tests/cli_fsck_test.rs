@@ -68,8 +68,13 @@ fn random_bytes(n: usize) -> Vec<u8> {
 }
 
 fn assert_fsck_fails(repo: &Path) {
+    assert_fsck_args_fail(repo, &[]);
+}
+
+fn assert_fsck_args_fail(repo: &Path, args: &[&str]) {
     let out = mediagit()
         .arg("fsck")
+        .args(args)
         .current_dir(repo)
         .assert()
         .failure()
@@ -94,6 +99,7 @@ fn fsck_fails_when_a_referenced_blob_is_missing() {
     assert_eq!(added.len(), 1, "fixture: add should write exactly the blob");
     std::fs::remove_file(&added[0]).unwrap();
     assert_fsck_fails(tmp.path());
+    assert_fsck_args_fail(tmp.path(), &["--quick"]);
 }
 
 #[test]
@@ -106,4 +112,6 @@ fn fsck_fails_when_a_chunk_of_a_chunked_file_is_missing() {
         .expect("fixture: file was not chunked");
     std::fs::remove_file(chunk).unwrap();
     assert_fsck_fails(tmp.path());
+    assert_fsck_args_fail(tmp.path(), &["--quick"]);
+    assert_fsck_args_fail(tmp.path(), &["--max-objects", "1"]);
 }

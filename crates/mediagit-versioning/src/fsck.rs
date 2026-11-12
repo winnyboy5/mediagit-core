@@ -280,12 +280,15 @@ impl FsckOptions {
         }
     }
 
-    /// Create options for a quick check (objects and refs only)
+    /// Create options for a quick check (objects, refs and the existence walk;
+    /// no dangling or chunk-delta analysis). Connectivity stays on: it only
+    /// tests existence, never reads blobs, and without it a deleted object is
+    /// invisible.
     pub fn quick() -> Self {
         Self {
             check_objects: true,
             check_refs: true,
-            check_connectivity: false,
+            check_connectivity: true,
             check_dangling: false,
             check_chunk_deltas: false,
             max_objects: 0,
@@ -817,7 +820,10 @@ impl FsckChecker {
     /// for. Whether the bytes are *correct* stays `check_objects`' job — it
     /// already reads and BLAKE3-verifies every object it enumerates, including
     /// per-chunk verification for manifests. This walk answers only the
-    /// question enumeration cannot: is anything referenced but absent.
+    /// question enumeration cannot: is anything referenced but absent —
+    /// blobs, trees, manifests, and (via the manifest) every chunk, so a
+    /// missing chunk is reported even when `check_objects` is off or
+    /// truncated by `max_objects`.
     ///
     /// Shares `visited` with [`Self::traverse_commit`] so trees reused across
     /// commits are walked once; OIDs are content hashes, so a tree OID can
@@ -857,6 +863,30 @@ impl FsckChecker {
                         .with_oid(entry.oid),
                     );
                     continue;
+                }
+
+                // A chunked blob's manifest can exist while a chunk is gone.
+                // Metadata only: read the (small) manifest, then test each
+                // chunk id's existence; no chunk bytes are read. Not left to
+                // `check_objects`, which `max_objects` can truncate. An
+                // unreadable manifest is corruption, reported there.
+                if let Ok(Some(manifest)) = self.odb.get_chunk_manifest(&entry.oid).await {
+                    for chunk in &manifest.chunks {
+                        referenced_objects.insert(chunk.id);
+                        if !self.odb.chunk_exists(&chunk.id).await? {
+                            report.add_issue(
+                                FsckIssue::new(
+                                    IssueSeverity::Error,
+                                    IssueCategory::MissingObject,
+                                    format!(
+                                        "Blob {} references missing chunk {}",
+                                        entry.oid, chunk.id
+                                    ),
+                                )
+                                .with_oid(chunk.id),
+                            );
+                        }
+                    }
                 }
 
                 // Trees in this VCS are normally single-level (entries keyed
@@ -2167,7 +2197,8 @@ mod tests {
 
         let quick = FsckOptions::quick();
         assert!(!quick.check_dangling);
-        assert!(!quick.check_connectivity);
+        // The existence walk is what sees deleted objects; quick keeps it.
+        assert!(quick.check_connectivity);
     }
 
     async fn write_ref(storage: &Arc<MockBackend>, name: &str, oid: Oid) {
@@ -2993,9 +3024,23 @@ mod tests {
         );
     }
 
+    /// Assert the report names `hex` as a missing object.
+    fn assert_names_missing(report: &FsckReport, hex: &str) {
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.category == IssueCategory::MissingObject
+                    && i.severity == IssueSeverity::Error
+                    && i.oid.is_some_and(|o| o.to_hex() == hex)
+                    && i.message.contains(hex)),
+            "expected a MissingObject error naming {hex}, got: {:?}",
+            report.issues
+        );
+    }
+
     /// With the manifest intact but a chunk gone, the default `check` must
-    /// still fail. (Existence of chunks is `check_objects`' job, not the
-    /// connectivity walk's; this pins the end-to-end default path.)
+    /// fail and name that chunk.
     #[tokio::test]
     async fn test_fsck_detects_missing_chunk_of_chunked_blob_end_to_end() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -3006,10 +3051,79 @@ mod tests {
 
         let report = checker.check(FsckOptions::default()).await.unwrap();
 
+        assert!(report.has_errors());
+        assert_names_missing(&report, chunk_key.strip_prefix("chunks/").unwrap());
+    }
+
+    /// The walk, not `check_objects`, owns chunk existence: with objects off
+    /// (and with a tiny `max_objects`) a missing chunk is still reported.
+    #[tokio::test]
+    async fn test_fsck_missing_chunk_found_without_check_objects() {
+        for (check_objects, max_objects) in [(false, 0), (true, 1)] {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let (checker, _blob, chunk_key, storage) = repo_with_chunked_blob(&tmp).await;
+            storage.delete(&chunk_key).await.unwrap();
+
+            let options = FsckOptions {
+                check_objects,
+                max_objects,
+                ..FsckOptions::default()
+            };
+            let report = checker.check(options).await.unwrap();
+            assert_names_missing(&report, chunk_key.strip_prefix("chunks/").unwrap());
+        }
+    }
+
+    /// `quick()` must see a deleted blob, tree and manifest: it used to turn
+    /// the walk off, so every one of these passed.
+    #[tokio::test]
+    async fn test_fsck_quick_detects_missing_blob() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (checker, blob, _tree, _commit, storage) = repo_with_one_commit(&tmp).await;
+        storage.delete(&blob.to_hex()).await.unwrap();
+
+        let report = checker.check(FsckOptions::quick()).await.unwrap();
+        assert_names_missing(&report, &blob.to_hex());
+    }
+
+    #[tokio::test]
+    async fn test_fsck_quick_detects_missing_tree() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (checker, _blob, tree, _commit, storage) = repo_with_one_commit(&tmp).await;
+        storage.delete(&tree.to_hex()).await.unwrap();
+
+        let report = checker.check(FsckOptions::quick()).await.unwrap();
         assert!(
-            report.has_errors(),
-            "a missing chunk must fail default fsck, got: {:?}",
+            report
+                .issues
+                .iter()
+                .any(|i| i.category == IssueCategory::MissingObject
+                    && i.message.contains(&tree.to_string())),
+            "got: {:?}",
             report.issues
         );
+    }
+
+    #[tokio::test]
+    async fn test_fsck_quick_detects_missing_commit() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (checker, _blob, _tree, commit, storage) = repo_with_one_commit(&tmp).await;
+        storage.delete(&commit.to_hex()).await.unwrap();
+
+        let report = checker.check(FsckOptions::quick()).await.unwrap();
+        assert!(report.has_errors(), "got: {:?}", report.issues);
+    }
+
+    #[tokio::test]
+    async fn test_fsck_quick_detects_missing_manifest() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (checker, blob, _chunk, storage) = repo_with_chunked_blob(&tmp).await;
+        storage
+            .delete(&format!("manifests/{}", blob.to_hex()))
+            .await
+            .unwrap();
+
+        let report = checker.check(FsckOptions::quick()).await.unwrap();
+        assert_names_missing(&report, &blob.to_hex());
     }
 }
