@@ -140,6 +140,8 @@ pub struct FsckCliReport {
     pub refs_removed: Option<u64>,
     /// `--repair`: files that can no longer be restored (empty otherwise).
     pub unrestorable_files: Vec<String>,
+    /// `--repair`: things that went wrong mid-repair (empty otherwise).
+    pub repair_errors: Vec<String>,
     /// Damaged copies held in `.mediagit/quarantine`.
     #[cfg_attr(test, ts(type = "number"))]
     pub quarantine_count: u64,
@@ -181,7 +183,8 @@ pub(super) fn emit_integrity(
     repair: Option<&RepairOutcome>,
     quarantine: &QuarantineStatus,
 ) -> Result<()> {
-    let lost_files = repair.is_some_and(|o| !o.unrestorable_files.is_empty());
+    let lost_files =
+        repair.is_some_and(|o| !o.unrestorable_files.is_empty() || !o.errors.is_empty());
     let healthy = !report.has_errors() && !lost_files;
     output::emit_ok(&FsckCliReport {
         healthy,
@@ -196,6 +199,7 @@ pub(super) fn emit_integrity(
         quarantined: repair.map(|o| o.quarantined.len() as u64),
         refs_removed: repair.map(|o| o.refs_removed.len() as u64),
         unrestorable_files: repair.map_or_else(Vec::new, |o| o.unrestorable_files.clone()),
+        repair_errors: repair.map_or_else(Vec::new, |o| o.errors.clone()),
         quarantine_count: quarantine.count,
         quarantine_bytes: quarantine.bytes,
         issues: report
@@ -509,7 +513,7 @@ impl FsckCmd {
         // Exit with error if critical issues found, or a file is lost
         let unrestorable = outcome
             .as_ref()
-            .is_some_and(|o| !o.unrestorable_files.is_empty());
+            .is_some_and(|o| !o.unrestorable_files.is_empty() || !o.errors.is_empty());
         if report.has_errors() || unrestorable {
             if !self.quiet() {
                 println!();
@@ -667,6 +671,9 @@ impl FsckCmd {
                 "  • {flattened} {} over-deep delta chain(s)",
                 o.flattened.len()
             );
+        }
+        for e in &o.errors {
+            println!("{} {e}", style("✖").red().bold());
         }
         if !o.unrestorable_files.is_empty() {
             println!(

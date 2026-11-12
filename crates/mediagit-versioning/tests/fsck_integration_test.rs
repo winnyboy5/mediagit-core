@@ -899,3 +899,79 @@ async fn test_fsck_sweep_drops_saved_ref_when_the_ref_is_back() {
     assert!(!saved.exists(), "ref is back: the saved copy goes");
     assert_eq!((st.removed, st.count), (1, 0));
 }
+
+/// The report is older than the repair: an object that reads fine now must
+/// not be quarantined (IMPORTANT 3).
+#[tokio::test]
+async fn test_fsck_repair_skips_an_object_that_is_healthy_now() {
+    let repo = Layout::new().await;
+    let blob = repo.commit_photo(&photo_bytes()).await;
+    let mut report = mediagit_versioning::FsckReport::new();
+    report.add_issue(
+        mediagit_versioning::FsckIssue::new(
+            IssueSeverity::Error,
+            IssueCategory::ChecksumMismatch,
+            "stale".to_string(),
+        )
+        .with_oid(blob)
+        .repairable(),
+    );
+    let before = snapshot(&repo.root);
+
+    let checker = repo.checker();
+    let done = repo.repair(&checker).repair(&report, false).await.unwrap();
+
+    assert!(done.restored.is_empty() && done.quarantined.is_empty());
+    assert!(done.unrestorable_files.is_empty());
+    assert_eq!(before, snapshot(&repo.root), "a healthy object was touched");
+}
+
+/// The second of two pieces cannot be moved: the outcome says so; the object
+/// is neither "restored" nor "quarantined", and no byte is lost (IMPORTANT 4).
+#[tokio::test]
+async fn test_fsck_repair_reports_a_partly_failed_quarantine() {
+    let repo = Layout::new().await;
+    let odb = ObjectDatabase::with_smart_compression(repo.storage.clone(), 10);
+    let data = photo_bytes();
+    let chunk = Oid::hash(&data);
+    odb.write_full_chunk(&chunk, &data).await.unwrap();
+    let chunk_key = format!("chunks/{}", chunk.to_hex());
+    let meta_key = format!("chunk-deltas/{}.meta", chunk.to_hex());
+    repo.storage
+        .put(&chunk_key, b"damaged chunk")
+        .await
+        .unwrap();
+    repo.storage
+        .put(&meta_key, b"damaged sidecar")
+        .await
+        .unwrap();
+
+    let mut report = mediagit_versioning::FsckReport::new();
+    report.add_issue(
+        mediagit_versioning::FsckIssue::new(
+            IssueSeverity::Error,
+            IssueCategory::ChecksumMismatch,
+            "damaged".to_string(),
+        )
+        .with_oid(chunk)
+        .repairable(),
+    );
+    let probe = Probe::new(repo.storage.clone());
+    *probe.fail_delete_nth.lock().unwrap() = Some(2);
+    let checker = repo.probe_checker(&probe);
+
+    let done = repo
+        .probe_repair(&probe, &checker)
+        .repair(&report, false)
+        .await
+        .unwrap();
+
+    assert_eq!(done.errors.len(), 1, "{:?}", done.errors);
+    assert!(done.errors[0].contains(&chunk.to_hex()));
+    assert!(done.restored.is_empty() && done.quarantined.is_empty());
+    // Nothing was lost: piece 1 is in quarantine, piece 2 is still in the store
+    // and also copied to quarantine before the failed delete.
+    assert!(repo.storage.exists(&meta_key).await.unwrap());
+    let kept = snapshot(&repo.root.join(".mediagit/quarantine"));
+    assert_eq!(kept.len(), 2, "{kept:?}");
+}

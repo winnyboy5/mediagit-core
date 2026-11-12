@@ -1668,6 +1668,9 @@ pub struct RepairOutcome {
     pub unrestorable_files: Vec<String>,
     /// (damaged or missing object, file that needs it) behind `unrestorable_files`.
     pub lost: Vec<(Oid, String)>,
+    /// Things that went wrong mid-repair (a move to quarantine failed, ...).
+    /// The object concerned is neither restored nor counted as quarantined.
+    pub errors: Vec<String>,
 }
 
 impl RepairOutcome {
@@ -2063,10 +2066,23 @@ impl FsckRepair {
             return false;
         };
         odb.invalidate_cache(oid).await;
-        odb.stream_object_to(oid, &mut tokio::io::sink())
-            .await
-            .is_ok()
-            || matches!(odb.get_chunk(oid).await, Ok(d) if Oid::hash(&d) == *oid)
+        // Judge the kind of copy that is actually stored: `get_chunk` also
+        // finds a blob's packed copy, which would hide a damaged loose file.
+        let pieces = self.stored_pieces(oid).await;
+        let chunk_ok =
+            || async { matches!(odb.get_chunk(oid).await, Ok(d) if Oid::hash(&d) == *oid) };
+        let object_ok = || async {
+            odb.stream_object_to(oid, &mut tokio::io::sink())
+                .await
+                .is_ok()
+        };
+        if pieces.iter().any(|(kind, _)| *kind != "loose") {
+            chunk_ok().await
+        } else if !pieces.is_empty() {
+            object_ok().await
+        } else {
+            object_ok().await || chunk_ok().await
+        }
     }
 
     /// The ODB repairs write through (and `is_healthy` reads through).
@@ -2252,6 +2268,11 @@ impl FsckRepair {
         dry_run: bool,
         out: &mut RepairOutcome,
     ) -> anyhow::Result<()> {
+        // The report may be older than this repair: an object that reads fine
+        // now is left alone and not mentioned.
+        if self.is_healthy(oid).await {
+            return Ok(());
+        }
         let pieces = self.stored_pieces(oid).await;
         // `missing`: the walk found nothing stored under this id, so there is
         // nothing to quarantine, only a good copy to look for. A "missing"
@@ -2319,10 +2340,15 @@ impl FsckRepair {
 
         for (kind, key) in &pieces {
             if let Err(e) = self.quarantine(kind, key, oid).await {
-                warn!(
-                    "Cannot quarantine damaged {} {}: {}; left in place",
-                    kind, oid, e
-                );
+                // Explicit, never silent. No restore is attempted: a piece
+                // that stayed in place would shadow or be overwritten by a
+                // rewrite, and its bytes are not safely kept.
+                warn!("Cannot quarantine damaged {kind} {oid}: {e}; left in place");
+                out.errors.push(format!(
+                    "{oid}: could not be moved to quarantine ({kind}): {e};                      it is partly or wholly still in the store"
+                ));
+                out.lost
+                    .extend(files.iter().map(|f| (*oid, f.path.clone())));
                 return Ok(());
             }
         }
@@ -2340,6 +2366,9 @@ impl FsckRepair {
         for (kind, key) in self.stored_pieces(oid).await {
             if let Err(e) = self.quarantine(kind, &key, oid).await {
                 warn!("Cannot quarantine bad rewrite of {}: {}", oid, e);
+                out.errors.push(format!(
+                    "{oid}: a failed rewrite could not be moved to quarantine: {e}"
+                ));
             }
         }
         unrestorable(out);

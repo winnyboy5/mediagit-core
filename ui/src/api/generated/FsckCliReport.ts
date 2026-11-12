@@ -31,6 +31,10 @@ refs_removed: number | null,
  */
 unrestorable_files: Array<string>, 
 /**
+ * `--repair`: things that went wrong mid-repair (empty otherwise).
+ */
+repair_errors: Array<string>, 
+/**
  * Damaged copies held in `.mediagit/quarantine`.
  */
 quarantine_count: number, 
