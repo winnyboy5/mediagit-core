@@ -42,8 +42,8 @@ use crate::{
 };
 use mediagit_storage::StorageBackend;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::collections::{HashMap, HashSet};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -348,9 +348,8 @@ pub struct FsckChecker {
     /// live outside the ref graph — the staging index, stashes, in-progress
     /// operation state and the reflog. Optional because `FsckChecker` is also
     /// built in server-side and test contexts that have a storage backend and
-    /// nothing else; when it is absent, dangling objects are reported but
-    /// never marked repairable, so `--repair` cannot delete them on a root set
-    /// known to be incomplete.
+    /// nothing else; when it is absent, the working-state roots are not
+    /// protected and dangling reports may include staged or stashed objects.
     repo_root: Option<PathBuf>,
 }
 
@@ -1203,32 +1202,18 @@ impl FsckChecker {
         // conclusion, because `--repair` then deletes the user's live work.
         self.protect_working_roots(&mut referenced, report).await?;
 
-        // Only a checker that can see those roots may condemn anything. With
-        // no repo root the ref graph is all we have, which is a strictly
-        // narrower set than `gc` protects, so findings stay informational.
-        let can_condemn = self.repo_root.is_some();
-        if !can_condemn {
-            warn!(
-                "Dangling detection ran without a repository root: staged, stashed and \
-                 in-progress objects cannot be distinguished from garbage, so findings \
-                 are reported but not marked repairable"
-            );
-        }
-
-        // Find dangling objects
+        // Informational only: `gc` owns unreferenced objects, `--repair`
+        // never touches them.
         for oid in all_objects {
             if !referenced.contains(&oid) {
-                let issue = FsckIssue::new(
-                    IssueSeverity::Info,
-                    IssueCategory::DanglingObject,
-                    format!("Object {} is not referenced by any commit", oid),
-                )
-                .with_oid(oid);
-                report.add_issue(if can_condemn {
-                    issue.repairable()
-                } else {
-                    issue
-                });
+                report.add_issue(
+                    FsckIssue::new(
+                        IssueSeverity::Info,
+                        IssueCategory::DanglingObject,
+                        format!("Object {} is not referenced by any commit", oid),
+                    )
+                    .with_oid(oid),
+                );
             }
         }
 
@@ -1585,6 +1570,62 @@ pub struct FsckRepair {
     /// storage-only callers keep working; those simply cannot perform
     /// ODB-level repairs and say so rather than silently skipping.
     odb: Option<Arc<ObjectDatabase>>,
+    /// Refs are files managed by `RefDatabase`, not storage keys; broken-ref
+    /// repair and the ref walk behind [`FsckRepair::paths_referencing`] need it.
+    refdb: Option<RefDatabase>,
+    /// Directory containing `.mediagit`. Source of the working files an
+    /// object can be restored from, and home of `.mediagit/quarantine`.
+    /// Without it nothing is moved or restored: repair never deletes.
+    repo_root: Option<PathBuf>,
+}
+
+/// A file in some reachable tree that needs a damaged object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferencingFile {
+    /// Path as stored in the tree (relative to the repository root).
+    pub path: String,
+    /// The tree entry's blob id (the chunk's owner, for a chunk).
+    pub blob: Oid,
+}
+
+/// What a repair run did. Counts are the run's own claims until
+/// [`RepairOutcome::confirm_against`] filters them with a fresh check.
+#[derive(Debug, Clone, Default)]
+pub struct RepairOutcome {
+    /// `--dry-run`: everything below is what *would* happen.
+    pub dry_run: bool,
+    /// Damaged objects rewritten from a good copy.
+    pub restored: Vec<Oid>,
+    /// Damaged objects moved to `.mediagit/quarantine` (never deleted).
+    pub quarantined: Vec<Oid>,
+    /// Broken refs removed through `RefDatabase`.
+    pub refs_removed: Vec<String>,
+    /// Over-deep chunk-delta chains rewritten as full chunks.
+    pub flattened: Vec<Oid>,
+    /// Files that need a quarantined object and so cannot be restored.
+    pub unrestorable_files: Vec<String>,
+}
+
+impl RepairOutcome {
+    /// Issues actually fixed (quarantining is containment, not a fix).
+    pub fn repaired(&self) -> u64 {
+        (self.restored.len() + self.refs_removed.len() + self.flattened.len()) as u64
+    }
+
+    /// Keep only the fixes a fresh check agrees with: an object, ref or chain
+    /// that still shows up as an issue was not repaired, whatever the repair
+    /// step believed.
+    pub fn confirm_against(&mut self, recheck: &FsckReport) {
+        let still_bad = |oid: &Oid| recheck.issues.iter().any(|i| i.oid == Some(*oid));
+        self.restored.retain(|o| !still_bad(o));
+        self.flattened.retain(|o| !still_bad(o));
+        self.refs_removed.retain(|r| {
+            !recheck
+                .issues
+                .iter()
+                .any(|i| i.ref_name.as_deref() == Some(r))
+        });
+    }
 }
 
 impl FsckRepair {
@@ -1594,7 +1635,24 @@ impl FsckRepair {
     /// [`FsckRepair::with_odb`]) are unavailable on an instance built this
     /// way — `repair` reports them instead of claiming success.
     pub fn new(storage: Arc<dyn StorageBackend>) -> Self {
-        Self { storage, odb: None }
+        Self {
+            storage,
+            odb: None,
+            refdb: None,
+            repo_root: None,
+        }
+    }
+
+    /// Attach the ref database (broken-ref repair, ref walk).
+    pub fn with_refdb(mut self, refdb: RefDatabase) -> Self {
+        self.refdb = Some(refdb);
+        self
+    }
+
+    /// Attach the repository root (the directory containing `.mediagit`).
+    pub fn with_repo_root(mut self, repo_root: impl Into<PathBuf>) -> Self {
+        self.repo_root = Some(repo_root.into());
+        self
     }
 
     /// Attach an ODB, enabling repairs that reconstruct content.
@@ -1616,7 +1674,13 @@ impl FsckRepair {
     ///
     /// # Returns
     ///
-    /// Number of issues successfully repaired
+    /// A [`RepairOutcome`]: what was restored, quarantined, removed or
+    /// flattened, and which files can no longer be restored. Damaged objects
+    /// are restored from the working tree when a file there hashes to the
+    /// tree's id; otherwise they are moved to `.mediagit/quarantine`.
+    ///
+    /// Pack and remote restore sources do not exist yet; a damaged object
+    /// that only a pack or remote could heal is quarantined.
     ///
     /// # Examples
     ///
@@ -1633,49 +1697,62 @@ impl FsckRepair {
     ///
     /// if report.has_errors() {
     ///     let repair = FsckRepair::new(storage);
-    ///     let fixed = repair.repair(&report, false).await?;
-    ///     println!("Repaired {} issues", fixed);
+    ///     let outcome = repair.repair(&report, false).await?;
+    ///     println!("Repaired {} issues", outcome.repaired());
     /// }
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn repair(&self, report: &FsckReport, dry_run: bool) -> anyhow::Result<u64> {
+    pub async fn repair(
+        &self,
+        report: &FsckReport,
+        dry_run: bool,
+    ) -> anyhow::Result<RepairOutcome> {
         info!(
             dry_run = dry_run,
             repairable = report.repairable_issues().len(),
             "Starting FSCK repair"
         );
 
-        let mut repaired = 0;
+        let mut out = RepairOutcome {
+            dry_run,
+            ..RepairOutcome::default()
+        };
+
+        let mut damaged: Vec<Oid> = report
+            .repairable_issues()
+            .iter()
+            .filter(|i| i.category == IssueCategory::ChecksumMismatch)
+            .filter_map(|i| i.oid)
+            .collect();
+        damaged.sort_unstable();
+        damaged.dedup();
+        let referencing = self.paths_referencing(&damaged).await?;
 
         for issue in report.repairable_issues() {
             match issue.category {
                 IssueCategory::ChecksumMismatch => {
                     if let Some(oid) = issue.oid
-                        && self.repair_corrupted_object(&oid, dry_run).await?
+                        && !out.restored.contains(&oid)
+                        && !out.quarantined.contains(&oid)
                     {
-                        repaired += 1;
+                        let files = referencing.get(&oid).map_or(&[][..], |v| v.as_slice());
+                        self.repair_damaged_object(&oid, files, dry_run, &mut out)
+                            .await?;
                     }
                 }
                 IssueCategory::BrokenReference => {
                     if let Some(ref_name) = &issue.ref_name
                         && self.repair_broken_reference(ref_name, dry_run).await?
                     {
-                        repaired += 1;
-                    }
-                }
-                IssueCategory::DanglingObject => {
-                    if let Some(oid) = issue.oid
-                        && self.remove_dangling_object(&oid, dry_run).await?
-                    {
-                        repaired += 1;
+                        out.refs_removed.push(ref_name.clone());
                     }
                 }
                 IssueCategory::DeepDeltaChain => {
                     if let Some(oid) = issue.oid
                         && self.flatten_deep_chunk_chain(&oid, dry_run).await?
                     {
-                        repaired += 1;
+                        out.flattened.push(oid);
                     }
                 }
                 _ => {
@@ -1684,8 +1761,15 @@ impl FsckRepair {
             }
         }
 
-        info!(repaired = repaired, "FSCK repair complete");
-        Ok(repaired)
+        out.unrestorable_files.sort();
+        out.unrestorable_files.dedup();
+        info!(
+            restored = out.restored.len(),
+            quarantined = out.quarantined.len(),
+            refs_removed = out.refs_removed.len(),
+            "FSCK repair complete"
+        );
+        Ok(out)
     }
 
     /// Flatten an over-deep chunk-delta chain by re-storing the chunk in full.
@@ -1770,116 +1854,393 @@ impl FsckRepair {
         Ok(true)
     }
 
-    /// Repair a corrupted object by removing it
+    /// Every file that needs one of `oids`, found by walking the trees of all
+    /// commits reachable from local refs: a tree entry whose blob id is in
+    /// `oids`, or whose chunk manifest lists a chunk in `oids`. Empty when the
+    /// ref database or ODB is not attached.
     ///
-    /// `storage.delete(&key)` only touches the loose object path. If `oid`
-    /// isn't present there — e.g. it lives inside a pack — the delete is a
-    /// silent no-op, but the old code still returned `Ok(true)` and the
-    /// caller counted it as repaired (QA-007: "Successfully repaired 67
-    /// issues" while nothing changed, because the objects were packed).
-    /// Now: only claim success when a loose file actually existed to remove.
-    async fn repair_corrupted_object(&self, oid: &Oid, dry_run: bool) -> anyhow::Result<bool> {
-        // Use oid.to_hex() - LocalBackend handles "objects/" prefix and sharding
-        let key = oid.to_hex();
+    /// Annotated-tag objects are not followed (the commit they point at is
+    /// normally reachable from a branch too).
+    pub async fn paths_referencing(
+        &self,
+        oids: &[Oid],
+    ) -> anyhow::Result<HashMap<Oid, Vec<ReferencingFile>>> {
+        let mut found: HashMap<Oid, Vec<ReferencingFile>> = HashMap::new();
+        let (Some(refdb), Some(odb)) = (&self.refdb, &self.odb) else {
+            return Ok(found);
+        };
+        if oids.is_empty() {
+            return Ok(found);
+        }
+        let wanted: HashSet<Oid> = oids.iter().copied().collect();
 
-        // FS-2: a corrupt *chunk* is reported under its own OID, and chunks
-        // live at `chunks/<hex>`, not the loose object path. Handle that first
-        // — otherwise the loose probe below misses, and the operator is told
-        // the chunk is "likely packed" when it is sitting right there.
-        let chunk_key = format!("chunks/{}", oid.to_hex());
-        if self.storage.exists(&chunk_key).await.unwrap_or(false) {
-            if dry_run {
-                info!("[DRY RUN] Would remove corrupted chunk: {}", oid);
-                return Ok(true);
+        let mut commits = Vec::new();
+        for namespace in ["heads", "remotes", "tags"] {
+            for name in refdb.list(namespace).await.unwrap_or_default() {
+                if let Ok(r) = refdb.read(&name).await
+                    && let Some(oid) = r.oid
+                {
+                    commits.push(oid);
+                }
             }
-            // Removing the bad bytes is what lets the next fetch/pull supply a
-            // good copy; keeping them guarantees every future read fails the
-            // same way. Any delta sidecar routing *to* this id goes with it,
-            // or the chunk would resolve back to the payload just deleted.
-            warn!("Removing corrupted chunk: {}", oid);
-            self.storage.delete(&chunk_key).await?;
-            let _ = self
-                .storage
-                .delete(&format!("chunk-deltas/{}.meta", oid.to_hex()))
-                .await;
-            let _ = self
-                .storage
-                .delete(&format!("chunk-deltas/{}", oid.to_hex()))
-                .await;
-            return Ok(true);
         }
 
-        if !self.storage.exists(&key).await.unwrap_or(false) {
-            // Distinguish the two reasons the loose probe misses. Reporting a
+        let mut seen_commits = HashSet::new();
+        let mut seen_trees = HashSet::new();
+        // blob id -> the wanted chunk ids its manifest lists (one manifest read per blob)
+        let mut chunks_of: HashMap<Oid, Vec<Oid>> = HashMap::new();
+        while let Some(commit_oid) = commits.pop() {
+            if !seen_commits.insert(commit_oid) {
+                continue;
+            }
+            let Ok(data) = odb.read(&commit_oid).await else {
+                continue;
+            };
+            let Ok(commit) = crate::format::deserialize::<Commit>(&data) else {
+                continue;
+            };
+            commits.extend(commit.parents.iter().copied());
+
+            let mut trees = vec![(commit.tree, String::new())];
+            while let Some((tree_oid, prefix)) = trees.pop() {
+                // ponytail: a tree reused at a second directory is walked once
+                if !seen_trees.insert(tree_oid) {
+                    continue;
+                }
+                let Ok(data) = odb.read(&tree_oid).await else {
+                    continue;
+                };
+                let Ok(tree) = crate::format::deserialize::<Tree>(&data) else {
+                    continue;
+                };
+                for (key, entry) in &tree.entries {
+                    let path = if prefix.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{prefix}/{key}")
+                    };
+                    if entry.mode == FileMode::Directory {
+                        trees.push((entry.oid, path));
+                        continue;
+                    }
+                    let mut hits = Vec::new();
+                    if wanted.contains(&entry.oid) {
+                        hits.push(entry.oid);
+                    }
+                    let listed = match chunks_of.get(&entry.oid) {
+                        Some(listed) => listed.clone(),
+                        None => {
+                            let listed: Vec<Oid> = match odb.get_chunk_manifest(&entry.oid).await {
+                                Ok(Some(m)) => m
+                                    .chunks
+                                    .iter()
+                                    .map(|c| c.id)
+                                    .filter(|id| wanted.contains(id))
+                                    .collect(),
+                                _ => Vec::new(),
+                            };
+                            chunks_of.insert(entry.oid, listed.clone());
+                            listed
+                        }
+                    };
+                    hits.extend(listed);
+                    for hit in hits {
+                        let file = ReferencingFile {
+                            path: path.clone(),
+                            blob: entry.oid,
+                        };
+                        let files = found.entry(hit).or_default();
+                        if !files.contains(&file) {
+                            files.push(file);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    /// `<root>/.mediagit/quarantine`
+    fn quarantine_dir(&self) -> Option<PathBuf> {
+        self.repo_root
+            .as_ref()
+            .map(|r| r.join(".mediagit").join("quarantine"))
+    }
+
+    /// The stored pieces of a damaged object, as (quarantine kind, storage key).
+    /// A chunk wins over a same-id loose object, as it always did here.
+    async fn stored_pieces(&self, oid: &Oid) -> Vec<(&'static str, String)> {
+        let hex = oid.to_hex();
+        let mut pieces = Vec::new();
+        for (kind, key) in [
+            ("chunk", format!("chunks/{hex}")),
+            ("chunk-delta-meta", format!("chunk-deltas/{hex}.meta")),
+            ("chunk-delta", format!("chunk-deltas/{hex}")),
+        ] {
+            if self.storage.exists(&key).await.unwrap_or(false) {
+                pieces.push((kind, key));
+            }
+        }
+        if pieces.is_empty() && self.storage.exists(&hex).await.unwrap_or(false) {
+            pieces.push(("loose", hex));
+        }
+        pieces
+    }
+
+    /// Move one stored key to `.mediagit/quarantine/<kind>/<oid>[.n]`.
+    /// The original is removed only after the copy is on disk at full length,
+    /// and an existing quarantine file is never overwritten.
+    async fn quarantine(&self, kind: &str, key: &str, oid: &Oid) -> anyhow::Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        let dir = self
+            .quarantine_dir()
+            .ok_or_else(|| anyhow::anyhow!("no repository root, cannot quarantine"))?
+            .join(kind);
+        tokio::fs::create_dir_all(&dir).await?;
+        let bytes = self.storage.get(key).await?;
+
+        let hex = oid.to_hex();
+        let mut n = 0u32;
+        let dest = loop {
+            let name = if n == 0 {
+                hex.clone()
+            } else {
+                format!("{hex}.{n}")
+            };
+            let path = dir.join(name);
+            match tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .await
+            {
+                Ok(mut f) => {
+                    f.write_all(&bytes).await?;
+                    f.sync_all().await?;
+                    break path;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+                Err(e) => return Err(e.into()),
+            }
+        };
+        anyhow::ensure!(
+            tokio::fs::metadata(&dest).await?.len() == bytes.len() as u64,
+            "quarantine copy {} is short; original kept",
+            dest.display()
+        );
+        warn!("Quarantined damaged {} {} at {}", kind, oid, dest.display());
+        // Safe: the bytes are in quarantine, verified above.
+        self.storage.delete(key).await?;
+        Ok(())
+    }
+
+    /// A good copy of `oid` in the working tree, if any file needing it has one.
+    async fn find_source(
+        &self,
+        oid: &Oid,
+        is_chunk: bool,
+        files: &[ReferencingFile],
+    ) -> Option<Source> {
+        let root = self.repo_root.as_ref()?;
+        let odb = self.odb.as_ref()?;
+        for f in files {
+            let rel = Path::new(&f.path);
+            // Tree paths are repository content: never follow `..` or absolute ones.
+            if !rel.components().all(|c| matches!(c, Component::Normal(_))) {
+                continue;
+            }
+            let path = root.join(rel);
+            if !path.is_file() {
+                continue;
+            }
+            if is_chunk {
+                let Ok(Some(manifest)) = odb.get_chunk_manifest(&f.blob).await else {
+                    continue;
+                };
+                let Some(c) = manifest.chunks.iter().find(|c| c.id == *oid) else {
+                    continue;
+                };
+                let (offset, size) = (c.offset, c.size);
+                let read = tokio::task::spawn_blocking(move || {
+                    use std::io::{Read, Seek, SeekFrom};
+                    let mut file = std::fs::File::open(path)?;
+                    file.seek(SeekFrom::Start(offset))?;
+                    let mut buf = vec![0u8; size];
+                    file.read_exact(&mut buf)?;
+                    std::io::Result::Ok(buf)
+                })
+                .await;
+                if let Ok(Ok(data)) = read
+                    && Oid::hash(&data) == *oid
+                {
+                    return Some(Source::Chunk(data));
+                }
+            } else if f.blob == *oid && Oid::from_file_async(&path).await.ok() == Some(*oid) {
+                return Some(Source::File {
+                    path,
+                    name: f.path.clone(),
+                });
+            }
+        }
+        None
+    }
+
+    /// Write `source` back and read it back through the ODB (cache cleared, so
+    /// the bytes on disk are what is judged).
+    async fn restore(&self, odb: &ObjectDatabase, oid: &Oid, source: Source) -> bool {
+        let is_chunk = matches!(source, Source::Chunk(_));
+        let written = match source {
+            Source::Chunk(data) => odb.write_full_chunk(oid, &data).await.is_ok(),
+            Source::File { path, name } => match tokio::fs::read(&path).await {
+                Ok(data) => matches!(
+                    odb.write_with_path(ObjectType::Blob, &data, &name).await,
+                    Ok(written) if written == *oid
+                ),
+                Err(_) => false,
+            },
+        };
+        if !written {
+            return false;
+        }
+        odb.invalidate_cache(oid).await;
+        if is_chunk {
+            matches!(odb.get_chunk(oid).await, Ok(d) if Oid::hash(&d) == *oid)
+        } else {
+            odb.stream_object_to(oid, &mut tokio::io::sink())
+                .await
+                .is_ok()
+        }
+    }
+
+    /// Restore a damaged object from the working tree, or quarantine it.
+    /// Nothing is ever deleted: the bad bytes go to `.mediagit/quarantine`
+    /// first, and only then is a good copy written in their place.
+    async fn repair_damaged_object(
+        &self,
+        oid: &Oid,
+        files: &[ReferencingFile],
+        dry_run: bool,
+        out: &mut RepairOutcome,
+    ) -> anyhow::Result<()> {
+        let pieces = self.stored_pieces(oid).await;
+        if pieces.is_empty() {
+            // Distinguish the two reasons the probe misses. Reporting a
             // chunked manifest as "likely packed" sent operators to
             // `gc --repack`, which cannot help.
-            let manifest_key = format!("manifests/{}", oid.to_hex());
-            if self.storage.exists(&manifest_key).await.unwrap_or(false) {
+            if self
+                .storage
+                .exists(&format!("manifests/{}", oid.to_hex()))
+                .await
+                .unwrap_or(false)
+            {
                 warn!(
-                    "Cannot remove corrupted object {}: it is a chunked-blob manifest. \
+                    "Cannot repair damaged object {}: it is a chunked-blob manifest. \
                      The damage is in its chunks — re-run fsck so they are reported \
                      individually, or re-fetch the object.",
                     oid
                 );
             } else {
                 warn!(
-                    "Cannot remove corrupted object {}: not present as a loose file \
-                     (likely packed); requires a repack, not a targeted delete",
+                    "Cannot repair damaged object {}: not present as a loose file \
+                     (likely packed); requires a repack",
                     oid
                 );
             }
-            return Ok(false);
+            return Ok(());
         }
+        let (Some(odb), Some(_root)) = (&self.odb, &self.repo_root) else {
+            warn!(
+                "Cannot repair damaged object {}: repair was built without an ODB or \
+                 repository root (use FsckRepair::with_odb and with_repo_root)",
+                oid
+            );
+            return Ok(());
+        };
+
+        let is_chunk = pieces.iter().any(|(kind, _)| *kind != "loose");
+        let source = self.find_source(oid, is_chunk, files).await;
+        let unrestorable = |out: &mut RepairOutcome| {
+            out.quarantined.push(*oid);
+            out.unrestorable_files
+                .extend(files.iter().map(|f| f.path.clone()));
+        };
 
         if dry_run {
-            info!("[DRY RUN] Would remove corrupted object: {}", oid);
-            return Ok(true);
+            info!("[DRY RUN] Would repair damaged object {}", oid);
+            if source.is_some() {
+                out.restored.push(*oid);
+            } else {
+                unrestorable(out);
+            }
+            return Ok(());
         }
 
-        warn!("Removing corrupted object: {}", oid);
-        self.storage.delete(&key).await?;
-        Ok(true)
+        for (kind, key) in &pieces {
+            if let Err(e) = self.quarantine(kind, key, oid).await {
+                warn!(
+                    "Cannot quarantine damaged {} {}: {}; left in place",
+                    kind, oid, e
+                );
+                return Ok(());
+            }
+        }
+        odb.invalidate_cache(oid).await;
+
+        let restored = match source {
+            Some(source) => self.restore(odb, oid, source).await,
+            None => false,
+        };
+        if restored {
+            out.restored.push(*oid);
+            return Ok(());
+        }
+        // A rewrite that failed its read-back must not stay behind live.
+        for (kind, key) in self.stored_pieces(oid).await {
+            if let Err(e) = self.quarantine(kind, &key, oid).await {
+                warn!("Cannot quarantine bad rewrite of {}: {}", oid, e);
+            }
+        }
+        unrestorable(out);
+        Ok(())
     }
 
-    /// Repair a broken reference by removing it
+    /// Remove a broken reference through `RefDatabase` (refs are files, not
+    /// storage keys). `HEAD` is never removed: it names an unborn branch in
+    /// every fresh repository.
     async fn repair_broken_reference(&self, ref_name: &str, dry_run: bool) -> anyhow::Result<bool> {
+        let Some(refdb) = &self.refdb else {
+            warn!(
+                "Cannot remove broken reference {}: repair was built without a RefDatabase \
+                 (use FsckRepair::with_refdb)",
+                ref_name
+            );
+            return Ok(false);
+        };
+        if ref_name == "HEAD" {
+            warn!("Not removing HEAD: it points at a branch that has no commits yet");
+            return Ok(false);
+        }
         if dry_run {
             info!("[DRY RUN] Would remove broken reference: {}", ref_name);
             return Ok(true);
         }
 
         warn!("Removing broken reference: {}", ref_name);
-        self.storage.delete(ref_name).await?;
-        Ok(true)
-    }
-
-    /// Remove a dangling object
-    ///
-    /// Same packed-object honesty check as `repair_corrupted_object`: a
-    /// dangling packed object can't be removed with a bare loose delete, so
-    /// don't claim it was repaired.
-    async fn remove_dangling_object(&self, oid: &Oid, dry_run: bool) -> anyhow::Result<bool> {
-        // Use oid.to_hex() - LocalBackend handles "objects/" prefix and sharding
-        let key = oid.to_hex();
-
-        if !self.storage.exists(&key).await.unwrap_or(false) {
-            warn!(
-                "Cannot remove dangling object {}: not present as a loose file \
-                 (likely packed); requires a repack, not a targeted delete",
-                oid
-            );
+        if let Err(e) = refdb.delete(ref_name).await {
+            warn!("Cannot remove broken reference {}: {}", ref_name, e);
             return Ok(false);
         }
-
-        if dry_run {
-            info!("[DRY RUN] Would remove dangling object: {}", oid);
-            return Ok(true);
-        }
-
-        info!("Removing dangling object: {}", oid);
-        self.storage.delete(&key).await?;
         Ok(true)
     }
+}
+
+/// Where a good copy of a damaged object comes from.
+enum Source {
+    /// The exact bytes of one chunk, cut from a working file.
+    Chunk(Vec<u8>),
+    /// A working file that hashes to the object id.
+    File { path: PathBuf, name: String },
 }
 
 #[cfg(test)]
@@ -2144,7 +2505,10 @@ mod tests {
             .repair(&report, false)
             .await
             .unwrap();
-        assert!(repaired > 0, "repair must report at least one fix");
+        assert!(
+            repaired.repaired() > 0,
+            "repair must report at least one fix"
+        );
 
         // The chunk reads back, and byte-identically.
         let recovered = odb
@@ -2182,7 +2546,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            repaired, 0,
+            repaired.repaired(),
+            0,
             "without an ODB the flatten repair must report 0, not a false success"
         );
     }
@@ -2437,7 +2802,8 @@ mod tests {
             .collect();
 
         assert_eq!(
-            repaired, 0,
+            repaired.repaired(),
+            0,
             "a healthy repo has nothing to repair, got report: {:?}",
             report.issues
         );
@@ -2448,7 +2814,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fsck_repair_removes_only_genuine_dangling_blob() {
+    async fn test_fsck_repair_leaves_dangling_blob_to_gc() {
         let storage = Arc::new(MockBackend::new());
         let (blob_oid, tree_oid, commit_oid) = write_referenced_chain(&storage).await;
 
@@ -2489,17 +2855,20 @@ mod tests {
             report.issues
         );
 
+        // Unreferenced objects belong to `gc`: repair neither plans nor
+        // performs anything for them.
         let repair = FsckRepair::new(storage.clone());
-        let repaired = repair.repair(&report, false).await.unwrap();
+        let outcome = repair.repair(&report, false).await.unwrap();
         assert_eq!(
-            repaired, 1,
-            "exactly the orphan must be repaired, got report: {:?}",
+            outcome.repaired(),
+            0,
+            "repair must leave dangling objects to gc, got report: {:?}",
             report.issues
         );
 
         assert!(
-            !storage.exists(&orphan_oid.to_hex()).await.unwrap(),
-            "orphan blob must be deleted"
+            storage.exists(&orphan_oid.to_hex()).await.unwrap(),
+            "orphan blob must survive repair"
         );
         assert!(
             storage.exists(&blob_oid.to_hex()).await.unwrap(),
@@ -2539,7 +2908,8 @@ mod tests {
         let repaired = repair.repair(&report, false).await.unwrap();
 
         assert_eq!(
-            repaired, 0,
+            repaired.repaired(),
+            0,
             "a packed (non-loose) object must never be reported as repaired"
         );
     }
@@ -2615,7 +2985,7 @@ mod tests {
     /// FS-2: detection is only half of it — the reported issue has to be one
     /// `repair` can actually act on, and the count it returns has to be real.
     #[tokio::test]
-    async fn fsck_repair_removes_the_corrupt_chunk_and_counts_it() {
+    async fn fsck_repair_quarantines_the_corrupt_chunk() {
         use crate::chunking::ChunkStrategy;
 
         let storage = Arc::new(MockBackend::new());
@@ -2653,18 +3023,93 @@ mod tests {
             .await
             .unwrap();
 
-        let repair = FsckRepair::new(storage.clone()).with_odb(checker.odb());
-        let repaired = repair.repair(&report, false).await.unwrap();
+        let repo = tempfile::TempDir::new().unwrap();
+        let repair = FsckRepair::new(storage.clone())
+            .with_odb(checker.odb())
+            .with_repo_root(repo.path());
+        let outcome = repair.repair(&report, false).await.unwrap();
 
-        assert!(
-            repaired > 0,
-            "a corrupt loose chunk is removable, so repair must not report 0; \
-             reporting 0 here is the '✅ repaired 0 issues' failure"
-        );
+        assert_eq!(outcome.quarantined, vec![victim_id]);
         assert!(
             !storage.exists(&chunk_key).await.unwrap(),
-            "the corrupt chunk must be gone so a later fetch can supply a good \
-             copy; leaving it means every future read fails identically"
+            "the corrupt chunk must leave the store so a later fetch can supply a \
+             good copy; leaving it means every future read fails identically"
+        );
+        let kept = repo
+            .path()
+            .join(".mediagit/quarantine/chunk")
+            .join(victim_id.to_hex());
+        assert_eq!(
+            std::fs::read(kept).unwrap(),
+            bytes,
+            "the damaged bytes must be kept, not deleted"
+        );
+    }
+
+    /// "Repaired" is only claimed for what a fresh check no longer reports.
+    #[test]
+    fn repair_outcome_keeps_only_confirmed_fixes() {
+        let (fixed, still_bad) = (Oid::hash(b"fixed"), Oid::hash(b"still bad"));
+        let mut outcome = RepairOutcome {
+            restored: vec![fixed, still_bad],
+            refs_removed: vec!["refs/heads/gone".into(), "refs/heads/stuck".into()],
+            quarantined: vec![still_bad],
+            ..RepairOutcome::default()
+        };
+        let mut recheck = FsckReport::new();
+        recheck.add_issue(
+            FsckIssue::new(
+                IssueSeverity::Error,
+                IssueCategory::MissingObject,
+                "still".to_string(),
+            )
+            .with_oid(still_bad),
+        );
+        recheck.add_issue(
+            FsckIssue::new(
+                IssueSeverity::Error,
+                IssueCategory::BrokenReference,
+                "stuck".to_string(),
+            )
+            .with_ref("refs/heads/stuck".to_string()),
+        );
+
+        outcome.confirm_against(&recheck);
+
+        assert_eq!(outcome.restored, vec![fixed]);
+        assert_eq!(outcome.refs_removed, vec!["refs/heads/gone".to_string()]);
+        assert_eq!(outcome.quarantined, vec![still_bad], "containment stands");
+        assert_eq!(outcome.repaired(), 2);
+    }
+
+    #[tokio::test]
+    async fn fsck_repair_without_repo_root_deletes_nothing() {
+        let storage = Arc::new(MockBackend::new());
+        let oid = Oid::hash(b"damaged");
+        storage
+            .put(&oid.to_hex(), b"not the real bytes")
+            .await
+            .unwrap();
+        let mut report = FsckReport::new();
+        report.add_issue(
+            FsckIssue::new(
+                IssueSeverity::Error,
+                IssueCategory::ChecksumMismatch,
+                "damaged".to_string(),
+            )
+            .with_oid(oid)
+            .repairable(),
+        );
+
+        let outcome = FsckRepair::new(storage.clone())
+            .repair(&report, false)
+            .await
+            .unwrap();
+
+        assert!(outcome.quarantined.is_empty() && outcome.restored.is_empty());
+        assert!(
+            storage.exists(&oid.to_hex()).await.unwrap(),
+            "with nowhere to quarantine, the object must stay where it is"
         );
     }
 
@@ -2863,14 +3308,13 @@ mod tests {
         let condemned: Vec<_> = report
             .issues
             .iter()
-            .filter(|i| i.category == IssueCategory::DanglingObject && i.repairable)
+            .filter(|i| i.category == IssueCategory::DanglingObject)
             .filter(|i| i.oid == Some(staged))
             .collect();
         assert!(
             condemned.is_empty(),
-            "a staged-but-uncommitted object must not be marked repairable-dangling: \
-             `fsck --repair` deletes those, destroying the user's staged work that \
-             `gc` deliberately protects. Got: {:?}",
+            "a staged-but-uncommitted object is protected work, not dangling: \
+             `gc` protects it too. Got: {:?}",
             condemned
         );
     }
@@ -2908,9 +3352,8 @@ mod tests {
              the working-root protection has swallowed the whole check"
         );
         assert!(
-            condemned.iter().all(|i| i.repairable),
-            "with a repo root present, dangling findings must stay repairable so \
-             `--repair` can still reclaim real garbage, got: {:?}",
+            condemned.iter().all(|i| !i.repairable),
+            "dangling findings are for `gc`; `--repair` must never act on them, got: {:?}",
             condemned
         );
     }

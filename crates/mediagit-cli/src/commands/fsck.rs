@@ -7,7 +7,9 @@ use crate::repo::create_storage_backend;
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
-use mediagit_versioning::{FsckChecker, FsckOptions, FsckRepair, IssueSeverity, RefDatabase};
+use mediagit_versioning::{
+    FsckChecker, FsckOptions, FsckRepair, IssueSeverity, RefDatabase, RepairOutcome,
+};
 use serde::Serialize;
 
 use crate::output;
@@ -118,6 +120,17 @@ pub struct FsckCliReport {
     /// `--repair`: issues actually repaired (`--dry-run`: that would be).
     #[cfg_attr(test, ts(type = "number | null"))]
     pub repaired: Option<u64>,
+    /// `--repair`: damaged objects rewritten from a good copy (confirmed by a re-check).
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub restored: Option<u64>,
+    /// `--repair`: damaged objects moved to `.mediagit/quarantine`.
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub quarantined: Option<u64>,
+    /// `--repair`: broken refs removed (confirmed by a re-check).
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub refs_removed: Option<u64>,
+    /// `--repair`: files that can no longer be restored (empty otherwise).
+    pub unrestorable_files: Vec<String>,
     pub issues: Vec<FsckIssueReport>,
 }
 
@@ -137,9 +150,10 @@ pub struct FsckIssueReport {
 /// Emit the machine report for `fsck` / `verify`; exits 1 when unhealthy.
 pub(super) fn emit_integrity(
     report: &mediagit_versioning::FsckReport,
-    repaired: Option<u64>,
+    repair: Option<&RepairOutcome>,
 ) -> Result<()> {
-    let healthy = !report.has_errors();
+    let lost_files = repair.is_some_and(|o| !o.unrestorable_files.is_empty());
+    let healthy = !report.has_errors() && !lost_files;
     output::emit_ok(&FsckCliReport {
         healthy,
         objects_checked: report.objects_checked,
@@ -148,7 +162,11 @@ pub(super) fn emit_integrity(
         broken_refs: report.broken_refs,
         missing_objects: report.missing_objects,
         dangling_objects: report.dangling_objects,
-        repaired,
+        repaired: repair.map(RepairOutcome::repaired),
+        restored: repair.map(|o| o.restored.len() as u64),
+        quarantined: repair.map(|o| o.quarantined.len() as u64),
+        refs_removed: repair.map(|o| o.refs_removed.len() as u64),
+        unrestorable_files: repair.map_or_else(Vec::new, |o| o.unrestorable_files.clone()),
         issues: report
             .issues
             .iter()
@@ -229,7 +247,8 @@ impl FsckCmd {
         }
 
         // Repair if requested
-        let mut repaired_count = None;
+        let mut report = report;
+        let mut outcome = None;
         if self.repair && !report.repairable_issues().is_empty() {
             if !self.quiet() {
                 println!();
@@ -240,62 +259,55 @@ impl FsckCmd {
                 );
             }
 
-            // Reuse the checker's ODB: flattening an over-deep chunk-delta
-            // chain re-stores content, so it must compress exactly the way the
-            // reader expects.
-            let repair = FsckRepair::new(storage).with_odb(checker.odb());
-            let repaired = repair
+            // Reuse the checker's ODB: restoring an object re-stores content,
+            // so it must compress exactly the way the reader expects.
+            let repair = FsckRepair::new(storage.clone())
+                .with_odb(checker.odb())
+                .with_refdb(RefDatabase::new(&mediagit_dir))
+                .with_repo_root(&repo_path);
+            let mut done = repair
                 .repair(&report, self.dry_run)
                 .await
                 .context("Repair failed")?;
 
-            // FS-2: never show a green check for work that did not happen.
-            // `repaired` counts repairs that actually succeeded, so it can be
-            // less than the number attempted — most often 0, when every issue
-            // was a packed object no targeted delete can touch. The old
-            // unconditional "✅ Successfully repaired 0 issue(s)" read as
-            // success and sent operators away believing the repo was fixed.
-            let attempted = report.repairable_issues().len();
-            repaired_count = Some(repaired as u64);
+            // Never claim a repair the repository does not bear out: check
+            // again with a cold checker and report only what that confirms.
+            // The exit code and issue list then describe the repository as
+            // it is now, not as it was before the repair.
+            if !self.dry_run {
+                let fresh = FsckChecker::new_with_refdb(
+                    storage.clone(),
+                    Some(RefDatabase::new(&mediagit_dir)),
+                )
+                .with_repo_root(&repo_path);
+                let recheck = fresh
+                    .check(self.build_options())
+                    .await
+                    .context("Failed to re-check after repair")?;
+                done.confirm_against(&recheck);
+                report = recheck;
+            }
+
             if !self.quiet() {
-                if self.dry_run {
-                    println!(
-                        "{} [DRY RUN] Would repair {} of {} issue(s)",
-                        style("ℹ").blue().bold(),
-                        repaired,
-                        attempted
-                    );
-                } else if repaired == 0 && attempted > 0 {
-                    println!(
-                        "{} Repaired 0 of {} issue(s) — no repair succeeded. \
-                         See the warnings above for why each was skipped.",
-                        style("✖").red().bold(),
-                        attempted
-                    );
-                } else if (repaired as usize) < attempted {
-                    println!(
-                        "{} Repaired {} of {} issue(s); {} could not be repaired",
-                        style("⚠").yellow().bold(),
-                        repaired,
-                        attempted,
-                        attempted - repaired as usize
-                    );
-                } else {
-                    println!(
-                        "{} Successfully repaired {} issue(s)",
-                        style("✅").green().bold(),
-                        repaired
-                    );
+                self.print_repair(&done);
+                if !self.dry_run {
+                    println!();
+                    println!("{} After repair:", style("🔍").cyan().bold());
+                    self.display_report(&report)?;
                 }
             }
+            outcome = Some(done);
         }
 
         if output::machine_mode() {
-            return emit_integrity(&report, repaired_count);
+            return emit_integrity(&report, outcome.as_ref());
         }
 
-        // Exit with error if critical issues found
-        if report.has_errors() {
+        // Exit with error if critical issues found, or a file is lost
+        let unrestorable = outcome
+            .as_ref()
+            .is_some_and(|o| !o.unrestorable_files.is_empty());
+        if report.has_errors() || unrestorable {
             if !self.quiet() {
                 println!();
                 println!(
@@ -310,6 +322,68 @@ impl FsckCmd {
         }
 
         Ok(())
+    }
+
+    /// Plain-words account of a repair run (`--dry-run`: the plan).
+    fn print_repair(&self, o: &RepairOutcome) {
+        let (restored, quarantined, removed, flattened) = if o.dry_run {
+            (
+                "Would restore",
+                "Would quarantine",
+                "Would remove",
+                "Would flatten",
+            )
+        } else {
+            ("Restored", "Quarantined", "Removed", "Flattened")
+        };
+        println!();
+        if o.dry_run {
+            println!(
+                "{} [DRY RUN] Nothing was changed.",
+                style("ℹ").blue().bold()
+            );
+        }
+        if !o.restored.is_empty() {
+            println!(
+                "  • {restored} {} damaged object(s) from files in the working folder",
+                o.restored.len()
+            );
+        }
+        if !o.quarantined.is_empty() {
+            println!(
+                "  • {quarantined} {} damaged object(s) in .mediagit/quarantine (nothing is deleted)",
+                o.quarantined.len()
+            );
+        }
+        if !o.refs_removed.is_empty() {
+            println!("  • {removed} {} broken reference(s)", o.refs_removed.len());
+        }
+        if !o.flattened.is_empty() {
+            println!(
+                "  • {flattened} {} over-deep delta chain(s)",
+                o.flattened.len()
+            );
+        }
+        if !o.unrestorable_files.is_empty() {
+            println!(
+                "{} {} file(s) {} no longer be restored:",
+                style("✖").red().bold(),
+                o.unrestorable_files.len(),
+                if o.dry_run { "could" } else { "can" }
+            );
+            for f in &o.unrestorable_files {
+                println!("    {f}");
+            }
+        } else if o.restored.is_empty()
+            && o.quarantined.is_empty()
+            && o.refs_removed.is_empty()
+            && o.flattened.is_empty()
+        {
+            println!(
+                "{} Nothing could be repaired. See the warnings above for why each issue was skipped.",
+                style("✖").red().bold()
+            );
+        }
     }
 
     fn build_options(&self) -> FsckOptions {

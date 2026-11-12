@@ -5,9 +5,11 @@
 
 use mediagit_storage::{LocalBackend, StorageBackend};
 use mediagit_versioning::{
-    Commit, FsckChecker, FsckOptions, FsckRepair, IssueCategory, IssueSeverity, ObjectDatabase,
-    ObjectType, Oid, Ref, Signature,
+    Commit, FileMode, FsckChecker, FsckOptions, FsckRepair, IssueCategory, IssueSeverity,
+    ObjectDatabase, ObjectType, Oid, Ref, RefDatabase, Signature, Tree, TreeEntry,
 };
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -230,55 +232,246 @@ async fn test_fsck_full_mode() {
     );
 }
 
-#[tokio::test]
-async fn test_fsck_repair_broken_reference() {
-    let (_temp_dir, storage, _odb) = setup_test_repo().await;
+/// A repository laid out like the CLI's: `<root>/.mediagit` holds the object
+/// store and the refs, `<root>` is the working tree.
+struct Layout {
+    _tmp: TempDir,
+    root: PathBuf,
+    storage: Arc<LocalBackend>,
+}
 
-    // Create a broken reference
-    let fake_oid = Oid::hash(b"nonexistent");
-    let broken_ref = Ref::new_direct("refs/heads/broken".to_string(), fake_oid);
-    let ref_data = mediagit_versioning::format::serialize(&broken_ref).unwrap();
-    storage.put("refs/heads/broken", &ref_data).await.unwrap();
+impl Layout {
+    async fn new() -> Self {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+        let storage = Arc::new(
+            LocalBackend::new(root.join(".mediagit").to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        Layout {
+            _tmp: tmp,
+            root,
+            storage,
+        }
+    }
 
-    // Run FSCK
-    let checker = FsckChecker::new(storage.clone());
-    let report = checker.check(FsckOptions::default()).await.unwrap();
+    fn refdb(&self) -> RefDatabase {
+        RefDatabase::new(self.root.join(".mediagit"))
+    }
 
-    assert!(report.has_errors());
-    assert_eq!(report.repairable_issues().len(), 1);
+    fn checker(&self) -> FsckChecker {
+        FsckChecker::new_with_refdb(self.storage.clone(), Some(self.refdb()))
+            .with_repo_root(&self.root)
+    }
 
-    // Repair
-    let repair = FsckRepair::new(storage.clone());
-    let repaired = repair.repair(&report, false).await.unwrap();
+    fn repair(&self, checker: &FsckChecker) -> FsckRepair {
+        FsckRepair::new(self.storage.clone())
+            .with_odb(checker.odb())
+            .with_refdb(self.refdb())
+            .with_repo_root(&self.root)
+    }
 
-    assert_eq!(repaired, 1);
+    /// Commit one file `photo.bin` (also left in the working tree).
+    async fn commit_photo(&self, data: &[u8]) -> Oid {
+        let odb = ObjectDatabase::with_smart_compression(self.storage.clone(), 1000);
+        let blob = odb
+            .write_with_path(ObjectType::Blob, data, "photo.bin")
+            .await
+            .unwrap();
+        let mut tree = Tree::new();
+        tree.add_entry(TreeEntry::new(
+            "photo.bin".to_string(),
+            FileMode::Regular,
+            blob,
+        ));
+        let tree_oid = tree.write(&odb).await.unwrap();
+        let sig = Signature::now("T".to_string(), "t@example.com".to_string());
+        let commit = Commit::new(tree_oid, sig.clone(), sig, "c".to_string());
+        let commit_oid = commit.write(&odb).await.unwrap();
+        self.refdb()
+            .write(&Ref::new_direct("refs/heads/main".to_string(), commit_oid))
+            .await
+            .unwrap();
+        std::fs::write(self.root.join("photo.bin"), data).unwrap();
+        blob
+    }
 
-    // Verify repair
-    assert!(!storage.exists("refs/heads/broken").await.unwrap());
+    /// Flip one byte of the stored loose object; returns the damaged bytes.
+    async fn damage(&self, oid: Oid) -> Vec<u8> {
+        let mut bytes = self.storage.get(&oid.to_hex()).await.unwrap();
+        let mid = bytes.len() / 2;
+        bytes[mid] ^= 0xFF;
+        self.storage.put(&oid.to_hex(), &bytes).await.unwrap();
+        bytes
+    }
+}
+
+/// Every file under `dir` with its size.
+fn snapshot(dir: &Path) -> BTreeMap<PathBuf, u64> {
+    let mut out = BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            out.extend(snapshot(&p));
+        } else {
+            out.insert(p.clone(), std::fs::metadata(&p).unwrap().len());
+        }
+    }
+    out
+}
+
+fn photo_bytes() -> Vec<u8> {
+    (0..4096u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+        .collect()
 }
 
 #[tokio::test]
-async fn test_fsck_repair_dry_run() {
-    let (_temp_dir, storage, _odb) = setup_test_repo().await;
-
-    // Create a broken reference
+async fn test_fsck_repair_broken_reference() {
+    let repo = Layout::new().await;
+    // Written through RefDatabase, as the real commands do: a raw
+    // `storage.put` lands somewhere else and hid BUG-007.
     let fake_oid = Oid::hash(b"nonexistent");
-    let broken_ref = Ref::new_direct("refs/heads/broken".to_string(), fake_oid);
-    let ref_data = mediagit_versioning::format::serialize(&broken_ref).unwrap();
-    storage.put("refs/heads/broken", &ref_data).await.unwrap();
+    repo.refdb()
+        .write(&Ref::new_direct("refs/heads/broken".to_string(), fake_oid))
+        .await
+        .unwrap();
 
-    // Run FSCK
-    let checker = FsckChecker::new(storage.clone());
+    let checker = repo.checker();
     let report = checker.check(FsckOptions::default()).await.unwrap();
+    assert!(report.has_errors());
+    assert_eq!(report.repairable_issues().len(), 1);
 
-    // Dry run repair
-    let repair = FsckRepair::new(storage.clone());
-    let repaired = repair.repair(&report, true).await.unwrap();
+    repo.repair(&checker).repair(&report, false).await.unwrap();
 
-    assert_eq!(repaired, 1);
+    assert!(
+        !repo.refdb().exists("refs/heads/broken").await.unwrap(),
+        "the broken ref must really be gone"
+    );
+    let again = repo.checker().check(FsckOptions::default()).await.unwrap();
+    assert!(
+        !again.has_errors(),
+        "re-check must confirm: {:?}",
+        again.issues
+    );
+}
 
-    // Verify ref still exists (dry run shouldn't actually repair)
-    assert!(storage.exists("refs/heads/broken").await.unwrap());
+#[tokio::test]
+async fn test_fsck_repair_corrupt_blob_without_source_is_quarantined() {
+    let repo = Layout::new().await;
+    let blob = repo.commit_photo(&photo_bytes()).await;
+    let damaged = repo.damage(blob).await;
+    std::fs::remove_file(repo.root.join("photo.bin")).unwrap();
+
+    let checker = repo.checker();
+    let report = checker.check(FsckOptions::default()).await.unwrap();
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|i| i.category == IssueCategory::ChecksumMismatch && i.oid == Some(blob)),
+        "fixture: damage unseen: {:?}",
+        report.issues
+    );
+
+    repo.repair(&checker).repair(&report, false).await.unwrap();
+
+    let kept: Vec<_> = snapshot(&repo.root.join(".mediagit/quarantine"))
+        .into_keys()
+        .collect();
+    assert_eq!(kept.len(), 1, "damaged bytes must be kept, got {kept:?}");
+    assert_eq!(std::fs::read(&kept[0]).unwrap(), damaged);
+    assert!(
+        kept[0].to_string_lossy().contains(&blob.to_hex()),
+        "quarantine entry must identify the object: {kept:?}"
+    );
+    assert!(!repo.storage.exists(&blob.to_hex()).await.unwrap());
+
+    let again = repo.checker().check(FsckOptions::default()).await.unwrap();
+    assert!(
+        again
+            .issues
+            .iter()
+            .any(|i| i.category == IssueCategory::MissingObject && i.oid == Some(blob)),
+        "the object is gone, fsck must stay red: {:?}",
+        again.issues
+    );
+}
+
+#[tokio::test]
+async fn test_fsck_repair_dry_run_changes_nothing_on_disk() {
+    let repo = Layout::new().await;
+    let blob = repo.commit_photo(&photo_bytes()).await;
+    repo.damage(blob).await;
+    repo.refdb()
+        .write(&Ref::new_direct(
+            "refs/heads/broken".to_string(),
+            Oid::hash(b"nonexistent"),
+        ))
+        .await
+        .unwrap();
+    std::fs::remove_file(repo.root.join("photo.bin")).unwrap();
+
+    let checker = repo.checker();
+    let report = checker.check(FsckOptions::default()).await.unwrap();
+    let before = snapshot(&repo.root);
+
+    let plan = repo.repair(&checker).repair(&report, true).await.unwrap();
+
+    assert_eq!(before, snapshot(&repo.root), "dry run touched the disk");
+    assert!(plan.dry_run);
+
+    // The real run does exactly what the plan said.
+    let done = repo.repair(&checker).repair(&report, false).await.unwrap();
+    assert_eq!(plan.quarantined, done.quarantined);
+    assert_eq!(plan.restored, done.restored);
+    assert_eq!(plan.refs_removed, done.refs_removed);
+    assert_eq!(plan.unrestorable_files, done.unrestorable_files);
+    assert_eq!(done.unrestorable_files, vec!["photo.bin".to_string()]);
+}
+
+#[tokio::test]
+async fn test_fsck_repair_restores_blob_from_working_file() {
+    let repo = Layout::new().await;
+    let data = photo_bytes();
+    let blob = repo.commit_photo(&data).await;
+    repo.damage(blob).await;
+
+    let checker = repo.checker();
+    let report = checker.check(FsckOptions::default()).await.unwrap();
+    repo.repair(&checker).repair(&report, false).await.unwrap();
+
+    let again = repo.checker().check(FsckOptions::default()).await.unwrap();
+    assert!(
+        !again.has_errors(),
+        "restored repo must be clean: {:?}",
+        again.issues
+    );
+    let odb = ObjectDatabase::with_smart_compression(repo.storage.clone(), 10);
+    assert_eq!(odb.read(&blob).await.unwrap(), data);
+}
+
+#[tokio::test]
+async fn test_fsck_repair_never_removes_head() {
+    let repo = Layout::new().await;
+    // A fresh repository: HEAD names a branch that has no commit yet.
+    repo.refdb()
+        .write(&Ref::new_symbolic(
+            "HEAD".to_string(),
+            "refs/heads/main".to_string(),
+        ))
+        .await
+        .unwrap();
+
+    let checker = repo.checker();
+    let report = checker.check(FsckOptions::default()).await.unwrap();
+    repo.repair(&checker).repair(&report, false).await.unwrap();
+
+    assert!(repo.refdb().exists("HEAD").await.unwrap());
 }
 
 #[tokio::test]

@@ -206,6 +206,32 @@ place (`mediagit_versioning::scan_hex_oids`) rather than in a private copy
 each. The two having drifted apart on which objects count as rooted is what
 caused this.
 
+### Fixed — `fsck --repair` deleted damaged objects and could not remove a broken ref
+
+`--repair` removed a damaged object (a loose blob, a chunk, a delta sidecar).
+With missing-object detection absent, `fsck` and `verify` then reported the
+repository clean while the saved version was gone for good, even when an intact
+copy sat in the working folder. A broken reference was "repaired" through the
+object store, but references are files managed by `RefDatabase`, so nothing
+happened and the output still said "Successfully repaired 1 issue(s)".
+
+- A damaged object is now restored from the working file when that file still
+  hashes to the id in the tree (a chunk is cut from the file at its manifest
+  offset and checked against its own id). The result is read back before it
+  counts.
+- Otherwise the damaged bytes are **moved** to `.mediagit/quarantine/<kind>/<id>`
+  (kind is `loose`, `chunk`, `chunk-delta-meta` or `chunk-delta`). Nothing is
+  deleted. `fsck` then reports the object as missing and exits non-zero, and the
+  output lists the files that can no longer be restored.
+- Broken references are removed through `RefDatabase`. `HEAD` is never removed.
+- After a repair `fsck` checks again and reports only what that check confirms.
+  The exit code and the issue list describe the repository as it is afterwards.
+- Dangling objects are no longer a repair action; `gc` owns them. They are still
+  reported.
+- `fsck --repair --machine` adds `restored`, `quarantined`, `refs_removed` and
+  `unrestorable_files`; existing fields are unchanged.
+- `--dry-run` prints the same plan and changes nothing on disk.
+
 ## [v0.7.0-rc.1] - 2026-11-03
 
 ### Security

@@ -139,7 +139,7 @@ pub use tree::{FileMode, Tree, TreeEntry};
 // Re-export fsck module
 pub use fsck::{
     FsckChecker, FsckIssue, FsckOptions, FsckRepair, FsckReport, IssueCategory, IssueSeverity,
-    scan_hex_oids,
+    ReferencingFile, RepairOutcome, scan_hex_oids,
 };
 
 #[cfg(test)]
