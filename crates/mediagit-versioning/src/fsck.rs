@@ -1636,12 +1636,41 @@ pub struct RepairOutcome {
     pub flattened: Vec<Oid>,
     /// Files that need a quarantined object and so cannot be restored.
     pub unrestorable_files: Vec<String>,
+    /// (damaged or missing object, file that needs it) behind `unrestorable_files`.
+    pub lost: Vec<(Oid, String)>,
 }
 
 impl RepairOutcome {
     /// Issues actually fixed (quarantining is containment, not a fix).
     pub fn repaired(&self) -> u64 {
         (self.restored.len() + self.refs_removed.len() + self.flattened.len()) as u64
+    }
+
+    /// The distinct objects no source could restore yet.
+    pub fn lost_oids(&self) -> Vec<Oid> {
+        let mut v: Vec<Oid> = self.lost.iter().map(|(o, _)| *o).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// A later source (the remote) restored these objects: move them from
+    /// "quarantined"/"lost" to "restored".
+    pub fn mark_restored(&mut self, healthy: &[Oid]) {
+        for oid in healthy {
+            self.quarantined.retain(|q| q != oid);
+            if self.lost.iter().any(|(o, _)| o == oid) && !self.restored.contains(oid) {
+                self.restored.push(*oid);
+            }
+            self.lost.retain(|(o, _)| o != oid);
+        }
+        self.refresh_unrestorable_files();
+    }
+
+    fn refresh_unrestorable_files(&mut self) {
+        self.unrestorable_files = self.lost.iter().map(|(_, p)| p.clone()).collect();
+        self.unrestorable_files.sort();
+        self.unrestorable_files.dedup();
     }
 
     /// Keep only the fixes a fresh check agrees with: an object, ref or chain
@@ -1799,8 +1828,7 @@ impl FsckRepair {
             }
         }
 
-        out.unrestorable_files.sort();
-        out.unrestorable_files.dedup();
+        out.refresh_unrestorable_files();
         info!(
             restored = out.restored.len(),
             quarantined = out.quarantined.len(),
@@ -1996,6 +2024,24 @@ impl FsckRepair {
             }
         }
         Ok(found)
+    }
+
+    /// Does `oid` read back intact right now (cache cleared)? Works for whole
+    /// objects and chunks alike.
+    pub async fn is_healthy(&self, oid: &Oid) -> bool {
+        let Some(odb) = &self.odb else {
+            return false;
+        };
+        odb.invalidate_cache(oid).await;
+        odb.stream_object_to(oid, &mut tokio::io::sink())
+            .await
+            .is_ok()
+            || matches!(odb.get_chunk(oid).await, Ok(d) if Oid::hash(&d) == *oid)
+    }
+
+    /// The ODB repairs write through (and `is_healthy` reads through).
+    pub fn odb(&self) -> Option<Arc<ObjectDatabase>> {
+        self.odb.clone()
     }
 
     /// `<root>/.mediagit/quarantine`
@@ -2227,8 +2273,8 @@ impl FsckRepair {
             if !missing {
                 out.quarantined.push(*oid);
             }
-            out.unrestorable_files
-                .extend(files.iter().map(|f| f.path.clone()));
+            out.lost
+                .extend(files.iter().map(|f| (*oid, f.path.clone())));
         };
 
         if dry_run {

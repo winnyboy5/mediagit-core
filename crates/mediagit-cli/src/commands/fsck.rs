@@ -217,6 +217,140 @@ pub(super) fn emit_integrity(
     Ok(())
 }
 
+/// One plain line, on stdout, or stderr in `--machine` (stdout is one JSON line).
+fn note(msg: &str) {
+    if output::machine_mode() {
+        eprintln!("{msg}");
+    } else {
+        println!("  {msg}");
+    }
+}
+
+fn describe_remote_error(remote: &str, e: &anyhow::Error) -> String {
+    let text = format!("{e:#}");
+    let lower = text.to_lowercase();
+    if ["401", "403", "unauthorized", "forbidden"]
+        .iter()
+        .any(|k| lower.contains(k))
+    {
+        format!("The server for '{remote}' refused the login (authentication failed).")
+    } else if [
+        "connect",
+        "error sending request",
+        "dns",
+        "timed out",
+        "refused",
+    ]
+    .iter()
+    .any(|k| lower.contains(k))
+    {
+        let first = text.lines().next().unwrap_or("");
+        format!("The server for '{remote}' could not be reached: {first}")
+    } else {
+        format!("The server for '{remote}' returned an error: {text}")
+    }
+}
+
+/// Try to fetch what no local source could restore. Every failure is one
+/// plain line and falls through to quarantine; nothing here may hang (the
+/// client's own connect, read and pull-deadline timeouts apply).
+async fn restore_from_remote(
+    repo_path: &std::path::Path,
+    mediagit_dir: &std::path::Path,
+    repair: &FsckRepair,
+    done: &mut RepairOutcome,
+) {
+    let config = match mediagit_config::Config::load(repo_path).await {
+        Ok(c) => c,
+        Err(e) => {
+            note(&format!(
+                "The repository config could not be read, so no remote was tried: {e}"
+            ));
+            return;
+        }
+    };
+    let name = if config.remotes.contains_key("origin") {
+        "origin".to_string()
+    } else if config.remotes.len() == 1 {
+        config.remotes.keys().next().cloned().unwrap_or_default()
+    } else if config.remotes.is_empty() {
+        note("No remote is configured, so nothing could be fetched.");
+        return;
+    } else {
+        note("Several remotes are configured and none is called origin, so none was tried.");
+        return;
+    };
+    let url = match config.resolve_remote_url(&name) {
+        Ok(u) => u,
+        Err(e) => {
+            note(&format!("The URL of remote '{name}' is unusable: {e}"));
+            return;
+        }
+    };
+    let client = mediagit_protocol::ProtocolClient::new(url)
+        .with_credentials(crate::repo::resolve_credentials(repo_path, &config, &name));
+    let refs = match client.get_refs().await {
+        Ok(r) => r.refs,
+        Err(e) => {
+            note(&describe_remote_error(&name, &e));
+            return;
+        }
+    };
+    if let Err(e) = crate::encryption::verify_remote_key_compatible(repo_path, &client).await {
+        note(&format!("Remote '{name}' cannot be used: {e}"));
+        return;
+    }
+
+    // Current branch first, then the rest.
+    let current = RefDatabase::new(mediagit_dir)
+        .read("HEAD")
+        .await
+        .ok()
+        .and_then(|h| h.target);
+    let mut branches: Vec<String> = refs
+        .iter()
+        .filter(|r| r.name.starts_with("refs/heads/"))
+        .map(|r| r.name.clone())
+        .collect();
+    branches.sort_by_key(|b| Some(b) != current.as_ref());
+
+    let Some(odb) = repair.odb() else { return };
+    for branch in branches {
+        match client.pull_streaming(&odb, &branch, vec![]).await {
+            Ok(chunked) if !chunked.is_empty() => {
+                if let Err(e) = client
+                    .download_chunked_objects(&odb, &chunked, |_, _, _| {})
+                    .await
+                {
+                    note(&describe_remote_error(&name, &e));
+                    break;
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                note(&describe_remote_error(&name, &e));
+                break;
+            }
+        }
+        let mut healthy = Vec::new();
+        for oid in done.lost_oids() {
+            if repair.is_healthy(&oid).await {
+                healthy.push(oid);
+            }
+        }
+        done.mark_restored(&healthy);
+        if done.lost.is_empty() {
+            return;
+        }
+    }
+    if !done.lost.is_empty() {
+        note(&format!(
+            "The server for '{name}' did not have a good copy of {} object(s).",
+            done.lost_oids().len()
+        ));
+    }
+}
+
 impl FsckCmd {
     fn quiet(&self) -> bool {
         self.quiet || output::machine_mode()
@@ -304,6 +438,14 @@ impl FsckCmd {
                 .repair(&report, self.dry_run)
                 .await
                 .context("Repair failed")?;
+
+            // Last source before giving up: the remote.
+            if !self.dry_run && !done.unrestorable_files.is_empty() {
+                restore_from_remote(&repo_path, &mediagit_dir, &repair, &mut done).await;
+            } else if self.dry_run && !done.unrestorable_files.is_empty() && !output::machine_mode()
+            {
+                println!("(A configured remote would be tried before these are given up.)");
+            }
 
             // Never claim a repair the repository does not bear out: check
             // again with a cold checker and report only what that confirms.
