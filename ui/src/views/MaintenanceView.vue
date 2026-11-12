@@ -11,7 +11,7 @@ import ProgressBar from '@/components/ProgressBar.vue'
 import TextField from '@/components/TextField.vue'
 import { timeAgo } from '@/lib/persist'
 import { primaryBar } from '@/stores/ops'
-import { useMaintenanceStore, type Task } from '@/stores/maintenance'
+import { repairVerdict, useMaintenanceStore, type Task } from '@/stores/maintenance'
 import { useRepoStore } from '@/stores/repo'
 
 const m = useMaintenanceStore()
@@ -21,6 +21,7 @@ const preview = ref<boolean | 'indeterminate'>(true)
 const deep = ref<boolean | 'indeterminate'>(false)
 const quick = ref<boolean | 'indeterminate'>(false)
 const confirmOpen = ref(false)
+const purgeOpen = ref(false)
 
 const bar = computed(() => (m.running ? primaryBar(m.running) : undefined))
 const last = (t: Task) => {
@@ -30,6 +31,23 @@ const last = (t: Task) => {
 const n = (x: number) => x.toLocaleString('en-US')
 const warn = (sev: string) => /^warn/i.test(sev)
 const running = (t: Task) => m.task === t && !!m.running
+const copies = (c: number) => `${n(c)} ${c === 1 ? 'copy' : 'copies'}`
+
+/** The line above a check or repair result. A repair is never "good" while files are lost or it failed. */
+const good = (t: 'fsck' | 'verify') => (t === 'fsck' ? m.fsckGood : !!m.verify?.report.healthy)
+function headline(t: 'fsck' | 'verify') {
+  const f = m.fsck
+  if (t === 'fsck' && f?.repair === 'done') {
+    const v = repairVerdict(f.report)
+    if (v === 'lost') return (f.report.restored ?? 0) === 0 ? 'Nothing could be restored. Some files are lost' : 'Some files could not be restored'
+    if (v === 'errors') return 'The repair ran into errors'
+    return v === 'clean' ? 'Repair finished. No problems found' : 'Problems remain after the repair'
+  }
+  return good(t) ? 'No problems found' : 'Problems found'
+}
+const repaired = computed(() => (m.fsck?.repair === 'done' ? m.fsck.report : null))
+/** Files the purge lists that the repair has not already listed. */
+const purgedLost = computed(() => (m.purged?.unrestorable_files ?? []).filter((f) => !m.fsck?.report.unrestorable_files?.includes(f)))
 
 // More options (each is a CLI flag, shown as secondary text).
 const noPrune = ref(false)
@@ -163,10 +181,10 @@ function runGc() {
           <ProgressBar :label="t[1]" :value="bar && bar.len != null ? bar.pos : null" :max="bar?.len ?? 100" />
         </div>
         <div v-if="m[t[0]] && !running(t[0])" class="result" :data-testid="`${t[0]}-result`" role="status">
-          <strong class="head2" :class="m[t[0]]!.report.healthy ? 'ok' : 'bad'">
-            <CircleCheck v-if="m[t[0]]!.report.healthy" :size="16" aria-hidden="true" />
+          <strong class="head2" :class="good(t[0]) ? 'ok' : 'bad'">
+            <CircleCheck v-if="good(t[0])" :size="16" aria-hidden="true" />
             <TriangleAlert v-else :size="16" aria-hidden="true" />
-            {{ m[t[0]]!.report.healthy ? 'No problems found' : 'Problems found' }}
+            {{ headline(t[0]) }}
           </strong>
           <dl class="kv">
             <dt>Objects checked</dt><dd class="mono">{{ n(m[t[0]]!.report.objects_checked) }}</dd>
@@ -174,13 +192,41 @@ function runGc() {
             <dt>Damaged</dt><dd class="mono" :class="{ bad: m[t[0]]!.report.corrupted_objects }">{{ n(m[t[0]]!.report.corrupted_objects) }}</dd>
             <dt>Missing</dt><dd class="mono" :class="{ bad: m[t[0]]!.report.missing_objects }">{{ n(m[t[0]]!.report.missing_objects) }}</dd>
             <dt>Broken refs</dt><dd class="mono" :class="{ bad: m[t[0]]!.report.broken_refs }">{{ n(m[t[0]]!.report.broken_refs) }}</dd>
-            <template v-if="t[0] === 'fsck' && m.fsck?.repair">
-              <dt>{{ m.fsck.repair === 'preview' ? 'Would repair' : 'Repaired' }}</dt><dd class="mono">{{ n(m.fsck.report.repaired ?? 0) }}</dd>
+            <template v-if="t[0] === 'fsck' && m.fsck?.repair === 'preview'">
+              <dt>Would repair</dt><dd class="mono">{{ n(m.fsck.report.repaired ?? 0) }}</dd>
+            </template>
+            <template v-if="t[0] === 'fsck' && repaired">
+              <dt>Restored</dt><dd class="mono">{{ n(repaired.restored ?? 0) }}</dd>
+              <dt>Moved to quarantine</dt><dd class="mono">{{ n(repaired.quarantined ?? 0) }}</dd>
+              <dt>References removed</dt><dd class="mono">{{ n(repaired.refs_removed ?? 0) }}</dd>
             </template>
           </dl>
+          <template v-if="t[0] === 'fsck' && repaired">
+            <template v-if="repaired.unrestorable_files?.length">
+              <p class="lost">These files can no longer be restored. No good copy of their saved versions was found.</p>
+              <ul class="issues" aria-label="Files that cannot be restored">
+                <li v-for="f in repaired.unrestorable_files" :key="f" class="mono">{{ f }}</li>
+              </ul>
+            </template>
+            <ul v-if="repaired.repair_errors?.length" class="issues" aria-label="Repair problems">
+              <li v-for="e in repaired.repair_errors" :key="e"><span class="chip bad">Error</span> {{ e }}</li>
+            </ul>
+          </template>
           <ul v-if="m[t[0]]!.report.issues.length" class="issues" :aria-label="`${t[1]} findings`">
             <li v-for="(i, k) in m[t[0]]!.report.issues.slice(0, 50)" :key="k"><span class="chip" :class="warn(i.severity) ? 'warn' : 'bad'">{{ warn(i.severity) ? 'Warning' : 'Error' }}</span> {{ i.message }}</li>
           </ul>
+          <div v-if="t[0] === 'fsck' && (m.quarantine || m.purged)" class="quar" data-testid="quarantine">
+            <template v-if="m.quarantine">
+              <span>Quarantine holds {{ copies(m.quarantine.count) }} of damaged data ({{ formatBytes(m.quarantine.bytes) }}). They are kept in case they help bring a file back.</span>
+              <Button size="sm" variant="danger" :disabled="m.busy" @click="purgeOpen = true">Delete quarantined copies…</Button>
+            </template>
+            <template v-else-if="m.purged">
+              <span>Deleted {{ copies(m.purged.deleted_count) }} ({{ formatBytes(m.purged.deleted_bytes) }}) from quarantine.</span>
+              <ul v-if="purgedLost.length" class="issues" aria-label="Files that can no longer be restored">
+                <li v-for="f in purgedLost" :key="f" class="mono">{{ f }}</li>
+              </ul>
+            </template>
+          </div>
         </div>
         <div v-if="t[0] === 'verify' && m.verifyRange && !running('verify')" class="result" data-testid="verify-range-result" role="status">
           <strong class="head2" :class="m.verifyRange.report.errors ? 'bad' : 'ok'">
@@ -211,10 +257,18 @@ function runGc() {
     <AlertDialog
       v-model:open="repairOpen"
       title="Repair the repository?"
-      description="Repair rewrites or removes damaged and unused data it finds. Data it removes cannot be brought back. Run the preview first to see what it would change."
+      description="Repair restores damaged data from a good copy where it can. Damaged data it cannot restore is moved to quarantine, not deleted, and the files that can no longer be restored are listed afterwards. Run the preview first to see what it would change."
       confirm-label="Repair"
       destructive
       @confirm="m.runFsck(fsckOptions(true))"
+    />
+    <AlertDialog
+      v-model:open="purgeOpen"
+      title="Delete quarantined copies?"
+      :description="m.quarantine ? `This deletes ${copies(m.quarantine.count)} of damaged data (${formatBytes(m.quarantine.bytes)}) for good. This cannot be undone, and any file that depended on them can no longer be restored.` : 'The quarantine is empty.'"
+      confirm-label="Delete copies"
+      destructive
+      @confirm="m.purgeQuarantine(true)"
     />
   </section>
 </template>
@@ -325,6 +379,20 @@ h2 {
   list-style: none;
   font-size: var(--fs-sm);
   overflow-wrap: anywhere;
+}
+.lost {
+  margin: 0;
+  color: var(--danger);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+.quar {
+  display: grid;
+  gap: var(--space-2);
+  justify-items: start;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+  font-size: var(--fs-sm);
 }
 .kv dd.bad {
   color: var(--danger);

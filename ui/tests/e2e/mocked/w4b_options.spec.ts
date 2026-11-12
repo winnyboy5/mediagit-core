@@ -240,8 +240,8 @@ test.describe('Maintenance: options', () => {
     expect((await calls(page, 'repo_fsck'))[0]).toMatchObject({ options: { all: true, lostFound: true, noDangling: true, repair: false, dryRun: false, confirmed: false } })
   })
 
-  test('repair previews first; a real repair is a danger button with a confirm that says what is lost', async ({ page }) => {
-    await mboot(page, { repo_fsck: { ...fixture<Record<string, unknown>>('fsck_ok'), repaired: 2 } })
+  test('repair previews first; a real repair is a danger button with a confirm that says what it does', async ({ page }) => {
+    await mboot(page, { repo_fsck: { ...fixture<Record<string, unknown>>('fsck_ok'), repaired: 2, restored: 2 } })
     const c = card(page, 'fsck')
     await more(c)
     await c.getByRole('checkbox', { name: /Try to repair what it finds/ }).click()
@@ -257,7 +257,7 @@ test.describe('Maintenance: options', () => {
     const go = c.getByRole('button', { name: 'Repair…' })
     await go.click()
     const alert = page.getByRole('alertdialog')
-    await expect(alert).toContainText('cannot be brought back')
+    await expect(alert).toContainText('moved to quarantine, not deleted')
     await expectNoAxeViolations(page)
     await alert.getByRole('button', { name: 'Cancel' }).click()
     expect(await calls(page, 'repo_fsck')).toHaveLength(1)
@@ -265,7 +265,8 @@ test.describe('Maintenance: options', () => {
     await page.getByRole('alertdialog').getByRole('button', { name: 'Repair' }).click()
     await polled(page, 'repo_fsck').toBe(2)
     expect((await calls(page, 'repo_fsck'))[1]).toMatchObject({ options: { repair: true, dryRun: false, confirmed: true } })
-    await expect(c.getByTestId('fsck-result')).toContainText('Repaired')
+    await expect(c.getByTestId('fsck-result')).toContainText('Repair finished')
+    await expect(c.getByTestId('fsck-result')).toContainText('Restored')
   })
 
   test('verify one version, with checksums and detail', async ({ page }) => {

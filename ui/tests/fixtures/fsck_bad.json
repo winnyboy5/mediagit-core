@@ -7,6 +7,13 @@
   "missing_objects": 1,
   "dangling_objects": 2,
   "repaired": null,
+  "restored": null,
+  "quarantined": null,
+  "refs_removed": null,
+  "unrestorable_files": [],
+  "repair_errors": [],
+  "quarantine_count": 0,
+  "quarantine_bytes": 0,
   "issues": [
     {
       "severity": "error",

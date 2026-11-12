@@ -155,3 +155,75 @@ test.describe('Maintenance: states', () => {
     await expectFocusRing(page)
   })
 })
+
+const REPAIR = { ...fixture<Record<string, unknown>>('fsck_ok'), repaired: 3, restored: 2, quarantined: 1, refs_removed: 1, quarantine_count: 1, quarantine_bytes: 2048 }
+
+async function repairNow(page: Page) {
+  const c = card(page, 'fsck')
+  await c.locator('summary').click()
+  await c.getByRole('checkbox', { name: /Try to repair what it finds/ }).click()
+  await c.getByRole('checkbox', { name: /Only show what a repair would change/ }).click()
+  await c.getByRole('button', { name: 'Repair…' }).click()
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Repair', exact: true }).click()
+}
+
+test.describe('Maintenance: repair result and quarantine', () => {
+  test('a clean repair shows plain counts and the quarantine line', async ({ page }) => {
+    await boot(page, { repo_fsck: REPAIR })
+    await repairNow(page)
+    const res = page.getByTestId('fsck-result')
+    await expect(res).toContainText('Repair finished. No problems found')
+    await expect(res).toContainText('Restored')
+    await expect(res).toContainText('Moved to quarantine')
+    await expect(res).toContainText('References removed')
+    await expect(page.getByTestId('quarantine')).toContainText('1 copy of damaged data (2.0 KB)')
+    await expectNoAxeViolations(page)
+  })
+
+  test('lost files are never shown as a success, and an empty restore says so', async ({ page }) => {
+    await boot(page, { repo_fsck: { ...REPAIR, restored: 0, unrestorable_files: ['art/hero.psd', 'cut/final.mov'], repair_errors: ['could not write pack-03'] } })
+    await repairNow(page)
+    const res = page.getByTestId('fsck-result')
+    await expect(res).toContainText('Nothing could be restored. Some files are lost')
+    await expect(res).not.toContainText('No problems found')
+    await expect(res.locator('.head2.ok')).toHaveCount(0)
+    await expect(page.getByRole('list', { name: 'Files that cannot be restored' })).toContainText('art/hero.psd')
+    await expect(page.getByRole('list', { name: 'Repair problems' })).toContainText('could not write pack-03')
+    await expectNoAxeViolations(page)
+  })
+
+  test('deleting quarantined copies asks first, says count, size and that it cannot be undone', async ({ page }) => {
+    await boot(page, { repo_fsck: REPAIR })
+    await repairNow(page)
+    await page.getByRole('button', { name: 'Delete quarantined copies…' }).click()
+    const dlg = page.getByRole('alertdialog')
+    await expect(dlg).toContainText('1 copy')
+    await expect(dlg).toContainText('2.0 KB')
+    await expect(dlg).toContainText('cannot be undone')
+    await expectNoAxeViolations(page)
+    await dlg.getByRole('button', { name: 'Cancel' }).click()
+    expect((await ipcCalls(page, 'repo_fsck')).filter((c) => (c.args.options as { purgeQuarantine?: boolean }).purgeQuarantine)).toHaveLength(0)
+  })
+
+  test('confirming sends the purge alone, confirmed, and the line goes away', async ({ page }) => {
+    await boot(page, { repo_fsck: REPAIR }, {}, { repo_fsck: `(a) => a.options.purgeQuarantine ? { deleted_count: 1, deleted_bytes: 2048, unrestorable_files: ['art/hero.psd'] } : ${JSON.stringify(REPAIR)}` })
+    await repairNow(page)
+    await page.getByRole('button', { name: 'Delete quarantined copies…' }).click()
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Delete copies' }).click()
+    const q = page.getByTestId('quarantine')
+    await expect(q).toContainText('Deleted 1 copy (2.0 KB) from quarantine')
+    await expect(q.getByRole('list', { name: 'Files that can no longer be restored' })).toContainText('art/hero.psd')
+    await expect(page.getByRole('button', { name: 'Delete quarantined copies…' })).toHaveCount(0)
+    const sent = (await ipcCalls(page, 'repo_fsck')).map((c) => c.args.options)
+    expect(sent.at(-1)).toMatchObject({ purgeQuarantine: true, confirmed: true })
+    expect(sent.at(-1)).not.toHaveProperty('repair', true)
+  })
+
+  test('an empty quarantine offers nothing to delete', async ({ page }) => {
+    await boot(page)
+    await card(page, 'fsck').getByRole('button', { name: 'Run integrity check' }).click()
+    await expect(page.getByTestId('fsck-result')).toContainText('No problems found')
+    await expect(page.getByTestId('quarantine')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: /Delete quarantined copies/ })).toHaveCount(0)
+  })
+})

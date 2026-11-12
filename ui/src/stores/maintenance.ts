@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
-import { ref, shallowRef, watch } from 'vue'
-import { api, type FsckCliReport, type FsckOptions, type GcOptions, type GcReport, type VerifyOptions, type VerifyRangeReport } from '@/api'
+import { computed, ref, shallowRef, watch } from 'vue'
+import { api, type FsckCliReport, type FsckOptions, type FsckPurgeReport, type GcOptions, type GcReport, type VerifyOptions, type VerifyRangeReport } from '@/api'
 import { load, save } from '@/lib/persist'
 import { useAction } from './action'
 import { useRepoStore } from './repo'
@@ -20,6 +20,14 @@ export interface Run<T> {
 
 const isRange = (r: FsckCliReport | VerifyRangeReport): r is VerifyRangeReport => 'commits' in r
 
+/** How a repair ended. Lost files or errors are never a success, whatever the re-check says. */
+export type RepairVerdict = 'clean' | 'lost' | 'errors' | 'problems'
+export function repairVerdict(r: FsckCliReport): RepairVerdict {
+  if (r.unrestorable_files?.length) return 'lost'
+  if (r.repair_errors?.length) return 'errors'
+  return r.healthy ? 'clean' : 'problems'
+}
+
 /** Maintenance: clean up (gc), check (fsck) and verify, one at a time, each with its last report. */
 export const useMaintenanceStore = defineStore('maintenance', () => {
   const repo = useRepoStore()
@@ -31,6 +39,8 @@ export const useMaintenanceStore = defineStore('maintenance', () => {
   const verify = shallowRef<Run<FsckCliReport> | null>(null)
   /** `verify` of one version or a range reports versions, not objects. */
   const verifyRange = shallowRef<Run<VerifyRangeReport> | null>(null)
+  /** The result of the last "delete quarantined copies"; a new check forgets it. */
+  const purged = shallowRef<FsckPurgeReport | null>(null)
   /** Which task is running, for its card. */
   const task = ref<Task | null>(null)
   /** When each task last ran, per repository. */
@@ -73,7 +83,40 @@ export const useMaintenanceStore = defineStore('maintenance', () => {
       (x) => (x.healthy ? `${x.objects_checked} objects checked, no problems` : 'Problems found'),
       (x) => !x.healthy,
     )
-    if (r) fsck.value = { report: r.value, at: Date.now(), repair: options.repair ? (options.dryRun ? 'preview' : 'done') : undefined }
+    if (r) {
+      purged.value = null
+      fsck.value = { report: r.value, at: Date.now(), repair: options.repair ? (options.dryRun ? 'preview' : 'done') : undefined }
+    }
+    return !!r
+  }
+
+  /** The check found no error and, after a repair, nothing is lost and nothing failed. */
+  const fsckGood = computed(() => {
+    const f = fsck.value
+    if (!f) return false
+    return f.repair === 'done' ? repairVerdict(f.report) === 'clean' : f.report.healthy
+  })
+
+  /** What the quarantine holds, or null when it is empty (then nothing can be deleted). */
+  const quarantine = computed(() => {
+    const r = fsck.value?.report
+    return r && r.quarantine_count > 0 ? { count: r.quarantine_count, bytes: r.quarantine_bytes } : null
+  })
+
+  /** Deletes the quarantined copies for good: only when `confirmed` and the quarantine holds something. */
+  async function purgeQuarantine(confirmed: boolean) {
+    if (!confirmed || !quarantine.value || !fsck.value) return false
+    const r = await exec(
+      'fsck',
+      'Delete quarantined copies',
+      (root, report) => unlock.withUnlock((p) => api.purgeQuarantine(root, p, report)),
+      (x) => `${x.deleted_count} quarantined copies deleted`,
+      (x) => x.unrestorable_files.length > 0,
+    )
+    if (r && fsck.value) {
+      purged.value = r.value
+      fsck.value = { ...fsck.value, report: { ...fsck.value.report, quarantine_count: 0, quarantine_bytes: 0 } }
+    }
     return !!r
   }
 
@@ -102,10 +145,10 @@ export const useMaintenanceStore = defineStore('maintenance', () => {
   watch(
     () => repo.path,
     () => {
-      gc.value = fsck.value = verify.value = verifyRange.value = null
+      gc.value = fsck.value = verify.value = verifyRange.value = purged.value = null
       error.value = null
     },
   )
 
-  return { gc, fsck, verify, verifyRange, task, last, busy, error, running, runGc, runFsck, runVerify }
+  return { gc, fsck, fsckGood, quarantine, purged, purgeQuarantine, verify, verifyRange, task, last, busy, error, running, runGc, runFsck, runVerify }
 })

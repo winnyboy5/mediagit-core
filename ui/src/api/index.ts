@@ -10,6 +10,7 @@ import type {
   ConfigReport,
   ConfigSchemaReport,
   FsckCliReport,
+  FsckPurgeReport,
   GcReport,
   KeyReport,
   RebaseReport,
@@ -148,6 +149,8 @@ export interface FsckOptions {
   repair?: boolean
   dryRun?: boolean
   confirmed?: boolean
+  /** Delete the quarantined copies; stands alone and needs `confirmed`. */
+  purgeQuarantine?: boolean
 }
 
 /** Options of `verify`: the whole repository, one version (`commit`) or a range (`start`/`end`). */
@@ -336,6 +339,9 @@ export const api = {
     invoke<GcReport>('repo_gc', { repo, dryRun, confirmed, options, passphrase: passphrase ?? null, onProgress: channel(onProgress) }),
   fsck: (repo: string, options: FsckOptions, passphrase: string | undefined, onProgress: Report) =>
     invoke<FsckCliReport>('repo_fsck', { repo, options, passphrase: passphrase ?? null, onProgress: channel(onProgress) }),
+  /** `fsck --purge-quarantine --yes`: only after the person confirmed. */
+  purgeQuarantine: (repo: string, passphrase: string | undefined, onProgress: Report) =>
+    invoke<FsckPurgeReport>('repo_fsck', { repo, options: { purgeQuarantine: true, confirmed: true }, passphrase: passphrase ?? null, onProgress: channel(onProgress) }),
   /** The whole repository gives an `FsckCliReport`; one version or a range gives a `VerifyRangeReport`. */
   verify: (repo: string, options: VerifyOptions, passphrase: string | undefined, onProgress: Report) =>
     invoke<FsckCliReport | VerifyRangeReport>('repo_verify', { repo, options, passphrase: passphrase ?? null, onProgress: channel(onProgress) }),
