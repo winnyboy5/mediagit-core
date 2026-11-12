@@ -590,6 +590,15 @@ impl B2SpacesDriver {
             match operation().await {
                 Ok(result) => return Ok(result),
                 Err(e) => {
+                    // A missing key or a refused request will not change on a
+                    // retry: report it at once (as minio.rs does).
+                    let msg = e.to_string().to_lowercase();
+                    if msg.contains("object not found")
+                        || msg.contains("accessdenied")
+                        || msg.contains("access denied")
+                    {
+                        return Err(e);
+                    }
                     retry_count += 1;
                     if retry_count >= self.config.max_retries {
                         return Err(e)
@@ -657,7 +666,20 @@ impl StorageBackend for B2SpacesDriver {
                     .key(&key)
                     .send()
                     .await
-                    .map_err(|e| anyhow!("Failed to get object: {}", e))?;
+                    .map_err(|e| {
+                        // Same decision as minio.rs: absent only on a 404 /
+                        // NoSuchKey / NotFound response; anything else keeps its
+                        // own text plus status and code.
+                        if crate::s3_error::is_not_found(&e) {
+                            anyhow!("object not found: {}", key)
+                        } else {
+                            anyhow!(
+                                "Failed to get object: {} ({})",
+                                e,
+                                crate::s3_error::describe(&e)
+                            )
+                        }
+                    })?;
 
                 let body = response
                     .body

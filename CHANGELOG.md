@@ -206,6 +206,16 @@ place (`mediagit_versioning::scan_hex_oids`) rather than in a private copy
 each. The two having drifted apart on which objects count as rooted is what
 caused this.
 
+### Fixed — an S3 refusal was reported as a missing file
+
+On S3 and S3-compatible storage, `get`, `exists` and `head` read any server error
+as "the object is not there". A refused or failing request (403, 500, 503) could
+therefore make a stored file look deleted. Now only a real "not found" answer
+(404, `NoSuchKey`, `NotFound`) means missing; every other error is reported as
+what it is, with its status and code. S3 answers 403 instead of 404 for a missing
+key when the credentials lack `s3:ListBucket`, so give the credentials that
+permission (see [CONFIGURATION.md](CONFIGURATION.md)); the error text now says so.
+
 ### Fixed — `fsck --repair` deleted damaged objects and could not remove a broken ref
 
 `--repair` removed a damaged object (a loose blob, a chunk, a delta sidecar).

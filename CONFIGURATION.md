@@ -161,6 +161,12 @@ Two consequences worth planning around:
   own QA harness does — it substitutes `AWS_ACCESS_KEY_ID` into a config
   template; the variable never reaches `mediagit` itself.
 
+> **Permissions.** The S3 credentials need `s3:GetObject`, `s3:PutObject`,
+> `s3:DeleteObject` and `s3:ListBucket` on the bucket. Without `s3:ListBucket`,
+> S3 answers 403 (not 404) for a key that does not exist, so a missing file
+> looks like a refusal. A refused request is reported as refused, with its
+> status and code, and no longer as a missing file.
+
 > **Not supported, despite appearing in earlier revisions of this document:**
 > `encryption` and `encryption_algorithm` under `[storage]`. There are no such
 > fields on `S3Storage` and no server-side-encryption code on any S3 path. The
