@@ -645,20 +645,46 @@ impl FsckChecker {
                 RefType::Direct => {
                     if let Some(oid) = r.oid {
                         // Verify the referenced commit exists
-                        if !self.object_exists(&oid).await? {
-                            report.add_issue(
-                                FsckIssue::new(
+                        match self.object_exists(&oid).await {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                // A lazy clone writes tracking refs for branches
+                                // it never downloaded: report, never repair.
+                                let tracking = r.name.starts_with("refs/remotes/");
+                                let issue = FsckIssue::new(
                                     IssueSeverity::Error,
                                     IssueCategory::BrokenReference,
-                                    format!(
-                                        "Reference {} points to missing commit {}",
-                                        r.name, oid
-                                    ),
+                                    if tracking {
+                                        format!(
+                                            "Reference {} points to missing commit {}                                              (not downloaded yet? run fetch)",
+                                            r.name, oid
+                                        )
+                                    } else {
+                                        format!(
+                                            "Reference {} points to missing commit {}",
+                                            r.name, oid
+                                        )
+                                    },
                                 )
                                 .with_ref(r.name.clone())
-                                .with_oid(oid)
-                                .repairable(),
-                            );
+                                .with_oid(oid);
+                                report.add_issue(if tracking { issue } else { issue.repairable() });
+                            }
+                            Err(e) => {
+                                // Not "missing": we do not know. Never repairable.
+                                report.add_issue(
+                                    FsckIssue::new(
+                                        IssueSeverity::Error,
+                                        IssueCategory::InvalidFormat,
+                                        format!(
+                                            "Could not check whether commit {} exists                                              (reference {}): {}",
+                                            oid, r.name, e
+                                        ),
+                                    )
+                                    .with_ref(r.name.clone())
+                                    .with_oid(oid),
+                                );
+                            }
                         }
                     } else {
                         report.add_issue(
@@ -1581,12 +1607,10 @@ impl FsckChecker {
     async fn object_exists(&self, oid: &Oid) -> anyhow::Result<bool> {
         // Presence check, not a verified read: `read()` of a chunked blob
         // reassembles it in RAM. Integrity of present objects is judged by
-        // `verify_object`. `exists()` does not know legacy `deltas/<oid>.meta`
-        // objects, so a miss still falls back to a read.
-        if self.odb.exists(oid).await? {
-            return Ok(true);
-        }
-        Ok(self.odb.read(oid).await.is_ok())
+        // `verify_object`. `Ok(false)` means every probe (loose, manifest,
+        // delta, pack) answered "not there"; any other failure is an `Err`,
+        // never "missing", so an I/O blip cannot make a good ref repairable.
+        self.odb.exists(oid).await
     }
 
     /// Check if a reference exists
@@ -2322,6 +2346,54 @@ impl FsckRepair {
         Ok(())
     }
 
+    /// Write a ref's name and value to `.mediagit/quarantine/refs/<name>`
+    /// (never overwriting: a repeat gets `~n`).
+    async fn save_ref(&self, ref_name: &str, r: &Ref) -> anyhow::Result<()> {
+        use tokio::io::AsyncWriteExt;
+        let base = self
+            .quarantine_dir()
+            .ok_or_else(|| anyhow::anyhow!("no repository root"))?
+            .join("refs");
+        let value = match (&r.oid, &r.target) {
+            (Some(oid), _) => format!(
+                "{}
+",
+                oid.to_hex()
+            ),
+            (None, Some(t)) => format!(
+                "ref: {t}
+"
+            ),
+            (None, None) => String::new(),
+        };
+        let mut n = 0u32;
+        loop {
+            let name = if n == 0 {
+                ref_name.to_string()
+            } else {
+                format!("{ref_name}~{n}")
+            };
+            let path = base.join(&name);
+            if let Some(parent) = path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            match tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .await
+            {
+                Ok(mut f) => {
+                    f.write_all(value.as_bytes()).await?;
+                    f.sync_all().await?;
+                    return Ok(());
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+
     /// Remove a broken reference through `RefDatabase` (refs are files, not
     /// storage keys). `HEAD` is never removed: it names an unborn branch in
     /// every fresh repository.
@@ -2338,11 +2410,40 @@ impl FsckRepair {
             warn!("Not removing HEAD: it points at a branch that has no commits yet");
             return Ok(false);
         }
+        if ref_name.starts_with("refs/remotes/") {
+            warn!(
+                "Not removing {ref_name}: remote-tracking refs may point at objects not downloaded yet; run fetch"
+            );
+            return Ok(false);
+        }
+        // The report may be stale: look again, and act only on a clear "gone".
+        // A probe that fails is not "gone".
+        let Ok(current) = refdb.read(ref_name).await else {
+            return Ok(false);
+        };
+        let target_gone = match (&current.oid, &current.target) {
+            (Some(oid), _) => match &self.odb {
+                Some(odb) => matches!(odb.exists(oid).await, Ok(false)),
+                None => false,
+            },
+            (None, Some(target)) => matches!(refdb.exists(target).await, Ok(false)),
+            (None, None) => false,
+        };
+        if !target_gone {
+            warn!("Not removing {ref_name}: its target is present or could not be checked");
+            return Ok(false);
+        }
         if dry_run {
             info!("[DRY RUN] Would remove broken reference: {}", ref_name);
             return Ok(true);
         }
 
+        // The ref's value is the only pointer to a lost commit (and what a
+        // remote restore needs): keep it before the file goes.
+        if let Err(e) = self.save_ref(ref_name, &current).await {
+            warn!("Not removing {ref_name}: its value could not be saved first: {e}");
+            return Ok(false);
+        }
         warn!("Removing broken reference: {}", ref_name);
         if let Err(e) = refdb.delete(ref_name).await {
             warn!("Cannot remove broken reference {}: {}", ref_name, e);
@@ -2371,6 +2472,8 @@ pub struct QuarantineEntry {
     pub kind: String,
     /// `None` when the file name is not `<oid>[.n]`.
     pub oid: Option<Oid>,
+    /// For `kind == "ref"`: the ref name that was removed (e.g. `refs/heads/x`).
+    pub ref_name: Option<String>,
     pub bytes: u64,
 }
 
@@ -2386,6 +2489,38 @@ pub async fn list_quarantine(repo_root: &Path) -> anyhow::Result<Vec<QuarantineE
             continue;
         }
         let kind = kind_dir.file_name().to_string_lossy().into_owned();
+        if kind == "refs" {
+            // Saved ref values, nested like the ref names themselves.
+            let base = kind_dir.path();
+            let mut stack = vec![base.clone()];
+            while let Some(dir) = stack.pop() {
+                let mut it = tokio::fs::read_dir(&dir).await?;
+                while let Some(f) = it.next_entry().await? {
+                    if f.file_type().await?.is_dir() {
+                        stack.push(f.path());
+                        continue;
+                    }
+                    let rel = f.path().strip_prefix(&base).map(|p| {
+                        p.components()
+                            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                            .collect::<Vec<_>>()
+                            .join("/")
+                    });
+                    // `<name>` or `<name>~<n>`
+                    let name = rel
+                        .ok()
+                        .map(|r| r.split('~').next().unwrap_or("").to_string());
+                    out.push(QuarantineEntry {
+                        path: f.path(),
+                        kind: "ref".to_string(),
+                        oid: None,
+                        ref_name: name,
+                        bytes: f.metadata().await?.len(),
+                    });
+                }
+            }
+            continue;
+        }
         let mut files = tokio::fs::read_dir(kind_dir.path()).await?;
         while let Some(f) = files.next_entry().await? {
             let name = f.file_name().to_string_lossy().into_owned();
@@ -2395,6 +2530,7 @@ pub async fn list_quarantine(repo_root: &Path) -> anyhow::Result<Vec<QuarantineE
                 path: f.path(),
                 kind: kind.clone(),
                 oid,
+                ref_name: None,
                 bytes: f.metadata().await?.len(),
             });
         }
@@ -2408,11 +2544,27 @@ pub async fn list_quarantine(repo_root: &Path) -> anyhow::Result<Vec<QuarantineE
 /// `delete = false` (dry run) only counts. `odb` should have a cold cache.
 pub async fn sweep_quarantine(
     odb: &ObjectDatabase,
+    refdb: Option<&RefDatabase>,
     repo_root: &Path,
     delete: bool,
 ) -> anyhow::Result<QuarantineStatus> {
     let mut status = QuarantineStatus::default();
     for entry in list_quarantine(repo_root).await? {
+        // A saved ref is obsolete once a ref of that name exists again.
+        if entry.kind == "ref" {
+            let back = match (&entry.ref_name, refdb) {
+                (Some(name), Some(db)) => db.exists(name).await.unwrap_or(false),
+                _ => false,
+            };
+            if back && delete {
+                tokio::fs::remove_file(&entry.path).await?;
+                status.removed += 1;
+            } else {
+                status.count += 1;
+                status.bytes += entry.bytes;
+            }
+            continue;
+        }
         let healthy = match entry.oid {
             Some(oid) => {
                 odb.invalidate_cache(&oid).await;

@@ -591,6 +591,13 @@ impl ObjectDatabase {
             return Ok(true);
         }
 
+        // Delta-stored object (`deltas/<oid>` + `.meta`): `read` reconstructs
+        // it, so it exists. One metadata probe; no reconstruction.
+        let delta_meta_key = format!("deltas/{}.meta", oid.to_hex());
+        if self.storage.exists(&delta_meta_key).await? {
+            return Ok(true);
+        }
+
         // Also check pack membership: `gc --repack` bundles loose objects
         // into a pack and (with remove_loose) deletes the loose copy, so a
         // miss above doesn't mean "we don't have it" — it may live only in

@@ -352,6 +352,15 @@ async fn test_fsck_repair_broken_reference() {
         !repo.refdb().exists("refs/heads/broken").await.unwrap(),
         "the broken ref must really be gone"
     );
+    // Its value is the only pointer to a lost commit: saved, not discarded.
+    let saved = repo
+        .root
+        .join(".mediagit/quarantine/refs/refs/heads/broken");
+    assert_eq!(
+        std::fs::read_to_string(&saved).unwrap().trim(),
+        fake_oid.to_hex(),
+        "the removed ref's value must be kept in quarantine"
+    );
     let again = repo.checker().check(FsckOptions::default()).await.unwrap();
     assert!(
         !again.has_errors(),
@@ -609,4 +618,284 @@ async fn test_fsck_repair_restores_damaged_loose_object_from_pack() {
     assert_eq!(std::fs::read(&kept[0]).unwrap(), damaged);
     let again = repo.checker().check(FsckOptions::default()).await.unwrap();
     assert!(!again.has_errors(), "{:?}", again.issues);
+}
+
+/// Wraps the real store and injects faults / records reads.
+#[derive(Debug)]
+struct Probe {
+    inner: Arc<LocalBackend>,
+    fail_exists: std::sync::Mutex<Option<String>>,
+    fail_delete_nth: std::sync::Mutex<Option<usize>>,
+    deletes: std::sync::atomic::AtomicUsize,
+    gets: std::sync::Mutex<Vec<String>>,
+}
+
+impl Probe {
+    fn new(inner: Arc<LocalBackend>) -> Arc<Self> {
+        Arc::new(Probe {
+            inner,
+            fail_exists: Default::default(),
+            fail_delete_nth: Default::default(),
+            deletes: Default::default(),
+            gets: Default::default(),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl StorageBackend for Probe {
+    async fn get(&self, key: &str) -> anyhow::Result<Vec<u8>> {
+        self.gets.lock().unwrap().push(key.to_string());
+        self.inner.get(key).await
+    }
+    async fn put(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
+        self.inner.put(key, data).await
+    }
+    async fn exists(&self, key: &str) -> anyhow::Result<bool> {
+        if self.fail_exists.lock().unwrap().as_deref() == Some(key) {
+            anyhow::bail!("injected I/O error probing {key}");
+        }
+        self.inner.exists(key).await
+    }
+    async fn delete(&self, key: &str) -> anyhow::Result<()> {
+        let n = self
+            .deletes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        if *self.fail_delete_nth.lock().unwrap() == Some(n) {
+            anyhow::bail!("injected failure on delete #{n}");
+        }
+        self.inner.delete(key).await
+    }
+    async fn list_objects(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
+        self.inner.list_objects(prefix).await
+    }
+    async fn head(&self, key: &str) -> anyhow::Result<Option<u64>> {
+        self.inner.head(key).await
+    }
+}
+
+impl Layout {
+    fn probe_checker(&self, probe: &Arc<Probe>) -> FsckChecker {
+        FsckChecker::new_with_refdb(probe.clone(), Some(self.refdb())).with_repo_root(&self.root)
+    }
+
+    fn probe_repair(&self, probe: &Arc<Probe>, checker: &FsckChecker) -> FsckRepair {
+        FsckRepair::new(probe.clone())
+            .with_odb(checker.odb())
+            .with_refdb(self.refdb())
+            .with_repo_root(&self.root)
+    }
+
+    /// Commit `entries` as the tree of one commit on refs/heads/main.
+    async fn commit_entries(&self, odb: &ObjectDatabase, entries: &[(&str, Oid)]) -> Oid {
+        let mut tree = Tree::new();
+        for (name, blob) in entries {
+            tree.add_entry(TreeEntry::new(name.to_string(), FileMode::Regular, *blob));
+        }
+        let tree_oid = tree.write(odb).await.unwrap();
+        let sig = Signature::now("T".to_string(), "t@example.com".to_string());
+        let commit = Commit::new(tree_oid, sig.clone(), sig, "c".to_string());
+        let commit_oid = commit.write(odb).await.unwrap();
+        self.refdb()
+            .write(&Ref::new_direct("refs/heads/main".to_string(), commit_oid))
+            .await
+            .unwrap();
+        commit_oid
+    }
+}
+
+/// A read/probe error is not "missing": it must never make a good branch
+/// repairable (CRITICAL 1).
+#[tokio::test]
+async fn test_fsck_probe_error_is_not_a_missing_commit() {
+    let repo = Layout::new().await;
+    let blob = repo.commit_photo(&photo_bytes()).await;
+    let head = repo
+        .refdb()
+        .read("refs/heads/main")
+        .await
+        .unwrap()
+        .oid
+        .unwrap();
+    let probe = Probe::new(repo.storage.clone());
+    *probe.fail_exists.lock().unwrap() = Some(head.to_hex());
+
+    let checker = repo.probe_checker(&probe);
+    // No object pass: it would read (and cache) the commit before the ref
+    // check probes it.
+    let report = checker
+        .check(FsckOptions {
+            check_objects: false,
+            ..FsckOptions::default()
+        })
+        .await
+        .unwrap();
+
+    assert!(report.has_errors(), "an unreadable commit is an error");
+    assert!(
+        report.repairable_issues().is_empty(),
+        "an I/O error must not be repairable: {:?}",
+        report.issues
+    );
+    repo.probe_repair(&probe, &checker)
+        .repair(&report, false)
+        .await
+        .unwrap();
+    assert!(repo.refdb().exists("refs/heads/main").await.unwrap());
+    let _ = blob;
+}
+
+/// Even from a stale report that lists the ref as broken, repair re-probes
+/// the target and leaves a ref whose commit exists (CRITICAL 1b).
+#[tokio::test]
+async fn test_fsck_repair_reprobes_before_removing_a_ref() {
+    let repo = Layout::new().await;
+    repo.commit_photo(&photo_bytes()).await;
+    let mut report = mediagit_versioning::FsckReport::new();
+    report.add_issue(
+        mediagit_versioning::FsckIssue::new(
+            IssueSeverity::Error,
+            IssueCategory::BrokenReference,
+            "stale".to_string(),
+        )
+        .with_ref("refs/heads/main".to_string())
+        .repairable(),
+    );
+    let checker = repo.checker();
+    let done = repo.repair(&checker).repair(&report, false).await.unwrap();
+    assert!(repo.refdb().exists("refs/heads/main").await.unwrap());
+    assert!(done.refs_removed.is_empty());
+}
+
+/// Lazy clones write tracking refs for branches whose objects were never
+/// downloaded. Repair never touches `refs/remotes/` (CRITICAL 2).
+#[tokio::test]
+async fn test_fsck_repair_never_removes_remote_tracking_refs() {
+    let repo = Layout::new().await;
+    repo.refdb()
+        .write(&Ref::new_direct(
+            "refs/remotes/origin/feature".to_string(),
+            Oid::hash(b"lazy, not downloaded"),
+        ))
+        .await
+        .unwrap();
+
+    let checker = repo.checker();
+    let report = checker.check(FsckOptions::default()).await.unwrap();
+    let issue = report
+        .issues
+        .iter()
+        .find(|i| i.ref_name.as_deref() == Some("refs/remotes/origin/feature"))
+        .expect("still reported");
+    assert!(!issue.repairable, "{issue:?}");
+    assert!(issue.message.contains("fetch"), "hint: {}", issue.message);
+
+    let done = repo.repair(&checker).repair(&report, false).await.unwrap();
+    assert!(
+        repo.refdb()
+            .exists("refs/remotes/origin/feature")
+            .await
+            .unwrap()
+    );
+    assert!(done.refs_removed.is_empty());
+
+    // Even a hand-built report cannot make repair remove it.
+    let mut forced = mediagit_versioning::FsckReport::new();
+    forced.add_issue(
+        mediagit_versioning::FsckIssue::new(
+            IssueSeverity::Error,
+            IssueCategory::BrokenReference,
+            "forced".to_string(),
+        )
+        .with_ref("refs/remotes/origin/feature".to_string())
+        .repairable(),
+    );
+    let done = repo.repair(&checker).repair(&forced, false).await.unwrap();
+    assert!(
+        repo.refdb()
+            .exists("refs/remotes/origin/feature")
+            .await
+            .unwrap()
+    );
+    assert!(done.refs_removed.is_empty());
+}
+
+/// A delta-stored blob is found by a cheap probe; the walk must not
+/// reconstruct it (IMPORTANT 5).
+#[tokio::test]
+async fn test_fsck_walk_does_not_read_delta_stored_blobs() {
+    let repo = Layout::new().await;
+    let odb = ObjectDatabase::new(repo.storage.clone(), 100);
+    let mut base = vec![b'a'; 10_000];
+    base.extend_from_slice(b"UNIQUE_TAIL_BASE");
+    let base_oid = odb.write(ObjectType::Blob, &base).await.unwrap();
+    let mut target = vec![b'a'; 10_000];
+    target.extend_from_slice(b"UNIQUE_TAIL_TARG");
+    let delta_oid = odb
+        .write_delta_against_base(ObjectType::Blob, &target, "f.bin", base_oid)
+        .await
+        .unwrap()
+        .expect("fixture: delta accepted");
+    repo.commit_entries(&odb, &[("f.bin", delta_oid)]).await;
+    let probe = Probe::new(repo.storage.clone());
+
+    let report = repo
+        .probe_checker(&probe)
+        .check(FsckOptions {
+            check_objects: false,
+            check_refs: false,
+            check_dangling: false,
+            check_chunk_deltas: false,
+            check_connectivity: true,
+            ..FsckOptions::default()
+        })
+        .await
+        .unwrap();
+
+    assert!(!report.has_errors(), "{:?}", report.issues);
+    let gets = probe.gets.lock().unwrap();
+    assert!(
+        !gets
+            .iter()
+            .any(|k| k.contains(&delta_oid.to_hex()) || k.contains(&base_oid.to_hex())),
+        "the walk reconstructed a delta chain: {gets:?}"
+    );
+}
+
+/// A saved ref is dropped once a ref of that name exists again, and kept
+/// while it does not.
+#[tokio::test]
+async fn test_fsck_sweep_drops_saved_ref_when_the_ref_is_back() {
+    let repo = Layout::new().await;
+    let fake = Oid::hash(b"nonexistent");
+    repo.refdb()
+        .write(&Ref::new_direct("refs/heads/broken".to_string(), fake))
+        .await
+        .unwrap();
+    let checker = repo.checker();
+    let report = checker.check(FsckOptions::default()).await.unwrap();
+    repo.repair(&checker).repair(&report, false).await.unwrap();
+    let saved = repo
+        .root
+        .join(".mediagit/quarantine/refs/refs/heads/broken");
+    assert!(saved.exists());
+
+    let odb = ObjectDatabase::with_smart_compression(repo.storage.clone(), 10);
+    let refdb = repo.refdb();
+    let st = mediagit_versioning::sweep_quarantine(&odb, Some(&refdb), &repo.root, true)
+        .await
+        .unwrap();
+    assert!(saved.exists(), "ref is still gone: keep the saved value");
+    assert_eq!((st.removed, st.count), (0, 1));
+
+    refdb
+        .write(&Ref::new_direct("refs/heads/broken".to_string(), fake))
+        .await
+        .unwrap();
+    let st = mediagit_versioning::sweep_quarantine(&odb, Some(&refdb), &repo.root, true)
+        .await
+        .unwrap();
+    assert!(!saved.exists(), "ref is back: the saved copy goes");
+    assert_eq!((st.removed, st.count), (1, 0));
 }

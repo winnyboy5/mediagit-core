@@ -462,3 +462,17 @@ fn fsck_on_a_fresh_repository_is_perfect() {
         "an empty repository is healthy: {text}"
     );
 }
+
+#[test]
+fn purge_quarantine_also_removes_saved_refs() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    run(repo, &["init", "-q"]);
+    let saved = repo.join(".mediagit/quarantine/refs/refs/heads/old");
+    std::fs::create_dir_all(saved.parent().unwrap()).unwrap();
+    std::fs::write(&saved, "00\n").unwrap();
+
+    let (ok, text) = purge(repo, &["--yes"]);
+    assert!(ok, "{text}");
+    assert!(!saved.exists(), "{text}");
+}

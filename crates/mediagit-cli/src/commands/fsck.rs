@@ -479,9 +479,14 @@ impl FsckCmd {
         // The one automatic deletion: a quarantined copy whose object has
         // verified healthy again. A dry run only counts.
         let sweep_odb = FsckChecker::new_with_refdb(storage.clone(), None).odb();
-        let quarantine = sweep_quarantine(&sweep_odb, &repo_path, !self.dry_run)
-            .await
-            .context("Failed to read the quarantine folder")?;
+        let quarantine = sweep_quarantine(
+            &sweep_odb,
+            Some(&RefDatabase::new(&mediagit_dir)),
+            &repo_path,
+            !self.dry_run,
+        )
+        .await
+        .context("Failed to read the quarantine folder")?;
 
         if output::machine_mode() {
             return emit_integrity(&report, outcome.as_ref(), &quarantine);
@@ -535,7 +540,13 @@ impl FsckCmd {
         let checker = FsckChecker::new_with_refdb(storage.clone(), None);
 
         // Copies whose object is healthy again are not "lost": drop them first.
-        sweep_quarantine(&checker.odb(), repo_path, true).await?;
+        sweep_quarantine(
+            &checker.odb(),
+            Some(&RefDatabase::new(mediagit_dir)),
+            repo_path,
+            true,
+        )
+        .await?;
         let entries = list_quarantine(repo_path).await?;
         let bytes: u64 = entries.iter().map(|e| e.bytes).sum();
 
@@ -592,12 +603,9 @@ impl FsckCmd {
                 .await
                 .with_context(|| format!("deleting {}", e.path.display()))?;
         }
-        // Empty folders only; a failure here is harmless.
-        let root = mediagit_dir.join("quarantine");
-        for kind in ["loose", "chunk", "chunk-delta-meta", "chunk-delta"] {
-            let _ = tokio::fs::remove_dir(root.join(kind)).await;
-        }
-        let _ = tokio::fs::remove_dir(&root).await;
+        // Every file in it was listed and removed above; what is left is
+        // empty folders, and a failure here is harmless.
+        let _ = tokio::fs::remove_dir_all(mediagit_dir.join("quarantine")).await;
 
         if output::machine_mode() {
             return output::emit_ok(&FsckPurgeReport {
