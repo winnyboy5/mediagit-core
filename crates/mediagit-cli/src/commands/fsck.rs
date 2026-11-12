@@ -281,12 +281,10 @@ fn describe_remote_error(remote: &str, e: &anyhow::Error) -> String {
 /// remote delivered that commit: the saved value under quarantine/refs is the
 /// pointer. The saved copy goes with it.
 async fn restore_removed_refs(
-    repo_path: &std::path::Path,
     refdb: &RefDatabase,
     odb: &mediagit_versioning::ObjectDatabase,
     done: &mut RepairOutcome,
 ) {
-    let _ = repo_path;
     for (name, saved) in done.saved_refs.clone() {
         if !done.refs_removed.contains(&name) {
             continue;
@@ -407,7 +405,7 @@ async fn restore_from_remote(
             }
         }
         done.mark_restored(&healthy);
-        restore_removed_refs(repo_path, &refdb, &odb, done).await;
+        restore_removed_refs(&refdb, &odb, done).await;
         if done.lost_oids().is_empty() && done.refs_removed.is_empty() {
             return;
         }

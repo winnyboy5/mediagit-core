@@ -8,6 +8,15 @@ use super::*;
 /// delta-chain depth) — every chunk of the previous version's manifest gets
 /// a full `get_chunk` reconstruction. Override via
 /// `MEDIAGIT_SIMILARITY_SEED_MAX_CHUNKS`.
+/// Is this `storage.get` failure the plain "object does not exist" answer?
+/// Every backend words it the same way (local, mock, GCS: `object not found:
+/// <key>`; MinIO/S3: `NoSuchKey: object not found`; Azure: typed
+/// `StorageError::NotFound`, same Display). Anything else is some other
+/// failure and gets a probe before being believed.
+fn is_plain_not_found(e: &anyhow::Error) -> bool {
+    format!("{e:#}").to_lowercase().contains("object not found")
+}
+
 fn similarity_seed_max_chunks() -> usize {
     match std::env::var("MEDIAGIT_SIMILARITY_SEED_MAX_CHUNKS") {
         Ok(v) => v.parse::<usize>().unwrap_or_else(|_| {
@@ -2821,13 +2830,24 @@ impl ObjectDatabase {
         let storage_data = match self.storage.get(&key).await {
             Ok(data) => data,
             Err(e) => {
-                // Only a genuinely absent key falls back to the packs. A key
-                // that is there but unreadable (I/O error, lock, EMFILE) is an
-                // error, not "not found": callers judge damage by this result.
-                if self.storage.exists(&key).await.map_err(|x| {
-                    anyhow::anyhow!("object {oid} could not be read ({e}) or probed ({x})")
-                })? {
-                    return Err(e.context(format!("object {oid} is present but unreadable")));
+                // A plain not-found (the normal case for a packed object) goes
+                // straight to the packs: no extra probe. Any other failure
+                // gets one existence probe: a key that is absent still falls
+                // back to the packs; a key that is present but unreadable (I/O
+                // error, lock, EMFILE) is an error, not "not found" -- though
+                // an intact pack copy still serves the read.
+                if !is_plain_not_found(&e) {
+                    let present = self.storage.exists(&key).await.map_err(|x| {
+                        anyhow::anyhow!("object {oid} could not be read ({e}) or probed ({x})")
+                    })?;
+                    if present {
+                        return match self.read_packed_object(oid).await {
+                            Ok(data) => Ok(data),
+                            Err(_) => {
+                                Err(e.context(format!("object {oid} is present but unreadable")))
+                            }
+                        };
+                    }
                 }
                 debug!(oid = %oid, "Loose object not found, trying pack files");
                 return self.read_packed_object(oid).await;
@@ -3247,10 +3267,14 @@ impl ObjectDatabase {
             Err(e) => {
                 // Same rule as `read`: a present but unreadable base chunk is
                 // an error, not a reason to look in the packs.
-                if self.storage.exists(&base_key).await? {
-                    return Err(
-                        e.context(format!("base chunk {base_id} is present but unreadable"))
-                    );
+                if !is_plain_not_found(&e) && self.storage.exists(&base_key).await? {
+                    return match self.read_from_packs(&base_id).await {
+                        Ok(d) => Ok(d),
+                        Err(_) => {
+                            Err(e
+                                .context(format!("base chunk {base_id} is present but unreadable")))
+                        }
+                    };
                 }
                 self.read_from_packs(&base_id).await.map_err(|e| {
                     anyhow::anyhow!(

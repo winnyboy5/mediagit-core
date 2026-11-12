@@ -640,6 +640,7 @@ struct Probe {
     fail_delete_nth: std::sync::Mutex<Option<usize>>,
     deletes: std::sync::atomic::AtomicUsize,
     gets: std::sync::Mutex<Vec<String>>,
+    exists_calls: std::sync::Mutex<std::collections::HashMap<String, usize>>,
 }
 
 impl Probe {
@@ -651,6 +652,7 @@ impl Probe {
             fail_delete_nth: Default::default(),
             deletes: Default::default(),
             gets: Default::default(),
+            exists_calls: Default::default(),
         })
     }
 }
@@ -668,6 +670,12 @@ impl StorageBackend for Probe {
         self.inner.put(key, data).await
     }
     async fn exists(&self, key: &str) -> anyhow::Result<bool> {
+        *self
+            .exists_calls
+            .lock()
+            .unwrap()
+            .entry(key.to_string())
+            .or_default() += 1;
         if self.fail_exists.lock().unwrap().as_deref() == Some(key) {
             anyhow::bail!("injected I/O error probing {key}");
         }
@@ -1170,4 +1178,68 @@ async fn test_fsck_head_is_reported_when_history_exists_but_every_ref_is_gone() 
         .find(|i| i.ref_name.as_deref() == Some("HEAD"))
         .expect("history exists, so a HEAD without a branch is reported");
     assert!(!head.repairable);
+    assert_eq!(head.severity, IssueSeverity::Error, "{head:?}");
+    assert!(head.message.contains("saved versions"), "{}", head.message);
+}
+
+/// Reading a packed-only object takes the plain not-found path: no extra
+/// existence probe on the loose key (one HEAD per read on a cloud store).
+#[tokio::test]
+async fn test_odb_read_of_a_packed_object_makes_no_extra_loose_probe() {
+    let repo = Layout::new().await;
+    let blob = repo.commit_photo(&photo_bytes()).await;
+    let writer = ObjectDatabase::with_smart_compression(repo.storage.clone(), 100);
+    writer.repack(10_000, true).await.unwrap();
+    assert!(!repo.storage.exists(&blob.to_hex()).await.unwrap());
+
+    let probe = Probe::new(repo.storage.clone());
+    let odb = ObjectDatabase::with_smart_compression(probe.clone(), 100);
+    assert_eq!(odb.read(&blob).await.unwrap(), photo_bytes());
+    let probes = *probe
+        .exists_calls
+        .lock()
+        .unwrap()
+        .get(&blob.to_hex())
+        .unwrap_or(&0);
+    assert_eq!(probes, 0, "extra exists() on the loose key");
+}
+
+/// A loose file that cannot be read but has a good pack copy still reads
+/// (the damaged loose file is for fsck to report).
+#[tokio::test]
+async fn test_odb_read_falls_back_to_the_pack_when_the_loose_file_is_unreadable() {
+    let repo = Layout::new().await;
+    let blob = repo.commit_photo(&photo_bytes()).await;
+    let writer = ObjectDatabase::with_smart_compression(repo.storage.clone(), 100);
+    writer.repack(10_000, false).await.unwrap();
+    assert!(repo.storage.exists(&blob.to_hex()).await.unwrap());
+
+    let probe = Probe::new(repo.storage.clone());
+    *probe.fail_get.lock().unwrap() = Some(blob.to_hex());
+    let odb = ObjectDatabase::with_smart_compression(probe.clone(), 100);
+    assert_eq!(odb.read(&blob).await.unwrap(), photo_bytes());
+}
+
+/// A fresh repository with staged work but no commit yet is healthy.
+#[tokio::test]
+async fn test_fsck_unborn_head_with_only_loose_blobs_is_healthy() {
+    let repo = Layout::new().await;
+    let odb = ObjectDatabase::with_smart_compression(repo.storage.clone(), 100);
+    odb.write(ObjectType::Blob, &photo_bytes()).await.unwrap();
+    repo.refdb()
+        .write(&Ref::new_symbolic(
+            "HEAD".to_string(),
+            "refs/heads/main".to_string(),
+        ))
+        .await
+        .unwrap();
+    let report = repo.checker().check(FsckOptions::default()).await.unwrap();
+    assert!(
+        !report
+            .issues
+            .iter()
+            .any(|i| i.category == IssueCategory::BrokenReference),
+        "{:?}",
+        report.issues
+    );
 }

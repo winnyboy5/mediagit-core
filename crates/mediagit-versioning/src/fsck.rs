@@ -637,17 +637,10 @@ impl FsckChecker {
         // yet. That is healthy; only a repository that has commits somewhere
         // can have lost its branch.
         //
-        // "Fresh" means no ref points anywhere AND the object store holds
-        // nothing but its LAYOUT marker (a listing check; objects are not
-        // typed). A repository whose every ref is gone but whose store has
-        // history is not fresh: its HEAD is reported (not repairable).
-        let has_commits = refs.iter().any(|r| r.oid.is_some())
-            || self
-                .storage
-                .list_objects("")
-                .await
-                .map(|keys| keys.iter().any(|k| !k.ends_with("LAYOUT")))
-                .unwrap_or(true);
+        // "Fresh" means no ref points anywhere AND the store holds no commit
+        // object. Staged blobs alone do not count (a fresh `init` + `add`).
+        // The store is only scanned when no ref exists, which is rare.
+        let any_ref_value = refs.iter().any(|r| r.oid.is_some());
 
         for r in refs {
             report.refs_checked += 1;
@@ -711,8 +704,23 @@ impl FsckChecker {
                 RefType::Symbolic => {
                     if let Some(target) = &r.target {
                         // Verify the target reference exists
-                        let unborn_head = r.name == "HEAD" && !has_commits;
-                        if !unborn_head && !self.ref_exists(target).await? {
+                        if r.name == "HEAD" && !any_ref_value {
+                            // Unborn: healthy unless saved versions exist.
+                            if self.store_has_a_commit(report).await? {
+                                report.add_issue(
+                                    FsckIssue::new(
+                                        IssueSeverity::Error,
+                                        IssueCategory::BrokenReference,
+                                        format!(
+                                            "There are saved versions, but no branch points to \
+                                             them: {} names {}, which does not exist",
+                                            r.name, target
+                                        ),
+                                    )
+                                    .with_ref(r.name.clone()),
+                                );
+                            }
+                        } else if !self.ref_exists(target).await? {
                             report.add_issue(
                                 FsckIssue::new(
                                     IssueSeverity::Warning,
@@ -1497,6 +1505,28 @@ impl FsckChecker {
     /// checksum) and is reported as a `ChecksumMismatch` issue rather than
     /// silently skipped — silently skipping would just reproduce the
     /// "0 objects, PERFECT" blind spot for a corrupted pack.
+    /// Is any object in the store a commit? Stops at the first one. Chunked
+    /// blobs (manifests) are skipped: a commit is never chunked, and reading
+    /// one would reassemble it in memory.
+    async fn store_has_a_commit(&self, report: &mut FsckReport) -> anyhow::Result<bool> {
+        for oid in self.list_all_objects(report).await? {
+            if self
+                .storage
+                .exists(&format!("manifests/{}", oid.to_hex()))
+                .await
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            if let Ok(data) = self.odb.read(&oid).await
+                && crate::format::deserialize_exact::<Commit>(&data).is_ok()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     async fn list_all_objects(&self, report: &mut FsckReport) -> anyhow::Result<Vec<Oid>> {
         use crate::pack::PackReader;
 

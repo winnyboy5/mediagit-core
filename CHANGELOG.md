@@ -263,7 +263,7 @@ happened and the output still said "Successfully repaired 1 issue(s)".
   reference holds the same commit and that commit reads. A failed read is no
   longer taken for damage: that object stays where it is and shows up in
   `repair_errors`. A `HEAD` with no branch is healthy only in a repository with
-  no references and an empty object store.
+  no references and no commit in the object store (staged files alone do not count). If saved versions exist but no branch points to them, `fsck` reports an error. Reading an object no longer costs an extra existence probe when it is simply not stored loose, and an unreadable loose file with an intact pack copy still reads.
 
 ## [v0.7.0-rc.1] - 2026-11-03
 

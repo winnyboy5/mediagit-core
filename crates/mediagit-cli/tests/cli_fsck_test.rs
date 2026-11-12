@@ -549,3 +549,28 @@ fn purge_quarantine_deletes_only_what_it_listed() {
     assert!(stray.exists(), "a file that was never listed must survive");
     assert!(files_under(&repo.join(".mediagit/quarantine/loose")).is_empty());
 }
+
+#[test]
+fn fsck_on_init_plus_add_is_clean() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    run(repo, &["init", "-q"]);
+    std::fs::write(repo.join("a.txt"), "staged only").unwrap();
+    run(repo, &["add", "a.txt"]);
+    let (ok, text) = fsck_text(repo, &[]);
+    assert!(ok, "{text}");
+    assert!(!text.contains("missing ref"), "{text}");
+}
+
+#[test]
+fn fsck_fails_when_history_exists_but_every_ref_is_gone() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    commit_file(repo, "a.txt", b"hello");
+    for f in files_under(&repo.join(".mediagit/refs")) {
+        std::fs::remove_file(f).unwrap();
+    }
+    let (ok, text) = fsck_text(repo, &[]);
+    assert!(!ok, "{text}");
+    assert!(text.contains("saved versions"), "{text}");
+}
