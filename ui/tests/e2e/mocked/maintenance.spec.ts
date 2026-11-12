@@ -208,6 +208,9 @@ test.describe('Maintenance: repair result and quarantine', () => {
   test('confirming sends the purge alone, confirmed, and the line goes away', async ({ page }) => {
     await boot(page, { repo_fsck: REPAIR }, {}, { repo_fsck: `(a) => a.options.purgeQuarantine ? { deleted_count: 1, deleted_bytes: 2048, unrestorable_files: ['art/hero.psd'] } : ${JSON.stringify(REPAIR)}` })
     await repairNow(page)
+    // While the delete button exists, it must not sit in a live region.
+    await expect(page.getByRole('button', { name: 'Delete quarantined copies…' })).toBeVisible()
+    await expect(page.locator('[role=status] button')).toHaveCount(0)
     await page.getByRole('button', { name: 'Delete quarantined copies…' }).click()
     await page.getByRole('alertdialog').getByRole('button', { name: 'Delete copies' }).click()
     const q = page.getByTestId('quarantine')
@@ -218,7 +221,6 @@ test.describe('Maintenance: repair result and quarantine', () => {
     await expect(res).toContainText('Some files can no longer be restored')
     await expect(res.locator('.head2.ok')).toHaveCount(0)
     await expect(page.locator('#purged-msg')).toBeFocused()
-    await expect(page.locator('[role=status] button')).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Delete quarantined copies…' })).toHaveCount(0)
     const sent = (await ipcCalls(page, 'repo_fsck')).map((c) => c.args.options)
     expect(sent.at(-1)).toMatchObject({ purgeQuarantine: true, confirmed: true })
