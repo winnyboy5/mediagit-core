@@ -458,7 +458,36 @@ async fn test_fsck_repair_restores_blob_from_working_file() {
 #[tokio::test]
 async fn test_fsck_repair_never_removes_head() {
     let repo = Layout::new().await;
-    // A fresh repository: HEAD names a branch that has no commit yet.
+    // A repository with history whose HEAD names a branch that is gone.
+    repo.commit_photo(&photo_bytes()).await;
+    repo.refdb()
+        .write(&Ref::new_symbolic(
+            "HEAD".to_string(),
+            "refs/heads/gone".to_string(),
+        ))
+        .await
+        .unwrap();
+
+    let checker = repo.checker();
+    let report = checker.check(FsckOptions::default()).await.unwrap();
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|i| i.category == IssueCategory::BrokenReference && i.repairable),
+        "fixture: this HEAD must be reported: {:?}",
+        report.issues
+    );
+    repo.repair(&checker).repair(&report, false).await.unwrap();
+
+    assert!(repo.refdb().exists("HEAD").await.unwrap());
+}
+
+/// A fresh repository has a HEAD that names a branch with no commit yet.
+/// That is healthy, not a broken reference (IMP-011).
+#[tokio::test]
+async fn test_fsck_unborn_head_in_empty_repository_is_healthy() {
+    let repo = Layout::new().await;
     repo.refdb()
         .write(&Ref::new_symbolic(
             "HEAD".to_string(),
@@ -466,12 +495,10 @@ async fn test_fsck_repair_never_removes_head() {
         ))
         .await
         .unwrap();
-
-    let checker = repo.checker();
-    let report = checker.check(FsckOptions::default()).await.unwrap();
-    repo.repair(&checker).repair(&report, false).await.unwrap();
-
-    assert!(repo.refdb().exists("HEAD").await.unwrap());
+    for options in [FsckOptions::default(), FsckOptions::quick()] {
+        let report = repo.checker().check(options).await.unwrap();
+        assert_eq!(report.total_issues(), 0, "got: {:?}", report.issues);
+    }
 }
 
 #[tokio::test]

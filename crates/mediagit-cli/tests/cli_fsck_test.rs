@@ -450,3 +450,15 @@ fn purge_quarantine_on_empty_quarantine_is_a_clean_no_op() {
     let (ok, text) = purge(repo, &[]);
     assert!(ok, "{text}");
 }
+
+#[test]
+fn fsck_on_a_fresh_repository_is_perfect() {
+    let tmp = TempDir::new().unwrap();
+    run(tmp.path(), &["init", "-q"]);
+    let (ok, text) = fsck_text(tmp.path(), &[]);
+    assert!(ok, "{text}");
+    assert!(
+        text.contains("PERFECT"),
+        "an empty repository is healthy: {text}"
+    );
+}

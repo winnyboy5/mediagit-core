@@ -633,6 +633,11 @@ impl FsckChecker {
         let refs = self.list_all_refs().await?;
         info!("Found {} references to check", refs.len());
 
+        // A fresh repository has a HEAD naming a branch that has no commit
+        // yet. That is healthy; only a repository that has commits somewhere
+        // can have lost its branch.
+        let has_commits = refs.iter().any(|r| r.oid.is_some());
+
         for r in refs {
             report.refs_checked += 1;
 
@@ -669,7 +674,8 @@ impl FsckChecker {
                 RefType::Symbolic => {
                     if let Some(target) = &r.target {
                         // Verify the target reference exists
-                        if !self.ref_exists(target).await? {
+                        let unborn_head = r.name == "HEAD" && !has_commits;
+                        if !unborn_head && !self.ref_exists(target).await? {
                             report.add_issue(
                                 FsckIssue::new(
                                     IssueSeverity::Warning,
