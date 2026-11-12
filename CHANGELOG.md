@@ -246,6 +246,17 @@ happened and the output still said "Successfully repaired 1 issue(s)".
 - A new repository (`HEAD` names a branch with no commit yet) is no longer
   reported as having a broken reference.
 - Dangling objects are `gc`'s job, not repair's (see above).
+- Repair is careful with references. A read error is never read as "missing":
+  an unreadable commit is reported and not repairable. Repair checks again
+  before it removes a reference, saves the reference's value under
+  `.mediagit/quarantine/refs/`, and never removes `refs/remotes/*` (a lazy
+  clone has tracking references for branches it has not downloaded).
+- Repair checks an object again right before it moves it, and reports a failed
+  move to quarantine in `repair_errors` instead of dropping it from the result.
+- The list of files names saved versions that cannot be restored; the working
+  copy may be fine. With a bucket as the object store, quarantined bytes are
+  kept on the local disk.
+- `fsck` no longer reads a delta-stored blob in full just to see that it exists.
 
 ## [v0.7.0-rc.1] - 2026-11-03
 

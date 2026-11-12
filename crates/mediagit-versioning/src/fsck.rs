@@ -1973,13 +1973,15 @@ impl FsckRepair {
         }
         let wanted: HashSet<Oid> = oids.iter().copied().collect();
 
-        let mut commits = Vec::new();
+        // (object, may be an annotated tag): a `refs/tags/*` ref can name a
+        // tag object, which names the commit.
+        let mut commits: Vec<(Oid, bool)> = Vec::new();
         for namespace in ["heads", "remotes", "tags"] {
             for name in refdb.list(namespace).await.unwrap_or_default() {
                 if let Ok(r) = refdb.read(&name).await
                     && let Some(oid) = r.oid
                 {
-                    commits.push(oid);
+                    commits.push((oid, namespace == "tags"));
                 }
             }
         }
@@ -1988,17 +1990,21 @@ impl FsckRepair {
         let mut seen_trees = HashSet::new();
         // blob id -> the wanted chunk ids its manifest lists (one manifest read per blob)
         let mut chunks_of: HashMap<Oid, Vec<Oid>> = HashMap::new();
-        while let Some(commit_oid) = commits.pop() {
+        while let Some((commit_oid, maybe_tag)) = commits.pop() {
             if !seen_commits.insert(commit_oid) {
                 continue;
             }
             let Ok(data) = odb.read(&commit_oid).await else {
                 continue;
             };
+            if maybe_tag && let Ok(tag) = crate::format::deserialize::<Tag>(&data) {
+                commits.push((tag.target, true));
+                continue;
+            }
             let Ok(commit) = crate::format::deserialize::<Commit>(&data) else {
                 continue;
             };
-            commits.extend(commit.parents.iter().copied());
+            commits.extend(commit.parents.iter().map(|p| (*p, false)));
 
             let mut trees = vec![(commit.tree, String::new())];
             while let Some((tree_oid, prefix)) = trees.pop() {
@@ -2120,7 +2126,14 @@ impl FsckRepair {
     /// Move one stored key to `.mediagit/quarantine/<kind>/<oid>[.n]`.
     /// The original is removed only after the copy is on disk at full length,
     /// and an existing quarantine file is never overwritten.
+    ///
+    /// The quarantine folder is always on the LOCAL disk, even when the object
+    /// store is a bucket (S3, GCS, Azure): the damaged object leaves the bucket
+    /// and its bytes land next to the working folder. The copy is streamed, so
+    /// memory use is bounded by the backend's stream part size; a backend whose
+    /// `get_streaming` is the default (one `get`) still holds one object in RAM.
     async fn quarantine(&self, kind: &str, key: &str, oid: &Oid) -> anyhow::Result<()> {
+        use futures::StreamExt;
         use tokio::io::AsyncWriteExt;
 
         let dir = self
@@ -2128,11 +2141,10 @@ impl FsckRepair {
             .ok_or_else(|| anyhow::anyhow!("no repository root, cannot quarantine"))?
             .join(kind);
         tokio::fs::create_dir_all(&dir).await?;
-        let bytes = self.storage.get(key).await?;
 
         let hex = oid.to_hex();
         let mut n = 0u32;
-        let dest = loop {
+        let (dest, mut file) = loop {
             let name = if n == 0 {
                 hex.clone()
             } else {
@@ -2145,17 +2157,34 @@ impl FsckRepair {
                 .open(&path)
                 .await
             {
-                Ok(mut f) => {
-                    f.write_all(&bytes).await?;
-                    f.sync_all().await?;
-                    break path;
-                }
+                Ok(f) => break (path, f),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
                 Err(e) => return Err(e.into()),
             }
         };
+        // Copy; on any failure drop only our own partial copy, never the original.
+        let copied: anyhow::Result<u64> = async {
+            let mut stream = self.storage.get_streaming(key).await?;
+            let mut total = 0u64;
+            while let Some(part) = stream.next().await {
+                let part = part?;
+                file.write_all(&part).await?;
+                total += part.len() as u64;
+            }
+            file.sync_all().await?;
+            Ok(total)
+        }
+        .await;
+        drop(file);
+        let total = match copied {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&dest).await;
+                return Err(e);
+            }
+        };
         anyhow::ensure!(
-            tokio::fs::metadata(&dest).await?.len() == bytes.len() as u64,
+            tokio::fs::metadata(&dest).await?.len() == total,
             "quarantine copy {} is short; original kept",
             dest.display()
         );
@@ -2236,13 +2265,12 @@ impl FsckRepair {
             // fall through to the pack. The read-back below proves it.
             Source::Pack => true,
             Source::Chunk(data) => odb.write_full_chunk(oid, &data).await.is_ok(),
-            Source::File { path, name } => match tokio::fs::read(&path).await {
-                Ok(data) => matches!(
-                    odb.write_with_path(ObjectType::Blob, &data, &name).await,
-                    Ok(written) if written == *oid
-                ),
-                Err(_) => false,
-            },
+            Source::Loaded { data, name } => matches!(
+                odb.write_with_path(ObjectType::Blob, &data, &name).await,
+                Ok(written) if written == *oid
+            ),
+            // Only ever turned into `Loaded` before a repair writes.
+            Source::File { .. } => false,
         };
         if !written {
             return false;
@@ -2337,6 +2365,24 @@ impl FsckRepair {
             }
             return Ok(());
         }
+
+        // Read and re-hash a working-file source BEFORE anything moves: if it
+        // changed since it was matched, stop with the object untouched.
+        let source = match source {
+            Some(Source::File { path, name }) => match tokio::fs::read(&path).await {
+                Ok(data) if Oid::hash(&data) == *oid => Some(Source::Loaded { data, name }),
+                _ => {
+                    out.errors.push(format!(
+                        "{oid}: the source file {} changed during repair, run repair again",
+                        path.display()
+                    ));
+                    out.lost
+                        .extend(files.iter().map(|f| (*oid, f.path.clone())));
+                    return Ok(());
+                }
+            },
+            other => other,
+        };
 
         for (kind, key) in &pieces {
             if let Err(e) = self.quarantine(kind, key, oid).await {
@@ -2624,8 +2670,10 @@ enum Source {
     Chunk(Vec<u8>),
     /// An intact copy inside a pack file.
     Pack,
-    /// A working file that hashes to the object id.
+    /// A working file that hashed to the object id when it was found.
     File { path: PathBuf, name: String },
+    /// That file's bytes, re-hashed just before the repair moves anything.
+    Loaded { data: Vec<u8>, name: String },
 }
 
 #[cfg(test)]

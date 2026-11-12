@@ -975,3 +975,38 @@ async fn test_fsck_repair_reports_a_partly_failed_quarantine() {
     let kept = snapshot(&repo.root.join(".mediagit/quarantine"));
     assert_eq!(kept.len(), 2, "{kept:?}");
 }
+
+/// A file reachable only through an annotated tag is still named.
+#[tokio::test]
+async fn test_paths_referencing_follows_annotated_tags() {
+    let repo = Layout::new().await;
+    let odb = ObjectDatabase::with_smart_compression(repo.storage.clone(), 100);
+    let blob = odb.write(ObjectType::Blob, &photo_bytes()).await.unwrap();
+    let commit = repo
+        .commit_entries(&odb, &[("only-in-tag.bin", blob)])
+        .await;
+    repo.refdb().delete("refs/heads/main").await.unwrap();
+    let tagger = Signature::now("T".to_string(), "t@example.com".to_string());
+    let tag = mediagit_versioning::Tag::new(
+        commit,
+        ObjectType::Commit,
+        "v1".to_string(),
+        tagger,
+        "release".to_string(),
+    );
+    let tag_oid = tag.write(&odb).await.unwrap();
+    repo.refdb()
+        .write(&Ref::new_direct("refs/tags/v1".to_string(), tag_oid))
+        .await
+        .unwrap();
+
+    let checker = repo.checker();
+    let found = repo
+        .repair(&checker)
+        .paths_referencing(&[blob])
+        .await
+        .unwrap();
+
+    let files = found.get(&blob).expect("named through the tag");
+    assert_eq!(files[0].path, "only-in-tag.bin");
+}

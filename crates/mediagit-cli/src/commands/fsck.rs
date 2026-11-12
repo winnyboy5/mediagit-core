@@ -624,7 +624,10 @@ impl FsckCmd {
             bytes
         );
         if !lost.is_empty() {
-            println!("{} file(s) can no longer be restored:", lost.len());
+            println!(
+                "{} file(s) have saved versions that can no longer be restored:",
+                lost.len()
+            );
             for f in &lost {
                 println!("    {f}");
             }
@@ -677,7 +680,7 @@ impl FsckCmd {
         }
         if !o.unrestorable_files.is_empty() {
             println!(
-                "{} {} file(s) {} no longer be restored:",
+                "{} {} file(s) have saved versions that {} no longer be restored:",
                 style("✖").red().bold(),
                 o.unrestorable_files.len(),
                 if o.dry_run { "could" } else { "can" }

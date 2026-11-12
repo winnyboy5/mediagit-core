@@ -134,13 +134,18 @@ looks for a good copy, in this order:
 
 If none has a good copy, the damaged bytes are moved to
 `.mediagit/quarantine/<kind>/<object id>`. The object is then missing, so
-`fsck` stays red and exits non-zero, and the output lists the files that can
-no longer be restored:
+`fsck` stays red and exits non-zero, and the output lists the files that have
+a saved version that can no longer be restored. The file in your working
+folder may be fine; it is the saved version that is lost:
 
 ```bash
-✖ 1 file(s) can no longer be restored:
+✖ 1 file(s) have saved versions that can no longer be restored:
     photo.bin
 ```
+
+The quarantine folder is always on the local disk. With a bucket as the
+object store (S3, GCS, Azure), a damaged object leaves the bucket and its
+bytes are kept locally, next to your working folder.
 
 If the remote cannot help, fsck says why in one line: no remote is
 configured, the server could not be reached, the login was refused, or the
@@ -149,7 +154,10 @@ server did not have a good copy.
 After repair, fsck checks again and reports only what the second check
 confirms. The exit code describes the repository as it is afterwards.
 
-Broken references are removed. `HEAD` is never removed. Dangling objects are
+Broken branch and tag references are removed, after their value is saved to
+`.mediagit/quarantine/refs/<name>`. `HEAD` and remote-tracking references
+(`refs/remotes/*`) are never removed: a lazy clone has tracking references for
+branches it has not downloaded yet, so run `fetch` for those. Dangling objects are
 not repaired: `mediagit gc` owns them.
 
 ### The quarantine folder
@@ -167,8 +175,8 @@ files that can no longer be restored. It runs no repair.
 ### Machine output
 
 `mediagit --machine fsck` adds `quarantine_count` and `quarantine_bytes`.
-After `--repair` it also reports `restored`, `quarantined`, `refs_removed`
-and `unrestorable_files`. `--purge-quarantine` reports `deleted_count`,
+After `--repair` it also reports `restored`, `quarantined`, `refs_removed`,
+`unrestorable_files` and `repair_errors`. `--purge-quarantine` reports `deleted_count`,
 `deleted_bytes` and `unrestorable_files`.
 
 ### Errors found

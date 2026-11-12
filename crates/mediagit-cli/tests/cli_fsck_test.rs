@@ -476,3 +476,19 @@ fn purge_quarantine_also_removes_saved_refs() {
     assert!(ok, "{text}");
     assert!(!saved.exists(), "{text}");
 }
+
+#[test]
+fn fsck_repair_words_the_loss_as_saved_versions() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let added = commit_file(repo, "photo.bin", &random_bytes(64 * 1024));
+    flip_byte(&added[0]);
+    // The working copy is intact, only the saved version is lost.
+    std::fs::write(repo.join("photo.bin"), b"edited since").unwrap();
+    let (ok, text) = fsck_text(repo, &["--repair"]);
+    assert!(!ok, "{text}");
+    assert!(
+        text.contains("have saved versions that can no longer be restored"),
+        "{text}"
+    );
+}
