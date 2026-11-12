@@ -362,3 +362,91 @@ fn fsck_prints_quarantine_count_and_size() {
     assert_eq!(v["data"]["quarantine_count"], 1, "{v}");
     assert_eq!(v["data"]["quarantine_bytes"], size, "{v}");
 }
+
+fn purge(repo: &Path, args: &[&str]) -> (bool, String) {
+    let out = mediagit()
+        .args(["fsck", "--purge-quarantine"])
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out.status.success(), text)
+}
+
+#[test]
+fn purge_quarantine_without_yes_deletes_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    quarantined_repo(repo, &random_bytes(64 * 1024));
+    let before = quarantine_bytes(repo);
+
+    // Not a terminal here: it must refuse and say how to proceed.
+    let (ok, text) = purge(repo, &[]);
+    assert!(!ok, "no confirmation, exit must be non-zero: {text}");
+    assert!(text.contains("--yes"), "{text}");
+    assert_eq!(before, quarantine_bytes(repo));
+
+    let out = mediagit()
+        .args(["--machine", "fsck", "--purge-quarantine"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "--machine needs --yes too");
+    assert_eq!(before, quarantine_bytes(repo));
+}
+
+#[test]
+fn purge_quarantine_with_yes_empties_it_and_names_lost_files() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    quarantined_repo(repo, &random_bytes(64 * 1024));
+    let size = quarantine_bytes(repo)
+        .values()
+        .map(|b| b.len())
+        .sum::<usize>();
+    // A working file is back, but purge must not repair anything.
+    std::fs::write(repo.join("photo.bin"), random_bytes(64 * 1024)).unwrap();
+
+    let (ok, text) = purge(repo, &["--yes"]);
+    assert!(ok, "{text}");
+    assert!(files_under(&repo.join(".mediagit/quarantine")).is_empty());
+    assert!(
+        text.contains("photo.bin"),
+        "must repeat the lost file: {text}"
+    );
+    assert!(text.contains(&size.to_string()), "must print bytes: {text}");
+    assert!(
+        !fsck_text(repo, &[]).0,
+        "purge must not have repaired the object"
+    );
+}
+
+#[test]
+fn purge_quarantine_machine_reports_what_it_deleted() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    quarantined_repo(repo, &random_bytes(64 * 1024));
+    let out = mediagit()
+        .args(["--machine", "fsck", "--purge-quarantine", "--yes"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["data"]["deleted_count"], 1, "{v}");
+    assert_eq!(v["data"]["unrestorable_files"][0], "photo.bin", "{v}");
+}
+
+#[test]
+fn purge_quarantine_on_empty_quarantine_is_a_clean_no_op() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    commit_file(repo, "a.txt", b"hello");
+    let (ok, text) = purge(repo, &[]);
+    assert!(ok, "{text}");
+}

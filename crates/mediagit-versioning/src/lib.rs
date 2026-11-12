@@ -139,7 +139,8 @@ pub use tree::{FileMode, Tree, TreeEntry};
 // Re-export fsck module
 pub use fsck::{
     FsckChecker, FsckIssue, FsckOptions, FsckRepair, FsckReport, IssueCategory, IssueSeverity,
-    QuarantineStatus, ReferencingFile, RepairOutcome, scan_hex_oids, sweep_quarantine,
+    QuarantineEntry, QuarantineStatus, ReferencingFile, RepairOutcome, list_quarantine,
+    scan_hex_oids, sweep_quarantine,
 };
 
 #[cfg(test)]

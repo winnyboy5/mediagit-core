@@ -9,7 +9,7 @@ use clap::Parser;
 use console::style;
 use mediagit_versioning::{
     FsckChecker, FsckOptions, FsckRepair, IssueSeverity, QuarantineStatus, RefDatabase,
-    RepairOutcome, sweep_quarantine,
+    RepairOutcome, list_quarantine, sweep_quarantine,
 };
 use serde::Serialize;
 
@@ -81,6 +81,14 @@ pub struct FsckCmd {
     #[arg(long)]
     pub dry_run: bool,
 
+    /// Delete every copy in .mediagit/quarantine (asks first; runs no check or repair)
+    #[arg(long)]
+    pub purge_quarantine: bool,
+
+    /// Do not ask for confirmation (with --purge-quarantine)
+    #[arg(long)]
+    pub yes: bool,
+
     /// Limit number of objects to check (0 = unlimited)
     #[arg(long, default_value = "0")]
     pub max_objects: u64,
@@ -139,6 +147,19 @@ pub struct FsckCliReport {
     #[cfg_attr(test, ts(type = "number"))]
     pub quarantine_bytes: u64,
     pub issues: Vec<FsckIssueReport>,
+}
+
+/// `--machine` data for `fsck --purge-quarantine`.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct FsckPurgeReport {
+    #[cfg_attr(test, ts(type = "number"))]
+    pub deleted_count: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub deleted_bytes: u64,
+    /// Files that need a purged copy and so can no longer be restored.
+    pub unrestorable_files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -206,6 +227,10 @@ impl FsckCmd {
         let repo_path_str = self.path.as_deref().unwrap_or(".");
         let repo_path = std::path::PathBuf::from(repo_path_str);
         let mediagit_dir = repo_path.join(".mediagit");
+
+        if self.purge_quarantine {
+            return self.purge_quarantine(&repo_path, &mediagit_dir).await;
+        }
 
         if !self.quiet() {
             println!(
@@ -352,6 +377,104 @@ impl FsckCmd {
             );
         }
 
+        Ok(())
+    }
+
+    /// `--purge-quarantine`: delete every quarantined copy, after asking.
+    /// Runs no check and no repair.
+    async fn purge_quarantine(
+        &self,
+        repo_path: &std::path::Path,
+        mediagit_dir: &std::path::Path,
+    ) -> Result<()> {
+        let storage = create_storage_backend(repo_path)
+            .await
+            .context("Failed to open repository. Is this a MediaGit repository?")?;
+        let checker = FsckChecker::new_with_refdb(storage.clone(), None);
+
+        // Copies whose object is healthy again are not "lost": drop them first.
+        sweep_quarantine(&checker.odb(), repo_path, true).await?;
+        let entries = list_quarantine(repo_path).await?;
+        let bytes: u64 = entries.iter().map(|e| e.bytes).sum();
+
+        if entries.is_empty() {
+            if output::machine_mode() {
+                return output::emit_ok(&FsckPurgeReport {
+                    deleted_count: 0,
+                    deleted_bytes: 0,
+                    unrestorable_files: Vec::new(),
+                });
+            }
+            println!("The quarantine is empty. Nothing to delete.");
+            return Ok(());
+        }
+
+        if !self.yes {
+            output::ensure_interactive("fsck --purge-quarantine confirmation (pass --yes)")?;
+            if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                anyhow::bail!(
+                    "stdin is not a terminal; pass --yes to delete {} quarantined cop(ies)",
+                    entries.len()
+                );
+            }
+            let confirmed = dialoguer::Confirm::new()
+                .with_prompt(format!(
+                    "Delete {} quarantined cop(ies) ({} bytes)? This cannot be undone.",
+                    entries.len(),
+                    bytes
+                ))
+                .default(false)
+                .interact()?;
+            if !confirmed {
+                anyhow::bail!("cancelled; nothing was deleted");
+            }
+        }
+
+        // Name the files before the evidence goes.
+        let oids: Vec<_> = entries.iter().filter_map(|e| e.oid).collect();
+        let repair = FsckRepair::new(storage)
+            .with_odb(checker.odb())
+            .with_refdb(RefDatabase::new(mediagit_dir));
+        let mut lost: Vec<String> = repair
+            .paths_referencing(&oids)
+            .await?
+            .into_values()
+            .flatten()
+            .map(|f| f.path)
+            .collect();
+        lost.sort();
+        lost.dedup();
+
+        for e in &entries {
+            tokio::fs::remove_file(&e.path)
+                .await
+                .with_context(|| format!("deleting {}", e.path.display()))?;
+        }
+        // Empty folders only; a failure here is harmless.
+        let root = mediagit_dir.join("quarantine");
+        for kind in ["loose", "chunk", "chunk-delta-meta", "chunk-delta"] {
+            let _ = tokio::fs::remove_dir(root.join(kind)).await;
+        }
+        let _ = tokio::fs::remove_dir(&root).await;
+
+        if output::machine_mode() {
+            return output::emit_ok(&FsckPurgeReport {
+                deleted_count: entries.len() as u64,
+                deleted_bytes: bytes,
+                unrestorable_files: lost,
+            });
+        }
+        println!(
+            "Deleted {} quarantined cop(ies), {} bytes.",
+            entries.len(),
+            bytes
+        );
+        if !lost.is_empty() {
+            println!("{} file(s) can no longer be restored:", lost.len());
+            for f in &lost {
+                println!("    {f}");
+            }
+        }
         Ok(())
     }
 

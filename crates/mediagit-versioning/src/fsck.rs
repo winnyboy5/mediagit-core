@@ -2297,6 +2297,45 @@ pub struct QuarantineStatus {
     pub bytes: u64,
 }
 
+/// One file in `.mediagit/quarantine`.
+#[derive(Debug, Clone)]
+pub struct QuarantineEntry {
+    pub path: PathBuf,
+    /// `loose`, `chunk`, `chunk-delta-meta` or `chunk-delta`.
+    pub kind: String,
+    /// `None` when the file name is not `<oid>[.n]`.
+    pub oid: Option<Oid>,
+    pub bytes: u64,
+}
+
+/// Every file in `.mediagit/quarantine` (empty when the folder is absent).
+pub async fn list_quarantine(repo_root: &Path) -> anyhow::Result<Vec<QuarantineEntry>> {
+    let root = repo_root.join(".mediagit").join("quarantine");
+    let mut out = Vec::new();
+    let Ok(mut kinds) = tokio::fs::read_dir(&root).await else {
+        return Ok(out);
+    };
+    while let Some(kind_dir) = kinds.next_entry().await? {
+        if !kind_dir.file_type().await?.is_dir() {
+            continue;
+        }
+        let kind = kind_dir.file_name().to_string_lossy().into_owned();
+        let mut files = tokio::fs::read_dir(kind_dir.path()).await?;
+        while let Some(f) = files.next_entry().await? {
+            let name = f.file_name().to_string_lossy().into_owned();
+            // `<oid>` or `<oid>.<n>`
+            let oid = name.split('.').next().and_then(|h| Oid::from_hex(h).ok());
+            out.push(QuarantineEntry {
+                path: f.path(),
+                kind: kind.clone(),
+                oid,
+                bytes: f.metadata().await?.len(),
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// Drop quarantined copies whose object now verifies in the store, and count
 /// what stays. This is the only automatic deletion from quarantine: a copy of
 /// an object that is still missing or still damaged is never touched.
@@ -2306,42 +2345,27 @@ pub async fn sweep_quarantine(
     repo_root: &Path,
     delete: bool,
 ) -> anyhow::Result<QuarantineStatus> {
-    let root = repo_root.join(".mediagit").join("quarantine");
     let mut status = QuarantineStatus::default();
-    let Ok(mut kinds) = tokio::fs::read_dir(&root).await else {
-        return Ok(status);
-    };
-    while let Some(kind_dir) = kinds.next_entry().await? {
-        if !kind_dir.file_type().await?.is_dir() {
-            continue;
-        }
-        let kind = kind_dir.file_name().to_string_lossy().into_owned();
-        let mut files = tokio::fs::read_dir(kind_dir.path()).await?;
-        while let Some(f) = files.next_entry().await? {
-            let size = f.metadata().await?.len();
-            let name = f.file_name().to_string_lossy().into_owned();
-            // `<oid>` or `<oid>.<n>`
-            let oid = name.split('.').next().and_then(|h| Oid::from_hex(h).ok());
-            let healthy = match oid {
-                Some(oid) => {
-                    odb.invalidate_cache(&oid).await;
-                    if kind == "loose" {
-                        odb.stream_object_to(&oid, &mut tokio::io::sink())
-                            .await
-                            .is_ok()
-                    } else {
-                        matches!(odb.get_chunk(&oid).await, Ok(d) if Oid::hash(&d) == oid)
-                    }
+    for entry in list_quarantine(repo_root).await? {
+        let healthy = match entry.oid {
+            Some(oid) => {
+                odb.invalidate_cache(&oid).await;
+                if entry.kind == "loose" {
+                    odb.stream_object_to(&oid, &mut tokio::io::sink())
+                        .await
+                        .is_ok()
+                } else {
+                    matches!(odb.get_chunk(&oid).await, Ok(d) if Oid::hash(&d) == oid)
                 }
-                None => false,
-            };
-            if healthy && delete {
-                tokio::fs::remove_file(f.path()).await?;
-                status.removed += 1;
-            } else {
-                status.count += 1;
-                status.bytes += size;
             }
+            None => false,
+        };
+        if healthy && delete {
+            tokio::fs::remove_file(&entry.path).await?;
+            status.removed += 1;
+        } else {
+            status.count += 1;
+            status.bytes += entry.bytes;
         }
     }
     Ok(status)

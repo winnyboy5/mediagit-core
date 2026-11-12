@@ -1032,6 +1032,12 @@ gui = "MaintenanceView/more"
 [arg."fsck --dry-run"]
 gui = "MaintenanceView/more"
 
+[arg."fsck --purge-quarantine"]
+gui = "TODO:MaintenanceView/more"
+
+[arg."fsck --yes"]
+gui = "TODO:MaintenanceView/more"
+
 [arg."fsck --max-objects"]
 excluded = "bounded-run knob for scripted checks"
 
