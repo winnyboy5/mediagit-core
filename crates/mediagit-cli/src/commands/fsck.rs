@@ -8,7 +8,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use mediagit_versioning::{
-    FsckChecker, FsckOptions, FsckRepair, IssueSeverity, RefDatabase, RepairOutcome,
+    FsckChecker, FsckOptions, FsckRepair, IssueSeverity, QuarantineStatus, RefDatabase,
+    RepairOutcome, sweep_quarantine,
 };
 use serde::Serialize;
 
@@ -131,6 +132,12 @@ pub struct FsckCliReport {
     pub refs_removed: Option<u64>,
     /// `--repair`: files that can no longer be restored (empty otherwise).
     pub unrestorable_files: Vec<String>,
+    /// Damaged copies held in `.mediagit/quarantine`.
+    #[cfg_attr(test, ts(type = "number"))]
+    pub quarantine_count: u64,
+    /// Total size of those copies.
+    #[cfg_attr(test, ts(type = "number"))]
+    pub quarantine_bytes: u64,
     pub issues: Vec<FsckIssueReport>,
 }
 
@@ -151,6 +158,7 @@ pub struct FsckIssueReport {
 pub(super) fn emit_integrity(
     report: &mediagit_versioning::FsckReport,
     repair: Option<&RepairOutcome>,
+    quarantine: &QuarantineStatus,
 ) -> Result<()> {
     let lost_files = repair.is_some_and(|o| !o.unrestorable_files.is_empty());
     let healthy = !report.has_errors() && !lost_files;
@@ -167,6 +175,8 @@ pub(super) fn emit_integrity(
         quarantined: repair.map(|o| o.quarantined.len() as u64),
         refs_removed: repair.map(|o| o.refs_removed.len() as u64),
         unrestorable_files: repair.map_or_else(Vec::new, |o| o.unrestorable_files.clone()),
+        quarantine_count: quarantine.count,
+        quarantine_bytes: quarantine.bytes,
         issues: report
             .issues
             .iter()
@@ -299,8 +309,29 @@ impl FsckCmd {
             outcome = Some(done);
         }
 
+        // The one automatic deletion: a quarantined copy whose object has
+        // verified healthy again. A dry run only counts.
+        let sweep_odb = FsckChecker::new_with_refdb(storage.clone(), None).odb();
+        let quarantine = sweep_quarantine(&sweep_odb, &repo_path, !self.dry_run)
+            .await
+            .context("Failed to read the quarantine folder")?;
+
         if output::machine_mode() {
-            return emit_integrity(&report, outcome.as_ref());
+            return emit_integrity(&report, outcome.as_ref(), &quarantine);
+        }
+        if !self.quiet() {
+            if quarantine.removed > 0 {
+                println!(
+                    "Removed {} quarantined copy(ies) whose object is healthy again.",
+                    quarantine.removed
+                );
+            }
+            if quarantine.count > 0 {
+                println!(
+                    "Quarantine: {} damaged cop(ies), {} bytes, in .mediagit/quarantine                      (mediagit fsck --purge-quarantine deletes them).",
+                    quarantine.count, quarantine.bytes
+                );
+            }
         }
 
         // Exit with error if critical issues found, or a file is lost

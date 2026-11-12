@@ -162,7 +162,11 @@ impl VerifyCmd {
             .context("Verification failed")?;
 
         if crate::output::machine_mode() {
-            return super::fsck::emit_integrity(&report, None);
+            return super::fsck::emit_integrity(
+                &report,
+                None,
+                &mediagit_versioning::QuarantineStatus::default(),
+            );
         }
 
         // Display results

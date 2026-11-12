@@ -918,14 +918,18 @@ impl FsckChecker {
                 // `object_exists`, not `odb.exists`: the latter does not know
                 // delta-stored (`deltas/<oid>`) blobs.
                 if !self.object_exists(&entry.oid).await? {
-                    report.add_issue(
-                        FsckIssue::new(
-                            IssueSeverity::Error,
-                            IssueCategory::MissingObject,
-                            format!("Tree {} references missing object {}", tree_oid, entry.oid),
-                        )
-                        .with_oid(entry.oid),
-                    );
+                    let issue = FsckIssue::new(
+                        IssueSeverity::Error,
+                        IssueCategory::MissingObject,
+                        format!("Tree {} references missing object {}", tree_oid, entry.oid),
+                    )
+                    .with_oid(entry.oid);
+                    // A missing file can be restored; a missing subtree cannot.
+                    report.add_issue(if entry.mode == FileMode::Directory {
+                        issue
+                    } else {
+                        issue.repairable()
+                    });
                     continue;
                 }
 
@@ -952,7 +956,8 @@ impl FsckChecker {
                                         entry.oid, chunk.id
                                     ),
                                 )
-                                .with_oid(chunk.id),
+                                .with_oid(chunk.id)
+                                .repairable(),
                             );
                         }
                     }
@@ -1749,22 +1754,28 @@ impl FsckRepair {
         let mut damaged: Vec<Oid> = report
             .repairable_issues()
             .iter()
-            .filter(|i| i.category == IssueCategory::ChecksumMismatch)
+            .filter(|i| {
+                matches!(
+                    i.category,
+                    IssueCategory::ChecksumMismatch | IssueCategory::MissingObject
+                )
+            })
             .filter_map(|i| i.oid)
             .collect();
         damaged.sort_unstable();
         damaged.dedup();
         let referencing = self.paths_referencing(&damaged).await?;
 
+        let mut handled = HashSet::new();
         for issue in report.repairable_issues() {
             match issue.category {
-                IssueCategory::ChecksumMismatch => {
+                IssueCategory::ChecksumMismatch | IssueCategory::MissingObject => {
                     if let Some(oid) = issue.oid
-                        && !out.restored.contains(&oid)
-                        && !out.quarantined.contains(&oid)
+                        && handled.insert(oid)
                     {
                         let files = referencing.get(&oid).map_or(&[][..], |v| v.as_slice());
-                        self.repair_damaged_object(&oid, files, dry_run, &mut out)
+                        let missing = issue.category == IssueCategory::MissingObject;
+                        self.repair_damaged_object(&oid, files, missing, dry_run, &mut out)
                             .await?;
                     }
                 }
@@ -2147,11 +2158,18 @@ impl FsckRepair {
         &self,
         oid: &Oid,
         files: &[ReferencingFile],
+        missing: bool,
         dry_run: bool,
         out: &mut RepairOutcome,
     ) -> anyhow::Result<()> {
         let pieces = self.stored_pieces(oid).await;
-        if pieces.is_empty() {
+        // `missing`: the walk found nothing stored under this id, so there is
+        // nothing to quarantine, only a good copy to look for. A "missing"
+        // object that is in fact stored is left to the next check.
+        if missing && (!pieces.is_empty() || files.is_empty()) {
+            return Ok(());
+        }
+        if pieces.is_empty() && !missing {
             // Distinguish the two reasons the probe misses. Reporting a
             // chunked manifest as "likely packed" sent operators to
             // `gc --repack`, which cannot help.
@@ -2185,10 +2203,16 @@ impl FsckRepair {
             return Ok(());
         };
 
-        let is_chunk = pieces.iter().any(|(kind, _)| *kind != "loose");
+        let is_chunk = if missing {
+            files.iter().all(|f| f.blob != *oid)
+        } else {
+            pieces.iter().any(|(kind, _)| *kind != "loose")
+        };
         let source = self.find_source(oid, is_chunk, files).await;
         let unrestorable = |out: &mut RepairOutcome| {
-            out.quarantined.push(*oid);
+            if !missing {
+                out.quarantined.push(*oid);
+            }
             out.unrestorable_files
                 .extend(files.iter().map(|f| f.path.clone()));
         };
@@ -2260,6 +2284,67 @@ impl FsckRepair {
         }
         Ok(true)
     }
+}
+
+/// What is left in `.mediagit/quarantine` after a sweep.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QuarantineStatus {
+    /// Copies deleted by this sweep because their object is healthy again.
+    pub removed: u64,
+    /// Copies still held.
+    pub count: u64,
+    /// Total size of the copies still held.
+    pub bytes: u64,
+}
+
+/// Drop quarantined copies whose object now verifies in the store, and count
+/// what stays. This is the only automatic deletion from quarantine: a copy of
+/// an object that is still missing or still damaged is never touched.
+/// `delete = false` (dry run) only counts. `odb` should have a cold cache.
+pub async fn sweep_quarantine(
+    odb: &ObjectDatabase,
+    repo_root: &Path,
+    delete: bool,
+) -> anyhow::Result<QuarantineStatus> {
+    let root = repo_root.join(".mediagit").join("quarantine");
+    let mut status = QuarantineStatus::default();
+    let Ok(mut kinds) = tokio::fs::read_dir(&root).await else {
+        return Ok(status);
+    };
+    while let Some(kind_dir) = kinds.next_entry().await? {
+        if !kind_dir.file_type().await?.is_dir() {
+            continue;
+        }
+        let kind = kind_dir.file_name().to_string_lossy().into_owned();
+        let mut files = tokio::fs::read_dir(kind_dir.path()).await?;
+        while let Some(f) = files.next_entry().await? {
+            let size = f.metadata().await?.len();
+            let name = f.file_name().to_string_lossy().into_owned();
+            // `<oid>` or `<oid>.<n>`
+            let oid = name.split('.').next().and_then(|h| Oid::from_hex(h).ok());
+            let healthy = match oid {
+                Some(oid) => {
+                    odb.invalidate_cache(&oid).await;
+                    if kind == "loose" {
+                        odb.stream_object_to(&oid, &mut tokio::io::sink())
+                            .await
+                            .is_ok()
+                    } else {
+                        matches!(odb.get_chunk(&oid).await, Ok(d) if Oid::hash(&d) == oid)
+                    }
+                }
+                None => false,
+            };
+            if healthy && delete {
+                tokio::fs::remove_file(f.path()).await?;
+                status.removed += 1;
+            } else {
+                status.count += 1;
+                status.bytes += size;
+            }
+        }
+    }
+    Ok(status)
 }
 
 /// Where a good copy of a damaged object comes from.

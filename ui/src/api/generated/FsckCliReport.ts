@@ -29,4 +29,12 @@ refs_removed: number | null,
 /**
  * `--repair`: files that can no longer be restored (empty otherwise).
  */
-unrestorable_files: Array<string>, issues: Array<FsckIssueReport>, };
+unrestorable_files: Array<string>, 
+/**
+ * Damaged copies held in `.mediagit/quarantine`.
+ */
+quarantine_count: number, 
+/**
+ * Total size of those copies.
+ */
+quarantine_bytes: number, issues: Array<FsckIssueReport>, };

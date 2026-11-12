@@ -275,3 +275,90 @@ fn fsck_repair_on_keyed_repo_never_writes_plaintext() {
     go(&["reset", "--hard", "HEAD"]).success();
     assert_eq!(std::fs::read(repo.join("photo.bin")).unwrap(), data);
 }
+
+/// Commit `photo.bin`, damage its object, delete the working file and repair:
+/// the object ends up quarantined (nothing could restore it).
+fn quarantined_repo(repo: &Path, data: &[u8]) {
+    let added = commit_file(repo, "photo.bin", data);
+    flip_byte(&added[0]);
+    std::fs::remove_file(repo.join("photo.bin")).unwrap();
+    let (ok, text) = fsck_text(repo, &["--repair"]);
+    assert!(!ok, "fixture: nothing could restore it: {text}");
+    assert_eq!(files_under(&repo.join(".mediagit/quarantine")).len(), 1);
+}
+
+fn quarantine_bytes(repo: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    files_under(&repo.join(".mediagit/quarantine"))
+        .into_iter()
+        .map(|p| {
+            let b = std::fs::read(&p).unwrap();
+            (p, b)
+        })
+        .collect()
+}
+
+#[test]
+fn quarantined_copy_is_dropped_once_the_object_is_restored() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let data = random_bytes(64 * 1024);
+    quarantined_repo(repo, &data);
+
+    std::fs::write(repo.join("photo.bin"), &data).unwrap();
+    let (ok, text) = fsck_text(repo, &["--repair"]);
+    assert!(ok, "the working file is back, repair must restore: {text}");
+    assert!(
+        files_under(&repo.join(".mediagit/quarantine")).is_empty(),
+        "a healthy object needs no quarantined copy: {text}"
+    );
+    assert!(fsck_text(repo, &["--full"]).0);
+}
+
+#[test]
+fn quarantine_of_a_still_missing_object_survives_fsck_and_gc() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    quarantined_repo(repo, &random_bytes(64 * 1024));
+    let before = quarantine_bytes(repo);
+
+    // Outcomes are not asserted: the repository is broken on purpose. Only
+    // the quarantine folder is.
+    let _ = fsck_text(repo, &[]);
+    let _ = fsck_text(repo, &["--repair"]);
+    let _ = mediagit().args(["gc"]).current_dir(repo).output().unwrap();
+    let _ = mediagit()
+        .args(["gc", "--repack"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        before,
+        quarantine_bytes(repo),
+        "quarantine must be untouched"
+    );
+}
+
+#[test]
+fn fsck_prints_quarantine_count_and_size() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    quarantined_repo(repo, &random_bytes(64 * 1024));
+    let size = quarantine_bytes(repo)
+        .values()
+        .map(|b| b.len() as u64)
+        .sum::<u64>();
+
+    let (_, text) = fsck_text(repo, &[]);
+    assert!(text.to_lowercase().contains("quarantine"), "{text}");
+
+    let out = mediagit()
+        .args(["--machine", "fsck"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("machine output is one JSON line");
+    assert_eq!(v["data"]["quarantine_count"], 1, "{v}");
+    assert_eq!(v["data"]["quarantine_bytes"], size, "{v}");
+}
