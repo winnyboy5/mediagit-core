@@ -646,7 +646,7 @@ impl BranchCmd {
             [only] => only.clone(),
             many if many.iter().any(|r| r == "origin") => "origin".to_string(),
             many => anyhow::bail!(
-                "More than one remote has a branch called '{}' ({}).                  Create it yourself with 'branch create --track'.",
+                "More than one remote has a branch called '{}' ({}). Create it yourself with 'branch create --track'.",
                 name,
                 many.join(", ")
             ),
@@ -674,8 +674,8 @@ impl BranchCmd {
                 embedded: true,
             };
             if let Err(e) = fetch.execute().await {
-                tracing::debug!("download of branch {name} failed: {e:#}");
-                let chain = format!("{e:#}");
+                let chain = crate::output::scrub(&format!("{e:#}"));
+                tracing::debug!("download of branch {name} failed: {chain}");
                 if is_connection_error(&e) {
                     anyhow::bail!(OFFLINE);
                 } else if chain.contains("not found on remote") {
@@ -1398,12 +1398,13 @@ impl RemoteBranch {
         name: &str,
         quiet: bool,
     ) -> Result<()> {
+        // Upstream first: a failed save then leaves no branch without one.
         let mut config = mediagit_config::Config::load(repo_root).await?;
         config.set_branch_upstream(name, &self.remote, format!("refs/heads/{name}"));
+        config.save(repo_root)?;
         refdb
             .write(&Ref::new_direct(format!("refs/heads/{name}"), self.tip))
             .await?;
-        config.save(repo_root)?;
         if !quiet {
             crate::output::info(&format!(
                 "Downloaded branch '{name}' from '{}'",
@@ -1416,9 +1417,60 @@ impl RemoteBranch {
 
 /// True when the server could not be reached at all (no route, refused,
 /// timed out), as opposed to answering with a refusal.
+///
+/// A TLS or certificate failure is not "offline": it is a refusal the user
+/// has to hear about. Some download paths flatten the error to text before it
+/// gets here, so the wording is checked as well as the type.
 fn is_connection_error(e: &anyhow::Error) -> bool {
+    let text = format!("{e:#}").to_lowercase();
+    if ["certificate", "tls", "ssl", "handshake"]
+        .iter()
+        .any(|k| text.contains(k))
+    {
+        return false;
+    }
     e.chain().any(|c| {
         c.downcast_ref::<reqwest::Error>()
             .is_some_and(|r| r.is_connect() || r.is_timeout())
-    })
+    }) || [
+        "error sending request",
+        "connection refused",
+        "connection reset",
+        "connection closed",
+        "connection aborted",
+        "broken pipe",
+        "timed out",
+        "dns error",
+        "unreachable",
+    ]
+    .iter()
+    .any(|k| text.contains(k))
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::is_connection_error;
+
+    fn e(msg: &str) -> anyhow::Error {
+        anyhow::anyhow!("{msg}")
+    }
+
+    #[test]
+    fn dropped_connections_count_even_when_flattened_to_text() {
+        assert!(is_connection_error(&e(
+            "chunk 3 failed: error sending request for url (http://h/r)"
+        )));
+        assert!(is_connection_error(&e("Connection reset by peer")));
+        assert!(is_connection_error(&e("operation timed out")));
+    }
+
+    #[test]
+    fn tls_failures_and_refusals_do_not() {
+        assert!(!is_connection_error(&e(
+            "error sending request: invalid peer certificate: UnknownIssuer"
+        )));
+        assert!(!is_connection_error(&e("tls handshake eof")));
+        assert!(!is_connection_error(&e("401 Unauthorized")));
+        assert!(!is_connection_error(&e("Branch 'x' not found on remote")));
+    }
 }

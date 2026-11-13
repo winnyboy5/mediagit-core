@@ -341,3 +341,62 @@ mod tests {
         assert_eq!(error_code(&needs), "needs_input");
     }
 }
+
+/// Error text is printed to a terminal, logs and the desktop app. Drop
+/// `user:password@` and any `?query` / `#fragment` (presigned URLs carry their
+/// signature there) from every URL in it, and every control character (a
+/// server controls part of this text). Newlines stay.
+pub fn scrub(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("://") {
+        let (head, tail) = rest.split_at(i + 3);
+        out.push_str(head);
+        let end = tail
+            .find(|c: char| c.is_whitespace() || matches!(c, ')' | '"' | '\'' | '>' | '<'))
+            .unwrap_or(tail.len());
+        let url = &tail[..end];
+        let (authority, path) = url.split_at(url.find('/').unwrap_or(url.len()));
+        let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+        // With no path, the query sits right after the host.
+        let host = host.split(['?', '#']).next().unwrap_or(host);
+        let path = path.split(['?', '#']).next().unwrap_or(path);
+        out.push_str(host);
+        out.push_str(path);
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out.chars()
+        .filter(|c| !c.is_control() || *c == '\n')
+        .collect()
+}
+
+#[cfg(test)]
+mod scrub_tests {
+    use super::scrub;
+
+    #[test]
+    fn drops_credentials() {
+        assert_eq!(
+            scrub("error sending request for url (https://bob:s3cret@host:9/r/info)"),
+            "error sending request for url (https://host:9/r/info)"
+        );
+    }
+
+    #[test]
+    fn drops_presigned_query_and_fragment() {
+        assert_eq!(
+            scrub(
+                "failed: https://b.s3.example.com/k/o?X-Amz-Signature=abc123&X-Amz-Credential=AKIA#frag now"
+            ),
+            "failed: https://b.s3.example.com/k/o now"
+        );
+        assert_eq!(scrub("(https://host:9?token=zzz)"), "(https://host:9)");
+    }
+
+    #[test]
+    fn drops_control_characters_but_keeps_newlines() {
+        assert_eq!(scrub("plain \u{1b}[31mred\nnext"), "plain [31mred\nnext");
+        assert_eq!(scrub("no url here"), "no url here");
+    }
+}

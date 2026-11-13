@@ -230,30 +230,8 @@ fn note(msg: &str) {
     }
 }
 
-/// Error text is printed to a terminal: drop `user:password@` from any URL in
-/// it and every control character (a server controls part of this text).
-fn scrub(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(i) = rest.find("://") {
-        let (head, tail) = rest.split_at(i + 3);
-        out.push_str(head);
-        let end = tail
-            .find(|c: char| c == '/' || c.is_whitespace())
-            .unwrap_or(tail.len());
-        let authority = &tail[..end];
-        let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-        out.push_str(host);
-        rest = &tail[end..];
-    }
-    out.push_str(rest);
-    out.chars()
-        .filter(|c| !c.is_control() || *c == '\n')
-        .collect()
-}
-
 fn describe_remote_error(remote: &str, e: &anyhow::Error) -> String {
-    let text = scrub(&format!("{e:#}"));
+    let text = crate::output::scrub(&format!("{e:#}"));
     let lower = text.to_lowercase();
     if ["401", "403", "unauthorized", "forbidden"]
         .iter()
@@ -984,20 +962,5 @@ impl FsckCmd {
         }
 
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod scrub_tests {
-    use super::scrub;
-
-    #[test]
-    fn scrub_drops_credentials_and_control_characters() {
-        assert_eq!(
-            scrub("error sending request for url (https://bob:s3cret@host:9/r/info)"),
-            "error sending request for url (https://host:9/r/info)"
-        );
-        assert_eq!(scrub("plain \u{1b}[31mred"), "plain [31mred");
-        assert_eq!(scrub("no url here"), "no url here");
     }
 }

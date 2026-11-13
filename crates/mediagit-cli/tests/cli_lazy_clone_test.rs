@@ -434,3 +434,30 @@ async fn deleting_the_tracking_ref_drops_its_entry() {
         "the entry outlived its tracking ref"
     );
 }
+
+/// Refused only by the guard that knows the target branch (an untracked file
+/// the branch would overwrite): the branch must not exist yet at that point.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn switch_refused_by_the_target_aware_guard_creates_nothing() {
+    let (_server, _parent, clone, _source, _repos) = two_branch_clone(false).await;
+    fs::write(clone.join("look.txt"), b"my own look.txt\n").unwrap();
+    let heads = clone.join(".mediagit/refs/heads");
+    let config = fs::read(clone.join(".mediagit/config.toml")).unwrap();
+    let head = fs::read(clone.join(".mediagit/HEAD")).unwrap();
+    let heads_before = sorted_files(&heads);
+
+    let (ok, text) = run_text(&clone, &["branch", "switch", "look-dev"]);
+    assert!(!ok, "an overwrite must refuse the switch: {text}");
+
+    assert_eq!(sorted_files(&heads), heads_before, "a branch was created");
+    assert_eq!(
+        fs::read(clone.join(".mediagit/config.toml")).unwrap(),
+        config,
+        "an upstream was written"
+    );
+    assert_eq!(fs::read(clone.join(".mediagit/HEAD")).unwrap(), head);
+    assert_eq!(
+        fs::read(clone.join("look.txt")).unwrap(),
+        b"my own look.txt\n"
+    );
+}
