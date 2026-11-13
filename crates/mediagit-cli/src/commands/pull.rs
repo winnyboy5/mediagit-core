@@ -472,7 +472,7 @@ impl PullCmd {
                 );
                 refdb.write(&tracking_ref).await?;
                 // The branch is downloaded now: fsck is strict about it again.
-                mediagit_versioning::lazy_refs::prune_present(&repo_root, &odb).await?;
+                crate::repo::prune_lazy_refs(&repo_root, &odb).await;
 
                 if self.verbose() {
                     println!(

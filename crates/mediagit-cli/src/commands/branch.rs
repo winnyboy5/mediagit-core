@@ -611,21 +611,24 @@ impl BranchCmd {
     }
 
     /// `switch <name>` when there is no local branch `<name>` but a remote
-    /// has it: download its commit if needed, then create the local branch
-    /// with its upstream set. Does nothing when no remote has the branch (the
-    /// caller then reports "not found") or the local branch already exists.
+    /// has it: download its commit if needed. Returns `None` when the local
+    /// branch exists or no remote has the branch (the caller then reports
+    /// "not found").
     ///
-    /// Offline, it fails with one plain message before anything is written.
-    async fn adopt_remote_branch(
+    /// Writes no ref and no config: the caller runs its own safety checks
+    /// and then calls [`RemoteBranch::create`]. Only downloaded objects
+    /// remain if the switch is refused later. The dirty-tree check runs before
+    /// anything is downloaded.
+    async fn fetch_remote_branch(
         repo_root: &std::path::Path,
         refdb: &RefDatabase,
         storage: std::sync::Arc<dyn mediagit_storage::StorageBackend>,
         name: &str,
-        quiet: bool,
-    ) -> Result<()> {
-        let local = format!("refs/heads/{name}");
-        if refdb.exists(&local).await? {
-            return Ok(());
+        force: bool,
+        current: Option<&Oid>,
+    ) -> Result<Option<RemoteBranch>> {
+        if refdb.exists(&format!("refs/heads/{name}")).await? {
+            return Ok(None);
         }
         let mut remotes: Vec<String> = refdb
             .list("remotes")
@@ -639,12 +642,11 @@ impl BranchCmd {
             .collect();
         remotes.sort();
         let remote = match remotes.as_slice() {
-            [] => return Ok(()),
+            [] => return Ok(None),
             [only] => only.clone(),
             many if many.iter().any(|r| r == "origin") => "origin".to_string(),
             many => anyhow::bail!(
-                "More than one remote has a branch called '{}' ({}). \
-                 Create it yourself with 'branch create --track'.",
+                "More than one remote has a branch called '{}' ({}).                  Create it yourself with 'branch create --track'.",
                 name,
                 many.join(", ")
             ),
@@ -656,6 +658,12 @@ impl BranchCmd {
         if !odb.exists(&tip).await.unwrap_or(false) {
             const OFFLINE: &str =
                 "This branch is not downloaded yet. Connect to the server and try again.";
+            // Refuse a dirty tree before touching the network.
+            if !force {
+                crate::worktree_guard::AtRisk::check(repo_root, &odb, current, None)
+                    .await?
+                    .ensure_clean("branch switch")?;
+            }
             let fetch = super::fetch::FetchCmd {
                 remote: Some(remote.clone()),
                 branch: Some(name.to_string()),
@@ -667,7 +675,17 @@ impl BranchCmd {
             };
             if let Err(e) = fetch.execute().await {
                 tracing::debug!("download of branch {name} failed: {e:#}");
-                anyhow::bail!(OFFLINE);
+                let chain = format!("{e:#}");
+                if is_connection_error(&e) {
+                    anyhow::bail!(OFFLINE);
+                } else if chain.contains("not found on remote") {
+                    anyhow::bail!("This branch is no longer on the server.");
+                } else {
+                    anyhow::bail!(
+                        "Could not download this branch: {}",
+                        chain.lines().next().unwrap_or("unknown problem")
+                    );
+                }
             }
             // The server may have moved the branch on; use what fetch wrote.
             tip = refdb.resolve(&tracking).await?;
@@ -675,15 +693,7 @@ impl BranchCmd {
                 anyhow::bail!(OFFLINE);
             }
         }
-
-        refdb.write(&Ref::new_direct(local, tip)).await?;
-        let mut config = mediagit_config::Config::load(repo_root).await?;
-        config.set_branch_upstream(name, &remote, format!("refs/heads/{name}"));
-        config.save(repo_root)?;
-        if !quiet {
-            crate::output::info(&format!("Downloaded branch '{name}' from '{remote}'"));
-        }
-        Ok(())
+        Ok(Some(RemoteBranch { remote, tip }))
     }
 
     async fn switch(&self, opts: &SwitchOpts) -> Result<()> {
@@ -720,6 +730,8 @@ impl BranchCmd {
         // OPTIMIZATION: Get current commit BEFORE updating HEAD
         // This enables differential checkout (only update changed files)
         let current_commit_oid = refdb.resolve("HEAD").await.ok();
+
+        let mut pending: Option<RemoteBranch> = None;
 
         // If create flag is set, create the branch first
         if opts.create {
@@ -775,21 +787,34 @@ impl BranchCmd {
             }
         } else {
             // BUG-006: a branch that only exists as a tracking ref (the
-            // clone did not download it) is downloaded and set up here.
-            Self::adopt_remote_branch(&repo_root, &refdb, storage.clone(), branch_name, opts.quiet)
-                .await?;
-            // Verify branch exists
-            refdb
-                .read(&branch_ref_name)
-                .await
-                .context(format!("Branch '{}' not found", opts.branch))?;
+            // clone did not download it) is downloaded here; the local branch
+            // is created below, after the safety checks.
+            pending = Self::fetch_remote_branch(
+                &repo_root,
+                &refdb,
+                storage.clone(),
+                branch_name,
+                opts.force,
+                current_commit_oid.as_ref(),
+            )
+            .await?;
+            if pending.is_none() {
+                // Verify branch exists
+                refdb
+                    .read(&branch_ref_name)
+                    .await
+                    .context(format!("Branch '{}' not found", opts.branch))?;
+            }
         }
 
         // Get the commit that the target branch points to
-        let target_commit_oid = refdb.resolve(&branch_ref_name).await.context(format!(
-            "Failed to resolve branch '{}' to a commit",
-            opts.branch
-        ))?;
+        let target_commit_oid = match &pending {
+            Some(p) => p.tip,
+            None => refdb.resolve(&branch_ref_name).await.context(format!(
+                "Failed to resolve branch '{}' to a commit",
+                opts.branch
+            ))?,
+        };
 
         let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
 
@@ -805,6 +830,11 @@ impl BranchCmd {
             )
             .await?
             .ensure_clean("branch switch")?;
+        }
+
+        if let Some(p) = &pending {
+            p.create(&repo_root, &refdb, branch_name, opts.quiet)
+                .await?;
         }
 
         // Update HEAD to point to the branch
@@ -938,6 +968,11 @@ impl BranchCmd {
                 match refdb.read(&remote_ref_name).await {
                     Ok(_) => {
                         refdb.delete(&remote_ref_name).await?;
+                        if let Err(e) =
+                            mediagit_versioning::lazy_refs::forget(&repo_root, &remote_ref_name)
+                        {
+                            tracing::warn!("lazy-refs not updated: {e}");
+                        }
                         deleted_count += 1;
                         deleted_names.push(branch_name.clone());
 
@@ -1346,4 +1381,44 @@ impl BranchCmd {
 
         Ok(())
     }
+}
+
+/// A branch that exists on a remote, downloaded but not yet created locally.
+struct RemoteBranch {
+    remote: String,
+    tip: Oid,
+}
+
+impl RemoteBranch {
+    /// Create the local branch and its upstream setting together.
+    async fn create(
+        &self,
+        repo_root: &std::path::Path,
+        refdb: &RefDatabase,
+        name: &str,
+        quiet: bool,
+    ) -> Result<()> {
+        let mut config = mediagit_config::Config::load(repo_root).await?;
+        config.set_branch_upstream(name, &self.remote, format!("refs/heads/{name}"));
+        refdb
+            .write(&Ref::new_direct(format!("refs/heads/{name}"), self.tip))
+            .await?;
+        config.save(repo_root)?;
+        if !quiet {
+            crate::output::info(&format!(
+                "Downloaded branch '{name}' from '{}'",
+                self.remote
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// True when the server could not be reached at all (no route, refused,
+/// timed out), as opposed to answering with a refusal.
+fn is_connection_error(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        c.downcast_ref::<reqwest::Error>()
+            .is_some_and(|r| r.is_connect() || r.is_timeout())
+    })
 }

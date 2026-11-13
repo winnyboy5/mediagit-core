@@ -958,6 +958,17 @@ pub async fn collect_local_have(refdb: &RefDatabase, odb: &ObjectDatabase) -> Ve
     out
 }
 
+/// End the "not downloaded yet" exemption for every branch whose commit is now
+/// local (BUG-006). Call it wherever objects may have arrived. A failure only
+/// warns: the download itself succeeded.
+pub async fn prune_lazy_refs(repo_root: &Path, odb: &ObjectDatabase) {
+    if let Err(e) = mediagit_versioning::lazy_refs::prune_present(repo_root, odb).await {
+        crate::output::warning(&format!(
+            "Could not update the list of branches that are not downloaded: {e}"
+        ));
+    }
+}
+
 /// Like [`collect_local_have`] but skips the object-presence filter.
 ///
 /// Useful for push paths where the client has just written the objects

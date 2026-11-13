@@ -110,6 +110,19 @@ impl FetchCmd {
     }
 
     pub async fn execute(&self) -> Result<()> {
+        let result = self.run().await;
+        // Whatever happened, a branch whose commit arrived is no longer
+        // "not downloaded yet" (BUG-006). Covers early returns and errors.
+        if let Ok(root) = find_repo_root()
+            && let Ok(storage) = create_storage_backend(&root).await
+        {
+            let odb = ObjectDatabase::with_smart_compression(storage, 1000);
+            crate::repo::prune_lazy_refs(&root, &odb).await;
+        }
+        result
+    }
+
+    async fn run(&self) -> Result<()> {
         let start_time = Instant::now();
         let mut stats = OperationStats::for_operation("fetch");
         let progress = ProgressTracker::new(self.quiet());
@@ -549,10 +562,6 @@ impl FetchCmd {
                 }
             }
         }
-
-        // Branches that were not downloaded at clone time and now are: drop
-        // them from the lazy list so fsck is strict about them again.
-        mediagit_versioning::lazy_refs::prune_present(&repo_root, &odb).await?;
 
         // Prune stale tracking refs if requested.
         // Always compare against ALL remote branches (not just branches_to_fetch),

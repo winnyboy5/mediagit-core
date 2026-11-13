@@ -56,6 +56,15 @@ pub fn save(repo_root: &Path, refs: &LazyRefs) -> std::io::Result<()> {
     crate::atomic_write::write_atomic(&path, text.as_bytes())
 }
 
+/// Drop one entry (the tracking ref was deleted).
+pub fn forget(repo_root: &Path, ref_name: &str) -> std::io::Result<()> {
+    let mut refs = load(repo_root);
+    if refs.remove(ref_name).is_none() {
+        return Ok(());
+    }
+    save(repo_root, &refs)
+}
+
 /// Drop entries whose commit is now in the store. A failed probe keeps the
 /// entry (it can only make `fsck` stricter, never looser).
 pub async fn prune_present(repo_root: &Path, odb: &ObjectDatabase) -> std::io::Result<()> {

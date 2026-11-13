@@ -713,9 +713,6 @@ url = "{}"
                 }
             }
 
-            mediagit_versioning::lazy_refs::save(&target_dir, &lazy)
-                .context("Could not record the branches that were not downloaded")?;
-
             // Write tag refs (refs/tags/*) and restore annotated tag .meta
             // sidecars (refs/tag-meta/*) received from the server. Shared with
             // `fetch` — see commands::fetch::fetch_tags. Pass the default branch
@@ -732,6 +729,12 @@ url = "{}"
                 self.verbose(),
             )
             .await?;
+
+            // Recorded after the tags: a tag can bring a branch tip along, and
+            // that branch is then downloaded, not "not downloaded yet".
+            mediagit_versioning::lazy_refs::save(&target_dir, &lazy)
+                .context("Could not record the branches that were not downloaded")?;
+            crate::repo::prune_lazy_refs(&target_dir, &odb).await;
 
             // Show available branches to user
             if !other_branches.is_empty() && !self.quiet() {

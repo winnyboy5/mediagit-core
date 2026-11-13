@@ -212,8 +212,12 @@ branches it left on the server in `.mediagit/lazy-refs`. `fsck` prints a
 is not listed, or whose value differs, is still an error. `branch switch
 <name>` downloads the branch, creates it with its upstream set and switches. Without a connection it
 stops with "This branch is not downloaded yet. Connect to the server and try
-again." and changes nothing. `fetch` and `pull` of the branch remove it from the
-list. The new file is optional; repositories without it behave as before.
+again." and changes nothing. If the branch was deleted on the server, or the
+server refuses the request, it says that instead. A switch refused because of
+unsaved changes creates no branch and changes no setting. Whenever a branch's
+commit arrives (`clone` with a tag, `fetch`, `pull`, `switch`, or an `fsck` run)
+it is removed from the list, so a commit lost later is an error again; `branch
+delete -r` removes its entry too. The new file is optional; repositories without it behave as before.
 
 ### Fixed — `push --force-with-lease` overwrote work pushed by someone else (BUG-032)
 

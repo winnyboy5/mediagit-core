@@ -456,6 +456,12 @@ impl FsckCmd {
         let checker =
             FsckChecker::new_with_refdb(storage.clone(), Some(refdb)).with_repo_root(&repo_path);
 
+        // BUG-006: a branch whose commit is now here is no longer "not
+        // downloaded yet". A dry run changes nothing.
+        if !self.dry_run {
+            crate::repo::prune_lazy_refs(&repo_path, &checker.odb()).await;
+        }
+
         // Configure options
         let options = self.build_options();
 
@@ -895,6 +901,7 @@ impl FsckCmd {
         // Branches a clone left on the server on purpose: always worth a line.
         let not_downloaded: Vec<_> = info
             .iter()
+            .copied()
             .filter(|i| i.category == mediagit_versioning::IssueCategory::NotDownloaded)
             .collect();
         if !not_downloaded.is_empty() && !self.quiet() {
@@ -931,12 +938,29 @@ impl FsckCmd {
                     style("PERFECT").green().bold()
                 );
             } else if !report.has_errors() {
+                let mut parts = Vec::new();
+                if !warnings.is_empty() {
+                    parts.push(format!("{} warning(s)", warnings.len()));
+                }
+                if !info.is_empty() {
+                    parts.push(format!("{} info", info.len()));
+                }
+                if !not_downloaded.is_empty() {
+                    parts.push(format!(
+                        "{} branch(es) still on the server",
+                        not_downloaded.len()
+                    ));
+                }
+                let detail = if parts.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", parts.join(", "))
+                };
                 println!(
-                    "{} Repository integrity: {} ({} warning(s), {} info)",
+                    "{} Repository integrity: {}{}",
                     style("✓").green(),
                     style("OK").green(),
-                    warnings.len(),
-                    info.len()
+                    detail
                 );
             } else {
                 println!(

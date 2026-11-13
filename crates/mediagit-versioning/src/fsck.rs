@@ -366,6 +366,8 @@ pub struct FsckChecker {
     /// nothing else; when it is absent, the working-state roots are not
     /// protected and dangling reports may include staged or stashed objects.
     repo_root: Option<PathBuf>,
+    /// The lazy-refs list, read once per run (see [`Self::lazy_refs`]).
+    lazy: std::sync::OnceLock<crate::lazy_refs::LazyRefs>,
 }
 
 impl FsckChecker {
@@ -378,6 +380,7 @@ impl FsckChecker {
             odb: Arc::new(odb),
             refdb,
             repo_root: None,
+            lazy: std::sync::OnceLock::new(),
         }
     }
 
@@ -631,15 +634,17 @@ impl FsckChecker {
 
     /// Tracking refs a lazy clone listed as not downloaded. Empty without a
     /// repository root, so server-side checks stay strict.
-    fn lazy_refs(&self) -> crate::lazy_refs::LazyRefs {
-        let mut lazy = self
-            .repo_root
-            .as_deref()
-            .map(crate::lazy_refs::load)
-            .unwrap_or_default();
-        // Only tracking refs may be lazy; a hand-edited list cannot excuse a branch.
-        lazy.retain(|name, _| name.starts_with("refs/remotes/"));
-        lazy
+    fn lazy_refs(&self) -> &crate::lazy_refs::LazyRefs {
+        self.lazy.get_or_init(|| {
+            let mut lazy = self
+                .repo_root
+                .as_deref()
+                .map(crate::lazy_refs::load)
+                .unwrap_or_default();
+            // Only tracking refs may be lazy; a hand-edited list cannot excuse a branch.
+            lazy.retain(|name, _| name.starts_with("refs/remotes/"));
+            lazy
+        })
     }
 
     /// Validate all references

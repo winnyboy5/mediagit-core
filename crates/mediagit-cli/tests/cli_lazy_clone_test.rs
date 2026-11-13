@@ -67,7 +67,9 @@ const LOOK_MAIN_EDIT: &[u8] = b"main file, edited on look-dev\n";
 
 /// A server holding `main` and `look-dev` (which differs from main), plus a
 /// fresh clone of it. Returns (server, clone parent, clone dir, remote url, server repos dir).
-async fn two_branch_clone() -> (
+async fn two_branch_clone(
+    tag_look_tip: bool,
+) -> (
     tokio::task::JoinHandle<()>,
     TempDir,
     PathBuf,
@@ -86,9 +88,15 @@ async fn two_branch_clone() -> (
     run(source.path(), &["branch", "switch", "look-dev"]);
     commit_file(source.path(), "look.txt", LOOK_FILE, "look one");
     commit_file(source.path(), "main.txt", LOOK_MAIN_EDIT, "look two");
+    if tag_look_tip {
+        run(source.path(), &["tag", "create", "look-v1"]);
+    }
     run(source.path(), &["branch", "switch", "main"]);
     run(source.path(), &["remote", "add", "origin", &remote_url]);
     run(source.path(), &["push", "origin", "--all"]);
+    if tag_look_tip {
+        run(source.path(), &["push", "origin", "--tags"]);
+    }
 
     let parent = TempDir::new().unwrap();
     let clone_dir = parent.path().join("copy");
@@ -101,7 +109,7 @@ async fn two_branch_clone() -> (
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fresh_clone_of_two_branches_is_clean_then_switch_downloads_the_branch() {
-    let (_server, _parent, clone, _source, _repos) = two_branch_clone().await;
+    let (_server, _parent, clone, _source, _repos) = two_branch_clone(false).await;
 
     // Fresh clone: healthy, with exactly one "not downloaded" note.
     for args in [&["fsck", "--full"][..], &["fsck"][..], &["verify"][..]] {
@@ -160,7 +168,7 @@ async fn fresh_clone_of_two_branches_is_clean_then_switch_downloads_the_branch()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn switch_with_server_down_refuses_plainly_and_changes_nothing() {
-    let (server, _parent, clone, _source, _repos) = two_branch_clone().await;
+    let (server, _parent, clone, _source, _repos) = two_branch_clone(false).await;
     server.abort();
     let _ = server.await;
 
@@ -197,7 +205,7 @@ async fn switch_with_server_down_refuses_plainly_and_changes_nothing() {
 /// missing is still an error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lost_commit_of_the_checked_out_branch_is_still_an_error() {
-    let (_server, _parent, clone, _source, _repos) = two_branch_clone().await;
+    let (_server, _parent, clone, _source, _repos) = two_branch_clone(false).await;
     let main_tip = fs::read_to_string(clone.join(".mediagit/refs/heads/main"))
         .unwrap()
         .trim()
@@ -215,7 +223,7 @@ async fn lost_commit_of_the_checked_out_branch_is_still_an_error() {
 /// moved to a different missing commit is an error again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lazy_entry_does_not_excuse_a_different_missing_commit() {
-    let (_server, _parent, clone, _source, _repos) = two_branch_clone().await;
+    let (_server, _parent, clone, _source, _repos) = two_branch_clone(false).await;
     let r = clone.join(".mediagit/refs/remotes/origin/look-dev");
     let old = fs::read_to_string(&r).unwrap();
     let forged = "ab".repeat(old.trim().len() / 2);
@@ -254,7 +262,7 @@ async fn fetch_and_pull_of_the_branch_clear_the_note() {
         &["fetch", "origin", "look-dev"][..],
         &["pull", "origin", "look-dev"][..],
     ] {
-        let (_server, _parent, clone, _source, _repos) = two_branch_clone().await;
+        let (_server, _parent, clone, _source, _repos) = two_branch_clone(false).await;
         run(&clone, how);
         let (ok, text) = run_text(&clone, &["fsck", "--full"]);
         assert!(ok, "{how:?}: {text}");
@@ -267,4 +275,162 @@ async fn fetch_and_pull_of_the_branch_clear_the_note() {
             "{how:?} left the lazy list"
         );
     }
+}
+
+fn sorted_files(dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for e in fs::read_dir(dir).into_iter().flatten().flatten() {
+        out.push(e.file_name().to_string_lossy().to_string());
+    }
+    out.sort();
+    out
+}
+
+/// A refused switch must not leave a branch, an upstream or a lazy-list change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refused_switch_leaves_no_branch_and_no_config() {
+    let (_server, _parent, clone, _source, _repos) = two_branch_clone(false).await;
+    fs::write(clone.join("main.txt"), b"my unsaved edit\n").unwrap();
+    let heads = clone.join(".mediagit/refs/heads");
+    let config = fs::read(clone.join(".mediagit/config.toml")).unwrap();
+    let lazy = fs::read(clone.join(".mediagit/lazy-refs")).unwrap();
+    let heads_before = sorted_files(&heads);
+
+    let (ok, text) = run_text(&clone, &["branch", "switch", "look-dev"]);
+    assert!(!ok, "a dirty tree must refuse the switch: {text}");
+
+    assert_eq!(sorted_files(&heads), heads_before, "a branch was created");
+    assert_eq!(
+        fs::read(clone.join(".mediagit/config.toml")).unwrap(),
+        config,
+        "config changed"
+    );
+    assert_eq!(fs::read(clone.join(".mediagit/lazy-refs")).unwrap(), lazy);
+    assert_eq!(
+        fs::read(clone.join("main.txt")).unwrap(),
+        b"my unsaved edit\n"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn branch_deleted_on_the_server_gets_its_own_message() {
+    let (_server, _parent, clone, source, _repos) = two_branch_clone(false).await;
+    run(source.path(), &["push", "origin", "--delete", "look-dev"]);
+
+    let (ok, text) = run_text(&clone, &["branch", "switch", "look-dev"]);
+    assert!(!ok, "{text}");
+    assert!(text.contains("no longer on the server"), "{text}");
+    assert!(!text.contains("not downloaded yet"), "{text}");
+    assert!(!clone.join(".mediagit/refs/heads/look-dev").exists());
+}
+
+/// A tag that happens to bring the branch tip along ends the exemption at
+/// clone time: losing that commit later must be an error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tip_that_arrives_with_a_tag_is_not_excused_later() {
+    let (_server, _parent, clone, _source, _repos) = two_branch_clone(true).await;
+    let tip = fs::read_to_string(clone.join(".mediagit/refs/remotes/origin/look-dev"))
+        .unwrap()
+        .trim()
+        .to_string();
+    let victim = find_object_file(&clone.join(".mediagit"), &tip)
+        .unwrap_or_else(|| panic!("the tag should have brought {tip} along"));
+    fs::remove_file(victim).unwrap();
+    // The tag ref would report the loss by itself; only the lazy list is on trial.
+    fs::remove_file(clone.join(".mediagit/refs/tags/look-v1")).unwrap();
+    let (ok, text) = run_text(&clone, &["fsck", "--full"]);
+    assert!(!ok, "a lost commit must not look not-downloaded: {text}");
+    assert!(text.to_lowercase().contains("missing"), "{text}");
+}
+
+/// fsck itself drops an entry whose commit is present.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fsck_drops_entries_whose_commit_is_present() {
+    let (_server, _parent, clone, _source, _repos) = two_branch_clone(false).await;
+    let saved = fs::read(clone.join(".mediagit/lazy-refs")).unwrap();
+    run(&clone, &["fetch", "origin", "look-dev"]);
+    assert!(!clone.join(".mediagit/lazy-refs").exists());
+    fs::write(clone.join(".mediagit/lazy-refs"), saved).unwrap();
+    run(&clone, &["fsck"]);
+    assert!(
+        !clone.join(".mediagit/lazy-refs").exists(),
+        "fsck left a stale entry"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn corrupt_lazy_list_keeps_fsck_strict() {
+    let (_server, _parent, clone, _source, _repos) = two_branch_clone(false).await;
+    fs::write(clone.join(".mediagit/lazy-refs"), b"\xff\xfe garbage\n").unwrap();
+    let (ok, text) = run_text(&clone, &["fsck", "--full"]);
+    assert!(!ok, "{text}");
+}
+
+/// Only tracking refs may be excused: a lost branch tip is an error even if
+/// the list names it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lazy_list_cannot_excuse_a_local_branch() {
+    let (_server, _parent, clone, _source, _repos) = two_branch_clone(false).await;
+    let tip = fs::read_to_string(clone.join(".mediagit/refs/heads/main"))
+        .unwrap()
+        .trim()
+        .to_string();
+    let list = clone.join(".mediagit/lazy-refs");
+    let mut text = fs::read_to_string(&list).unwrap();
+    text.push_str(&format!("refs/heads/main {tip}\n"));
+    fs::write(&list, text).unwrap();
+    let victim = find_object_file(&clone.join(".mediagit"), &tip).unwrap();
+    fs::remove_file(victim).unwrap();
+    // The tracking ref at the same commit would report the loss by itself.
+    fs::remove_file(clone.join(".mediagit/refs/remotes/origin/main")).unwrap();
+    let (ok, text) = run_text(&clone, &["fsck", "--full"]);
+    assert!(!ok, "{text}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repair_on_a_lazy_clone_removes_nothing() {
+    let (_server, _parent, clone, _source, _repos) = two_branch_clone(false).await;
+    let (ok, text) = run_text(&clone, &["fsck", "--full", "--repair"]);
+    assert!(ok, "{text}");
+    assert!(
+        clone
+            .join(".mediagit/refs/remotes/origin/look-dev")
+            .exists()
+    );
+    assert!(clone.join(".mediagit/lazy-refs").exists());
+    assert!(
+        !clone.join(".mediagit/quarantine").exists(),
+        "repair saved something"
+    );
+
+    // Without the list the tip is just a broken tracking ref: still not removed.
+    fs::remove_file(clone.join(".mediagit/lazy-refs")).unwrap();
+    let (ok, _) = run_text(&clone, &["fsck", "--full", "--repair"]);
+    assert!(!ok);
+    assert!(
+        clone
+            .join(".mediagit/refs/remotes/origin/look-dev")
+            .exists()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn note_summary_is_consistent() {
+    let (_server, _parent, clone, _source, _repos) = two_branch_clone(false).await;
+    let (ok, text) = run_text(&clone, &["fsck", "--full"]);
+    assert!(ok, "{text}");
+    assert!(
+        !text.contains("0 info"),
+        "summary contradicts the note: {text}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deleting_the_tracking_ref_drops_its_entry() {
+    let (_server, _parent, clone, _source, _repos) = two_branch_clone(false).await;
+    run(&clone, &["branch", "delete", "-r", "origin/look-dev"]);
+    assert!(
+        !clone.join(".mediagit/lazy-refs").exists(),
+        "the entry outlived its tracking ref"
+    );
 }
