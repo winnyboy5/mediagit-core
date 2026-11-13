@@ -237,6 +237,38 @@ impl std::error::Error for Untrackable {}
 /// Windows drops a trailing dot or space when it opens a name, so such a file
 /// cannot be read back by its own name and checkout would recreate it under a
 /// different one. Returns the reason in plain words.
+/// Which names a folder really holds, read once per folder (BUG-011).
+///
+/// `Path::exists` asks the filesystem, which on Windows and default macOS
+/// answers yes for `art/Hero.txt` when the file is now called `art/hero.txt`.
+/// Deleted-or-not must be decided by the exact stored name, folder by folder.
+#[derive(Default)]
+struct ExactNames {
+    folders:
+        std::collections::HashMap<PathBuf, Option<std::collections::HashSet<std::ffi::OsString>>>,
+}
+
+impl ExactNames {
+    /// True when every component of `rel` is present under `root` with
+    /// exactly this spelling. An unreadable or missing folder holds nothing.
+    fn exists_exact(&mut self, root: &Path, rel: &Path) -> bool {
+        let mut dir = root.to_path_buf();
+        for part in rel.components() {
+            let name = part.as_os_str();
+            let names = self.folders.entry(dir.clone()).or_insert_with(|| {
+                std::fs::read_dir(&dir)
+                    .ok()
+                    .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.file_name()).collect())
+            });
+            if !names.as_ref().is_some_and(|n| n.contains(name)) {
+                return false;
+            }
+            dir.push(name);
+        }
+        true
+    }
+}
+
 fn windows_unstorable_name(path: &Path) -> Option<&'static str> {
     let name = path.file_name()?.to_string_lossy();
     (name.ends_with('.') || name.ends_with(' '))
@@ -758,6 +790,7 @@ impl AddCmd {
         let sparse = mediagit_versioning::SparseFilter::load(&repo_root)
             .context("Failed to load sparse-checkout patterns")?;
 
+        let mut on_disk = ExactNames::default();
         for head_path in head_files.as_ref().keys() {
             // BUG-008 way out: the last commit holds an absolute or `..` path.
             // Stage its removal whatever the pathspec or --ignore-removal; the
@@ -795,20 +828,18 @@ impl AddCmd {
                 wp.to_string_lossy().replace('\\', "/") == head_path_normalized.to_string_lossy()
             });
 
-            if !exists_in_working_dir {
-                let full_path = repo_root.join(head_path);
-                if !full_path.exists() {
-                    // Stage deletion unless --ignore-removal is set
-                    if !self.ignore_removal {
-                        if !self.dry_run {
-                            index.mark_deleted(head_path.clone());
-                            if self.verbose {
-                                output::detail("deleted", &head_path.display().to_string());
-                            }
-                        }
-                        deleted_count += 1;
+            // Stage deletion unless --ignore-removal is set
+            if !exists_in_working_dir
+                && !on_disk.exists_exact(&repo_root, head_path)
+                && !self.ignore_removal
+            {
+                if !self.dry_run {
+                    index.mark_deleted(head_path.clone());
+                    if self.verbose {
+                        output::detail("deleted", &head_path.display().to_string());
                     }
                 }
+                deleted_count += 1;
             }
         }
 
@@ -1525,6 +1556,23 @@ impl AddCmd {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// BUG-011: the stored spelling decides, on any filesystem, for the file
+    /// and for every folder above it; each folder is read once.
+    #[test]
+    fn exists_exact_compares_every_component_exactly_and_reads_each_folder_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("art")).unwrap();
+        std::fs::write(tmp.path().join("art/hero.txt"), "x").unwrap();
+        let mut names = ExactNames::default();
+        assert!(names.exists_exact(tmp.path(), Path::new("art/hero.txt")));
+        assert!(names.exists_exact(tmp.path(), Path::new("art/hero.txt")));
+        assert!(!names.exists_exact(tmp.path(), Path::new("art/Hero.txt")));
+        assert!(!names.exists_exact(tmp.path(), Path::new("Art/hero.txt")));
+        assert!(!names.exists_exact(tmp.path(), Path::new("art/missing.txt")));
+        assert!(!names.exists_exact(tmp.path(), Path::new("nodir/x")));
+        assert_eq!(names.folders.len(), 2, "root and art, each read once");
+    }
 
     #[test]
     fn windows_unstorable_name_flags_trailing_dot_and_space_only() {

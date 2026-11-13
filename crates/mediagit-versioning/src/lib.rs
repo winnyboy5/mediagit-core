@@ -100,7 +100,7 @@ pub fn checkout_chunk_prefetch_for_test(total_bytes: u64, chunk_count: usize) ->
 
 pub use bitmap::{ReachabilityBitmap, bitmap_enabled, bitmap_key};
 pub use branch::{BranchInfo, BranchManager, DetachedHead};
-pub use checkout::{CheckoutManager, CheckoutStats, FreshCheckoutPlan};
+pub use checkout::{CheckoutManager, CheckoutStats, FreshCheckoutPlan, case_only_collisions};
 pub use chunking::{
     ChunkId, ChunkManifest, ChunkRef, ChunkStore, ChunkStoreStats, ChunkStrategy, ChunkType,
     CodecHint, ContentChunk, ContentChunker, PositionalBase, tensor_delta_enabled,
@@ -134,7 +134,7 @@ pub use streaming_pack::{
 };
 pub use tag_object::Tag;
 pub use transaction::PackTransaction;
-pub use tree::{FileMode, Tree, TreeEntry, check_tracked_path};
+pub use tree::{FileMode, Tree, TreeEntry, check_no_case_collisions, check_tracked_path};
 
 // Re-export fsck module
 pub use fsck::{

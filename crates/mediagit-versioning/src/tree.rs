@@ -161,6 +161,30 @@ pub fn check_tracked_path(path: &str) -> anyhow::Result<()> {
     check_tracked_path_for(path, cfg!(windows))
 }
 
+/// Refuse a tree holding two paths that differ only by letter case (BUG-011).
+///
+/// Such a version can never be checked out on Windows or macOS (checkout
+/// refuses it), so it must not be written. Uses the same folding rule as
+/// checkout: [`crate::case_only_collisions`].
+pub fn check_no_case_collisions<I, P>(names: I) -> anyhow::Result<()>
+where
+    I: Iterator<Item = P>,
+    P: AsRef<std::path::Path>,
+{
+    let collisions = crate::case_only_collisions(names);
+    if collisions.is_empty() {
+        return Ok(());
+    }
+    let detail = collisions
+        .iter()
+        .map(|(a, b)| format!("'{}' and '{}'", a.display(), b.display()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    anyhow::bail!(
+        "these paths differ only by letter case: {detail}. They would overwrite each other          on Windows and macOS, so the version cannot be saved. Keep one: rename or delete the          other, then run 'mediagit add --all' and save again."
+    )
+}
+
 /// [`check_tracked_path`] with the platform as a parameter, so both
 /// behaviours are testable on any host.
 pub(crate) fn check_tracked_path_for(path: &str, windows: bool) -> anyhow::Result<()> {
@@ -244,6 +268,7 @@ impl Tree {
         for name in self.entries.keys() {
             check_tracked_path(name)?;
         }
+        check_no_case_collisions(self.entries.keys())?;
         crate::format::serialize(self)
             .map_err(|e| anyhow::anyhow!("Tree serialization failed: {}", e))
     }
@@ -303,6 +328,59 @@ impl Default for Tree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// BUG-011: a tree with two names equal under case folding is never
+    /// written, on any platform; the message names both and the way out.
+    #[test]
+    fn serialize_refuses_names_that_differ_only_by_case() {
+        let oid = Oid::hash(b"x");
+        let mut t = Tree::new();
+        t.add_entry(TreeEntry::new(
+            "art/Hero.txt".into(),
+            FileMode::Regular,
+            oid,
+        ));
+        t.add_entry(TreeEntry::new(
+            "art/hero.txt".into(),
+            FileMode::Regular,
+            oid,
+        ));
+        let msg = t.serialize().unwrap_err().to_string();
+        for want in [
+            "art/Hero.txt",
+            "art/hero.txt",
+            "Windows and macOS",
+            "add --all",
+        ] {
+            assert!(msg.contains(want), "missing {want:?} in: {msg}");
+        }
+        let mut ok = Tree::new();
+        ok.add_entry(TreeEntry::new(
+            "art/hero.txt".into(),
+            FileMode::Regular,
+            oid,
+        ));
+        ok.add_entry(TreeEntry::new(
+            "art/hero2.txt".into(),
+            FileMode::Regular,
+            oid,
+        ));
+        ok.add_entry(TreeEntry::new(
+            "Art2/hero.txt".into(),
+            FileMode::Regular,
+            oid,
+        ));
+        assert!(ok.serialize().is_ok());
+    }
+
+    /// Folder-level and non-ASCII pairs fold with the same rule.
+    #[test]
+    fn case_collisions_cover_folders_and_unicode() {
+        assert!(check_no_case_collisions(["Art/x.txt", "art/x.txt"].iter()).is_err());
+        assert!(check_no_case_collisions(["é/x", "É/x"].iter()).is_err());
+        assert!(check_no_case_collisions(["a/x", "a/x"].iter()).is_ok());
+        assert!(check_no_case_collisions(["a/x", "a/y"].iter()).is_ok());
+    }
 
     fn tree_with(name: &str) -> Tree {
         let mut t = Tree::new();

@@ -296,13 +296,11 @@ impl<'a> CheckoutManager<'a> {
 
         // Optimized: Single-pass checkout that collects files and writes them
         // This eliminates the redundant tree traversal
+        // (The clean-up of files not in the target runs inside, before the writes.)
         let (target_files, files_updated) = self
             .checkout_tree_optimized(&commit.tree, Path::new(""))
             .await?;
         debug!("Target files: {} entries", target_files.len());
-
-        // Clean working directory (remove files not in target)
-        self.clean_working_directory(&target_files)?;
 
         info!("Checked out {} files", files_updated);
         Ok(files_updated)
@@ -688,6 +686,11 @@ impl<'a> CheckoutManager<'a> {
         let file_paths: HashSet<PathBuf> = flat.keys().cloned().collect();
         let entries: Vec<(PathBuf, Oid, FileMode)> =
             flat.into_iter().map(|(p, (o, m))| (p, o, m)).collect();
+        // Remove files not in the target BEFORE writing (BUG-011): on a
+        // case-insensitive filesystem the old `Hero.txt` and the new
+        // `hero.txt` are one file, so cleaning afterwards deleted the file
+        // just written.
+        self.clean_working_directory(&file_paths)?;
         let files_updated = self.run_parallel_writes(entries, true).await?;
         Ok((file_paths, files_updated))
     }
@@ -914,9 +917,17 @@ impl<'a> CheckoutManager<'a> {
         // Parallel I/O phases (bounded by MEDIAGIT_CHECKOUT_PARALLELISM).
         // First error in any phase aborts that phase's remaining tasks and
         // fails the whole checkout.
+        // Deletes first (BUG-011): on a case-insensitive filesystem `Hero.txt`
+        // in the old tree and `hero.txt` in the new one are the same file, so
+        // deleting after the write removed the file just written.
+        let files_deleted = self.run_parallel_deletes(to_delete).await?;
+        if files_deleted > 0 {
+            // A folder renamed by case only (`Art` to `art`) must be gone
+            // before the writes, or the new files land in the old spelling.
+            self.remove_empty_directories()?;
+        }
         let files_added = self.run_parallel_writes(to_add, false).await?;
         let files_modified = self.run_parallel_writes(to_modify, false).await?;
-        let files_deleted = self.run_parallel_deletes(to_delete).await?;
 
         let mut stats = CheckoutStats {
             files_added,
@@ -1095,19 +1106,27 @@ where
 
 /// Pairs of paths that differ only by case. Pure, so it is testable on a
 /// case-sensitive filesystem where the collision could never be observed.
-fn case_only_collisions<'a, I>(paths: I) -> Vec<(PathBuf, PathBuf)>
+///
+/// The one folding rule used everywhere (checkout, commit, fsck): the whole
+/// path string is compared after `str::to_lowercase` (Unicode lowercase, not
+/// the NTFS upcase table and not Unicode normalisation).
+pub fn case_only_collisions<I, P>(paths: I) -> Vec<(PathBuf, PathBuf)>
 where
-    I: Iterator<Item = &'a PathBuf>,
+    I: Iterator<Item = P>,
+    P: AsRef<Path>,
 {
     let mut seen: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
     let mut collisions = Vec::new();
     for path in paths {
+        let path = path.as_ref();
         let key = path.to_string_lossy().to_lowercase();
         match seen.get(&key) {
-            Some(existing) if existing != path => collisions.push((existing.clone(), path.clone())),
+            Some(existing) if existing != path => {
+                collisions.push((existing.clone(), path.to_path_buf()))
+            }
             Some(_) => {}
             None => {
-                seen.insert(key, path.clone());
+                seen.insert(key, path.to_path_buf());
             }
         }
     }
@@ -2487,7 +2506,10 @@ mod overlap_split_parity_tests {
             FileMode::Regular,
             b_oid,
         ));
-        let root_oid = root.write(&odb).await?;
+        // Bypass `Tree::serialize`, which now refuses a case collision (BUG-011).
+        let root_oid = odb
+            .write(ObjectType::Tree, &crate::format::serialize(&root)?)
+            .await?;
         let commit = Commit::new(root_oid, sig(), sig(), "collision".to_string());
         let commit_oid = commit.write(&odb).await?;
 

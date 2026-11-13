@@ -182,6 +182,21 @@ under its repo-relative path. `add` names what it
 repaired even with `--quiet`. A linked folder that leaves the repository is
 reported once. A name like `v:take1.psd` stays trackable on Linux and macOS.
 
+### Fixed — renaming a file by letter case only saved a version that could not be checked out (BUG-011)
+
+Renaming `art/Hero.txt` to `art/hero.txt` (or a folder `art` to `Art`) on
+Windows or macOS left both names in the next version, because `add --all` asked
+the filesystem whether the old name still existed and it said yes. `reset --hard`
+and checkout of that version then failed, and `fsck` said PERFECT. `add` now
+decides "deleted" by the exact name stored in the folder, so the old name is
+staged for deletion. A version holding two names that differ only by letter case
+is refused at save time, naming both paths, and `fsck` reports it. A repository
+that already holds both names has a way out: `mediagit add --all` stages the
+deletion of the name that is not on disk, then save again. Switching branches or
+`reset --hard` between two spellings used to delete the file just written; it now
+leaves the target spelling on disk. On a case-sensitive filesystem where both
+files really exist, saving is refused until one is renamed or deleted.
+
 ### Fixed — `push --force-with-lease` overwrote work pushed by someone else (BUG-032)
 
 The lease was the server's own fresh answer, so it always matched and the push
