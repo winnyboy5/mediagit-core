@@ -734,7 +734,7 @@ impl BranchCmd {
         // Update working directory to match the target branch's commit.
         // WT-1: the `checkout_commit` fallback below (no current commit) would
         // otherwise delete untracked files that merely happen not to be in the
-        // target tree. `checkout_diff` never cleans, so this only binds the
+        // target tree. `checkout_diff` deletes only files of the old tree, so this only binds the
         // initial-checkout path.
         let tracked =
             crate::worktree_guard::tracked_paths(&repo_root, &odb, current_commit_oid.as_ref())

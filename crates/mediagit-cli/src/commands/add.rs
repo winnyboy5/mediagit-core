@@ -248,25 +248,53 @@ struct ExactNames {
         std::collections::HashMap<PathBuf, Option<std::collections::HashSet<std::ffi::OsString>>>,
 }
 
+/// Only these mean "the folder is not there". Any other read error (access
+/// denied, too many open files, a dropped network drive) says nothing about
+/// the files in it, so it must never be read as "they were deleted".
+fn folder_is_absent(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind::{NotADirectory, NotFound};
+    // 267 is ERROR_DIRECTORY: a file stands where the folder was.
+    matches!(e.kind(), NotFound | NotADirectory) || e.raw_os_error() == Some(267)
+}
+
 impl ExactNames {
     /// True when every component of `rel` is present under `root` with
-    /// exactly this spelling. An unreadable or missing folder holds nothing.
-    fn exists_exact(&mut self, root: &Path, rel: &Path) -> bool {
+    /// exactly this spelling. A missing folder holds nothing; a folder that
+    /// cannot be read is an error naming it.
+    fn exists_exact(&mut self, root: &Path, rel: &Path) -> Result<bool> {
         let mut dir = root.to_path_buf();
         for part in rel.components() {
             let name = part.as_os_str();
-            let names = self.folders.entry(dir.clone()).or_insert_with(|| {
-                std::fs::read_dir(&dir)
-                    .ok()
-                    .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.file_name()).collect())
-            });
-            if !names.as_ref().is_some_and(|n| n.contains(name)) {
-                return false;
+            if !self.folders.contains_key(&dir) {
+                let listing = match std::fs::read_dir(&dir) {
+                    Ok(rd) => Some(
+                        rd.map(|e| e.map(|e| e.file_name()))
+                            .collect::<std::io::Result<_>>()
+                            .map_err(|e| unreadable_folder(&dir, &e))?,
+                    ),
+                    Err(e) if folder_is_absent(&e) => None,
+                    Err(e) => return Err(unreadable_folder(&dir, &e)),
+                };
+                self.folders.insert(dir.clone(), listing);
+            }
+            let known = self.folders[&dir]
+                .as_ref()
+                .is_some_and(|n| n.contains(name));
+            if !known {
+                return Ok(false);
             }
             dir.push(name);
         }
-        true
+        Ok(true)
     }
+}
+
+fn unreadable_folder(dir: &Path, e: &std::io::Error) -> anyhow::Error {
+    anyhow::anyhow!(
+        "Cannot read the folder '{}' ({e}), so `add` cannot tell which of its files were \
+         deleted. Nothing was staged. Fix the folder's permissions and run `add` again.",
+        dir.display()
+    )
 }
 
 fn windows_unstorable_name(path: &Path) -> Option<&'static str> {
@@ -830,7 +858,7 @@ impl AddCmd {
 
             // Stage deletion unless --ignore-removal is set
             if !exists_in_working_dir
-                && !on_disk.exists_exact(&repo_root, head_path)
+                && !on_disk.exists_exact(&repo_root, head_path)?
                 && !self.ignore_removal
             {
                 if !self.dry_run {
@@ -1557,6 +1585,43 @@ impl AddCmd {
 mod tests {
     use super::*;
 
+    /// I3: only "not there" means absent; any other read error is not a
+    /// verdict about the files in the folder.
+    #[test]
+    fn only_a_missing_folder_counts_as_absent() {
+        use std::io::{Error, ErrorKind};
+        assert!(folder_is_absent(&Error::from(ErrorKind::NotFound)));
+        assert!(folder_is_absent(&Error::from(ErrorKind::NotADirectory)));
+        for kind in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::Interrupted,
+            ErrorKind::TimedOut,
+            ErrorKind::Other,
+        ] {
+            assert!(!folder_is_absent(&Error::from(kind)), "{kind:?}");
+        }
+    }
+
+    /// An unreadable folder fails naming the folder instead of reporting its
+    /// files deleted. Unix only: the test strips the folder's permissions.
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_folder_is_an_error_naming_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let sub = tmp.path().join("locked");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("a.txt"), "x").unwrap();
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = std::fs::read_dir(&sub).is_ok(); // running as root
+        let res = ExactNames::default().exists_exact(tmp.path(), Path::new("locked/a.txt"));
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !readable {
+            let msg = res.unwrap_err().to_string();
+            assert!(msg.contains("locked"), "{msg}");
+        }
+    }
+
     /// BUG-011: the stored spelling decides, on any filesystem, for the file
     /// and for every folder above it; each folder is read once.
     #[test]
@@ -1565,12 +1630,36 @@ mod tests {
         std::fs::create_dir(tmp.path().join("art")).unwrap();
         std::fs::write(tmp.path().join("art/hero.txt"), "x").unwrap();
         let mut names = ExactNames::default();
-        assert!(names.exists_exact(tmp.path(), Path::new("art/hero.txt")));
-        assert!(names.exists_exact(tmp.path(), Path::new("art/hero.txt")));
-        assert!(!names.exists_exact(tmp.path(), Path::new("art/Hero.txt")));
-        assert!(!names.exists_exact(tmp.path(), Path::new("Art/hero.txt")));
-        assert!(!names.exists_exact(tmp.path(), Path::new("art/missing.txt")));
-        assert!(!names.exists_exact(tmp.path(), Path::new("nodir/x")));
+        assert!(
+            names
+                .exists_exact(tmp.path(), Path::new("art/hero.txt"))
+                .unwrap()
+        );
+        assert!(
+            names
+                .exists_exact(tmp.path(), Path::new("art/hero.txt"))
+                .unwrap()
+        );
+        assert!(
+            !names
+                .exists_exact(tmp.path(), Path::new("art/Hero.txt"))
+                .unwrap()
+        );
+        assert!(
+            !names
+                .exists_exact(tmp.path(), Path::new("Art/hero.txt"))
+                .unwrap()
+        );
+        assert!(
+            !names
+                .exists_exact(tmp.path(), Path::new("art/missing.txt"))
+                .unwrap()
+        );
+        assert!(
+            !names
+                .exists_exact(tmp.path(), Path::new("nodir/x"))
+                .unwrap()
+        );
         assert_eq!(names.folders.len(), 2, "root and art, each read once");
     }
 

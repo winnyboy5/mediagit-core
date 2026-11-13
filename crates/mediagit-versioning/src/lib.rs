@@ -134,7 +134,7 @@ pub use streaming_pack::{
 };
 pub use tag_object::Tag;
 pub use transaction::PackTransaction;
-pub use tree::{FileMode, Tree, TreeEntry, check_no_case_collisions, check_tracked_path};
+pub use tree::{FileMode, Tree, TreeEntry, check_no_new_case_collisions, check_tracked_path};
 
 // Re-export fsck module
 pub use fsck::{

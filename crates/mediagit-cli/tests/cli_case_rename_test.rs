@@ -92,6 +92,21 @@ fn count_name(lines: &[String], name: &str) -> usize {
 /// A child of HEAD whose tree also holds `extra` (same blob as `like`),
 /// planted through the library, bypassing the write-side guard.
 async fn plant_second_name(root: &Path, like: &str, extra: &str) {
+    plant(
+        root,
+        |tree| {
+            let oid = tree.get_entry(like).unwrap().oid;
+            tree.add_entry(TreeEntry::new(extra.to_string(), FileMode::Regular, oid));
+        },
+        true,
+    )
+    .await;
+}
+
+/// A child of HEAD whose tree is HEAD's tree after `edit`, written through the
+/// library (bypassing every write-side guard). Returns the commit id in hex.
+/// With `move_head` the current branch moves to it; otherwise nothing moves.
+async fn plant(root: &Path, edit: impl FnOnce(&mut Tree), move_head: bool) -> String {
     let storage = mediagit_cli::repo::create_storage_backend(root)
         .await
         .unwrap();
@@ -100,8 +115,7 @@ async fn plant_second_name(root: &Path, like: &str, extra: &str) {
     let head = refdb.resolve("HEAD").await.unwrap();
     let commit = Commit::deserialize(&odb.read(&head).await.unwrap()).unwrap();
     let mut tree = Tree::deserialize(&odb.read(&commit.tree).await.unwrap()).unwrap();
-    let oid = tree.get_entry(like).unwrap().oid;
-    tree.add_entry(TreeEntry::new(extra.to_string(), FileMode::Regular, oid));
+    edit(&mut tree);
     let tree_oid = odb
         .write(
             ObjectType::Tree,
@@ -111,12 +125,25 @@ async fn plant_second_name(root: &Path, like: &str, extra: &str) {
         .unwrap();
     let sig = Signature::now("t".into(), "t@e".into());
     let planted = Commit::with_parents(tree_oid, vec![head], sig.clone(), sig, "both".into());
-    let new_head = planted.write(&odb).await.unwrap();
-    let branch = refdb.read("HEAD").await.unwrap().target.unwrap();
-    refdb
-        .write(&Ref::new_direct(branch, new_head))
+    // Raw write: `Commit::write` refuses a newly introduced case pair.
+    let new_head = odb
+        .write(ObjectType::Commit, &planted.serialize().unwrap())
         .await
         .unwrap();
+    if move_head {
+        let branch = refdb.read("HEAD").await.unwrap().target.unwrap();
+        refdb
+            .write(&Ref::new_direct(branch, new_head))
+            .await
+            .unwrap();
+    }
+    new_head.to_hex()
+}
+
+const BAD: &str = "//?/C:/Users/someone/work/a.txt";
+
+fn read(root: &Path, rel: &str) -> String {
+    fs::read_to_string(root.join(rel)).unwrap()
 }
 
 #[test]
@@ -184,22 +211,43 @@ async fn repository_holding_both_names_add_all_is_the_way_out() {
     assert!(root.join("keep.txt").exists());
 }
 
-/// Independent of the filesystem: a tree with two case-equal names is never
-/// written. The refusal names both paths and the way out, and HEAD stays put.
+/// Independent of the filesystem: a repository that already holds a case pair
+/// (for example made on Linux) keeps working.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn commit_refuses_two_names_that_differ_only_by_case() {
+async fn existing_case_pair_does_not_block_commits() {
     let dir = repo_with(&[("art/hero.txt", "hero")]);
     let root = dir.path();
     plant_second_name(root, "art/hero.txt", "art/Hero.txt").await;
 
-    let head = fs::read_to_string(root.join(".mediagit/refs/heads/main")).unwrap();
+    // A pair already in the parent version may stay: an unrelated commit works.
     let (ok, text) = run(root, &["commit", "--allow-empty", "-m", "x"]);
+    assert!(ok, "an existing pair must not block commits: {text}");
+}
+
+/// A commit that would introduce a NEW pair is refused, naming both paths and
+/// the way out; HEAD stays put. Built through the index API, any filesystem.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn commit_refuses_a_newly_introduced_case_pair() {
+    let dir = repo_with(&[("art/hero.txt", "hero")]);
+    let root = dir.path();
+    let mut index = mediagit_versioning::Index::load(root).unwrap();
+    index.add_entry(mediagit_versioning::IndexEntry::new(
+        "art/Hero.txt".into(),
+        mediagit_versioning::Oid::hash(b"hero"),
+        0o100644,
+        4,
+        None,
+    ));
+    index.save(root).unwrap();
+
+    let head = fs::read_to_string(root.join(".mediagit/refs/heads/main")).unwrap();
+    let (ok, text) = run(root, &["commit", "-m", "x"]);
     assert!(!ok, "commit must refuse: {text}");
     for want in [
         "art/Hero.txt",
         "art/hero.txt",
         "Windows and macOS",
-        "add --all",
+        "Rename",
     ] {
         assert!(text.contains(want), "missing {want:?} in: {text}");
     }
@@ -217,10 +265,12 @@ async fn fsck_reports_two_names_that_differ_only_by_case() {
     let root = dir.path();
     plant_second_name(root, "art/hero.txt", "art/Hero.txt").await;
 
+    // A pair that already exists is a warning (exit 0), not an error.
     let (ok, text) = run(root, &["fsck"]);
+    assert!(ok, "an existing pair is a warning, not a failure:\n{text}");
     assert!(
         text.contains("art/Hero.txt") && text.contains("art/hero.txt"),
-        "fsck must name both paths (ok={ok}):\n{text}"
+        "fsck must name both paths:\n{text}"
     );
     assert!(!text.contains("PERFECT"), "{text}");
 }
@@ -285,4 +335,166 @@ fn reset_hard_and_folder_switch_across_casings_keep_the_target_spelling() {
         "{:?}",
         disk_names(root)
     );
+}
+
+fn snapshot(root: &Path, names: &[&str]) -> Vec<String> {
+    names.iter().map(|n| read(root, n)).collect()
+}
+
+/// A checkout that fails validation must not touch the working tree: every
+/// tracked file stays byte-identical. Any filesystem.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refused_checkout_leaves_every_working_file_untouched() {
+    let dir = repo_with(&[("a.txt", "alpha"), ("b.txt", "beta")]);
+    let root = dir.path();
+    // Target drops b.txt and holds an unsafe path.
+    let target = plant(
+        root,
+        |t| {
+            let oid = t.get_entry("a.txt").unwrap().oid;
+            t.entries.remove("b.txt");
+            t.add_entry(TreeEntry::new(BAD.to_string(), FileMode::Regular, oid));
+        },
+        false,
+    )
+    .await;
+    let (ok, text) = run(root, &["reset", "--hard", &target]);
+    assert!(!ok, "reset to an unsafe tree must fail: {text}");
+    assert_eq!(
+        snapshot(root, &["a.txt", "b.txt"]),
+        vec!["alpha", "beta"],
+        "{text}"
+    );
+}
+
+/// A checkout that fails while writing (object missing) must not have deleted
+/// unrelated tracked files first. Any filesystem.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn checkout_failing_in_the_write_phase_keeps_unrelated_files() {
+    let dir = repo_with(&[("a.txt", "alpha"), ("b.txt", "beta")]);
+    let root = dir.path();
+    let target = plant(
+        root,
+        |t| {
+            t.entries.remove("b.txt");
+            t.add_entry(TreeEntry::new(
+                "n.txt".to_string(),
+                FileMode::Regular,
+                mediagit_versioning::Oid::hash(b"never stored"),
+            ));
+        },
+        false,
+    )
+    .await;
+    let (ok, text) = run(root, &["reset", "--hard", &target]);
+    assert!(!ok, "reset with a missing object must fail: {text}");
+    assert_eq!(
+        snapshot(root, &["a.txt", "b.txt"]),
+        vec!["alpha", "beta"],
+        "{text}"
+    );
+}
+
+/// Validation runs before the case-twin step too: a refused checkout must not
+/// rename or remove the old spelling. Case-insensitive filesystems only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refused_checkout_does_not_touch_a_case_twin() {
+    let dir = repo_with(&[("art/Hero.txt", "hero"), ("keep.txt", "keep")]);
+    let root = dir.path();
+    if !case_insensitive(root) {
+        return;
+    }
+    let target = plant(
+        root,
+        |t| {
+            let e = t.entries.remove("art/Hero.txt").unwrap();
+            t.add_entry(TreeEntry::new(
+                "art/hero.txt".into(),
+                FileMode::Regular,
+                e.oid,
+            ));
+            t.add_entry(TreeEntry::new(BAD.to_string(), FileMode::Regular, e.oid));
+        },
+        false,
+    )
+    .await;
+    let (ok, text) = run(root, &["reset", "--hard", &target]);
+    assert!(!ok, "{text}");
+    assert_eq!(disk_names(&root.join("art")), vec!["Hero.txt"], "{text}");
+    assert_eq!(read(root, "art/Hero.txt"), "hero");
+}
+
+/// A failing write after a case-only rename must still leave a file at the
+/// path (the old spelling is renamed, not deleted first). Case-insensitive only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_write_after_case_rename_leaves_a_file_at_the_path() {
+    let dir = repo_with(&[("art/Hero.txt", "hero"), ("keep.txt", "keep")]);
+    let root = dir.path();
+    if !case_insensitive(root) {
+        return;
+    }
+    let target = plant(
+        root,
+        |t| {
+            let e = t.entries.remove("art/Hero.txt").unwrap();
+            // hero.txt gets new content that is not in the store.
+            let _ = e;
+            t.add_entry(TreeEntry::new(
+                "art/hero.txt".into(),
+                FileMode::Regular,
+                mediagit_versioning::Oid::hash(b"never stored"),
+            ));
+        },
+        false,
+    )
+    .await;
+    let (ok, text) = run(root, &["reset", "--hard", &target]);
+    assert!(!ok, "{text}");
+    assert_eq!(disk_names(&root.join("art")).len(), 1, "{text}");
+    assert_eq!(
+        read(root, "art/hero.txt"),
+        "hero",
+        "content survives: {text}"
+    );
+}
+
+/// Same guarantee through the differential path (branch switch): a target
+/// holding a colliding pair (fails validation) must not rename the case twin first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refused_branch_switch_does_not_touch_a_case_twin() {
+    let dir = repo_with(&[("art/Hero.txt", "hero"), ("keep.txt", "keep")]);
+    let root = dir.path();
+    if !case_insensitive(root) {
+        return;
+    }
+    let target = plant(
+        root,
+        |t| {
+            let e = t.entries.remove("art/Hero.txt").unwrap();
+            t.add_entry(TreeEntry::new(
+                "art/hero.txt".into(),
+                FileMode::Regular,
+                e.oid,
+            ));
+            t.add_entry(TreeEntry::new(
+                "art/HERO.txt".into(),
+                FileMode::Regular,
+                e.oid,
+            ));
+        },
+        false,
+    )
+    .await;
+    let refdb = RefDatabase::new(root.join(".mediagit"));
+    refdb
+        .write(&Ref::new_direct(
+            "refs/heads/planted".to_string(),
+            mediagit_versioning::Oid::from_hex(&target).unwrap(),
+        ))
+        .await
+        .unwrap();
+    let (ok, text) = run(root, &["branch", "switch", "planted"]);
+    assert!(!ok, "{text}");
+    assert_eq!(disk_names(&root.join("art")), vec!["Hero.txt"], "{text}");
+    assert_eq!(read(root, "art/Hero.txt"), "hero");
 }

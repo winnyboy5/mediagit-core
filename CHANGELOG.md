@@ -190,12 +190,17 @@ the filesystem whether the old name still existed and it said yes. `reset --hard
 and checkout of that version then failed, and `fsck` said PERFECT. `add` now
 decides "deleted" by the exact name stored in the folder, so the old name is
 staged for deletion. A version holding two names that differ only by letter case
-is refused at save time, naming both paths, and `fsck` reports it. A repository
-that already holds both names has a way out: `mediagit add --all` stages the
-deletion of the name that is not on disk, then save again. Switching branches or
-`reset --hard` between two spellings used to delete the file just written; it now
-leaves the target spelling on disk. On a case-sensitive filesystem where both
-files really exist, saving is refused until one is renamed or deleted.
+is refused at save time, naming both paths and saying to rename one. Only a pair
+the new version adds is refused: a repository that already holds such a pair (for
+example `Makefile` and `makefile` made on Linux) keeps working, and `fsck` lists
+the pair as a warning instead of an error. A repository that already holds both
+names on Windows or macOS has a way out: `mediagit add --all` stages the deletion
+of the name that is not on disk, then save again. Switching branches, `reset
+--hard`, merge and rebase between two spellings used to delete the file just
+written; the old spelling is now renamed to the new one before the files are
+written, and a checkout that is refused or fails part-way no longer leaves tracked
+files deleted. `add` now stops with an error naming a folder it cannot read,
+instead of staging every file in it as deleted.
 
 ### Fixed — `push --force-with-lease` overwrote work pushed by someone else (BUG-032)
 

@@ -256,6 +256,7 @@ impl MergeCmd {
                     committer: signature,
                     message,
                 };
+                squash_commit.check_case_collisions(&odb).await?;
                 let commit_data = squash_commit.serialize()?;
                 let commit_oid = odb.write(ObjectType::Commit, &commit_data).await?;
                 if let Some(ref target) = head_target {
@@ -459,6 +460,7 @@ impl MergeCmd {
                 message,
             };
 
+            merge_commit.check_case_collisions(&odb).await?;
             let commit_data = merge_commit.serialize()?;
             let commit_oid = odb.write(ObjectType::Commit, &commit_data).await?;
 

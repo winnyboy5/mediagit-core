@@ -506,6 +506,7 @@ impl RebaseCmd {
                 message: original_commit.message.clone(),
             };
 
+            new_commit.check_case_collisions(odb).await?;
             let commit_data = new_commit.serialize()?;
             let commit_oid = odb.write(ObjectType::Commit, &commit_data).await?;
 
@@ -680,6 +681,7 @@ impl RebaseCmd {
                 ),
                 message: original.message.clone(),
             };
+            resolved.check_case_collisions(&odb).await?;
             let resolved_oid = odb
                 .write(ObjectType::Commit, &resolved.serialize()?)
                 .await?;

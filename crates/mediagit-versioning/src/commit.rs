@@ -250,8 +250,29 @@ impl Commit {
     ///
     /// The OID of the written commit
     pub async fn write(&self, odb: &crate::ObjectDatabase) -> anyhow::Result<Oid> {
+        self.check_case_collisions(odb).await?;
         let data = self.serialize()?;
         odb.write(ObjectType::Commit, &data).await
+    }
+
+    /// Refuse a commit whose tree gains a pair of paths that differ only by
+    /// letter case compared with its first parent's tree (BUG-011). Every
+    /// commit writer calls this (or [`Commit::write`]) before moving a ref.
+    pub async fn check_case_collisions(&self, odb: &crate::ObjectDatabase) -> anyhow::Result<()> {
+        // A tree that is not stored cannot be judged here; the writers store
+        // it first, so this only happens for hand-built commits.
+        let Ok(tree) = crate::Tree::read(odb, &self.tree).await else {
+            return Ok(());
+        };
+        // An unreadable parent (shallow history) is treated as "no pairs".
+        let parent = match self.parents.first() {
+            Some(p) => match Commit::read(odb, p).await {
+                Ok(c) => crate::Tree::read(odb, &c.tree).await.ok(),
+                Err(_) => None,
+            },
+            None => None,
+        };
+        crate::tree::check_no_new_case_collisions(&tree, parent.as_ref())
     }
 
     /// Read commit from object database by OID

@@ -296,11 +296,13 @@ impl<'a> CheckoutManager<'a> {
 
         // Optimized: Single-pass checkout that collects files and writes them
         // This eliminates the redundant tree traversal
-        // (The clean-up of files not in the target runs inside, before the writes.)
         let (target_files, files_updated) = self
             .checkout_tree_optimized(&commit.tree, Path::new(""))
             .await?;
         debug!("Target files: {} entries", target_files.len());
+
+        // Clean working directory (remove files not in target)
+        self.clean_working_directory(&target_files)?;
 
         info!("Checked out {} files", files_updated);
         Ok(files_updated)
@@ -335,6 +337,92 @@ impl<'a> CheckoutManager<'a> {
 
             Ok(files)
         })
+    }
+
+    /// Check every target path (unsafe names, case collisions) before any
+    /// delete, rename or write, so a refused checkout touches nothing.
+    fn validate_targets<'p>(&self, paths: impl Iterator<Item = &'p PathBuf> + Clone) -> Result<()> {
+        detect_case_collisions(&self.repo_root, paths.clone())?;
+        for p in paths {
+            worktree_path(&self.repo_root, p)?;
+        }
+        Ok(())
+    }
+
+    /// BUG-011. For each old path that is the same file as a target path on a
+    /// case-insensitive filesystem (equal under case folding, different exact
+    /// spelling), put the file under the target's spelling before the writes.
+    /// Same folder: rename, so the path never lacks a file if a later write
+    /// fails and an unchanged file is not rewritten. Folder spelling differs:
+    /// remove the old file (the writes recreate it) and then the empty
+    /// folders, so the new folder spelling is the one created.
+    /// Returns the old paths handled. Targets must be validated already.
+    fn move_case_twins(&self, old: &[PathBuf], targets: &HashSet<PathBuf>) -> Result<Vec<PathBuf>> {
+        if old.is_empty() || !fs_is_case_insensitive(&self.repo_root) {
+            return Ok(Vec::new());
+        }
+        let norm = |p: &Path| p.to_string_lossy().replace('\\', "/");
+        let by_fold: std::collections::HashMap<String, &PathBuf> = targets
+            .iter()
+            .map(|t| (norm(t).to_lowercase(), t))
+            .collect();
+        let mut handled = Vec::new();
+        let mut removed_any = false;
+        for o in old {
+            let Some(t) = by_fold.get(&norm(o).to_lowercase()) else {
+                continue;
+            };
+            if norm(o) == norm(t) {
+                continue;
+            }
+            let (Ok(from), Ok(to)) = (
+                worktree_path(&self.repo_root, o),
+                worktree_path(&self.repo_root, t),
+            ) else {
+                continue;
+            };
+            if !from.exists() {
+                continue;
+            }
+            if o.parent().map(norm) == t.parent().map(norm) {
+                fs::rename(&from, &to).with_context(|| {
+                    format!("Failed to rename {} to {}", from.display(), to.display())
+                })?;
+            } else {
+                fs::remove_file(&from)
+                    .with_context(|| format!("Failed to remove file: {}", from.display()))?;
+                removed_any = true;
+            }
+            handled.push(o.clone());
+        }
+        if removed_any {
+            self.remove_empty_directories()?;
+        }
+        Ok(handled)
+    }
+
+    /// [`Self::move_case_twins`] for a checkout without an old tree: the old
+    /// candidates are the files the clean-up would delete.
+    fn move_case_twins_on_disk(&self, targets: &HashSet<PathBuf>) -> Result<()> {
+        if !fs_is_case_insensitive(&self.repo_root) {
+            return Ok(());
+        }
+        let normalized: HashSet<String> = targets
+            .iter()
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .collect();
+        let stale: Vec<PathBuf> = self
+            .list_working_directory_files()?
+            .into_iter()
+            .filter(|f| {
+                let n = f.to_string_lossy().replace('\\', "/");
+                !normalized.contains(&n)
+                    && self.deletable.as_ref().is_none_or(|d| d.contains(&n))
+                    && self.sparse.is_included(f)
+            })
+            .collect();
+        self.move_case_twins(&stale, targets)?;
+        Ok(())
     }
 
     /// Clean working directory, removing files not in target set
@@ -686,11 +774,12 @@ impl<'a> CheckoutManager<'a> {
         let file_paths: HashSet<PathBuf> = flat.keys().cloned().collect();
         let entries: Vec<(PathBuf, Oid, FileMode)> =
             flat.into_iter().map(|(p, (o, m))| (p, o, m)).collect();
-        // Remove files not in the target BEFORE writing (BUG-011): on a
-        // case-insensitive filesystem the old `Hero.txt` and the new
-        // `hero.txt` are one file, so cleaning afterwards deleted the file
-        // just written.
-        self.clean_working_directory(&file_paths)?;
+        // Validate everything before the first change to the working tree.
+        self.validate_targets(file_paths.iter())?;
+        // BUG-011: the old spelling of a case-only rename is the same file as
+        // the new one; move it before the writes, since the clean-up that
+        // follows them would otherwise delete the file just written.
+        self.move_case_twins_on_disk(&file_paths)?;
         let files_updated = self.run_parallel_writes(entries, true).await?;
         Ok((file_paths, files_updated))
     }
@@ -898,8 +987,18 @@ impl<'a> CheckoutManager<'a> {
             }
         }
 
+        // Validate every path about to be written before the first change.
+        self.validate_targets(
+            to_add
+                .iter()
+                .chain(to_modify.iter())
+                .map(|(p, _, _)| p)
+                .collect::<Vec<_>>()
+                .into_iter(),
+        )?;
+
         // Files not in target tree - delete.
-        let mut to_delete = Vec::new();
+        let mut stale: Vec<(PathBuf, PathBuf)> = Vec::new();
         for path in from_files.keys() {
             if !to_files.contains_key(path) {
                 // An unsafe path in the tree we are leaving was never written,
@@ -909,25 +1008,28 @@ impl<'a> CheckoutManager<'a> {
                     continue;
                 };
                 if full_path.exists() {
-                    to_delete.push(full_path);
+                    stale.push((path.clone(), full_path));
                 }
             }
         }
 
+        // BUG-011: a case-only rename is one file under two spellings; move
+        // it to the new spelling instead of deleting it after the write.
+        let target_keys: HashSet<PathBuf> = to_files.keys().cloned().collect();
+        let stale_rel: Vec<PathBuf> = stale.iter().map(|(r, _)| r.clone()).collect();
+        let moved = self.move_case_twins(&stale_rel, &target_keys)?;
+        let to_delete: Vec<PathBuf> = stale
+            .into_iter()
+            .filter(|(r, _)| !moved.contains(r))
+            .map(|(_, f)| f)
+            .collect();
+
         // Parallel I/O phases (bounded by MEDIAGIT_CHECKOUT_PARALLELISM).
         // First error in any phase aborts that phase's remaining tasks and
         // fails the whole checkout.
-        // Deletes first (BUG-011): on a case-insensitive filesystem `Hero.txt`
-        // in the old tree and `hero.txt` in the new one are the same file, so
-        // deleting after the write removed the file just written.
-        let files_deleted = self.run_parallel_deletes(to_delete).await?;
-        if files_deleted > 0 {
-            // A folder renamed by case only (`Art` to `art`) must be gone
-            // before the writes, or the new files land in the old spelling.
-            self.remove_empty_directories()?;
-        }
         let files_added = self.run_parallel_writes(to_add, false).await?;
         let files_modified = self.run_parallel_writes(to_modify, false).await?;
+        let files_deleted = self.run_parallel_deletes(to_delete).await?;
 
         let mut stats = CheckoutStats {
             files_added,
@@ -2506,12 +2608,10 @@ mod overlap_split_parity_tests {
             FileMode::Regular,
             b_oid,
         ));
-        // Bypass `Tree::serialize`, which now refuses a case collision (BUG-011).
-        let root_oid = odb
-            .write(ObjectType::Tree, &crate::format::serialize(&root)?)
-            .await?;
+        let root_oid = root.write(&odb).await?;
         let commit = Commit::new(root_oid, sig(), sig(), "collision".to_string());
-        let commit_oid = commit.write(&odb).await?;
+        // Raw write: `Commit::write` refuses a newly introduced case pair.
+        let commit_oid = odb.write(ObjectType::Commit, &commit.serialize()?).await?;
 
         let repo = TempDir::new()?;
         let mgr = CheckoutManager::new(&odb, repo.path());

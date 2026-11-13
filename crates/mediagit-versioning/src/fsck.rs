@@ -971,15 +971,17 @@ impl FsckChecker {
                 return Ok(());
             };
 
-            // BUG-011: two names that differ only by case cannot be checked
-            // out on Windows or macOS. Same rule as checkout and commit.
+            // BUG-011: two names that differ only by letter case cannot be
+            // checked out on Windows or macOS. Same rule as checkout and
+            // commit. A warning: the version is intact and fine on Linux.
             for (a, b) in crate::case_only_collisions(tree.entries.keys()) {
                 report.add_issue(
                     FsckIssue::new(
-                        IssueSeverity::Error,
+                        IssueSeverity::Warning,
                         IssueCategory::InvalidFormat,
                         format!(
-                            "Tree {} holds '{}' and '{}', which differ only by letter case;                              checkout of this version fails on Windows and macOS",
+                            "Tree {} holds '{}' and '{}', which differ only by letter case; \
+                             checkout of this version fails on Windows and macOS",
                             tree_oid,
                             a.display(),
                             b.display()

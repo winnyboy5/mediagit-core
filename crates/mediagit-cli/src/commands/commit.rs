@@ -383,6 +383,8 @@ or pass --author \"Your Name <you@example.com>\"."
         };
 
         // Serialize and write commit
+        // BUG-011: refuse a newly introduced case-only pair before any ref moves.
+        commit.check_case_collisions(&odb).await?;
         let commit_bytes = commit.serialize()?;
         let commit_oid = odb
             .write(mediagit_versioning::ObjectType::Commit, &commit_bytes)

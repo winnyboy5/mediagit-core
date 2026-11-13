@@ -161,27 +161,35 @@ pub fn check_tracked_path(path: &str) -> anyhow::Result<()> {
     check_tracked_path_for(path, cfg!(windows))
 }
 
-/// Refuse a tree holding two paths that differ only by letter case (BUG-011).
+/// Refuse a tree that gains a pair of paths differing only by letter case
+/// (BUG-011), compared with the parent version's tree.
 ///
-/// Such a version can never be checked out on Windows or macOS (checkout
-/// refuses it), so it must not be written. Uses the same folding rule as
-/// checkout: [`crate::case_only_collisions`].
-pub fn check_no_case_collisions<I, P>(names: I) -> anyhow::Result<()>
-where
-    I: Iterator<Item = P>,
-    P: AsRef<std::path::Path>,
-{
-    let collisions = crate::case_only_collisions(names);
-    if collisions.is_empty() {
+/// Such a version cannot be checked out on Windows or macOS. A pair the parent
+/// already holds is allowed to stay, so repositories made on a case-sensitive
+/// system keep working and a commit that removes one of the pair always
+/// succeeds. Same folding rule as checkout: [`crate::case_only_collisions`].
+pub fn check_no_new_case_collisions(tree: &Tree, parent: Option<&Tree>) -> anyhow::Result<()> {
+    let new_pairs: Vec<_> = crate::case_only_collisions(tree.entries.keys())
+        .into_iter()
+        .filter(|(a, b)| {
+            !parent.is_some_and(|p| {
+                p.entries.contains_key(a.to_string_lossy().as_ref())
+                    && p.entries.contains_key(b.to_string_lossy().as_ref())
+            })
+        })
+        .collect();
+    if new_pairs.is_empty() {
         return Ok(());
     }
-    let detail = collisions
+    let detail = new_pairs
         .iter()
         .map(|(a, b)| format!("'{}' and '{}'", a.display(), b.display()))
         .collect::<Vec<_>>()
         .join(", ");
     anyhow::bail!(
-        "these paths differ only by letter case: {detail}. They would overwrite each other          on Windows and macOS, so the version cannot be saved. Keep one: rename or delete the          other, then run 'mediagit add --all' and save again."
+        "these paths differ only by letter case: {detail}. They would collide on Windows and \
+         macOS (one overwrites the other), so this version cannot be saved. Rename one of \
+         them, then run 'mediagit add --all' and save again."
     )
 }
 
@@ -268,7 +276,6 @@ impl Tree {
         for name in self.entries.keys() {
             check_tracked_path(name)?;
         }
-        check_no_case_collisions(self.entries.keys())?;
         crate::format::serialize(self)
             .map_err(|e| anyhow::anyhow!("Tree serialization failed: {}", e))
     }
@@ -329,57 +336,62 @@ impl Default for Tree {
 mod tests {
     use super::*;
 
-    /// BUG-011: a tree with two names equal under case folding is never
-    /// written, on any platform; the message names both and the way out.
-    #[test]
-    fn serialize_refuses_names_that_differ_only_by_case() {
-        let oid = Oid::hash(b"x");
+    fn tree_of(names: &[&str]) -> Tree {
         let mut t = Tree::new();
-        t.add_entry(TreeEntry::new(
-            "art/Hero.txt".into(),
-            FileMode::Regular,
-            oid,
-        ));
-        t.add_entry(TreeEntry::new(
-            "art/hero.txt".into(),
-            FileMode::Regular,
-            oid,
-        ));
-        let msg = t.serialize().unwrap_err().to_string();
+        for n in names {
+            t.add_entry(TreeEntry::new(
+                n.to_string(),
+                FileMode::Regular,
+                Oid::hash(b"x"),
+            ));
+        }
+        t
+    }
+
+    /// BUG-011: a NEW pair is refused with both paths, the platforms and the
+    /// way out; a pair the parent already holds may stay; removing one of the
+    /// pair always passes. Pure, so it runs on every platform.
+    #[test]
+    fn new_case_pairs_are_refused_existing_ones_are_grandfathered() {
+        let both = tree_of(&["art/Hero.txt", "art/hero.txt"]);
+        let msg = check_no_new_case_collisions(&both, None)
+            .unwrap_err()
+            .to_string();
         for want in [
             "art/Hero.txt",
             "art/hero.txt",
-            "Windows and macOS",
-            "add --all",
+            "Windows and",
+            "macOS",
+            "Rename",
         ] {
             assert!(msg.contains(want), "missing {want:?} in: {msg}");
         }
-        let mut ok = Tree::new();
-        ok.add_entry(TreeEntry::new(
-            "art/hero.txt".into(),
-            FileMode::Regular,
-            oid,
-        ));
-        ok.add_entry(TreeEntry::new(
-            "art/hero2.txt".into(),
-            FileMode::Regular,
-            oid,
-        ));
-        ok.add_entry(TreeEntry::new(
-            "Art2/hero.txt".into(),
-            FileMode::Regular,
-            oid,
-        ));
-        assert!(ok.serialize().is_ok());
+        assert!(!msg.contains("  "), "no runs of spaces: {msg}");
+        // parent without the pair: refused
+        let one = tree_of(&["art/hero.txt"]);
+        assert!(check_no_new_case_collisions(&both, Some(&one)).is_err());
+        // parent with the pair: allowed to stay
+        assert!(check_no_new_case_collisions(&both, Some(&both)).is_ok());
+        // a third colliding name is new even when two of the three were there
+        let three = tree_of(&["art/Hero.txt", "art/hero.txt", "art/HERO.txt"]);
+        assert!(check_no_new_case_collisions(&three, Some(&both)).is_err());
+        // removing one of the pair passes
+        assert!(check_no_new_case_collisions(&one, Some(&both)).is_ok());
     }
 
     /// Folder-level and non-ASCII pairs fold with the same rule.
     #[test]
-    fn case_collisions_cover_folders_and_unicode() {
-        assert!(check_no_case_collisions(["Art/x.txt", "art/x.txt"].iter()).is_err());
-        assert!(check_no_case_collisions(["é/x", "É/x"].iter()).is_err());
-        assert!(check_no_case_collisions(["a/x", "a/x"].iter()).is_ok());
-        assert!(check_no_case_collisions(["a/x", "a/y"].iter()).is_ok());
+    fn case_pairs_cover_folders_and_unicode() {
+        assert!(check_no_new_case_collisions(&tree_of(&["Art/x.txt", "art/x.txt"]), None).is_err());
+        assert!(check_no_new_case_collisions(&tree_of(&["\u{e9}/x", "\u{c9}/x"]), None).is_err());
+        assert!(check_no_new_case_collisions(&tree_of(&["a/x", "a/y", "b/x"]), None).is_ok());
+    }
+
+    /// `serialize` itself no longer refuses a pair (the writers that know the
+    /// parent do): a repository made on Linux must stay readable and writable.
+    #[test]
+    fn serialize_accepts_a_case_pair() {
+        assert!(tree_of(&["Makefile", "makefile"]).serialize().is_ok());
     }
 
     fn tree_with(name: &str) -> Tree {
