@@ -219,6 +219,13 @@ commit arrives (`clone` with a tag, `fetch`, `pull`, `switch`, or an `fsck` run)
 it is removed from the list, so a commit lost later is an error again; `branch
 delete -r` removes its entry too. The new file is optional; repositories without it behave as before.
 
+### Fixed — cancelling a rebase left conflict text in your files (BUG-026)
+
+`rebase --abort` put the branch back but left the clashing file full of
+conflict markers, kept the conflict flagged, and blocked a new rebase. It now
+puts every tracked file back to how it was before the rebase and clears the
+conflict. Files that are not tracked are left alone.
+
 ### Fixed — `cherry-pick` copied every earlier version of the source branch too (BUG-028)
 
 `cherry-pick` compared against where the two branches split, so picking the

@@ -611,3 +611,107 @@ fn test_cherrypick_continue_after_conflict_given_a_branch_name() {
         .success();
     assert_eq!(fs::read_to_string(d.join("c.txt")).unwrap(), "resolved\n");
 }
+
+/// BUG-026: `main` and `clash` both change notes.txt. `extra_pick` puts a
+/// clean version before the clashing one on `clash`. Leaves `clash` checked
+/// out, with the rebase stopped on the conflict.
+fn stopped_rebase(d: &Path, extra_pick: bool) -> Vec<(&'static str, String)> {
+    init_repo(d);
+    add_and_commit(d, "notes.txt", "base\n", "Base");
+    create_and_switch_branch(d, "clash");
+    if extra_pick {
+        add_and_commit(d, "a.txt", "pick one\n", "Clean pick");
+    }
+    add_and_commit(d, "notes.txt", "clash\n", "Clash edit");
+    switch_main(d);
+    add_and_commit(d, "notes.txt", "main\n", "Main edit");
+    add_and_commit(d, "up.txt", "from main\n", "Main adds a file");
+    mediagit()
+        .args(["branch", "switch", "clash"])
+        .current_dir(d)
+        .assert()
+        .success();
+    let before: Vec<(&'static str, String)> = ["notes.txt", "a.txt"]
+        .iter()
+        .filter_map(|n| fs::read_to_string(d.join(n)).ok().map(|c| (*n, c)))
+        .collect();
+    mediagit()
+        .args(["rebase", "main"])
+        .current_dir(d)
+        .assert()
+        .failure();
+    assert!(
+        fs::read_to_string(d.join("notes.txt"))
+            .unwrap()
+            .contains("<<<<<<<"),
+        "the rebase stopped with markers in notes.txt"
+    );
+    before
+}
+
+fn assert_abort_restores(d: &Path, before: &[(&str, String)]) {
+    mediagit()
+        .args(["rebase", "--abort"])
+        .current_dir(d)
+        .assert()
+        .success();
+    for (name, content) in before {
+        assert_eq!(
+            &fs::read_to_string(d.join(name)).unwrap(),
+            content,
+            "{name} is back to its pre-rebase bytes"
+        );
+    }
+    assert!(
+        !d.join("up.txt").exists(),
+        "a file only the new base has is not left behind"
+    );
+    let out = mediagit().args(["status"]).current_dir(d).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).to_lowercase();
+    assert!(
+        !text.contains("in progress") && !text.contains("unresolved"),
+        "status shows no operation and no unresolved paths: {text}"
+    );
+    // A new rebase starts (and stops on the same clash), it is not refused
+    // for "local changes".
+    let again = mediagit()
+        .args(["rebase", "main"])
+        .current_dir(d)
+        .output()
+        .unwrap();
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&again.stdout),
+        String::from_utf8_lossy(&again.stderr)
+    );
+    assert!(
+        !all.contains("would be overwritten"),
+        "a new rebase can start after abort: {all}"
+    );
+}
+
+#[test]
+fn test_rebase_abort_restores_files_after_conflict() {
+    let t = TempDir::new().unwrap();
+    let before = stopped_rebase(t.path(), false);
+    assert_abort_restores(t.path(), &before);
+}
+
+#[test]
+fn test_rebase_abort_restores_files_after_a_clean_pick_then_conflict() {
+    let t = TempDir::new().unwrap();
+    let before = stopped_rebase(t.path(), true);
+    assert_abort_restores(t.path(), &before);
+}
+
+#[test]
+fn test_rebase_abort_keeps_untracked_files() {
+    let t = TempDir::new().unwrap();
+    let before = stopped_rebase(t.path(), false);
+    fs::write(t.path().join("mine.txt"), "scratch\n").unwrap();
+    assert_abort_restores(t.path(), &before);
+    assert_eq!(
+        fs::read_to_string(t.path().join("mine.txt")).unwrap(),
+        "scratch\n"
+    );
+}

@@ -571,6 +571,17 @@ impl RebaseCmd {
         let storage_path = repo_root.join(".mediagit");
         let refdb = RefDatabase::new(&storage_path);
 
+        // Validate first: the original head must be readable, or nothing changes.
+        let storage = create_storage_backend(repo_root).await?;
+        let odb = ObjectDatabase::with_smart_compression(storage, 1000);
+        Commit::read(&odb, &state.original_head)
+            .await
+            .context("Cannot read the commit this rebase started from; nothing was changed")?;
+
+        // Put tracked files back to the original head, clear the index and the
+        // merge files (BUG-026). Untracked files are kept.
+        crate::worktree_guard::drop_conflict(repo_root, &odb, &state.original_head).await?;
+
         // Restore HEAD to original position
         if let Some(ref branch) = state.original_branch {
             // HEAD was on a branch
