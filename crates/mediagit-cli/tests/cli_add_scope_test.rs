@@ -94,3 +94,84 @@ fn subdirectory_with_trailing_slash_stages_only_its_deletions() {
         "top.txt is outside the pathspec: {d:?}"
     );
 }
+
+/// Run without requiring success; returns (success, stdout + stderr).
+fn try_run(cwd: &Path, args: &[&str]) -> (bool, String) {
+    let out = mediagit().args(args).current_dir(cwd).output().unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out.status.success(), text)
+}
+
+/// A pathspec that resolves to nothing in the repository must never widen to
+/// "everything": no deletion is staged and the command says what was wrong.
+fn assert_no_widening(r: &Path, cwd: &Path, spec: &str) {
+    let (ok, text) = try_run(cwd, &["add", spec]);
+    assert!(
+        staged_deletions(r).is_empty(),
+        "add {spec} staged deletions: {:?}\n{text}",
+        staged_deletions(r)
+    );
+    // Today this is a warning with exit 0 (nothing matched), not an error.
+    let _ = ok;
+    assert!(
+        (text.contains("does not exist") || text.contains("not inside the repository"))
+            && text.contains(spec),
+        "add {spec} must name the bad pathspec:
+{text}"
+    );
+}
+
+#[test]
+fn pathspec_outside_the_repository_stages_no_deletion() {
+    let t = repo_with_two_deletions();
+    let outside = TempDir::new().unwrap();
+    let spec = outside.path().join("elsewhere.txt");
+    fs::write(&spec, "o").unwrap();
+    assert_no_widening(t.path(), t.path(), spec.to_str().unwrap());
+}
+
+#[test]
+fn dotdot_sibling_from_a_subdirectory_stages_no_deletion() {
+    let t = repo_with_two_deletions();
+    // ../sibling resolves above the repository root from a subfolder of it.
+    let sub = t.path().join("dir");
+    assert_no_widening(t.path(), &sub, "../../sibling-folder");
+}
+
+#[test]
+fn missing_name_stages_no_deletion() {
+    let t = repo_with_two_deletions();
+    assert_no_widening(t.path(), t.path(), "a-name-that-does-not-exist");
+}
+
+/// Windows only: the repository root spelled with different letter case. It
+/// must act as the root (every deletion staged) or say plainly that nothing
+/// matched; never succeed silently with nothing staged.
+#[cfg(windows)]
+#[test]
+fn root_in_a_different_case_is_the_root_or_an_error() {
+    let t = repo_with_two_deletions();
+    let root = dunce::canonicalize(t.path()).unwrap();
+    let swapped: String = root
+        .to_string_lossy()
+        .chars()
+        .map(|c| {
+            if c.is_lowercase() {
+                c.to_uppercase().next().unwrap()
+            } else {
+                c.to_lowercase().next().unwrap()
+            }
+        })
+        .collect();
+    let (ok, text) = try_run(t.path(), &["add", &swapped]);
+    let staged = staged_deletions(t.path());
+    eprintln!("different-case root: ok={ok} staged={staged:?}\n{text}");
+    assert!(
+        staged.len() == 2 || !ok || text.to_lowercase().contains("no files"),
+        "silent no-op for a different-case root (ok={ok}, staged={staged:?}):\n{text}"
+    );
+}

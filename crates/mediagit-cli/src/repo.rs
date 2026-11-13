@@ -78,6 +78,13 @@ pub fn repo_scope(repo_root: &Path, path: &Path) -> Option<String> {
             other => clean.push(other.as_os_str()),
         }
     }
+    // An existing path is judged in its canonical spelling, so the repository
+    // folder written in another letter case (Windows) is still the root.
+    let clean = if clean.exists() {
+        dunce::canonicalize(&clean).unwrap_or(clean)
+    } else {
+        clean
+    };
     if strip_verbatim(&clean) == strip_verbatim(repo_root) {
         return Some(String::new());
     }
