@@ -522,3 +522,92 @@ fn test_cherrypick_preserves_content() {
     let content = fs::read_to_string(temp_dir.path().join("special.txt")).unwrap();
     assert_eq!(content, feature_content);
 }
+
+fn switch_main(dir: &Path) {
+    mediagit()
+        .args(["branch", "switch", "refs/heads/main"])
+        .current_dir(dir)
+        .assert()
+        .success();
+}
+
+/// BUG-028: the base is the picked version's parent, not the branch
+/// merge-base, so earlier versions of the source branch do not come along.
+fn two_version_branch(dir: &Path) {
+    init_repo(dir);
+    add_and_commit(dir, "base.txt", "Base", "Base");
+    create_and_switch_branch(dir, "x");
+    add_and_commit(dir, "f1.txt", "one", "x1");
+    add_and_commit(dir, "f2.txt", "two", "x2");
+    switch_main(dir);
+}
+
+#[test]
+fn test_cherrypick_copies_only_the_picked_version() {
+    let t = TempDir::new().unwrap();
+    two_version_branch(t.path());
+    mediagit()
+        .args(["cherry-pick", "x"])
+        .current_dir(t.path())
+        .assert()
+        .success();
+    assert!(t.path().join("f2.txt").exists());
+    assert!(
+        !t.path().join("f1.txt").exists(),
+        "f1.txt belongs to the version before the picked one"
+    );
+}
+
+#[test]
+fn test_cherrypick_no_commit_copies_only_picked_and_stages_it() {
+    let t = TempDir::new().unwrap();
+    two_version_branch(t.path());
+    mediagit()
+        .args(["cherry-pick", "-n", "x"])
+        .current_dir(t.path())
+        .assert()
+        .success();
+    assert!(t.path().join("f2.txt").exists());
+    assert!(!t.path().join("f1.txt").exists());
+    let out = mediagit()
+        .args(["status", "--porcelain"])
+        .current_dir(t.path())
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(text.contains("f2.txt"), "f2.txt is staged: {text}");
+    assert!(
+        !text.contains("??"),
+        "nothing left untracked after a no-commit pick: {text}"
+    );
+}
+
+#[test]
+fn test_cherrypick_continue_after_conflict_given_a_branch_name() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    init_repo(d);
+    add_and_commit(d, "c.txt", "base\n", "Base");
+    create_and_switch_branch(d, "side");
+    add_and_commit(d, "c.txt", "theirs\n", "Side edit");
+    switch_main(d);
+    add_and_commit(d, "c.txt", "ours\n", "Main edit");
+
+    mediagit()
+        .args(["cherry-pick", "side"])
+        .current_dir(d)
+        .assert()
+        .failure();
+    fs::write(d.join("c.txt"), "resolved\n").unwrap();
+    mediagit()
+        .args(["add", "c.txt"])
+        .current_dir(d)
+        .assert()
+        .success();
+    mediagit()
+        .args(["cherry-pick", "--continue"])
+        .current_dir(d)
+        .assert()
+        .success();
+    assert_eq!(fs::read_to_string(d.join("c.txt")).unwrap(), "resolved\n");
+}

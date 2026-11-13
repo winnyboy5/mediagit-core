@@ -219,6 +219,14 @@ commit arrives (`clone` with a tag, `fetch`, `pull`, `switch`, or an `fsck` run)
 it is removed from the list, so a commit lost later is an error again; `branch
 delete -r` removes its entry too. The new file is optional; repositories without it behave as before.
 
+### Fixed — `cherry-pick` copied every earlier version of the source branch too (BUG-028)
+
+`cherry-pick` compared against where the two branches split, so picking the
+second version of a branch also brought the first, and could report false
+conflicts. It now copies only the change the picked version made. With
+`--no-commit` the result is staged. `cherry-pick --continue` also works now
+when the pick was given as a branch name or a short id.
+
 ### Fixed — undoing, cherry-picking or rebasing through a conflict left a phantom "merge in progress", and the app could not open the repository (BUG-020, BUG-021)
 
 After `revert`, `cherry-pick` or `rebase` stopped on a conflict, leaving it

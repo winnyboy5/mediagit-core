@@ -183,6 +183,9 @@ impl CherryPickCmd {
                     .context(format!("Failed to resolve commit: {}", commit_ref))?,
             );
         }
+        // The state file stores full ids: a branch name or short id would not
+        // parse in `--continue`.
+        let resolved: Vec<String> = listed[1..].iter().map(|o| o.to_hex()).collect();
         crate::repo::ensure_no_unsafe_paths(&odb, repo_root, &listed).await?;
 
         // Process each commit to cherry-pick
@@ -231,7 +234,7 @@ impl CherryPickCmd {
                                 // next. With nothing left after it there is
                                 // nothing to continue, so leave no state.
                                 if idx + 1 < self.commits.len() {
-                                    self.save_cherrypick_state(repo_root, &self.commits, idx)
+                                    self.save_cherrypick_state(repo_root, &resolved, idx)
                                         .await?;
                                 }
                                 return Err(e);
@@ -242,7 +245,7 @@ impl CherryPickCmd {
                 }
                 Err(e) => {
                     // Save cherry-pick state for continuation
-                    self.save_cherrypick_state(repo_root, &self.commits, idx)
+                    self.save_cherrypick_state(repo_root, &resolved, idx)
                         .await?;
 
                     if !output::machine_mode() {
@@ -315,12 +318,17 @@ impl CherryPickCmd {
             .ensure_clean("cherry-pick")?;
         crate::repo::ensure_no_unsafe_paths(odb, repo_root, &[*commit_oid]).await?;
 
-        // Perform three-way merge: current HEAD vs commit being cherry-picked
+        // BUG-028: base = the picked version's parent, so only that version's
+        // own change is applied (the branch merge-base would drag in every
+        // earlier version of the source branch).
+        let parent_commit = Commit::read(odb.as_ref(), &commit.parents[0]).await?;
+        let current_commit = Commit::read(odb.as_ref(), &current_oid).await?;
         let merger = MergeEngine::new(odb.clone());
         let merge_result = merger
-            .merge(
-                &current_oid,
-                commit_oid,
+            .merge_trees(
+                &parent_commit.tree,
+                &current_commit.tree,
+                &commit.tree,
                 mediagit_versioning::MergeStrategy::Recursive,
             )
             .await?;
@@ -383,6 +391,14 @@ impl CherryPickCmd {
         // Write temporary commit to get OID for checkout
         let temp_oid = commit_to_checkout.write(odb.as_ref()).await?;
         checkout_mgr.checkout_commit(&temp_oid).await?;
+
+        // `--no-commit` leaves the result staged (the commit path rebuilds
+        // nothing: the new commit is what the index should match).
+        if self.no_commit {
+            let mut index = Index::new();
+            add_tree_to_index(odb.as_ref(), &tree_oid, PathBuf::new(), &mut index).await?;
+            index.save(repo_root)?;
+        }
 
         Ok(tree_oid)
     }
@@ -722,6 +738,33 @@ struct CherryPickState {
     original_head: Option<String>,
     current_commit: Option<String>,
     remaining_commits: Vec<String>,
+}
+
+/// Stage every file of `tree_oid` (recursing into subtrees).
+fn add_tree_to_index<'a>(
+    odb: &'a ObjectDatabase,
+    tree_oid: &'a Oid,
+    prefix: PathBuf,
+    index: &'a mut Index,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+    Box::pin(async move {
+        let tree = Tree::read(odb, tree_oid).await?;
+        for entry in tree.iter() {
+            let path = prefix.join(&entry.name);
+            if entry.is_tree() {
+                add_tree_to_index(odb, &entry.oid, path, index).await?;
+            } else {
+                index.add_entry(mediagit_versioning::IndexEntry::new(
+                    path,
+                    entry.oid,
+                    entry.mode.as_u32(),
+                    0,
+                    None,
+                ));
+            }
+        }
+        Ok(())
+    })
 }
 
 #[cfg(test)]
