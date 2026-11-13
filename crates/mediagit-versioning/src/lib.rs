@@ -113,7 +113,10 @@ pub use delta::{Delta, DeltaDecoder, DeltaEncoder};
 pub use diff::{ModifiedEntry, ThreeWayDiff, TreeDiff, TreeDiffer};
 pub use index::{Index, IndexEntry, is_stage_debris_key};
 pub use lca::{LcaFinder, LcaResult};
-pub use merge::{FastForwardInfo, MergeEngine, MergeResult, MergeStrategy, apply_merge_to_workdir};
+pub use merge::{
+    FastForwardInfo, MergeEngine, MergeResult, MergeStrategy, apply_merge_to_workdir,
+    clear_merge_state,
+};
 pub use metrics::OdbMetrics;
 pub use object::ObjectType;
 pub use odb::{ObjectDatabase, RepackStats};

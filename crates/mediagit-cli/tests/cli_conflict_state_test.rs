@@ -546,3 +546,214 @@ fn wt7_stash_apply_still_works_on_a_clean_tree() {
         "stash apply did not restore the stashed content"
     );
 }
+
+// ============================================================================
+// BUG-020 — leaving a conflicted operation must not leave a phantom merge.
+// ============================================================================
+
+fn merge_files_left(dir: &Path) -> Vec<&'static str> {
+    ["MERGE_HEAD", "MERGE_MSG", "ORIG_HEAD"]
+        .into_iter()
+        .filter(|f| dir.join(".mediagit").join(f).exists())
+        .collect()
+}
+
+fn assert_no_operation(dir: &Path, what: &str) {
+    let left = merge_files_left(dir);
+    assert!(left.is_empty(), "{what}: left behind {left:?}");
+    let out = run(dir, &["status"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !text.contains("in progress"),
+        "{what}: status still reports an operation:\n{text}"
+    );
+}
+
+fn revert_conflict(dir: &Path) {
+    let target = setup_revert_conflict(dir);
+    let out = run(dir, &["revert", &target]);
+    assert!(!out.status.success(), "revert should stop on a conflict");
+    assert!(dir.join(".mediagit/MERGE_HEAD").exists(), "precondition");
+}
+
+fn resolve(dir: &Path, rel: &str) {
+    fs::write(dir.join(rel), "resolved\n").unwrap();
+    mediagit()
+        .args(["add", rel])
+        .current_dir(dir)
+        .assert()
+        .success();
+}
+
+#[test]
+fn bug020_revert_abort_clears_merge_state() {
+    let t = TempDir::new().unwrap();
+    revert_conflict(t.path());
+    assert!(run(t.path(), &["revert", "--abort"]).status.success());
+    assert_no_operation(t.path(), "revert --abort");
+}
+
+#[test]
+fn bug020_revert_continue_clears_merge_state() {
+    let t = TempDir::new().unwrap();
+    revert_conflict(t.path());
+    resolve(t.path(), "shared.txt");
+    let out = run(t.path(), &["revert", "--continue"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_no_operation(t.path(), "revert --continue");
+}
+
+#[test]
+fn bug020_revert_skip_clears_merge_state() {
+    let t = TempDir::new().unwrap();
+    revert_conflict(t.path());
+    assert!(run(t.path(), &["revert", "--skip"]).status.success());
+    assert_no_operation(t.path(), "revert --skip");
+}
+
+/// Returns nothing; cherry-picks the feature tip (full oid: the state file
+/// stores the argument as typed) onto a main that edited the same line.
+fn setup_cherry_pick_conflict(dir: &Path) {
+    init_repo(dir);
+    commit_file(
+        dir,
+        "shared.txt",
+        "base
+",
+        "base",
+    );
+    mediagit()
+        .args(["branch", "create", "feature"])
+        .current_dir(dir)
+        .assert()
+        .success();
+    commit_file(
+        dir,
+        "shared.txt",
+        "main-change
+",
+        "main edit",
+    );
+    mediagit()
+        .args(["branch", "switch", "feature"])
+        .current_dir(dir)
+        .assert()
+        .success();
+    commit_file(
+        dir,
+        "shared.txt",
+        "feature-change
+",
+        "feature edit",
+    );
+    let tip = fs::read_to_string(dir.join(".mediagit/refs/heads/feature")).unwrap();
+    mediagit()
+        .args(["branch", "switch", "main"])
+        .current_dir(dir)
+        .assert()
+        .success();
+    let out = run(dir, &["cherry-pick", tip.trim()]);
+    assert!(
+        !out.status.success(),
+        "cherry-pick should stop on a conflict"
+    );
+    assert!(dir.join(".mediagit/MERGE_HEAD").exists(), "precondition");
+}
+
+#[test]
+fn bug020_cherry_pick_abort_clears_merge_state() {
+    let t = TempDir::new().unwrap();
+    setup_cherry_pick_conflict(t.path());
+    assert!(run(t.path(), &["cherry-pick", "--abort"]).status.success());
+    assert_no_operation(t.path(), "cherry-pick --abort");
+}
+
+#[test]
+fn bug020_cherry_pick_skip_clears_merge_state() {
+    let t = TempDir::new().unwrap();
+    setup_cherry_pick_conflict(t.path());
+    assert!(run(t.path(), &["cherry-pick", "--skip"]).status.success());
+    assert_no_operation(t.path(), "cherry-pick --skip");
+}
+
+#[test]
+fn bug020_cherry_pick_continue_refuses_unresolved_then_clears() {
+    let t = TempDir::new().unwrap();
+    setup_cherry_pick_conflict(t.path());
+    let refused = run(t.path(), &["cherry-pick", "--continue"]);
+    assert!(
+        !refused.status.success(),
+        "continue must refuse while a path is unresolved"
+    );
+    assert!(t.path().join(".mediagit/CHERRY_PICK_STATE").exists());
+    resolve(t.path(), "shared.txt");
+    let out = run(t.path(), &["cherry-pick", "--continue"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_no_operation(t.path(), "cherry-pick --continue");
+}
+
+fn setup_rebase_conflict(dir: &Path) {
+    setup_conflicting_branches(dir);
+    let out = run(dir, &["rebase", "main"]);
+    assert!(!out.status.success(), "rebase should stop on a conflict");
+    assert!(dir.join(".mediagit/MERGE_HEAD").exists(), "precondition");
+}
+
+#[test]
+fn bug020_rebase_abort_clears_merge_state() {
+    let t = TempDir::new().unwrap();
+    setup_rebase_conflict(t.path());
+    assert!(run(t.path(), &["rebase", "--abort"]).status.success());
+    assert_no_operation(t.path(), "rebase --abort");
+}
+
+#[test]
+fn bug020_rebase_continue_clears_merge_state() {
+    let t = TempDir::new().unwrap();
+    setup_rebase_conflict(t.path());
+    resolve(t.path(), "shared.txt");
+    let out = run(t.path(), &["rebase", "--continue"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_no_operation(t.path(), "rebase --continue");
+}
+
+#[test]
+fn bug020_rebase_skip_clears_merge_state() {
+    let t = TempDir::new().unwrap();
+    setup_rebase_conflict(t.path());
+    assert!(run(t.path(), &["rebase", "--skip"]).status.success());
+    assert_no_operation(t.path(), "rebase --skip");
+}
+
+#[test]
+fn bug020_merge_continue_clears_merge_state() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    setup_conflicting_branches(d);
+    mediagit()
+        .args(["branch", "switch", "main"])
+        .current_dir(d)
+        .assert()
+        .success();
+    assert!(!run(d, &["merge", "feature"]).status.success());
+    resolve(d, "shared.txt");
+    let out = run(d, &["merge", "--continue"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_no_operation(d, "merge --continue");
+}

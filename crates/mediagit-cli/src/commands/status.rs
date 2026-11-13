@@ -34,6 +34,33 @@ pub struct StatusReport {
     /// on and at least one changed file is a recognized media type.
     pub media: Vec<MediaLineReport>,
     pub summary: StatusSummaryReport,
+    /// A merge, rebase, cherry-pick or revert that stopped part-way.
+    pub operation: Option<OperationReport>,
+    /// Paths of the stopped operation that still need a decision
+    /// (`mediagit add <path>` accepts one).
+    pub unresolved: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+#[serde(rename_all = "snake_case")]
+pub enum OperationKind {
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../../ui/src/api/generated/"))]
+pub struct OperationReport {
+    pub kind: OperationKind,
+    /// Branch the operation is running on; `None` when HEAD is detached.
+    pub ours: Option<String>,
+    /// Commit being brought in (hex), when the operation recorded one.
+    pub theirs: Option<String>,
 }
 
 /// A single `media: ...` summary line for one modified/staged file, keyed
@@ -328,17 +355,23 @@ impl StatusCmd {
         // rebase. The one command whose job is answering "what state am I in?"
         // did not answer it. Printed before the branch line because "you are
         // in the middle of X" outranks "you are on branch Y".
+        let op = in_progress_operation(&storage_path);
+        let unresolved = if op.is_some() {
+            Index::load(&repo_root)
+                .map(|i| i.unresolved_paths())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         if !self.json
             && !self.porcelain
-            && let Some(op) = in_progress_operation(&storage_path)
+            && !output::machine_mode()
+            && let Some(op) = &op
         {
             output::warning(&format!("{} in progress", op.label));
             for hint in op.hints {
                 println!("  {}", hint);
             }
-            let unresolved = Index::load(&repo_root)
-                .map(|i| i.unresolved_paths())
-                .unwrap_or_default();
             if !unresolved.is_empty() {
                 println!("  Unresolved path(s):");
                 for p in &unresolved {
@@ -713,6 +746,17 @@ impl StatusCmd {
             untracked,
             ignored,
             media,
+            operation: op.as_ref().map(|o| OperationReport {
+                kind: o.kind,
+                ours: branch_name_for_upstream
+                    .clone()
+                    .filter(|_| matches!(branch_state, BranchState::OnBranch(_))),
+                theirs: std::fs::read_to_string(storage_path.join("MERGE_HEAD"))
+                    .ok()
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty()),
+            }),
+            unresolved: unresolved.iter().map(|p| p.display().to_string()).collect(),
             summary: StatusSummaryReport {
                 staged: staged_count,
                 modified: modified_count,
@@ -927,6 +971,7 @@ impl StatusCmd {
 
 /// An operation the repository is part-way through.
 struct InProgressOp {
+    kind: OperationKind,
     label: &'static str,
     hints: &'static [&'static str],
 }
@@ -942,6 +987,7 @@ fn in_progress_operation(mediagit_dir: &std::path::Path) -> Option<InProgressOp>
 
     if exists("rebase-apply/state.json") {
         return Some(InProgressOp {
+            kind: OperationKind::Rebase,
             label: "Rebase",
             hints: &[
                 "`mediagit rebase --continue` to resume",
@@ -951,6 +997,7 @@ fn in_progress_operation(mediagit_dir: &std::path::Path) -> Option<InProgressOp>
     }
     if exists("CHERRY_PICK_STATE") {
         return Some(InProgressOp {
+            kind: OperationKind::CherryPick,
             label: "Cherry-pick",
             hints: &[
                 "`mediagit cherry-pick --continue` to resume",
@@ -960,6 +1007,7 @@ fn in_progress_operation(mediagit_dir: &std::path::Path) -> Option<InProgressOp>
     }
     if exists("REVERT_STATE") {
         return Some(InProgressOp {
+            kind: OperationKind::Revert,
             label: "Revert",
             hints: &[
                 "`mediagit revert --continue` to resume",
@@ -969,6 +1017,7 @@ fn in_progress_operation(mediagit_dir: &std::path::Path) -> Option<InProgressOp>
     }
     if exists("MERGE_HEAD") {
         return Some(InProgressOp {
+            kind: OperationKind::Merge,
             label: "Merge",
             hints: &[
                 "`mediagit merge --continue` to conclude the merge",

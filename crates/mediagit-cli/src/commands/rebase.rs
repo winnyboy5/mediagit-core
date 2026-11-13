@@ -584,6 +584,7 @@ impl RebaseCmd {
 
         // Clear rebase state
         RebaseState::clear(repo_root)?;
+        mediagit_versioning::clear_merge_state(&storage_path)?;
 
         if !self.quiet() {
             println!(
@@ -690,6 +691,7 @@ impl RebaseCmd {
             state.current_commit = None;
             state.set_conflicts(Vec::new());
             state.save(repo_root)?;
+            mediagit_versioning::clear_merge_state(&storage_path)?;
 
             if !self.quiet() {
                 println!(
@@ -792,6 +794,13 @@ impl RebaseCmd {
         // Skip current commit
         state.skip_current();
         state.save(repo_root)?;
+
+        // The skipped commit's conflict is dropped: no merge files, and no
+        // staged conflict entries to block `continue`.
+        mediagit_versioning::clear_merge_state(&repo_root.join(".mediagit"))?;
+        let mut index = Index::load(repo_root)?;
+        index.clear();
+        index.save(repo_root)?;
 
         // Continue with remaining
         self.continue_rebase_process(repo_root).await

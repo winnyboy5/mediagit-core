@@ -219,6 +219,20 @@ commit arrives (`clone` with a tag, `fetch`, `pull`, `switch`, or an `fsck` run)
 it is removed from the list, so a commit lost later is an error again; `branch
 delete -r` removes its entry too. The new file is optional; repositories without it behave as before.
 
+### Fixed — undoing, cherry-picking or rebasing through a conflict left a phantom "merge in progress", and the app could not open the repository (BUG-020, BUG-021)
+
+After `revert`, `cherry-pick` or `rebase` stopped on a conflict, leaving it
+with `--abort`, `--continue` or `--skip` kept the merge files, so `status`
+kept saying "Merge in progress" on a clean folder. Every way out of a conflict
+now removes them, and `merge --continue` also removes `ORIG_HEAD`.
+`cherry-pick --continue` now refuses while a path still needs a decision, like
+`rebase` and `revert` do. `rebase --skip` now drops the skipped commit's
+conflict. Separately, `status --machine` printed hint lines before its JSON
+during a conflict, which the app rejected ("more than one line on stdout"), so
+the repository would not open. It now prints one JSON line only, and the data
+has two new fields: `operation` (`kind`, `ours`, `theirs`) and `unresolved`.
+The Changes view shows a banner while an operation is stopped.
+
 ### Fixed — `push --force-with-lease` overwrote work pushed by someone else (BUG-032)
 
 The lease was the server's own fresh answer, so it always matched and the push

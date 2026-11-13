@@ -545,23 +545,6 @@ impl MergeCmd {
             anyhow::bail!("There is no merge to abort (no merge in progress)");
         }
 
-        let mut cleaned = 0;
-
-        if merge_head.exists() {
-            std::fs::remove_file(&merge_head).context("Failed to remove MERGE_HEAD")?;
-            cleaned += 1;
-        }
-
-        if merge_msg.exists() {
-            std::fs::remove_file(&merge_msg).context("Failed to remove MERGE_MSG")?;
-            cleaned += 1;
-        }
-
-        if merge_mode.exists() {
-            std::fs::remove_file(&merge_mode).context("Failed to remove MERGE_MODE")?;
-            cleaned += 1;
-        }
-
         if had_merge_state {
             // Restore the working tree to the pre-merge commit and clear the
             // index. An empty index means "clean" (a normal commit clears it
@@ -598,12 +581,10 @@ impl MergeCmd {
             let mut index = Index::load(&repo_root)?;
             index.clear();
             index.save(&repo_root)?;
-
-            if orig_head.exists() {
-                std::fs::remove_file(&orig_head).context("Failed to remove ORIG_HEAD")?;
-                cleaned += 1;
-            }
         }
+
+        // Last, so a failed restore above leaves the merge resumable.
+        let cleaned = mediagit_versioning::clear_merge_state(&mediagit_dir)?;
 
         if !self.quiet() {
             println!(
@@ -739,16 +720,7 @@ impl MergeCmd {
         let _ = reflog.append("HEAD", &entry).await;
 
         // Clean up merge state after successful commit
-        if merge_head_path.exists() {
-            std::fs::remove_file(&merge_head_path).ok();
-        }
-        if merge_msg_path.exists() {
-            std::fs::remove_file(&merge_msg_path).ok();
-        }
-        let merge_mode = mediagit_dir.join("MERGE_MODE");
-        if merge_mode.exists() {
-            std::fs::remove_file(&merge_mode).ok();
-        }
+        mediagit_versioning::clear_merge_state(&mediagit_dir)?;
 
         if !self.quiet() {
             println!("{} Merge continued successfully", style("✓").green());

@@ -486,8 +486,24 @@ impl CherryPickCmd {
         let state_json = std::fs::read_to_string(&state_path)?;
         let state: CherryPickState = serde_json::from_str(&state_json)?;
 
-        // Note: Conflict checking would need additional state tracking
-        // For now, assume user has resolved conflicts if they're continuing
+        // Refuse while any path is still unacknowledged (same rule as rebase
+        // and revert): staging a path is the acknowledgement. The state file
+        // stays, so the cherry-pick remains resumable.
+        let unresolved = Index::load(repo_root)?.unresolved_paths();
+        if !unresolved.is_empty() {
+            anyhow::bail!(
+                "Cannot continue: {} path(s) still unresolved:
+  {}
+                 Review each, then `mediagit add <path>` to accept it                  (binary files included — staging is the acknowledgement),                  or `mediagit cherry-pick --abort`.",
+                unresolved.len(),
+                unresolved
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("
+  ")
+            );
+        }
 
         // Create commit for current pick
         let mediagit_dir = repo_root.join(".mediagit");
@@ -503,6 +519,9 @@ impl CherryPickCmd {
                 .await?;
             created.push(new_oid.to_hex());
         }
+
+        // The conflicted pick is done; the next one rewrites these if it conflicts.
+        mediagit_versioning::clear_merge_state(&mediagit_dir)?;
 
         // Continue with remaining commits
         if state.remaining_commits.is_empty() {
@@ -552,6 +571,8 @@ impl CherryPickCmd {
                 state.current_commit.as_deref().unwrap_or("unknown")
             );
         }
+
+        mediagit_versioning::clear_merge_state(&repo_root.join(".mediagit"))?;
 
         // Continue with remaining commits (skip current)
         if state.remaining_commits.is_empty() {
@@ -617,6 +638,7 @@ impl CherryPickCmd {
 
         // Clean up state
         std::fs::remove_file(&state_path)?;
+        mediagit_versioning::clear_merge_state(&repo_root.join(".mediagit"))?;
 
         if !self.quiet() {
             println!("{} Cherry-pick aborted", style("✓").green());

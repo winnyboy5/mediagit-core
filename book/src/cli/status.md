@@ -182,6 +182,8 @@ document:
   "deleted": ["old_notes.txt"],
   "untracked": ["draft_design.psd"],
   "ignored": [],
+  "operation": null,
+  "unresolved": [],
   "summary": {
     "staged": 1,
     "modified": 1,
@@ -198,6 +200,7 @@ Notes:
 - `branch.upstream` is `null` when the branch has no configured upstream.
 - `upstream.ahead`/`upstream.behind` are `null` (not `0`) when the remote-tracking ref has never been
   fetched locally — distinguish this from a real 0/0 (in sync).
+- `operation` is `null` unless a merge, rebase, cherry-pick or revert stopped part-way. Then it is `{ "kind": "merge" | "rebase" | "cherry_pick" | "revert", "ours": branch or null, "theirs": commit or null }` and `unresolved` lists the paths still waiting for `mediagit add <path>`. `--machine` carries the same fields and prints no hint lines.
 - `staged[].kind` is `"added"` or `"modified"`.
 - `summary.total_size` is `null` unless `-v/--verbose` was also passed.
 - `ignored` is always populated (regardless of `--ignored`); `--ignored` only affects whether the

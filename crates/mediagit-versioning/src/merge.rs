@@ -678,6 +678,22 @@ pub async fn apply_merge_to_workdir(
     Ok(())
 }
 
+/// Remove the files `apply_merge_to_workdir` leaves behind (`MERGE_HEAD`,
+/// `MERGE_MSG`, `MERGE_MODE`, `ORIG_HEAD`). Every way out of a conflicted
+/// merge, revert, cherry-pick or rebase calls this, because they all share
+/// that writer. Returns how many files were removed; missing files are fine.
+pub fn clear_merge_state(storage_path: &Path) -> Result<usize> {
+    let mut removed = 0;
+    for name in ["MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "ORIG_HEAD"] {
+        match std::fs::remove_file(storage_path.join(name)) {
+            Ok(()) => removed += 1,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("Failed to remove {name}")),
+        }
+    }
+    Ok(removed)
+}
+
 /// Heuristic binary detector: a NUL byte anywhere in the content means it's
 /// not safe to inline as text (mirrors the common git/diff convention).
 fn contains_nul_byte(bytes: &[u8]) -> bool {

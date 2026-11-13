@@ -531,6 +531,7 @@ impl RevertCmd {
         }
 
         fs::remove_file(&state_file).await?;
+        mediagit_versioning::clear_merge_state(storage_path)?;
 
         let storage = create_storage_backend(repo_root).await?;
         let odb = Arc::new(ObjectDatabase::with_smart_compression(
@@ -630,6 +631,7 @@ impl RevertCmd {
         index.save(repo_root)?;
 
         fs::remove_file(&state_file).await?;
+        mediagit_versioning::clear_merge_state(storage_path)?;
 
         if output::machine_mode() {
             return output::emit_ok(&revert_report("abort", "aborted", Vec::new()));
@@ -654,6 +656,7 @@ impl RevertCmd {
         let mut state = RevertState::from_string(&state_content)?;
 
         state.current_index += 1;
+        mediagit_versioning::clear_merge_state(storage_path)?;
 
         if output::machine_mode() {
             let status = if state.current_index >= state.commits.len() {

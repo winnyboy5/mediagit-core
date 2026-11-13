@@ -494,3 +494,26 @@ async fn remote_ls_tree_machine_auth_required_is_a_clean_error() {
         "{v}"
     );
 }
+
+/// BUG-021: during a conflict `status --machine` must still print exactly one
+/// JSON line (run_machine asserts that) and carry the operation and the
+/// unresolved paths in it.
+#[test]
+fn status_machine_reports_operation_during_conflict() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    conflicted_repo(dir);
+
+    let (code, _) = run_machine(dir, &["merge", "feature"]);
+    assert_eq!(code, 1);
+
+    let d = ok(dir, &["status"]);
+    assert_eq!(d["operation"]["kind"], "merge", "{d}");
+    assert!(d["operation"]["theirs"].is_string(), "{d}");
+    assert_eq!(d["unresolved"][0], "shared.txt", "{d}");
+
+    ok(dir, &["merge", "--abort"]);
+    let d = ok(dir, &["status"]);
+    assert!(d["operation"].is_null(), "{d}");
+    assert_eq!(d["unresolved"].as_array().unwrap().len(), 0, "{d}");
+}
