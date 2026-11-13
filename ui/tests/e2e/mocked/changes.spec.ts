@@ -219,3 +219,20 @@ test.describe('Changes: refresh and shell', () => {
     await expect(page).toHaveURL(/#\/welcome$/)
   })
 })
+
+test.describe('Changes: stopped operation (BUG-021)', () => {
+  test('a merge in progress shows a banner with the files that need a decision, and the list still loads', async ({ page }) => {
+    await boot(page, { repo_status: fixture('status_conflict') })
+    const banner = page.getByTestId('operation-banner')
+    await expect(banner).toContainText('A merge is in progress.')
+    await expect(banner).toContainText('2 files need a decision.')
+    await expect(banner.getByRole('link', { name: 'Open the merge' })).toBeVisible()
+    await expect(list(page).getByRole('treeitem')).toHaveCount(2)
+    await expectNoAxeViolations(page)
+  })
+
+  test('no banner when nothing is stopped', async ({ page }) => {
+    await boot(page)
+    await expect(page.getByTestId('operation-banner')).toHaveCount(0)
+  })
+})

@@ -11,5 +11,7 @@
   "untracked": ["audio/vo_take3.wav", "env/fog_vol.vdb", "video/shot_010.mp4"],
   "ignored": [],
   "media": [],
+  "operation": null,
+  "unresolved": [],
   "summary": { "staged": 3, "modified": 2, "deleted": 1, "untracked": 3, "total_size": null }
 }

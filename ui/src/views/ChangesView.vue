@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { RouterLink } from 'vue-router'
 import { CircleCheck, Ellipsis, PanelRight } from 'lucide-vue-next'
 import Button from '@/components/Button.vue'
 import DropdownMenu from '@/components/DropdownMenu.vue'
@@ -68,6 +69,14 @@ const MODES = [
     </header>
 
     <UndoDialogs />
+
+    <div v-if="changes.stopped" class="stopped" role="status" data-testid="operation-banner">
+      <span>
+        <strong>{{ changes.stopped.title }}.</strong>
+        {{ changes.stopped.detail }}
+      </span>
+      <RouterLink v-if="changes.stopped.kind === 'merge'" to="/branches/merge" class="link">Open the merge</RouterLink>
+    </div>
 
     <div v-if="loadingFirst" class="pad"><SkeletonRows :count="8" /></div>
 
@@ -178,6 +187,20 @@ const MODES = [
   background: var(--danger-soft);
 }
 .banner span {
+  flex: 1;
+}
+.stopped {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-3);
+  margin: 0 var(--space-6) var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid var(--conflict);
+  border-radius: var(--radius-control);
+  background: var(--conflict-soft);
+}
+.stopped span {
   flex: 1;
 }
 </style>

@@ -1,0 +1,13 @@
+{
+  "format_version": 1,
+  "branch": { "name": "main", "detached": false, "detached_oid": null, "has_commits": true, "upstream": null },
+  "staged": [{ "path": "notes.txt", "kind": "modified" }, { "path": "art/photo.jpeg", "kind": "modified" }],
+  "modified": [],
+  "deleted": [],
+  "untracked": [],
+  "ignored": [],
+  "media": [],
+  "operation": { "kind": "merge", "ours": "main", "theirs": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+  "unresolved": ["notes.txt", "art/photo.jpeg"],
+  "summary": { "staged": 2, "modified": 0, "deleted": 0, "untracked": 0, "total_size": null }
+}

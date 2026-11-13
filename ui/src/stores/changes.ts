@@ -58,6 +58,20 @@ function entriesOf(s: StatusReport | null): Record<Group, FileEntry[]> {
   }
 }
 
+const OPERATION_NAME = { merge: 'A merge', rebase: 'A rebase', cherry_pick: 'A cherry-pick', revert: 'An undo' } as const
+
+/** What to tell the person when an operation stopped part-way; null when none did. */
+export function stoppedOperation(s: StatusReport | null): { kind: keyof typeof OPERATION_NAME; title: string; detail: string } | null {
+  const op = s?.operation
+  if (!op) return null
+  const n = s.unresolved?.length ?? 0
+  return {
+    kind: op.kind,
+    title: `${OPERATION_NAME[op.kind]} is in progress`,
+    detail: n ? `${n} ${n === 1 ? 'file needs' : 'files need'} a decision.` : 'Every file is decided.',
+  }
+}
+
 /** Changes view state: groups, tree/flat rows, selection, stage + commit. */
 export const useChangesStore = defineStore('changes', () => {
   const repo = useRepoStore()
@@ -78,6 +92,7 @@ export const useChangesStore = defineStore('changes', () => {
 
   watch(mode, (m) => save('mg.changes.mode', m))
 
+  const stopped = computed(() => stoppedOperation(repo.status))
   const entries = computed(() => entriesOf(repo.status))
   /** Staged and not-staged files as one list; `included` = staged. */
   const list = computed(() => mergeChanges(entries.value.staged, entries.value.unstaged))
@@ -299,6 +314,7 @@ export const useChangesStore = defineStore('changes', () => {
   const unstageAll = () => unstagePaths(['.'], `Unstaging ${plural(counts.value.staged, 'file')}`)
 
   return {
+    stopped,
     mode,
     addOpts,
     commitForm,
