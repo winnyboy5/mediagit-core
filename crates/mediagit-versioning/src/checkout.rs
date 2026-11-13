@@ -351,14 +351,13 @@ impl<'a> CheckoutManager<'a> {
 
     /// BUG-011. For each old path that is the same file as a target path on a
     /// case-insensitive filesystem (equal under case folding, different exact
-    /// spelling), put the file under the target's spelling before the writes.
-    /// Same folder: rename, so the path never lacks a file if a later write
-    /// fails and an unchanged file is not rewritten. Folder spelling differs:
-    /// remove the old file (the writes recreate it) and then the empty
-    /// folders, so the new folder spelling is the one created.
-    /// Returns the old paths handled. Targets must be validated already.
+    /// spelling), give the file and its folders the target's spelling before
+    /// the writes, by renaming one path component at a time (a case-only
+    /// rename keeps the content). Nothing is removed, so if a later write
+    /// fails the path still holds the file. Returns the old paths handled.
+    /// Targets must be validated already.
     fn move_case_twins(&self, old: &[PathBuf], targets: &HashSet<PathBuf>) -> Result<Vec<PathBuf>> {
-        if old.is_empty() || !fs_is_case_insensitive(&self.repo_root) {
+        if old.is_empty() {
             return Ok(Vec::new());
         }
         let norm = |p: &Path| p.to_string_lossy().replace('\\', "/");
@@ -366,16 +365,20 @@ impl<'a> CheckoutManager<'a> {
             .iter()
             .map(|t| (norm(t).to_lowercase(), t))
             .collect();
+        // Only a pair whose spelling differs needs the filesystem at all.
+        let pairs: Vec<(&PathBuf, &PathBuf)> = old
+            .iter()
+            .filter_map(|o| {
+                let t = by_fold.get(&norm(o).to_lowercase())?;
+                (norm(o) != norm(t)).then_some((o, *t))
+            })
+            .collect();
+        if pairs.is_empty() || !fs_is_case_insensitive(&self.repo_root) {
+            return Ok(Vec::new());
+        }
         let mut handled = Vec::new();
-        let mut removed_any = false;
-        for o in old {
-            let Some(t) = by_fold.get(&norm(o).to_lowercase()) else {
-                continue;
-            };
-            if norm(o) == norm(t) {
-                continue;
-            }
-            let (Ok(from), Ok(to)) = (
+        for (o, t) in pairs {
+            let (Ok(from), Ok(_)) = (
                 worktree_path(&self.repo_root, o),
                 worktree_path(&self.repo_root, t),
             ) else {
@@ -384,43 +387,51 @@ impl<'a> CheckoutManager<'a> {
             if !from.exists() {
                 continue;
             }
-            if o.parent().map(norm) == t.parent().map(norm) {
-                fs::rename(&from, &to).with_context(|| {
-                    format!("Failed to rename {} to {}", from.display(), to.display())
-                })?;
-            } else {
-                fs::remove_file(&from)
-                    .with_context(|| format!("Failed to remove file: {}", from.display()))?;
-                removed_any = true;
+            // Parents first: `Art/x` becomes `art/x`, then the file name.
+            let mut new_prefix = PathBuf::new();
+            for (a, b) in o.components().zip(t.components()) {
+                let here_old = self.repo_root.join(&new_prefix).join(a.as_os_str());
+                let here_new = self.repo_root.join(&new_prefix).join(b.as_os_str());
+                if a != b {
+                    fs::rename(&here_old, &here_new).with_context(|| {
+                        format!(
+                            "Failed to rename {} to {}",
+                            here_old.display(),
+                            here_new.display()
+                        )
+                    })?;
+                }
+                new_prefix.push(b.as_os_str());
             }
             handled.push(o.clone());
-        }
-        if removed_any {
-            self.remove_empty_directories()?;
         }
         Ok(handled)
     }
 
     /// [`Self::move_case_twins`] for a checkout without an old tree: the old
-    /// candidates are the files the clean-up would delete.
+    /// candidates are the files the clean-up would delete. When the tracked
+    /// set is known, only it is compared and the working tree is not walked
+    /// unless a case-only pair really exists.
     fn move_case_twins_on_disk(&self, targets: &HashSet<PathBuf>) -> Result<()> {
-        if !fs_is_case_insensitive(&self.repo_root) {
-            return Ok(());
-        }
-        let normalized: HashSet<String> = targets
-            .iter()
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
-            .collect();
-        let stale: Vec<PathBuf> = self
-            .list_working_directory_files()?
-            .into_iter()
-            .filter(|f| {
-                let n = f.to_string_lossy().replace('\\', "/");
-                !normalized.contains(&n)
-                    && self.deletable.as_ref().is_none_or(|d| d.contains(&n))
-                    && self.sparse.is_included(f)
-            })
-            .collect();
+        let norm = |p: &Path| p.to_string_lossy().replace('\\', "/");
+        let normalized: HashSet<String> = targets.iter().map(|p| norm(p)).collect();
+        let stale: Vec<PathBuf> = match &self.deletable {
+            Some(tracked) => tracked
+                .iter()
+                .filter(|n| !normalized.contains(n.as_str()))
+                .map(PathBuf::from)
+                .filter(|f| self.sparse.is_included(f))
+                .collect(),
+            None => {
+                if !fs_is_case_insensitive(&self.repo_root) {
+                    return Ok(());
+                }
+                self.list_working_directory_files()?
+                    .into_iter()
+                    .filter(|f| !normalized.contains(&norm(f)) && self.sparse.is_included(f))
+                    .collect()
+            }
+        };
         self.move_case_twins(&stale, targets)?;
         Ok(())
     }

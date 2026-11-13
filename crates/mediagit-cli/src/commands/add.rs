@@ -858,8 +858,8 @@ impl AddCmd {
 
             // Stage deletion unless --ignore-removal is set
             if !exists_in_working_dir
-                && !on_disk.exists_exact(&repo_root, head_path)?
                 && !self.ignore_removal
+                && !on_disk.exists_exact(&repo_root, head_path)?
             {
                 if !self.dry_run {
                     index.mark_deleted(head_path.clone());

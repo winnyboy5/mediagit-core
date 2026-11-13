@@ -256,7 +256,7 @@ impl Commit {
     }
 
     /// Refuse a commit whose tree gains a pair of paths that differ only by
-    /// letter case compared with its first parent's tree (BUG-011). Every
+    /// letter case compared with its parents' trees (BUG-011). Every
     /// commit writer calls this (or [`Commit::write`]) before moving a ref.
     pub async fn check_case_collisions(&self, odb: &crate::ObjectDatabase) -> anyhow::Result<()> {
         // A tree that is not stored cannot be judged here; the writers store
@@ -264,15 +264,21 @@ impl Commit {
         let Ok(tree) = crate::Tree::read(odb, &self.tree).await else {
             return Ok(());
         };
-        // An unreadable parent (shallow history) is treated as "no pairs".
-        let parent = match self.parents.first() {
-            Some(p) => match Commit::read(odb, p).await {
-                Ok(c) => crate::Tree::read(odb, &c.tree).await.ok(),
-                Err(_) => None,
-            },
-            None => None,
-        };
-        crate::tree::check_no_new_case_collisions(&tree, parent.as_ref())
+        let pairs = crate::case_only_collisions(tree.entries.keys());
+        if pairs.is_empty() {
+            return Ok(()); // nothing to compare: no parent is read
+        }
+        // A pair that ANY parent holds is not new. An unreadable parent
+        // (shallow history) counts as holding no pairs.
+        let mut parents = Vec::with_capacity(self.parents.len());
+        for p in &self.parents {
+            if let Ok(c) = Commit::read(odb, p).await
+                && let Ok(t) = crate::Tree::read(odb, &c.tree).await
+            {
+                parents.push(t);
+            }
+        }
+        crate::tree::check_pairs_are_not_new(pairs, &parents)
     }
 
     /// Read commit from object database by OID
@@ -471,6 +477,71 @@ mod tests {
         assert_eq!(commit, loaded);
         assert_eq!(loaded.message, "Test commit");
         assert_eq!(loaded.parent_count(), 1);
+    }
+
+    /// BUG-011: a pair counts as already existing when ANY parent holds both
+    /// names, so a merge that brings an old pair in from the second parent
+    /// succeeds, while a truly new pair is still refused.
+    #[tokio::test]
+    async fn case_pair_held_by_any_parent_is_not_new() {
+        use crate::{FileMode, ObjectType, Tree, TreeEntry};
+        use mediagit_storage::mock::MockBackend;
+        use std::sync::Arc;
+
+        let odb = crate::ObjectDatabase::new(Arc::new(MockBackend::new()), 100);
+        let sig = Signature::now("A".to_string(), "a@example.com".to_string());
+        let blob = Oid::hash(b"blob");
+        let tree_oid = |names: &[&str]| {
+            let mut t = Tree::new();
+            for n in names {
+                t.add_entry(TreeEntry::new(n.to_string(), FileMode::Regular, blob));
+            }
+            t.serialize().unwrap()
+        };
+        let plain = odb
+            .write(ObjectType::Tree, &tree_oid(&["readme"]))
+            .await
+            .unwrap();
+        let pair = odb
+            .write(ObjectType::Tree, &tree_oid(&["Makefile", "makefile"]))
+            .await
+            .unwrap();
+        let triple = odb
+            .write(
+                ObjectType::Tree,
+                &tree_oid(&["Makefile", "makefile", "MAKEFILE"]),
+            )
+            .await
+            .unwrap();
+        let raw = |tree: Oid| {
+            let c = Commit::new(tree, sig.clone(), sig.clone(), "c".to_string());
+            c.serialize().unwrap()
+        };
+        let p1 = odb.write(ObjectType::Commit, &raw(plain)).await.unwrap();
+        let p2 = odb.write(ObjectType::Commit, &raw(pair)).await.unwrap();
+
+        let merge = |tree: Oid, parents: Vec<Oid>| {
+            Commit::with_parents(tree, parents, sig.clone(), sig.clone(), "m".to_string())
+        };
+        // pair arrives from the second parent: not new
+        merge(pair, vec![p1, p2])
+            .check_case_collisions(&odb)
+            .await
+            .unwrap();
+        // pair held by no parent: new, refused
+        assert!(
+            merge(pair, vec![p1])
+                .check_case_collisions(&odb)
+                .await
+                .is_err()
+        );
+        // a third spelling on top of an existing pair is new
+        assert!(
+            merge(triple, vec![p1, p2])
+                .check_case_collisions(&odb)
+                .await
+                .is_err()
+        );
     }
 
     #[test]

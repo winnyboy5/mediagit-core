@@ -498,3 +498,82 @@ async fn refused_branch_switch_does_not_touch_a_case_twin() {
     assert_eq!(disk_names(&root.join("art")), vec!["Hero.txt"], "{text}");
     assert_eq!(read(root, "art/Hero.txt"), "hero");
 }
+
+/// A failing write after a case-only FOLDER rename must still leave the file
+/// readable (the old file is not removed first). Case-insensitive only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_write_after_folder_case_rename_keeps_the_file() {
+    let dir = repo_with(&[("art/x.txt", "x"), ("keep.txt", "keep")]);
+    let root = dir.path();
+    if !case_insensitive(root) {
+        return;
+    }
+    let target = plant(
+        root,
+        |t| {
+            t.entries.remove("art/x.txt");
+            t.add_entry(TreeEntry::new(
+                "Art/x.txt".into(),
+                FileMode::Regular,
+                mediagit_versioning::Oid::hash(b"never stored"),
+            ));
+        },
+        false,
+    )
+    .await;
+    let (ok, text) = run(root, &["reset", "--hard", &target]);
+    assert!(!ok, "{text}");
+    assert_eq!(read(root, "art/x.txt"), "x", "file survives: {text}");
+}
+
+/// An unreadable folder stops `add` with an error naming it, and stages no
+/// deletion for its files. Windows: the folder's list permission is denied.
+#[cfg(windows)]
+#[test]
+fn unreadable_folder_stops_add_and_stages_no_deletion() {
+    struct Restore(std::path::PathBuf);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("icacls")
+                .arg(&self.0)
+                .args(["/remove:d", "*S-1-1-0"])
+                .output();
+        }
+    }
+    let dir = repo_with(&[("locked/a.txt", "a"), ("keep.txt", "keep")]);
+    let root = dir.path();
+    let locked = root.join("locked");
+    // Ignored, so the working-tree walk skips the folder and only the
+    // deletion scan (the code under test) has to read it.
+    fs::write(
+        root.join(".mediagitignore"),
+        "locked/
+",
+    )
+    .unwrap();
+    let _restore = Restore(locked.clone());
+    let out = std::process::Command::new("icacls")
+        .arg(&locked)
+        .args(["/deny", "*S-1-1-0:(RD)"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "icacls: {:?}", out);
+    if fs::read_dir(&locked).is_ok() {
+        return; // the host ignores the deny (for example an elevated user)
+    }
+    let (ok, text) = run(root, &["add", "--all"]);
+    assert!(!ok, "add must stop: {text}");
+    assert!(
+        text.contains("Cannot read the folder") && text.contains("locked"),
+        "must name the folder: {text}"
+    );
+    // --ignore-removal never needs the answer, so it must not fail.
+    let (ok, text) = run(root, &["add", "--all", "--ignore-removal"]);
+    assert!(ok, "--ignore-removal must not read the folder: {text}");
+    drop(_restore);
+    let (_, status) = run(root, &["status", "--porcelain"]);
+    assert!(
+        !status.lines().any(|l| l.starts_with('D')),
+        "no deletion may be staged:\n{status}"
+    );
+}

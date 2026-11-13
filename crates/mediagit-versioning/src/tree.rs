@@ -162,17 +162,26 @@ pub fn check_tracked_path(path: &str) -> anyhow::Result<()> {
 }
 
 /// Refuse a tree that gains a pair of paths differing only by letter case
-/// (BUG-011), compared with the parent version's tree.
+/// (BUG-011), compared with the parent versions' trees.
 ///
-/// Such a version cannot be checked out on Windows or macOS. A pair the parent
-/// already holds is allowed to stay, so repositories made on a case-sensitive
+/// Such a version cannot be checked out on Windows or macOS. A pair that ANY
+/// parent already holds is allowed to stay, so repositories made on a case-sensitive
 /// system keep working and a commit that removes one of the pair always
 /// succeeds. Same folding rule as checkout: [`crate::case_only_collisions`].
-pub fn check_no_new_case_collisions(tree: &Tree, parent: Option<&Tree>) -> anyhow::Result<()> {
-    let new_pairs: Vec<_> = crate::case_only_collisions(tree.entries.keys())
+pub fn check_no_new_case_collisions(tree: &Tree, parents: &[Tree]) -> anyhow::Result<()> {
+    check_pairs_are_not_new(crate::case_only_collisions(tree.entries.keys()), parents)
+}
+
+/// [`check_no_new_case_collisions`] for pairs already found, so a caller can
+/// skip loading the parents when there are none.
+pub(crate) fn check_pairs_are_not_new(
+    pairs: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+    parents: &[Tree],
+) -> anyhow::Result<()> {
+    let new_pairs: Vec<_> = pairs
         .into_iter()
         .filter(|(a, b)| {
-            !parent.is_some_and(|p| {
+            !parents.iter().any(|p| {
                 p.entries.contains_key(a.to_string_lossy().as_ref())
                     && p.entries.contains_key(b.to_string_lossy().as_ref())
             })
@@ -354,7 +363,7 @@ mod tests {
     #[test]
     fn new_case_pairs_are_refused_existing_ones_are_grandfathered() {
         let both = tree_of(&["art/Hero.txt", "art/hero.txt"]);
-        let msg = check_no_new_case_collisions(&both, None)
+        let msg = check_no_new_case_collisions(&both, &[])
             .unwrap_err()
             .to_string();
         for want in [
@@ -369,22 +378,22 @@ mod tests {
         assert!(!msg.contains("  "), "no runs of spaces: {msg}");
         // parent without the pair: refused
         let one = tree_of(&["art/hero.txt"]);
-        assert!(check_no_new_case_collisions(&both, Some(&one)).is_err());
+        assert!(check_no_new_case_collisions(&both, std::slice::from_ref(&one)).is_err());
         // parent with the pair: allowed to stay
-        assert!(check_no_new_case_collisions(&both, Some(&both)).is_ok());
+        assert!(check_no_new_case_collisions(&both, std::slice::from_ref(&both)).is_ok());
         // a third colliding name is new even when two of the three were there
         let three = tree_of(&["art/Hero.txt", "art/hero.txt", "art/HERO.txt"]);
-        assert!(check_no_new_case_collisions(&three, Some(&both)).is_err());
+        assert!(check_no_new_case_collisions(&three, std::slice::from_ref(&both)).is_err());
         // removing one of the pair passes
-        assert!(check_no_new_case_collisions(&one, Some(&both)).is_ok());
+        assert!(check_no_new_case_collisions(&one, std::slice::from_ref(&both)).is_ok());
     }
 
     /// Folder-level and non-ASCII pairs fold with the same rule.
     #[test]
     fn case_pairs_cover_folders_and_unicode() {
-        assert!(check_no_new_case_collisions(&tree_of(&["Art/x.txt", "art/x.txt"]), None).is_err());
-        assert!(check_no_new_case_collisions(&tree_of(&["\u{e9}/x", "\u{c9}/x"]), None).is_err());
-        assert!(check_no_new_case_collisions(&tree_of(&["a/x", "a/y", "b/x"]), None).is_ok());
+        assert!(check_no_new_case_collisions(&tree_of(&["Art/x.txt", "art/x.txt"]), &[]).is_err());
+        assert!(check_no_new_case_collisions(&tree_of(&["\u{e9}/x", "\u{c9}/x"]), &[]).is_err());
+        assert!(check_no_new_case_collisions(&tree_of(&["a/x", "a/y", "b/x"]), &[]).is_ok());
     }
 
     /// `serialize` itself no longer refuses a pair (the writers that know the
