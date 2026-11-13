@@ -508,16 +508,16 @@ impl CherryPickCmd {
         let unresolved = Index::load(repo_root)?.unresolved_paths();
         if !unresolved.is_empty() {
             anyhow::bail!(
-                "Cannot continue: {} path(s) still unresolved:
-  {}
-                 Review each, then `mediagit add <path>` to accept it                  (binary files included — staging is the acknowledgement),                  or `mediagit cherry-pick --abort`.",
+                "Cannot continue: {} path(s) still unresolved:\n  {}\n\
+                 Review each, then `mediagit add <path>` to accept it \
+                 (binary files included — staging is the acknowledgement), \
+                 or `mediagit cherry-pick --abort`.",
                 unresolved.len(),
                 unresolved
                     .iter()
                     .map(|p| p.display().to_string())
                     .collect::<Vec<_>>()
-                    .join("
-  ")
+                    .join("\n  ")
             );
         }
 
@@ -565,6 +565,8 @@ impl CherryPickCmd {
         };
 
         let mut rest = cmd.start_cherrypick(repo_root).await?;
+        // The next picks went through; a conflict would have rewritten it.
+        std::fs::remove_file(&state_path)?;
         created.append(&mut rest.commits);
         outcome(rest.status, created)
     }
@@ -588,7 +590,26 @@ impl CherryPickCmd {
             );
         }
 
-        mediagit_versioning::clear_merge_state(&repo_root.join(".mediagit"))?;
+        // Validate first: every remaining pick must resolve and be safe, so a
+        // refusal happens before anything is changed.
+        let mediagit_dir = repo_root.join(".mediagit");
+        let storage = create_storage_backend(repo_root).await?;
+        let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 1000));
+        let refdb = RefDatabase::new(&mediagit_dir);
+        let head_oid = refdb.resolve("HEAD").await?;
+        let mut listed = vec![head_oid];
+        for commit_ref in &state.remaining_commits {
+            listed.push(
+                self.resolve_commit(&refdb, repo_root, commit_ref)
+                    .await
+                    .context(format!("Failed to resolve commit: {}", commit_ref))?,
+            );
+        }
+        crate::repo::ensure_no_unsafe_paths(&odb, repo_root, &listed).await?;
+
+        // Then drop the skipped pick's conflict: files back to HEAD, index
+        // cleared, merge files removed.
+        crate::worktree_guard::drop_conflict(repo_root, &odb, &head_oid).await?;
 
         // Continue with remaining commits (skip current)
         if state.remaining_commits.is_empty() {
@@ -613,7 +634,10 @@ impl CherryPickCmd {
             quiet: self.quiet,
         };
 
-        cmd.start_cherrypick(repo_root).await
+        let rest = cmd.start_cherrypick(repo_root).await?;
+        // The next picks went through; a conflict would have rewritten it.
+        std::fs::remove_file(&state_path)?;
+        Ok(rest)
     }
 
     async fn abort_cherrypick(&self, repo_root: &PathBuf) -> Result<Outcome> {
@@ -650,6 +674,11 @@ impl CherryPickCmd {
             let checkout_mgr = mediagit_versioning::CheckoutManager::new(&odb, repo_root)
                 .with_tracked_paths(tracked);
             checkout_mgr.checkout_commit(&original_oid).await?;
+
+            // The index still stages the conflict; an empty one means clean.
+            let mut index = Index::load(repo_root)?;
+            index.clear();
+            index.save(repo_root)?;
         }
 
         // Clean up state

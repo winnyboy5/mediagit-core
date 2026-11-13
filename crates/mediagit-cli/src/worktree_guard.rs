@@ -153,6 +153,22 @@ pub async fn tracked_paths(
     Ok(paths)
 }
 
+/// Drop a stopped operation's conflict: put every tracked file back to
+/// `head` (untracked files are kept), clear the index and remove the merge
+/// files, so no marker text or unresolved flag outlives the operation.
+pub async fn drop_conflict(repo_root: &Path, odb: &ObjectDatabase, head: &Oid) -> Result<()> {
+    let tracked = tracked_paths(repo_root, odb, Some(head)).await?;
+    CheckoutManager::new(odb, repo_root)
+        .with_tracked_paths(tracked)
+        .checkout_commit(head)
+        .await?;
+    let mut index = Index::load(repo_root)?;
+    index.clear();
+    index.save(repo_root)?;
+    mediagit_versioning::clear_merge_state(&repo_root.join(".mediagit"))?;
+    Ok(())
+}
+
 /// Working-tree files that are neither tracked nor ignored.
 fn untracked_paths(repo_root: &Path, tracked: &HashSet<PathBuf>) -> Result<HashSet<PathBuf>> {
     let index = Index::load(repo_root)?;

@@ -7,6 +7,8 @@ export type OperationReport = { kind: OperationKind,
  */
 ours: string | null, 
 /**
- * Commit being brought in (hex), when the operation recorded one.
+ * Commit being brought in (hex), when the operation recorded one. For
+ * merge, cherry-pick and rebase it is the commit being merged, picked or
+ * replayed; for revert it is the parent of the commit being undone.
  */
 theirs: string | null, };

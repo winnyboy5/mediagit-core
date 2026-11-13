@@ -235,7 +235,9 @@ kept saying "Merge in progress" on a clean folder. Every way out of a conflict
 now removes them, and `merge --continue` also removes `ORIG_HEAD`.
 `cherry-pick --continue` now refuses while a path still needs a decision, like
 `rebase` and `revert` do. `rebase --skip` now drops the skipped commit's
-conflict. Separately, `status --machine` printed hint lines before its JSON
+conflict. `revert --skip`, `cherry-pick --skip` and `cherry-pick --abort` do the
+same: the files go back to the last version and nothing stays flagged. `status`
+now lists unresolved paths even when no operation is in progress. Separately, `status --machine` printed hint lines before its JSON
 during a conflict, which the app rejected ("more than one line on stdout"), so
 the repository would not open. It now prints one JSON line only, and the data
 has two new fields: `operation` (`kind`, `ours`, `theirs`) and `unresolved`.

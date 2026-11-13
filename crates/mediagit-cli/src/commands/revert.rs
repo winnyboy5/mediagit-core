@@ -146,7 +146,7 @@ impl RevertCmd {
             return self.do_abort(&repo_root, &storage_path).await;
         }
         if self.skip {
-            return self.do_skip(&storage_path).await;
+            return self.do_skip(&repo_root, &storage_path).await;
         }
 
         if self.commits.is_empty() {
@@ -530,9 +530,6 @@ impl RevertCmd {
             );
         }
 
-        fs::remove_file(&state_file).await?;
-        mediagit_versioning::clear_merge_state(storage_path)?;
-
         let storage = create_storage_backend(repo_root).await?;
         let odb = Arc::new(ObjectDatabase::with_smart_compression(
             storage.clone(),
@@ -573,6 +570,10 @@ impl RevertCmd {
         } else {
             refs.update("HEAD", new_commit_oid, true).await?;
         }
+
+        // Write, then delete: a failure above leaves the revert continuable.
+        fs::remove_file(&state_file).await?;
+        mediagit_versioning::clear_merge_state(storage_path)?;
 
         if output::machine_mode() {
             return output::emit_ok(&revert_report(
@@ -645,7 +646,7 @@ impl RevertCmd {
         Ok(())
     }
 
-    async fn do_skip(&self, storage_path: &Path) -> Result<()> {
+    async fn do_skip(&self, repo_root: &Path, storage_path: &Path) -> Result<()> {
         let state_file = storage_path.join(REVERT_STATE_FILE);
         if !state_file.exists() {
             anyhow::bail!("No revert in progress");
@@ -656,7 +657,17 @@ impl RevertCmd {
         let mut state = RevertState::from_string(&state_content)?;
 
         state.current_index += 1;
-        mediagit_versioning::clear_merge_state(storage_path)?;
+
+        // The skipped revert's conflict is dropped: files back to HEAD, index
+        // cleared, merge files removed. HEAD is read first; the state file is
+        // only touched once that worked.
+        let refs = RefDatabase::new(storage_path);
+        let head_oid = refs.resolve("HEAD").await?;
+        let storage = create_storage_backend(repo_root).await?;
+        let odb = ObjectDatabase::with_smart_compression(storage, 10000);
+        crate::worktree_guard::drop_conflict(repo_root, &odb, &head_oid)
+            .await
+            .context("Failed to restore working directory on revert skip")?;
 
         if output::machine_mode() {
             let status = if state.current_index >= state.commits.len() {

@@ -757,3 +757,209 @@ fn bug020_merge_continue_clears_merge_state() {
     );
     assert_no_operation(d, "merge --continue");
 }
+
+// ---- Task 3.1 fix round 1 ----
+
+fn status_data(dir: &Path) -> serde_json::Value {
+    let out = mediagit()
+        .args(["--machine", "status"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    v["data"].clone()
+}
+
+/// After a conflict is dropped: no markers on disk, nothing unresolved or
+/// staged, status clean, and an untracked file is still there.
+fn assert_conflict_dropped(dir: &Path, what: &str) {
+    assert_no_operation(dir, what);
+    let body = fs::read_to_string(dir.join("shared.txt")).unwrap();
+    assert!(!body.contains("<<<<<<<"), "{what}: markers left:\n{body}");
+    let s = status_data(dir);
+    for key in ["unresolved", "staged", "modified"] {
+        assert_eq!(
+            s[key],
+            serde_json::json!([]),
+            "{what}: {key} not empty: {s}"
+        );
+    }
+    assert!(dir.join("keep.txt").exists(), "{what}: untracked file lost");
+}
+
+fn add_untracked(dir: &Path) {
+    fs::write(dir.join("keep.txt"), "mine\n").unwrap();
+}
+
+#[test]
+fn fix1_revert_skip_drops_the_conflict() {
+    let t = TempDir::new().unwrap();
+    revert_conflict(t.path());
+    add_untracked(t.path());
+    assert!(run(t.path(), &["revert", "--skip"]).status.success());
+    assert_conflict_dropped(t.path(), "revert --skip");
+}
+
+#[test]
+fn fix1_cherry_pick_skip_drops_the_conflict() {
+    let t = TempDir::new().unwrap();
+    setup_cherry_pick_conflict(t.path());
+    add_untracked(t.path());
+    assert!(run(t.path(), &["cherry-pick", "--skip"]).status.success());
+    assert_conflict_dropped(t.path(), "cherry-pick --skip");
+}
+
+#[test]
+fn fix1_cherry_pick_abort_drops_the_conflict() {
+    let t = TempDir::new().unwrap();
+    setup_cherry_pick_conflict(t.path());
+    add_untracked(t.path());
+    assert!(run(t.path(), &["cherry-pick", "--abort"]).status.success());
+    assert_conflict_dropped(t.path(), "cherry-pick --abort");
+}
+
+#[test]
+fn fix1_status_lists_unresolved_without_an_operation_file() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    setup_cherry_pick_conflict(d);
+    // A stale flag with every operation file gone must still be visible.
+    fs::remove_file(d.join(".mediagit/CHERRY_PICK_STATE")).unwrap();
+    for f in ["MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "ORIG_HEAD"] {
+        let _ = fs::remove_file(d.join(".mediagit").join(f));
+    }
+    let s = status_data(d);
+    assert_eq!(s["unresolved"], serde_json::json!(["shared.txt"]), "{s}");
+    let human = String::from_utf8_lossy(&run(d, &["status"]).stdout).to_string();
+    assert!(
+        human.contains("shared.txt") && human.contains("nresolved"),
+        "{human}"
+    );
+}
+
+#[test]
+fn fix1_cherry_pick_continue_refusal_text_is_clean() {
+    let t = TempDir::new().unwrap();
+    setup_cherry_pick_conflict(t.path());
+    let out = run(t.path(), &["cherry-pick", "--continue"]);
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(err.contains("still unresolved"), "{err}");
+    for line in err.lines() {
+        assert!(
+            !line.trim_start().contains("  "),
+            "run of spaces inside a sentence: {line:?}"
+        );
+    }
+    assert!(err.contains("`mediagit cherry-pick --abort`"), "{err}");
+}
+
+/// A revert that fails while building its commit must stay continuable.
+#[test]
+fn fix1_revert_continue_keeps_state_when_the_commit_fails() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    revert_conflict(d);
+    resolve(d, "shared.txt");
+    let state_path = d.join(".mediagit/REVERT_STATE");
+    let good = fs::read_to_string(&state_path).unwrap();
+    // The reverted commit's id is the last line; make it unreadable.
+    let mut lines: Vec<&str> = good.lines().collect();
+    let last = lines.len() - 1;
+    let bad_id = "0".repeat(64);
+    lines[last] = &bad_id;
+    fs::write(&state_path, lines.join("\n")).unwrap();
+    let failed = run(d, &["revert", "--continue"]);
+    assert!(
+        !failed.status.success(),
+        "precondition: commit build must fail"
+    );
+    assert!(state_path.exists(), "state lost on a failed continue");
+    fs::write(&state_path, good).unwrap();
+    let again = run(d, &["revert", "--continue"]);
+    assert!(
+        again.status.success(),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+}
+
+fn snapshot(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    ["CHERRY_PICK_STATE", "MERGE_HEAD", "MERGE_MSG", "index"]
+        .iter()
+        .map(|f| {
+            (
+                f.to_string(),
+                fs::read(dir.join(".mediagit").join(f)).unwrap_or_default(),
+            )
+        })
+        .chain(std::iter::once((
+            "shared.txt".to_string(),
+            fs::read(dir.join("shared.txt")).unwrap(),
+        )))
+        .collect()
+}
+
+#[test]
+fn fix1_refused_cherry_pick_skip_changes_nothing() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    setup_cherry_pick_conflict(d);
+    let state_path = d.join(".mediagit/CHERRY_PICK_STATE");
+    let mut state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+    state["remaining_commits"] = serde_json::json!(["no-such-ref"]);
+    fs::write(&state_path, state.to_string()).unwrap();
+    let before = snapshot(d);
+    let out = run(d, &["cherry-pick", "--skip"]);
+    assert!(
+        !out.status.success(),
+        "skip must refuse an unresolvable pick"
+    );
+    assert_eq!(before, snapshot(d), "a refused skip changed the repository");
+}
+
+#[test]
+fn fix1_cherry_pick_skip_moves_on_to_the_next_pick() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    init_repo(d);
+    commit_file(d, "shared.txt", "base\n", "base");
+    mediagit()
+        .args(["branch", "create", "feature"])
+        .current_dir(d)
+        .assert()
+        .success();
+    commit_file(d, "shared.txt", "main-change\n", "main edit");
+    mediagit()
+        .args(["branch", "switch", "feature"])
+        .current_dir(d)
+        .assert()
+        .success();
+    commit_file(d, "shared.txt", "feature-change\n", "feature edit");
+    let p1 = fs::read_to_string(d.join(".mediagit/refs/heads/feature")).unwrap();
+    commit_file(d, "other.txt", "other\n", "feature add");
+    let p2 = fs::read_to_string(d.join(".mediagit/refs/heads/feature")).unwrap();
+    mediagit()
+        .args(["branch", "switch", "main"])
+        .current_dir(d)
+        .assert()
+        .success();
+    assert!(
+        !run(d, &["cherry-pick", p1.trim(), p2.trim()])
+            .status
+            .success()
+    );
+    let out = run(d, &["cherry-pick", "--skip"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(d.join("other.txt").exists());
+    assert_eq!(
+        fs::read_to_string(d.join("shared.txt")).unwrap(),
+        "main-change\n"
+    );
+    assert!(!d.join(".mediagit/CHERRY_PICK_STATE").exists());
+    assert_no_operation(d, "cherry-pick --skip (two picks)");
+}

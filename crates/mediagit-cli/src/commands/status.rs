@@ -59,7 +59,9 @@ pub struct OperationReport {
     pub kind: OperationKind,
     /// Branch the operation is running on; `None` when HEAD is detached.
     pub ours: Option<String>,
-    /// Commit being brought in (hex), when the operation recorded one.
+    /// Commit being brought in (hex), when the operation recorded one. For
+    /// merge, cherry-pick and rebase it is the commit being merged, picked or
+    /// replayed; for revert it is the parent of the commit being undone.
     pub theirs: Option<String>,
 }
 
@@ -356,21 +358,21 @@ impl StatusCmd {
         // did not answer it. Printed before the branch line because "you are
         // in the middle of X" outranks "you are on branch Y".
         let op = in_progress_operation(&storage_path);
-        let unresolved = if op.is_some() {
-            Index::load(&repo_root)
-                .map(|i| i.unresolved_paths())
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
+        // Always asked of the index: a stale flag stays visible even when no
+        // operation file is left to explain it.
+        let unresolved = Index::load(&repo_root)
+            .map(|i| i.unresolved_paths())
+            .unwrap_or_default();
         if !self.json
             && !self.porcelain
             && !output::machine_mode()
-            && let Some(op) = &op
+            && (op.is_some() || !unresolved.is_empty())
         {
-            output::warning(&format!("{} in progress", op.label));
-            for hint in op.hints {
-                println!("  {}", hint);
+            if let Some(op) = &op {
+                output::warning(&format!("{} in progress", op.label));
+                for hint in op.hints {
+                    println!("  {}", hint);
+                }
             }
             if !unresolved.is_empty() {
                 println!("  Unresolved path(s):");
