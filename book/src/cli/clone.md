@@ -59,6 +59,13 @@ Cloning into 'game-assets'...
 $ mediagit clone --branch production http://media-server.example.com/my-project
 ```
 
+## Other branches
+
+A clone downloads the default branch only. The other branches are listed and
+stay on the server until you need them: `mediagit branch switch <branch>`
+downloads one on demand. `mediagit fsck` prints a "not downloaded yet" note for
+each and passes.
+
 ## After Cloning
 
 ```bash

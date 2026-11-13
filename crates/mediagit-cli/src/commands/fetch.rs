@@ -92,6 +92,11 @@ pub struct FetchCmd {
     /// Verbose mode
     #[arg(short, long)]
     pub verbose: bool,
+
+    /// Run as a step of another command (`branch switch`): the caller owns
+    /// the `--machine` envelope, so this one must not print its own.
+    #[arg(skip)]
+    pub embedded: bool,
 }
 
 impl FetchCmd {
@@ -545,6 +550,10 @@ impl FetchCmd {
             }
         }
 
+        // Branches that were not downloaded at clone time and now are: drop
+        // them from the lazy list so fsck is strict about them again.
+        mediagit_versioning::lazy_refs::prune_present(&repo_root, &odb).await?;
+
         // Prune stale tracking refs if requested.
         // Always compare against ALL remote branches (not just branches_to_fetch),
         // so pruning works correctly when only fetching a subset of branches.
@@ -584,7 +593,7 @@ impl FetchCmd {
             tracing::warn!("Failed to save operation stats: {}", e);
         }
 
-        if output::machine_mode() {
+        if output::machine_mode() && !self.embedded {
             return output::emit_ok(&FetchReport {
                 remote: remote.to_string(),
                 branches_updated,

@@ -471,6 +471,8 @@ impl PullCmd {
                     remote_oid_parsed,
                 );
                 refdb.write(&tracking_ref).await?;
+                // The branch is downloaded now: fsck is strict about it again.
+                mediagit_versioning::lazy_refs::prune_present(&repo_root, &odb).await?;
 
                 if self.verbose() {
                     println!(

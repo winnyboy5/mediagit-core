@@ -54,6 +54,11 @@ Create a new branch at `<start-point>` (defaults to HEAD).
 
 Switch to a branch, updating the working tree.
 
+If the branch exists only on a remote, for example after a clone (a clone
+downloads the main branch only), `switch` downloads it, creates the local branch
+and sets its upstream. Without a connection it stops and changes nothing:
+"This branch is not downloaded yet. Connect to the server and try again."
+
 | Option | Description |
 |--------|-------------|
 | `-c`, `--create` | Create and switch to a new branch |

@@ -67,6 +67,7 @@ mod diff;
 pub mod format;
 pub mod fsck;
 mod index;
+pub mod lazy_refs;
 mod lca;
 mod merge;
 mod metrics;

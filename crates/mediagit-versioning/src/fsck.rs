@@ -79,6 +79,9 @@ pub enum IssueCategory {
     /// unreadable (`get_chunk` refuses to reconstruct it), which makes the
     /// repository unpushable and unclonable. Repaired by flattening.
     DeepDeltaChain,
+    /// A tracking ref whose commit a lazy clone deliberately did not
+    /// download (listed in `.mediagit/lazy-refs`). Not a fault.
+    NotDownloaded,
 }
 
 /// An issue detected during FSCK
@@ -626,6 +629,19 @@ impl FsckChecker {
         }
     }
 
+    /// Tracking refs a lazy clone listed as not downloaded. Empty without a
+    /// repository root, so server-side checks stay strict.
+    fn lazy_refs(&self) -> crate::lazy_refs::LazyRefs {
+        let mut lazy = self
+            .repo_root
+            .as_deref()
+            .map(crate::lazy_refs::load)
+            .unwrap_or_default();
+        // Only tracking refs may be lazy; a hand-edited list cannot excuse a branch.
+        lazy.retain(|name, _| name.starts_with("refs/remotes/"));
+        lazy
+    }
+
     /// Validate all references
     async fn check_references(&self, report: &mut FsckReport) -> anyhow::Result<()> {
         debug!("Checking references");
@@ -641,6 +657,7 @@ impl FsckChecker {
         // object. Staged blobs alone do not count (a fresh `init` + `add`).
         // The store is only scanned when no ref exists, which is rare.
         let any_ref_value = refs.iter().any(|r| r.oid.is_some());
+        let lazy = self.lazy_refs();
 
         for r in refs {
             report.refs_checked += 1;
@@ -652,8 +669,27 @@ impl FsckChecker {
                         match self.object_exists(&oid).await {
                             Ok(true) => {}
                             Ok(false) => {
-                                // A lazy clone writes tracking refs for branches
-                                // it never downloaded: report, never repair.
+                                // A lazy clone listed this tip as not downloaded.
+                                if lazy.get(&r.name) == Some(&oid) {
+                                    report.add_issue(
+                                        FsckIssue::new(
+                                            IssueSeverity::Info,
+                                            IssueCategory::NotDownloaded,
+                                            format!(
+                                                "Branch {} is not downloaded yet. \
+                                                 Switch to it, or run fetch, to get it.",
+                                                r.name
+                                                    .strip_prefix("refs/remotes/")
+                                                    .unwrap_or(&r.name)
+                                            ),
+                                        )
+                                        .with_ref(r.name.clone())
+                                        .with_oid(oid),
+                                    );
+                                    continue;
+                                }
+                                // Any other tracking ref with no commit: report,
+                                // never repair.
                                 let tracking = r.name.starts_with("refs/remotes/");
                                 let issue = FsckIssue::new(
                                     IssueSeverity::Error,
@@ -775,9 +811,17 @@ impl FsckChecker {
         let mut visited = Seen::default();
         let mut referenced_objects = HashSet::new();
 
+        let lazy = self.lazy_refs();
+
         // Traverse from all branch heads
         for r in refs {
             if let Some(oid) = r.oid {
+                // Listed as not downloaded: `check_references` already said so.
+                if lazy.get(&r.name) == Some(&oid)
+                    && matches!(self.object_exists(&oid).await, Ok(false))
+                {
+                    continue;
+                }
                 let is_annotated_tag = r.namespace() == Some("tags")
                     && self
                         .check_and_traverse_tag(

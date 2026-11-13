@@ -202,6 +202,19 @@ written, and a checkout that is refused or fails part-way no longer leaves track
 files deleted. `add` now stops with an error naming a folder it cannot read,
 instead of staging every file in it as deleted.
 
+### Fixed — a fresh clone of a repository with several branches failed `fsck` (BUG-006)
+
+A clone downloads the main branch only but wrote a tracking ref for every
+branch, so `fsck` (and the checks built on it) reported those branches as
+broken and `branch switch` could not open them. The clone now records the
+branches it left on the server in `.mediagit/lazy-refs`. `fsck` prints a
+"not downloaded yet" note for a listed branch and passes; a missing commit that
+is not listed, or whose value differs, is still an error. `branch switch
+<name>` downloads the branch, creates it with its upstream set and switches. Without a connection it
+stops with "This branch is not downloaded yet. Connect to the server and try
+again." and changes nothing. `fetch` and `pull` of the branch remove it from the
+list. The new file is optional; repositories without it behave as before.
+
 ### Fixed — `push --force-with-lease` overwrote work pushed by someone else (BUG-032)
 
 The lease was the server's own fresh answer, so it always matched and the push

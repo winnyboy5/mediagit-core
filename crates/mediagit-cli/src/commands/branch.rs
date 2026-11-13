@@ -610,6 +610,82 @@ impl BranchCmd {
         Ok(())
     }
 
+    /// `switch <name>` when there is no local branch `<name>` but a remote
+    /// has it: download its commit if needed, then create the local branch
+    /// with its upstream set. Does nothing when no remote has the branch (the
+    /// caller then reports "not found") or the local branch already exists.
+    ///
+    /// Offline, it fails with one plain message before anything is written.
+    async fn adopt_remote_branch(
+        repo_root: &std::path::Path,
+        refdb: &RefDatabase,
+        storage: std::sync::Arc<dyn mediagit_storage::StorageBackend>,
+        name: &str,
+        quiet: bool,
+    ) -> Result<()> {
+        let local = format!("refs/heads/{name}");
+        if refdb.exists(&local).await? {
+            return Ok(());
+        }
+        let mut remotes: Vec<String> = refdb
+            .list("remotes")
+            .await?
+            .iter()
+            .filter_map(|r| {
+                let rest = r.strip_prefix("refs/remotes/")?;
+                let (remote, branch) = rest.split_once('/')?;
+                (branch == name).then(|| remote.to_string())
+            })
+            .collect();
+        remotes.sort();
+        let remote = match remotes.as_slice() {
+            [] => return Ok(()),
+            [only] => only.clone(),
+            many if many.iter().any(|r| r == "origin") => "origin".to_string(),
+            many => anyhow::bail!(
+                "More than one remote has a branch called '{}' ({}). \
+                 Create it yourself with 'branch create --track'.",
+                name,
+                many.join(", ")
+            ),
+        };
+        let tracking = format!("refs/remotes/{remote}/{name}");
+        let odb = mediagit_versioning::ObjectDatabase::with_smart_compression(storage, 1000);
+        let mut tip = refdb.resolve(&tracking).await?;
+
+        if !odb.exists(&tip).await.unwrap_or(false) {
+            const OFFLINE: &str =
+                "This branch is not downloaded yet. Connect to the server and try again.";
+            let fetch = super::fetch::FetchCmd {
+                remote: Some(remote.clone()),
+                branch: Some(name.to_string()),
+                all: false,
+                prune: false,
+                quiet: true,
+                verbose: false,
+                embedded: true,
+            };
+            if let Err(e) = fetch.execute().await {
+                tracing::debug!("download of branch {name} failed: {e:#}");
+                anyhow::bail!(OFFLINE);
+            }
+            // The server may have moved the branch on; use what fetch wrote.
+            tip = refdb.resolve(&tracking).await?;
+            if !odb.exists(&tip).await.unwrap_or(false) {
+                anyhow::bail!(OFFLINE);
+            }
+        }
+
+        refdb.write(&Ref::new_direct(local, tip)).await?;
+        let mut config = mediagit_config::Config::load(repo_root).await?;
+        config.set_branch_upstream(name, &remote, format!("refs/heads/{name}"));
+        config.save(repo_root)?;
+        if !quiet {
+            crate::output::info(&format!("Downloaded branch '{name}' from '{remote}'"));
+        }
+        Ok(())
+    }
+
     async fn switch(&self, opts: &SwitchOpts) -> Result<()> {
         use crate::output;
         use mediagit_versioning::{CheckoutManager, Index, ObjectDatabase};
@@ -698,6 +774,10 @@ impl BranchCmd {
                 ));
             }
         } else {
+            // BUG-006: a branch that only exists as a tracking ref (the
+            // clone did not download it) is downloaded and set up here.
+            Self::adopt_remote_branch(&repo_root, &refdb, storage.clone(), branch_name, opts.quiet)
+                .await?;
             // Verify branch exists
             refdb
                 .read(&branch_ref_name)

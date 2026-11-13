@@ -312,459 +312,485 @@ impl CloneCmd {
         // (NOTE-RM-3). We always own target_dir here — either the exists()
         // check above bailed, or the marker proves this command created it.
         let clone_result: Result<CloneReport> = async {
-        // Step 2: Initialize repository
-        init_spinner.set_message("Initializing repository...");
-        let storage_path = target_dir.join(".mediagit");
-        // On resume the control directory is already built. Re-running Step 3
-        // in particular would mint a NEW repo_id and namespace into
-        // config.toml, orphaning every object already downloaded under the old
-        // one — so the whole of setup is skipped, not just the parts that
-        // would error.
-        if !resuming {
-        std::fs::create_dir_all(&storage_path)?;
-        std::fs::create_dir_all(storage_path.join("objects"))?;
-        std::fs::create_dir_all(storage_path.join("refs").join("heads"))?;
-        std::fs::create_dir_all(storage_path.join("refs").join("tags"))?;
-        std::fs::create_dir_all(storage_path.join("refs").join("remotes").join("origin"))?;
+            // Step 2: Initialize repository
+            init_spinner.set_message("Initializing repository...");
+            let storage_path = target_dir.join(".mediagit");
+            // On resume the control directory is already built. Re-running Step 3
+            // in particular would mint a NEW repo_id and namespace into
+            // config.toml, orphaning every object already downloaded under the old
+            // one — so the whole of setup is skipped, not just the parts that
+            // would error.
+            if !resuming {
+                std::fs::create_dir_all(&storage_path)?;
+                std::fs::create_dir_all(storage_path.join("objects"))?;
+                std::fs::create_dir_all(storage_path.join("refs").join("heads"))?;
+                std::fs::create_dir_all(storage_path.join("refs").join("tags"))?;
+                std::fs::create_dir_all(storage_path.join("refs").join("remotes").join("origin"))?;
 
-        // Create HEAD pointing to main branch
-        let head_content = format!("ref: refs/heads/{}\n", branch);
-        std::fs::write(storage_path.join("HEAD"), head_content)?;
+                // Create HEAD pointing to main branch
+                let head_content = format!("ref: refs/heads/{}\n", branch);
+                std::fs::write(storage_path.join("HEAD"), head_content)?;
 
-        // Step 3: Configure remote
-        init_spinner.set_message("Configuring remote...");
-        // Layout v2: default namespace = sanitized basename of the clone
-        // target directory, matching `init`'s convention.
-        let namespace = target_dir
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "repo".to_string());
-        let config_content = format!(
-            r#"repo_namespace = "{}"
+                // Step 3: Configure remote
+                init_spinner.set_message("Configuring remote...");
+                // Layout v2: default namespace = sanitized basename of the clone
+                // target directory, matching `init`'s convention.
+                let namespace = target_dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "repo".to_string());
+                let config_content = format!(
+                    r#"repo_namespace = "{}"
 layout_version = {}
 repo_id = "{}"
 
 [remotes.origin]
 url = "{}"
 "#,
-            mediagit_storage::sanitize_namespace(&namespace),
-            mediagit_config::CURRENT_LAYOUT_VERSION,
-            mediagit_storage::generate_repo_id(),
-            self.url
-        );
-        std::fs::write(storage_path.join("config.toml"), config_content)?;
-
-        // C5: from here on, a leftover directory is a resumable clone rather
-        // than debris. Written after config.toml so an adopted directory is
-        // always one that got at least as far as being a valid repository.
-        write_clone_marker(&storage_path, &self.url, branch)?;
-        } // end `if !resuming`
-
-        // Step 4: Initialize storage and fetch. `create_storage_backend`
-        // performs the LAYOUT marker check/write itself (one of the two
-        // production wrap-points), keyed off the repo_id just written above.
-        init_spinner.set_message("Connecting to remote...");
-
-        // F3: a `clone` run *inside* an encrypted repository would seal the new
-        // repository's objects under the outer repo's process key while the new
-        // one gets no key file of its own — permanently unopenable.
-        //
-        // The guard normally rides along inside `create_storage_backend`, but
-        // that now happens after the escrow round trip (the ODB must capture
-        // the cloned repo's key at construction). Run it here so the refusal
-        // still comes before any network call: a guard the user only reaches
-        // after a connection error is not a guard.
-        // PHASE MARKERS (`MEDIAGIT_LOG=debug`), from here to the first byte of
-        // bulk transfer.
-        //
-        // Clone has hung four times with the process alive, CPU flat across two
-        // samples, every thread in Wait, and NOTHING in the log after the last
-        // completed request. Twice the server had seen zero requests; twice it
-        // had seen encryption-key + info/refs and nothing since. A single fixed
-        // code location cannot explain both, and there is currently no evidence
-        // that distinguishes them - the log is silent through this entire
-        // stretch, so every investigation so far has had to guess which step
-        // blocked.
-        //
-        // These markers make the next occurrence name the step it died in. That
-        // is precisely how the A7 backend-outage hang - open for two weeks and
-        // two campaigns - was solved in one run. `debug!` costs nothing when the
-        // level is off, so this stays out of normal output.
-        //
-        // To arm them for a hang hunt, ALWAYS keep the global level in the
-        // filter - measured on one clone, 8 markers either way:
-        //
-        //   MEDIAGIT_LOG=warn,mediagit::commands::clone=debug ..  28 stderr lines
-        //   MEDIAGIT_LOG=debug ................................. 253 stderr lines
-        //
-        // A campaign runs thousands of clones, so that 9x matters.
-        //
-        // The leading `warn,` is NOT optional, and omitting it is not a style
-        // choice - it silently breaks other things. An EnvFilter built from
-        // target-only directives disables every target that does not match, so
-        // `MEDIAGIT_LOG=mediagit::commands::clone=debug` suppresses the whole
-        // rest of the tree, including `mediagit_protocol`'s
-        // "rate limited (429); backing off before retry" warning.
-        //
-        // That is not hypothetical: arming exactly that filter across campaign
-        // ga21 made 07_ratelimit's RL6 drill fail. RL6 greps the client's output
-        // for "429" to prove throttling actually happened before it will credit
-        // recovery - a deliberately anti-vacuous check - so silencing the
-        // warning made a healthy limiter look like it never fired. The
-        // instrument changed what it was measuring.
-        //
-        // Measured, not assumed: RUST_LOG="tower_http=debug" yields 0 WARN lines
-        // from other targets; RUST_LOG="warn,tower_http=debug" yields 3.
-        tracing::debug!(phase = "key-armed", "clone: local key/scope resolved");
-        crate::encryption::install_armed_key()?;
-        mediagit_compression::ensure_key_scope(&target_dir)?;
-
-        let refdb = RefDatabase::new(&storage_path);
-
-        // Initialize protocol client. config.toml was just written above with
-        // an empty `[remotes.origin]` (no token yet — clone predates the
-        // repo existing, so per-remote credentials can't be set ahead of
-        // time), so credential resolution here effectively falls through to
-        // env MEDIAGIT_TOKEN/MEDIAGIT_API_KEY. Also honours env
-        // MEDIAGIT_DOWNLOAD_CONCURRENCY to tune download concurrency.
-        let clone_config = mediagit_config::Config::load(&target_dir)
-            .await
-            .unwrap_or_default();
-        tracing::debug!(phase = "resolving-credentials", "clone: resolving credentials");
-        let (mut credentials, cred_source) =
-            crate::repo::resolve_credentials_tiered(&target_dir, &clone_config, "origin");
-        let mut client = mediagit_protocol::ProtocolClient::new(self.url.clone())
-            .with_credentials(credentials.clone());
-
-        // Step 5: Get remote refs
-        init_spinner.set_message("Fetching remote refs...");
-        // First authenticated call of this command — a cached keychain
-        // credential (e.g. from a prior `auth login`) may have expired; on a
-        // 401, invalidate it and retry once with the next tier (I11).
-        tracing::debug!(phase = "get-refs", "clone: requesting info/refs");
-        let remote_refs = match client.get_refs().await {
-            Ok(r) => r,
-            Err(e)
-                if crate::repo::invalidate_on_unauthorized(
-                    &clone_config,
-                    "origin",
-                    cred_source,
-                    &e,
-                ) =>
-            {
-                credentials =
-                    crate::repo::resolve_credentials(&target_dir, &clone_config, "origin");
-                client = mediagit_protocol::ProtocolClient::new(self.url.clone())
-                    .with_credentials(credentials.clone());
-                client.get_refs().await?
-            }
-            Err(e) => return Err(e),
-        };
-        crate::repo::remember_credentials(&clone_config, "origin", &credentials);
-        init_spinner.finish_with_message("Connected");
-
-        // DC-7/D4: if the remote holds an encryption key for this repository,
-        // adopt it before a single object is written.
-        //
-        // Everything about to be downloaded is sealed under it, and the ODB
-        // built below captures the key at construction — so this has to happen
-        // first or the clone writes objects it cannot read and reports success.
-        // The local master comes from the same precedence `key init` uses
-        // (keyfile, keychain, then a keychain entry provisioned on the spot),
-        // so a clone never prompts.
-        //
-        // 404 means the remote does not do escrow, which is every remote that
-        // is not serving encrypted repositories: nothing to adopt, carry on.
-        tracing::debug!(phase = "get-encryption-key", "clone: refs received; asking for escrowed key");
-        if let mediagit_protocol::client::escrow::EscrowedKey::Present(key) =
-            client.get_encryption_key().await?
-        {
-            let source = crate::encryption::adopt_repo_key(&target_dir, &key)?;
-            let repo_key = mediagit_security::encryption::EncryptionKey::from_bytes(key.to_vec())
-                .map_err(|e| anyhow::anyhow!("the remote's encryption key is unusable: {e}"))?;
-            mediagit_compression::set_process_key(&target_dir, repo_key)
-                .context("installing the cloned repository's at-rest encryption key")?;
-            if !self.quiet() {
-                println!(
-                    "{} This repository is encrypted; its key is now held by {}",
-                    style("🔑").cyan(),
-                    style(source.describe()).yellow()
+                    mediagit_storage::sanitize_namespace(&namespace),
+                    mediagit_config::CURRENT_LAYOUT_VERSION,
+                    mediagit_storage::generate_repo_id(),
+                    self.url
                 );
-            }
-        }
+                std::fs::write(storage_path.join("config.toml"), config_content)?;
 
-        tracing::debug!(phase = "create-storage", "clone: building storage backend");
-        let storage = create_storage_backend(&target_dir).await?;
-        let odb = Arc::new(ObjectDatabase::with_smart_compression(
-            Arc::clone(&storage),
-            1000,
-        ));
+                // C5: from here on, a leftover directory is a resumable clone rather
+                // than debris. Written after config.toml so an adopted directory is
+                // always one that got at least as far as being a valid repository.
+                write_clone_marker(&storage_path, &self.url, branch)?;
+            } // end `if !resuming`
 
-        // Inherit the remote's CDC seed (if advertised) so this clone produces
-        // matching chunk boundaries for better cross-clone dedup. Missing
-        // capability just leaves cdc_seed at 0 (legacy) — this only affects
-        // dedup ratio, never correctness (chunk storage is content-addressed).
-        if let Some(seed) = remote_refs.capabilities.iter().find_map(|c| {
-            c.strip_prefix("cdc-seed=")
-                .and_then(|v| v.parse::<u64>().ok())
-        }) {
-            let config_path = storage_path.join("config.toml");
-            let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
-            // The freshly-written clone config already carries a top-level
-            // `cdc_seed = 0` line; replace its value in place. Prepending a
-            // second `cdc_seed` key produced invalid TOML (duplicate key) and
-            // broke every clone of a seeded repo.
-            let mut replaced = false;
-            let mut lines: Vec<String> = existing
-                .lines()
-                .map(|l| {
-                    if !replaced && l.trim_start().starts_with("cdc_seed") && l.contains('=') {
-                        replaced = true;
-                        format!("cdc_seed = {seed}")
-                    } else {
-                        l.to_string()
-                    }
-                })
-                .collect();
-            if !replaced {
-                lines.insert(0, format!("cdc_seed = {seed}"));
-            }
-            std::fs::write(&config_path, lines.join("\n") + "\n")?;
-        }
+            // Step 4: Initialize storage and fetch. `create_storage_backend`
+            // performs the LAYOUT marker check/write itself (one of the two
+            // production wrap-points), keyed off the repo_id just written above.
+            init_spinner.set_message("Connecting to remote...");
 
-        tracing::debug!(phase = "cdc-seed-written", "clone: config written; selecting ref");
-        let remote_ref_name = format!("refs/heads/{}", branch);
-        let remote_ref = remote_refs
-            .refs
-            .iter()
-            .find(|r| r.name == remote_ref_name)
-            .ok_or_else(|| anyhow::anyhow!("Remote branch '{}' not found", branch))?;
+            // F3: a `clone` run *inside* an encrypted repository would seal the new
+            // repository's objects under the outer repo's process key while the new
+            // one gets no key file of its own — permanently unopenable.
+            //
+            // The guard normally rides along inside `create_storage_backend`, but
+            // that now happens after the escrow round trip (the ODB must capture
+            // the cloned repo's key at construction). Run it here so the refusal
+            // still comes before any network call: a guard the user only reaches
+            // after a connection error is not a guard.
+            // PHASE MARKERS (`MEDIAGIT_LOG=debug`), from here to the first byte of
+            // bulk transfer.
+            //
+            // Clone has hung four times with the process alive, CPU flat across two
+            // samples, every thread in Wait, and NOTHING in the log after the last
+            // completed request. Twice the server had seen zero requests; twice it
+            // had seen encryption-key + info/refs and nothing since. A single fixed
+            // code location cannot explain both, and there is currently no evidence
+            // that distinguishes them - the log is silent through this entire
+            // stretch, so every investigation so far has had to guess which step
+            // blocked.
+            //
+            // These markers make the next occurrence name the step it died in. That
+            // is precisely how the A7 backend-outage hang - open for two weeks and
+            // two campaigns - was solved in one run. `debug!` costs nothing when the
+            // level is off, so this stays out of normal output.
+            //
+            // To arm them for a hang hunt, ALWAYS keep the global level in the
+            // filter - measured on one clone, 8 markers either way:
+            //
+            //   MEDIAGIT_LOG=warn,mediagit::commands::clone=debug ..  28 stderr lines
+            //   MEDIAGIT_LOG=debug ................................. 253 stderr lines
+            //
+            // A campaign runs thousands of clones, so that 9x matters.
+            //
+            // The leading `warn,` is NOT optional, and omitting it is not a style
+            // choice - it silently breaks other things. An EnvFilter built from
+            // target-only directives disables every target that does not match, so
+            // `MEDIAGIT_LOG=mediagit::commands::clone=debug` suppresses the whole
+            // rest of the tree, including `mediagit_protocol`'s
+            // "rate limited (429); backing off before retry" warning.
+            //
+            // That is not hypothetical: arming exactly that filter across campaign
+            // ga21 made 07_ratelimit's RL6 drill fail. RL6 greps the client's output
+            // for "429" to prove throttling actually happened before it will credit
+            // recovery - a deliberately anti-vacuous check - so silencing the
+            // warning made a healthy limiter look like it never fired. The
+            // instrument changed what it was measuring.
+            //
+            // Measured, not assumed: RUST_LOG="tower_http=debug" yields 0 WARN lines
+            // from other targets; RUST_LOG="warn,tower_http=debug" yields 3.
+            tracing::debug!(phase = "key-armed", "clone: local key/scope resolved");
+            crate::encryption::install_armed_key()?;
+            mediagit_compression::ensure_key_scope(&target_dir)?;
 
-        if self.verbose() {
-            println!(
-                "  Remote ref: {} -> {}",
-                remote_ref.name,
-                &remote_ref.oid[..8]
+            let refdb = RefDatabase::new(&storage_path);
+
+            // Initialize protocol client. config.toml was just written above with
+            // an empty `[remotes.origin]` (no token yet — clone predates the
+            // repo existing, so per-remote credentials can't be set ahead of
+            // time), so credential resolution here effectively falls through to
+            // env MEDIAGIT_TOKEN/MEDIAGIT_API_KEY. Also honours env
+            // MEDIAGIT_DOWNLOAD_CONCURRENCY to tune download concurrency.
+            let clone_config = mediagit_config::Config::load(&target_dir)
+                .await
+                .unwrap_or_default();
+            tracing::debug!(
+                phase = "resolving-credentials",
+                "clone: resolving credentials"
             );
-        }
+            let (mut credentials, cred_source) =
+                crate::repo::resolve_credentials_tiered(&target_dir, &clone_config, "origin");
+            let mut client = mediagit_protocol::ProtocolClient::new(self.url.clone())
+                .with_credentials(credentials.clone());
 
-        // Step 6: Pull objects using streaming (memory-efficient)
-        // Use spinner: total bytes unknown, pull_streaming has no progress callback
-        let download_pb = progress.spinner("Receiving objects...");
-        // Use streaming pull to avoid OOM with large files
-        tracing::debug!(phase = "pull-streaming", "clone: starting bulk transfer");
-        // Past setup: `get_refs` above has already proved the URL, the
-        // credentials and the repo. Anything that fails from here has data
-        // behind it worth resuming from.
-        data_phase.store(true, std::sync::atomic::Ordering::SeqCst);
-        let chunked_oids = client
-            .pull_streaming(&odb, &remote_ref_name, vec![])
-            .await?;
-        tracing::debug!(phase = "pull-complete", "clone: bulk transfer finished");
-        download_pb.finish_with_message("Received objects");
-
-        if self.verbose() {
-            println!(
-                "  Received objects via streaming, {} chunked objects",
-                chunked_oids.len()
-            );
-        }
-
-        let remote_oid = mediagit_versioning::Oid::from_hex(&remote_ref.oid)
-            .map_err(|e| anyhow::anyhow!("Invalid remote OID: {}", e))?;
-
-        // C4: overlap the working-tree writes we can already do with the chunk
-        // downloads we still have to wait for.
-        //
-        // `pull_streaming` has just written every non-chunked object to the
-        // ODB, so every small blob in the tree is ALREADY complete — only
-        // chunked media is still in flight. Checkout used to sit behind a hard
-        // barrier waiting for all of it anyway.
-        //
-        // `MEDIAGIT_CLONE_OVERLAP=0` restores the old serial path. That is both
-        // the revert switch and the parity oracle the clone-parity test diffs
-        // against, so it must stay reachable.
-        let checkout_mgr = CheckoutManager::new(&odb, &target_dir);
-        let overlap_enabled = std::env::var("MEDIAGIT_CLONE_OVERLAP").as_deref() != Ok("0");
-        let split = if overlap_enabled {
-            let deferred_oids: std::collections::HashSet<_> =
-                chunked_oids.iter().copied().collect();
-            Some(checkout_mgr.plan_fresh(&remote_oid, &deferred_oids).await?)
-        } else {
-            None
-        };
-        let (ready_entries, deferred_entries) = match split {
-            Some(plan) => (Some(plan.ready), Some(plan.deferred)),
-            None => (None, None),
-        };
-        let mut files_written = 0usize;
-
-        // Step 7: Download chunked objects (large files)
-        if !chunked_oids.is_empty() {
-            // Total bytes seeded from manifests in Phase 1 via first on_progress call.
-            let chunk_pb = progress.download_bar("Downloading large files", 0);
-
-            let chunk_pb_ref = chunk_pb.clone();
-            let download = client.download_chunked_objects(
-                &odb,
-                &chunked_oids,
-                move |bytes_done, bytes_total, msg| {
-                    if chunk_pb_ref.length() != Some(bytes_total) {
-                        chunk_pb_ref.set_length(bytes_total);
-                        chunk_pb_ref.reset_eta();
-                    }
-                    chunk_pb_ref.set_position(bytes_done);
-                    chunk_pb_ref.set_message(msg.to_string());
-                },
-            );
-
-            let (chunks_downloaded, chunk_bytes) = if let Some(ready) = ready_entries {
-                let (downloaded, wrote) =
-                    tokio::try_join!(download, checkout_mgr.write_entries(ready))?;
-                files_written += wrote;
-                downloaded
-            } else {
-                download.await?
+            // Step 5: Get remote refs
+            init_spinner.set_message("Fetching remote refs...");
+            // First authenticated call of this command — a cached keychain
+            // credential (e.g. from a prior `auth login`) may have expired; on a
+            // 401, invalidate it and retry once with the next tier (I11).
+            tracing::debug!(phase = "get-refs", "clone: requesting info/refs");
+            let remote_refs = match client.get_refs().await {
+                Ok(r) => r,
+                Err(e)
+                    if crate::repo::invalidate_on_unauthorized(
+                        &clone_config,
+                        "origin",
+                        cred_source,
+                        &e,
+                    ) =>
+                {
+                    credentials =
+                        crate::repo::resolve_credentials(&target_dir, &clone_config, "origin");
+                    client = mediagit_protocol::ProtocolClient::new(self.url.clone())
+                        .with_credentials(credentials.clone());
+                    client.get_refs().await?
+                }
+                Err(e) => return Err(e),
             };
+            crate::repo::remember_credentials(&clone_config, "origin", &credentials);
+            init_spinner.finish_with_message("Connected");
 
-            chunk_pb.finish_with_message(format!("Downloaded {} chunks", chunks_downloaded));
-            stats.objects_received += chunks_downloaded as u64;
-            // RP-2: clone reported no download figure either.
-            stats.bytes_downloaded += chunk_bytes;
+            // DC-7/D4: if the remote holds an encryption key for this repository,
+            // adopt it before a single object is written.
+            //
+            // Everything about to be downloaded is sealed under it, and the ODB
+            // built below captures the key at construction — so this has to happen
+            // first or the clone writes objects it cannot read and reports success.
+            // The local master comes from the same precedence `key init` uses
+            // (keyfile, keychain, then a keychain entry provisioned on the spot),
+            // so a clone never prompts.
+            //
+            // 404 means the remote does not do escrow, which is every remote that
+            // is not serving encrypted repositories: nothing to adopt, carry on.
+            tracing::debug!(
+                phase = "get-encryption-key",
+                "clone: refs received; asking for escrowed key"
+            );
+            if let mediagit_protocol::client::escrow::EscrowedKey::Present(key) =
+                client.get_encryption_key().await?
+            {
+                let source = crate::encryption::adopt_repo_key(&target_dir, &key)?;
+                let repo_key =
+                    mediagit_security::encryption::EncryptionKey::from_bytes(key.to_vec())
+                        .map_err(|e| {
+                            anyhow::anyhow!("the remote's encryption key is unusable: {e}")
+                        })?;
+                mediagit_compression::set_process_key(&target_dir, repo_key)
+                    .context("installing the cloned repository's at-rest encryption key")?;
+                if !self.quiet() {
+                    println!(
+                        "{} This repository is encrypted; its key is now held by {}",
+                        style("🔑").cyan(),
+                        style(source.describe()).yellow()
+                    );
+                }
+            }
+
+            tracing::debug!(phase = "create-storage", "clone: building storage backend");
+            let storage = create_storage_backend(&target_dir).await?;
+            let odb = Arc::new(ObjectDatabase::with_smart_compression(
+                Arc::clone(&storage),
+                1000,
+            ));
+
+            // Inherit the remote's CDC seed (if advertised) so this clone produces
+            // matching chunk boundaries for better cross-clone dedup. Missing
+            // capability just leaves cdc_seed at 0 (legacy) — this only affects
+            // dedup ratio, never correctness (chunk storage is content-addressed).
+            if let Some(seed) = remote_refs.capabilities.iter().find_map(|c| {
+                c.strip_prefix("cdc-seed=")
+                    .and_then(|v| v.parse::<u64>().ok())
+            }) {
+                let config_path = storage_path.join("config.toml");
+                let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
+                // The freshly-written clone config already carries a top-level
+                // `cdc_seed = 0` line; replace its value in place. Prepending a
+                // second `cdc_seed` key produced invalid TOML (duplicate key) and
+                // broke every clone of a seeded repo.
+                let mut replaced = false;
+                let mut lines: Vec<String> = existing
+                    .lines()
+                    .map(|l| {
+                        if !replaced && l.trim_start().starts_with("cdc_seed") && l.contains('=') {
+                            replaced = true;
+                            format!("cdc_seed = {seed}")
+                        } else {
+                            l.to_string()
+                        }
+                    })
+                    .collect();
+                if !replaced {
+                    lines.insert(0, format!("cdc_seed = {seed}"));
+                }
+                std::fs::write(&config_path, lines.join("\n") + "\n")?;
+            }
+
+            tracing::debug!(
+                phase = "cdc-seed-written",
+                "clone: config written; selecting ref"
+            );
+            let remote_ref_name = format!("refs/heads/{}", branch);
+            let remote_ref = remote_refs
+                .refs
+                .iter()
+                .find(|r| r.name == remote_ref_name)
+                .ok_or_else(|| anyhow::anyhow!("Remote branch '{}' not found", branch))?;
 
             if self.verbose() {
                 println!(
-                    "  Downloaded {} chunks for {} large files",
-                    chunks_downloaded,
+                    "  Remote ref: {} -> {}",
+                    remote_ref.name,
+                    &remote_ref.oid[..8]
+                );
+            }
+
+            // Step 6: Pull objects using streaming (memory-efficient)
+            // Use spinner: total bytes unknown, pull_streaming has no progress callback
+            let download_pb = progress.spinner("Receiving objects...");
+            // Use streaming pull to avoid OOM with large files
+            tracing::debug!(phase = "pull-streaming", "clone: starting bulk transfer");
+            // Past setup: `get_refs` above has already proved the URL, the
+            // credentials and the repo. Anything that fails from here has data
+            // behind it worth resuming from.
+            data_phase.store(true, std::sync::atomic::Ordering::SeqCst);
+            let chunked_oids = client
+                .pull_streaming(&odb, &remote_ref_name, vec![])
+                .await?;
+            tracing::debug!(phase = "pull-complete", "clone: bulk transfer finished");
+            download_pb.finish_with_message("Received objects");
+
+            if self.verbose() {
+                println!(
+                    "  Received objects via streaming, {} chunked objects",
                     chunked_oids.len()
                 );
             }
-        } else if let Some(ready) = ready_entries {
-            // Nothing to overlap with, but the split is still the cheaper
-            // path: these entries are written here and skipped at Step 9.
-            files_written += checkout_mgr.write_entries(ready).await?;
-        }
 
-        // Step 8: Update refs
-        let ref_update = mediagit_versioning::Ref::new_direct(remote_ref_name.clone(), remote_oid);
-        refdb.write(&ref_update).await?;
+            let remote_oid = mediagit_versioning::Oid::from_hex(&remote_ref.oid)
+                .map_err(|e| anyhow::anyhow!("Invalid remote OID: {}", e))?;
 
-        // Upstream tracking (M2 plumbing, consumed by `status` in M4): the
-        // cloned default branch tracks origin's default branch by construction.
-        {
-            let mut tracking_config = mediagit_config::Config::load(&target_dir).await?;
-            tracking_config.set_branch_upstream(branch, "origin", remote_ref_name.clone());
-            tracking_config.save(&target_dir)?;
-        }
+            // C4: overlap the working-tree writes we can already do with the chunk
+            // downloads we still have to wait for.
+            //
+            // `pull_streaming` has just written every non-chunked object to the
+            // ODB, so every small blob in the tree is ALREADY complete — only
+            // chunked media is still in flight. Checkout used to sit behind a hard
+            // barrier waiting for all of it anyway.
+            //
+            // `MEDIAGIT_CLONE_OVERLAP=0` restores the old serial path. That is both
+            // the revert switch and the parity oracle the clone-parity test diffs
+            // against, so it must stay reachable.
+            let checkout_mgr = CheckoutManager::new(&odb, &target_dir);
+            let overlap_enabled = std::env::var("MEDIAGIT_CLONE_OVERLAP").as_deref() != Ok("0");
+            let split = if overlap_enabled {
+                let deferred_oids: std::collections::HashSet<_> =
+                    chunked_oids.iter().copied().collect();
+                Some(checkout_mgr.plan_fresh(&remote_oid, &deferred_oids).await?)
+            } else {
+                None
+            };
+            let (ready_entries, deferred_entries) = match split {
+                Some(plan) => (Some(plan.ready), Some(plan.deferred)),
+                None => (None, None),
+            };
+            let mut files_written = 0usize;
 
-        // Step 8b: Create tracking refs for all remote branches (LAZY CLONE)
-        // We only download objects for the default branch. Other branches' objects
-        // will be fetched on-demand when user runs `pull origin branch` or `branch switch`.
-        // Also write tag refs (refs/tags/*) received from the server.
-        let mut other_branches = Vec::new();
-        for ref_info in &remote_refs.refs {
-            if ref_info.name.starts_with("refs/heads/") {
-                let branch_name = ref_info
-                    .name
-                    .strip_prefix("refs/heads/")
-                    .unwrap_or(&ref_info.name);
-                let tracking_ref_name = format!("refs/remotes/origin/{}", branch_name);
+            // Step 7: Download chunked objects (large files)
+            if !chunked_oids.is_empty() {
+                // Total bytes seeded from manifests in Phase 1 via first on_progress call.
+                let chunk_pb = progress.download_bar("Downloading large files", 0);
 
-                // Create tracking ref for this branch (just the reference, not objects)
-                if let Ok(tracking_oid) = mediagit_versioning::Oid::from_hex(&ref_info.oid) {
-                    let tracking_ref = mediagit_versioning::Ref::new_direct(
-                        tracking_ref_name.clone(),
-                        tracking_oid,
+                let chunk_pb_ref = chunk_pb.clone();
+                let download = client.download_chunked_objects(
+                    &odb,
+                    &chunked_oids,
+                    move |bytes_done, bytes_total, msg| {
+                        if chunk_pb_ref.length() != Some(bytes_total) {
+                            chunk_pb_ref.set_length(bytes_total);
+                            chunk_pb_ref.reset_eta();
+                        }
+                        chunk_pb_ref.set_position(bytes_done);
+                        chunk_pb_ref.set_message(msg.to_string());
+                    },
+                );
+
+                let (chunks_downloaded, chunk_bytes) = if let Some(ready) = ready_entries {
+                    let (downloaded, wrote) =
+                        tokio::try_join!(download, checkout_mgr.write_entries(ready))?;
+                    files_written += wrote;
+                    downloaded
+                } else {
+                    download.await?
+                };
+
+                chunk_pb.finish_with_message(format!("Downloaded {} chunks", chunks_downloaded));
+                stats.objects_received += chunks_downloaded as u64;
+                // RP-2: clone reported no download figure either.
+                stats.bytes_downloaded += chunk_bytes;
+
+                if self.verbose() {
+                    println!(
+                        "  Downloaded {} chunks for {} large files",
+                        chunks_downloaded,
+                        chunked_oids.len()
                     );
-                    refdb.write(&tracking_ref).await?;
+                }
+            } else if let Some(ready) = ready_entries {
+                // Nothing to overlap with, but the split is still the cheaper
+                // path: these entries are written here and skipped at Step 9.
+                files_written += checkout_mgr.write_entries(ready).await?;
+            }
 
-                    if self.verbose() {
-                        println!(
-                            "  Created tracking ref: {} -> {}",
-                            tracking_ref_name,
-                            &ref_info.oid[..8]
+            // Step 8: Update refs
+            let ref_update =
+                mediagit_versioning::Ref::new_direct(remote_ref_name.clone(), remote_oid);
+            refdb.write(&ref_update).await?;
+
+            // Upstream tracking (M2 plumbing, consumed by `status` in M4): the
+            // cloned default branch tracks origin's default branch by construction.
+            {
+                let mut tracking_config = mediagit_config::Config::load(&target_dir).await?;
+                tracking_config.set_branch_upstream(branch, "origin", remote_ref_name.clone());
+                tracking_config.save(&target_dir)?;
+            }
+
+            // Step 8b: Create tracking refs for all remote branches (LAZY CLONE)
+            // We only download objects for the default branch. Other branches' objects
+            // will be fetched on-demand when user runs `pull origin branch` or `branch switch`.
+            // Also write tag refs (refs/tags/*) received from the server.
+            let mut other_branches = Vec::new();
+            let mut lazy = mediagit_versioning::lazy_refs::LazyRefs::new();
+            for ref_info in &remote_refs.refs {
+                if ref_info.name.starts_with("refs/heads/") {
+                    let branch_name = ref_info
+                        .name
+                        .strip_prefix("refs/heads/")
+                        .unwrap_or(&ref_info.name);
+                    let tracking_ref_name = format!("refs/remotes/origin/{}", branch_name);
+
+                    // Create tracking ref for this branch (just the reference, not objects)
+                    if let Ok(tracking_oid) = mediagit_versioning::Oid::from_hex(&ref_info.oid) {
+                        let tracking_ref = mediagit_versioning::Ref::new_direct(
+                            tracking_ref_name.clone(),
+                            tracking_oid,
                         );
-                    }
+                        refdb.write(&tracking_ref).await?;
 
-                    // Track other branches for summary
-                    if ref_info.name != remote_ref_name {
-                        other_branches.push(branch_name.to_string());
+                        // Not downloaded: tell fsck this is on purpose.
+                        if !odb.exists(&tracking_oid).await? {
+                            lazy.insert(tracking_ref_name.clone(), tracking_oid);
+                        }
+
+                        if self.verbose() {
+                            println!(
+                                "  Created tracking ref: {} -> {}",
+                                tracking_ref_name,
+                                &ref_info.oid[..8]
+                            );
+                        }
+
+                        // Track other branches for summary
+                        if ref_info.name != remote_ref_name {
+                            other_branches.push(branch_name.to_string());
+                        }
                     }
                 }
             }
-        }
 
-        // Write tag refs (refs/tags/*) and restore annotated tag .meta
-        // sidecars (refs/tag-meta/*) received from the server. Shared with
-        // `fetch` — see commands::fetch::fetch_tags. Pass the default branch
-        // tip as the have-set: a tag pointing at (or behind) it needs no
-        // extra download; anything else fetch_tags pulls on its own.
-        let clone_have = vec![remote_oid.to_hex()];
-        super::fetch::fetch_tags(
-            &refdb,
-            &odb,
-            &storage_path,
-            &remote_refs.refs,
-            &client,
-            &clone_have,
-            self.verbose(),
-        )
-        .await?;
+            mediagit_versioning::lazy_refs::save(&target_dir, &lazy)
+                .context("Could not record the branches that were not downloaded")?;
 
-        // Show available branches to user
-        if !other_branches.is_empty() && !self.quiet() {
-            println!(
-                "{} {} other branch(es) available: {}",
-                style("ℹ").blue(),
-                other_branches.len(),
-                other_branches.join(", ")
+            // Write tag refs (refs/tags/*) and restore annotated tag .meta
+            // sidecars (refs/tag-meta/*) received from the server. Shared with
+            // `fetch` — see commands::fetch::fetch_tags. Pass the default branch
+            // tip as the have-set: a tag pointing at (or behind) it needs no
+            // extra download; anything else fetch_tags pulls on its own.
+            let clone_have = vec![remote_oid.to_hex()];
+            super::fetch::fetch_tags(
+                &refdb,
+                &odb,
+                &storage_path,
+                &remote_refs.refs,
+                &client,
+                &clone_have,
+                self.verbose(),
+            )
+            .await?;
+
+            // Show available branches to user
+            if !other_branches.is_empty() && !self.quiet() {
+                println!(
+                    "{} {} other branch(es) available: {}",
+                    style("ℹ").blue(),
+                    other_branches.len(),
+                    other_branches.join(", ")
+                );
+                println!("  Use 'mediagit branch switch <branch>' to download and open one");
+            }
+
+            // Step 9: Checkout working directory
+            // Use spinner: file count only known after checkout finishes
+            let checkout_pb = progress.spinner("Checking out files...");
+            // Timed from HERE, not from before the download: this is the wait the
+            // user actually still has after the last byte lands. With overlap off
+            // it is the whole checkout, matching the C0 baseline; with it on it is
+            // the residual tail, which is the number that should collapse.
+            let checkout_start = std::time::Instant::now();
+            // With overlap on, only the chunked entries are left — the rest were
+            // written above, under the download. With it off this is the original
+            // whole-tree checkout.
+            let files_count = match deferred_entries {
+                Some(deferred) => files_written + checkout_mgr.write_entries(deferred).await?,
+                None => checkout_mgr.checkout_fresh(&remote_oid).await?,
+            };
+            mediagit_protocol::bench::emit_checkout_summary(
+                checkout_start,
+                files_count as u64,
+                overlap_enabled,
             );
-            println!("  Use 'mediagit pull origin <branch>' then 'mediagit branch switch <branch>' to access");
-        }
+            checkout_pb.finish_with_message(format!("Checked out {} files", files_count));
+            stats.files_updated = files_count as u64;
 
-        // Step 9: Checkout working directory
-        // Use spinner: file count only known after checkout finishes
-        let checkout_pb = progress.spinner("Checking out files...");
-        // Timed from HERE, not from before the download: this is the wait the
-        // user actually still has after the last byte lands. With overlap off
-        // it is the whole checkout, matching the C0 baseline; with it on it is
-        // the residual tail, which is the number that should collapse.
-        let checkout_start = std::time::Instant::now();
-        // With overlap on, only the chunked entries are left — the rest were
-        // written above, under the download. With it off this is the original
-        // whole-tree checkout.
-        let files_count = match deferred_entries {
-            Some(deferred) => files_written + checkout_mgr.write_entries(deferred).await?,
-            None => checkout_mgr.checkout_fresh(&remote_oid).await?,
-        };
-        mediagit_protocol::bench::emit_checkout_summary(checkout_start, files_count as u64, overlap_enabled);
-        checkout_pb.finish_with_message(format!("Checked out {} files", files_count));
-        stats.files_updated = files_count as u64;
+            if self.verbose() {
+                println!("  Checked out {} files", files_count);
+            }
 
-        if self.verbose() {
-            println!("  Checked out {} files", files_count);
-        }
+            // Summary with stats
+            stats.duration_ms = start_time.elapsed().as_millis() as u64;
+            if !self.quiet() {
+                println!(
+                    "\n{} Cloned into '{}'",
+                    style("✅").green().bold(),
+                    target_dir.display()
+                );
+                println!("{} {}", style("📊").cyan(), stats.summary());
+            }
 
-        // Summary with stats
-        stats.duration_ms = start_time.elapsed().as_millis() as u64;
-        if !self.quiet() {
-            println!(
-                "\n{} Cloned into '{}'",
-                style("✅").green().bold(),
-                target_dir.display()
-            );
-            println!("{} {}", style("📊").cyan(), stats.summary());
-        }
+            // Save stats for later retrieval by stats command
+            if let Err(e) = stats.save(&storage_path) {
+                tracing::warn!("Failed to save operation stats: {}", e);
+            }
 
-        // Save stats for later retrieval by stats command
-        if let Err(e) = stats.save(&storage_path) {
-            tracing::warn!("Failed to save operation stats: {}", e);
-        }
-
-        // Best-effort auto-gc: clones can leave stale partial objects from
-        // failed transfers; this trims them silently when significant.
-        let _ =
-            crate::auto_gc::maybe_run(&target_dir, crate::auto_gc::TriggerMode::PostClone).await;
+            // Best-effort auto-gc: clones can leave stale partial objects from
+            // failed transfers; this trims them silently when significant.
+            let _ = crate::auto_gc::maybe_run(&target_dir, crate::auto_gc::TriggerMode::PostClone)
+                .await;
 
             Ok(CloneReport {
                 url: self.url.clone(),

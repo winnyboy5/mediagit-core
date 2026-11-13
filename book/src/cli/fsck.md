@@ -160,9 +160,22 @@ confirms. The exit code describes the repository as it is afterwards.
 
 Broken branch and tag references are removed, after their value is saved to
 `.mediagit/quarantine/refs/<name>`. `HEAD` and remote-tracking references
-(`refs/remotes/*`) are never removed: a lazy clone has tracking references for
-branches it has not downloaded yet, so run `fetch` for those. Dangling objects are
-not repaired: `mediagit gc` owns them.
+(`refs/remotes/*`) are never removed. Dangling objects are not repaired:
+`mediagit gc` owns them.
+
+### Branches that are not downloaded yet
+
+A clone downloads the main branch only. The other branches stay on the server,
+and the clone lists them in `.mediagit/lazy-refs`. For each one fsck prints a
+note, and the check still passes:
+
+```text
+ℹ Branch origin/look-dev is not downloaded yet. Switch to it, or run fetch, to get it.
+```
+
+`mediagit branch switch look-dev` or `mediagit fetch origin look-dev` downloads
+the branch and the note goes away. A missing commit that is not on this list is
+still an error.
 
 ### The quarantine folder
 

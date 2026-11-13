@@ -892,6 +892,22 @@ impl FsckCmd {
             println!();
         }
 
+        // Branches a clone left on the server on purpose: always worth a line.
+        let not_downloaded: Vec<_> = info
+            .iter()
+            .filter(|i| i.category == mediagit_versioning::IssueCategory::NotDownloaded)
+            .collect();
+        if !not_downloaded.is_empty() && !self.quiet() {
+            for issue in &not_downloaded {
+                println!("{} {}", style("ℹ").blue().bold(), issue.message);
+            }
+            println!();
+        }
+
+        let info: Vec<_> = info
+            .into_iter()
+            .filter(|i| i.category != mediagit_versioning::IssueCategory::NotDownloaded)
+            .collect();
         if !info.is_empty() && (self.verbose || self.lost_found) {
             println!("{} Information:", style("ℹ").blue().bold());
             for issue in &info {
