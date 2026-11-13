@@ -177,6 +177,16 @@ impl RevertCmd {
             resolved_commits.push(oid);
         }
 
+        // BUG-008: check HEAD, every listed commit and its parent before the
+        // first revert is committed.
+        let mut involved = vec![original_head];
+        for oid in &resolved_commits {
+            involved.push(*oid);
+            let c = Commit::read(&odb, oid).await?;
+            involved.extend(c.parents.first().copied());
+        }
+        crate::repo::ensure_no_unsafe_paths(&odb, &repo_root, &involved).await?;
+
         // Process each commit
         let mut new_commits = Vec::new();
         for (i, commit_oid) in resolved_commits.iter().enumerate() {

@@ -63,6 +63,29 @@ pub fn repo_relative(repo_root: &Path, abs: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(rel))
 }
 
+/// A pathspec as a repo-relative scope string: `""` for the repository folder
+/// itself (everything), else the `/`-separated relative path. `.` and `..` are
+/// resolved lexically first. `None` if it lies outside the repository.
+pub fn repo_scope(repo_root: &Path, path: &Path) -> Option<String> {
+    use std::path::Component;
+    let mut clean = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::ParentDir => {
+                clean.pop();
+            }
+            Component::CurDir => {}
+            other => clean.push(other.as_os_str()),
+        }
+    }
+    if strip_verbatim(&clean) == strip_verbatim(repo_root) {
+        return Some(String::new());
+    }
+    repo_relative(repo_root, &clean)
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
 /// Normalize a file path to a repo-relative path with forward slashes.
 ///
 /// Handles `./`, `.\`, backslash separators, and non-canonical paths by:

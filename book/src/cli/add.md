@@ -195,8 +195,13 @@ Versions made by older releases may hold an absolute path (for example
 change anything, and the message names the path. Run `mediagit add --all`: it
 drops the bad entry and, if the file still exists, adds it again under its
 repo-relative path; then `commit`. If the bad path is only in the staging area,
-`mediagit reset -- PATH` also removes it. The old version stays in history, so
-`fsck` keeps reporting that one version.
+`mediagit reset -- PATH` also removes it. `add` names every path it replaced or
+removed, even with `--quiet`, and says when the file is no longer in the working
+folder (the path is then just removed from the next version). With `--machine`
+the list is in `repaired_unsafe_paths`. The exit status stays 0 when the repair
+worked. `cherry-pick` and `revert` check every listed commit before applying the
+first. The old version stays in history, so `fsck` keeps reporting that one
+version.
 
 ## Notes
 

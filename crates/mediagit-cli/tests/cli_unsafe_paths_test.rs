@@ -69,6 +69,15 @@ fn head_ref_file(root: &Path) -> String {
 
 /// Rewrite HEAD's commit so its tree names `a.txt` as `BAD`.
 async fn poison_head(root: &Path) {
+    let oid = poison_commit(root).await;
+    let refdb = RefDatabase::new(root.join(".mediagit"));
+    let head_ref = refdb.read("HEAD").await.unwrap();
+    let branch = head_ref.target.expect("HEAD names a branch");
+    refdb.write(&Ref::new_direct(branch, oid)).await.unwrap();
+}
+
+/// A child of HEAD whose tree holds `BAD`; no ref is moved.
+async fn poison_commit(root: &Path) -> mediagit_versioning::Oid {
     let storage = mediagit_cli::repo::create_storage_backend(root)
         .await
         .unwrap();
@@ -93,10 +102,7 @@ async fn poison_head(root: &Path) {
         .unwrap();
     let sig = Signature::now("t".into(), "t@e".into());
     let poisoned = Commit::with_parents(tree_oid, vec![head], sig.clone(), sig, "poisoned".into());
-    let oid = poisoned.write(&odb).await.unwrap();
-    let head_ref = refdb.read("HEAD").await.unwrap();
-    let branch = head_ref.target.expect("HEAD names a branch");
-    refdb.write(&Ref::new_direct(branch, oid)).await.unwrap();
+    poisoned.write(&odb).await.unwrap()
 }
 
 /// Plant `BAD` in the staging area in place of `c.txt`.
@@ -296,4 +302,148 @@ fn symlink_outside_repository_is_named_and_refused() {
     let (_, st) = run(root, &["status", "--porcelain"]);
     assert!(st.contains("ok.txt"), "{st}");
     assert!(!st.contains("//?/"), "{st}");
+}
+
+/// Names in HEAD's tree.
+async fn head_tree_names(root: &Path) -> Vec<String> {
+    let storage = mediagit_cli::repo::create_storage_backend(root)
+        .await
+        .unwrap();
+    let odb = mediagit_versioning::ObjectDatabase::with_smart_compression(storage, 100);
+    let refdb = RefDatabase::new(root.join(".mediagit"));
+    let head = refdb.resolve("HEAD").await.unwrap();
+    let commit = Commit::deserialize(&odb.read(&head).await.unwrap()).unwrap();
+    let tree = Tree::deserialize(&odb.read(&commit.tree).await.unwrap()).unwrap();
+    tree.iter().map(|e| e.name.clone()).collect()
+}
+
+/// Cherry-picking `A P` where P holds a bad path: A must not be committed
+/// before P is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cherry_pick_checks_every_listed_commit_before_applying_any() {
+    let dir = clean_repo();
+    let root = dir.path();
+    fs::write(root.join("c.txt"), "gamma").unwrap();
+    must(root, &["add", "c.txt"]);
+    must(root, &["commit", "-m", "A"]);
+    let a = head_ref_file(root);
+    let p = poison_commit(root).await.to_hex();
+    must(root, &["branch", "switch", "other"]);
+
+    let before = head_ref_file(root);
+    let (ok, text) = run(root, &["cherry-pick", &a, &p]);
+    assert!(!ok, "{text}");
+    assert!(text.contains(BAD), "{text}");
+    assert_eq!(
+        head_ref_file(root),
+        before,
+        "A was committed before P was refused"
+    );
+    assert!(!root.join(".mediagit/CHERRY_PICK_STATE").exists());
+}
+
+/// Bad entry whose file is gone: it is removed and the message says so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bad_head_entry_with_missing_file_is_removed_and_named() {
+    let dir = clean_repo();
+    let root = dir.path();
+    poison_head(root).await;
+    fs::remove_file(root.join("a.txt")).unwrap();
+
+    let out = must(root, &["add", "--all"]);
+    assert!(
+        out.contains(BAD) && out.contains("not in the working folder"),
+        "{out}"
+    );
+    must(root, &["commit", "-m", "repair"]);
+    let names = head_tree_names(root).await;
+    assert!(names.iter().all(|n| !n.contains("//?/")), "{names:?}");
+    assert!(!names.contains(&"a.txt".to_string()), "{names:?}");
+    assert!(names.contains(&"b.txt".to_string()), "{names:?}");
+}
+
+/// The repair is named even under --quiet, and --machine carries the list.
+#[test]
+fn repair_is_named_under_quiet_and_in_machine_output() {
+    let dir = clean_repo();
+    let root = dir.path();
+    poison_index(root);
+    let (ok, text) = run(root, &["add", "--all", "--quiet"]);
+    assert!(ok, "{text}");
+    assert!(
+        text.contains(BAD),
+        "quiet add must still name the path: {text}"
+    );
+
+    let dir = clean_repo();
+    let root = dir.path();
+    poison_index(root);
+    let (ok, text) = run(root, &["--machine", "add", "--all"]);
+    assert!(ok, "{text}");
+    assert!(
+        text.contains("repaired_unsafe_paths") && text.contains(BAD),
+        "{text}"
+    );
+}
+
+/// Sparse checkout: repairing a bad entry must not stage the removal of the
+/// good entries that sparse checkout excluded (BUG-041 stays fixed).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bad_entry_repair_leaves_sparse_excluded_entries_alone() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    must(root, &["init", "-q"]);
+    fs::create_dir_all(root.join("included")).unwrap();
+    fs::create_dir_all(root.join("excluded")).unwrap();
+    fs::write(root.join("a.txt"), "alpha").unwrap();
+    fs::write(root.join("included/keep.txt"), "k").unwrap();
+    fs::write(root.join("excluded/drop.txt"), "d").unwrap();
+    must(root, &["add", "--all"]);
+    must(root, &["commit", "-m", "first"]);
+    must(root, &["sparse-checkout", "set", "included"]);
+    assert!(!root.join("excluded/drop.txt").exists());
+    poison_head(root).await;
+
+    must(root, &["add", "--all"]);
+    must(root, &["commit", "-m", "repair"]);
+    let names = head_tree_names(root).await;
+    assert!(
+        names.contains(&"excluded/drop.txt".to_string()),
+        "excluded entry lost: {names:?}"
+    );
+    assert!(
+        names.contains(&"included/keep.txt".to_string()),
+        "{names:?}"
+    );
+    assert!(names.iter().all(|n| !n.contains("//?/")), "{names:?}");
+}
+
+/// A linked folder that leaves the repository is named once, not per file.
+#[cfg(windows)]
+#[test]
+fn linked_folder_outside_repository_warns_once() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    must(root, &["init", "-q"]);
+    let outside = TempDir::new().unwrap();
+    for i in 0..5 {
+        fs::write(outside.path().join(format!("f{i}.bin")), "x").unwrap();
+    }
+    let ok = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(root.join("assets_link"))
+        .arg(outside.path())
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !ok {
+        return;
+    }
+    let (ok, text) = run(root, &["add", "--all"]);
+    assert!(!ok, "{text}");
+    assert_eq!(
+        text.matches("Cannot track").count(),
+        1,
+        "one warning for the link, not one per file: {text}"
+    );
 }

@@ -178,8 +178,9 @@ existing version as an error. Versions already holding such a path are not
 rewritten, but there is a way out: `commit`, `merge`, `rebase`, `cherry-pick`,
 `revert` and `stash` refuse to build on them before changing anything and name
 the path, and `mediagit add --all` removes the bad entry and re-adds the file
-under its repo-relative path. A name like `v:take1.psd` stays trackable on
-Linux and macOS.
+under its repo-relative path. `add` names what it
+repaired even with `--quiet`. A linked folder that leaves the repository is
+reported once. A name like `v:take1.psd` stays trackable on Linux and macOS.
 
 ### Fixed — `push --force-with-lease` overwrote work pushed by someone else (BUG-032)
 

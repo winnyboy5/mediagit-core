@@ -159,7 +159,8 @@ repositories hosted on a server; `add` streams a bytes bar and a files bar.
 repo-relative path (a name ending in `.` or a space on Windows, a symlink that
 leaves the repository), after staging the rest; `add --all` also repairs an
 existing absolute or `..` entry, and `commit`, `merge`, `rebase`, `cherry-pick`,
-`revert` and `stash` refuse such a version up front and name the way out;
+`revert` and `stash` refuse such a version up front and name the way out
+(`add` lists what it repaired in `--machine` data as `repaired_unsafe_paths`);
 `fsck` reports an absolute or `..` path inside a stored version as an error.
 The hidden `__cli-tree` command prints the clap command tree as JSON; the
 desktop test suite checks it against `ui/parity.toml`, so a new flag cannot

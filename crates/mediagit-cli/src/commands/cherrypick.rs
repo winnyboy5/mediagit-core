@@ -173,6 +173,18 @@ impl CherryPickCmd {
             );
         }
 
+        // BUG-008: check every listed commit before the first one is applied,
+        // so a refusal cannot come after earlier picks are already committed.
+        let mut listed = vec![current_oid];
+        for commit_ref in &self.commits {
+            listed.push(
+                self.resolve_commit(&refdb, repo_root, commit_ref)
+                    .await
+                    .context(format!("Failed to resolve commit: {}", commit_ref))?,
+            );
+        }
+        crate::repo::ensure_no_unsafe_paths(&odb, repo_root, &listed).await?;
+
         // Process each commit to cherry-pick
         let mut picked_commits = Vec::new();
         let mut created = Vec::new();

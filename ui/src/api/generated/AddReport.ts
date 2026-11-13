@@ -19,4 +19,9 @@ deleted: number,
 /**
  * Total size of the staged files.
  */
-bytes: number, };
+bytes: number, 
+/**
+ * Unsafe (absolute or `..`) paths found in the staging area or the last
+ * version and replaced or removed (BUG-008). Empty on a healthy repository.
+ */
+repaired_unsafe_paths: Array<string>, };

@@ -124,6 +124,9 @@ pub struct AddReport {
     /// Total size of the staged files.
     #[cfg_attr(test, ts(type = "number"))]
     pub bytes: u64,
+    /// Unsafe (absolute or `..`) paths found in the staging area or the last
+    /// version and replaced or removed (BUG-008). Empty on a healthy repository.
+    pub repaired_unsafe_paths: Vec<String>,
 }
 
 /// Add file contents to the staging area
@@ -240,6 +243,26 @@ fn windows_unstorable_name(path: &Path) -> Option<&'static str> {
         .then_some("Windows cannot keep a name that ends in a dot or a space; rename the file")
 }
 
+/// What `add` did about an unsafe path found in the staging area or the last
+/// version: the file is re-added under its own name if it is still in the
+/// working folder (found by matching the tail of the bad path), else the path
+/// is simply removed from the next version.
+fn describe_unsafe_repair(bad: &str, repo_root: &Path) -> String {
+    let parts: Vec<&str> = bad
+        .split(['/', '\\'])
+        .filter(|p| !p.is_empty() && *p != "..")
+        .collect();
+    for i in 0..parts.len() {
+        let tail = parts[i..].join("/");
+        if repo_root.join(&tail).is_file() {
+            return format!("Replaced unsafe path {bad} with {tail}");
+        }
+    }
+    format!(
+        "Removed unsafe path {bad} from the next version (its file is not in the working folder)"
+    )
+}
+
 /// If `e` is an [`Untrackable`], warn (unless quiet), remember it and return
 /// true so the caller moves on to the next file.
 fn note_untrackable(e: &anyhow::Error, list: &mut Vec<String>, quiet: bool) -> bool {
@@ -350,10 +373,14 @@ impl AddCmd {
             .map(|e| e.path.clone())
             .filter(|p| mediagit_versioning::check_tracked_path(&p.to_string_lossy()).is_err())
             .collect();
+        // Data-affecting, so named even under --quiet; --machine gets the list
+        // in `repaired_unsafe_paths`.
+        let mut repaired: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
         for p in &unsafe_staged {
-            if !self.quiet {
-                output::warning(&format!("Dropping unsafe staged path {}", p.display()));
-            }
+            let note = describe_unsafe_repair(&p.to_string_lossy(), &repo_root);
+            output::warning(&note);
+            repaired.insert(p.to_string_lossy().into_owned(), note);
             index.remove_entry(p);
         }
 
@@ -718,10 +745,11 @@ impl AddCmd {
                     } else {
                         std::env::current_dir().unwrap_or_default().join(p)
                     };
-                    let rel = crate::repo::repo_relative(&repo_root, &joined)
-                        .unwrap_or_else(|_| PathBuf::from(p));
-                    let s = rel.to_string_lossy().replace('\\', "/");
-                    if s == "." { String::new() } else { s }
+                    // The repository folder itself is a valid scope: everything.
+                    crate::repo::repo_scope(&repo_root, &joined).unwrap_or_else(|| {
+                        let s = p.replace('\\', "/");
+                        if s == "." { String::new() } else { s }
+                    })
                 })
                 .collect()
         };
@@ -735,11 +763,11 @@ impl AddCmd {
             // Stage its removal whatever the pathspec or --ignore-removal; the
             // file itself, if present, was re-added above under its real path.
             if mediagit_versioning::check_tracked_path(&head_path.to_string_lossy()).is_err() {
-                if !self.quiet {
-                    output::warning(&format!(
-                        "Removing unsafe path {} from the next version",
-                        head_path.display()
-                    ));
+                let key = head_path.to_string_lossy().into_owned();
+                if let std::collections::btree_map::Entry::Vacant(slot) = repaired.entry(key) {
+                    let note = describe_unsafe_repair(slot.key(), &repo_root);
+                    output::warning(&note);
+                    slot.insert(note);
                 }
                 if !self.dry_run {
                     index.mark_deleted(head_path.clone());
@@ -862,6 +890,7 @@ impl AddCmd {
                 modified: modified_count,
                 deleted: deleted_count,
                 bytes: staged_bytes,
+                repaired_unsafe_paths: repaired.values().cloned().collect(),
             });
         }
 
@@ -1117,6 +1146,23 @@ impl AddCmd {
     /// path, or a plain-words reason it cannot be tracked (BUG-008/009).
     /// Refusing here, with the path the user knows, beats failing later on
     /// the canonical target.
+    fn leaves_repo(path: &Path, repo_root: &Path) -> bool {
+        let Ok(canon) = dunce::canonicalize(path) else {
+            return false;
+        };
+        crate::repo::repo_relative(repo_root, &canon).is_err()
+            && std::path::absolute(path)
+                .is_ok_and(|lexical| crate::repo::repo_relative(repo_root, &lexical).is_ok())
+    }
+
+    fn link_message(path: &Path) -> String {
+        format!(
+            "{}: this is a symbolic link that points outside the repository. \
+             Add a rule for it to .mediagitignore to stop this warning",
+            path.display()
+        )
+    }
+
     fn resolve_entry(path: &Path, repo_root: &Path) -> std::result::Result<PathBuf, String> {
         if cfg!(windows)
             && let Some(why) = windows_unstorable_name(path)
@@ -1126,15 +1172,8 @@ impl AddCmd {
         let Ok(canon) = dunce::canonicalize(path) else {
             return Ok(path.to_path_buf());
         };
-        if crate::repo::repo_relative(repo_root, &canon).is_err()
-            && let Ok(lexical) = std::path::absolute(path)
-            && crate::repo::repo_relative(repo_root, &lexical).is_ok()
-        {
-            return Err(format!(
-                "{}: this is a symbolic link that points outside the repository. \
-                 Add a rule for it to .mediagitignore to stop this warning",
-                path.display()
-            ));
+        if Self::leaves_repo(path, repo_root) {
+            return Err(Self::link_message(path));
         }
         Ok(canon)
     }
@@ -1359,6 +1398,11 @@ impl AddCmd {
                     && let Some(why) = windows_unstorable_name(&path)
                 {
                     refused.push(format!("{}: {why}", path.display()));
+                    continue;
+                }
+                // A linked folder is refused once, not once per file inside.
+                if Self::leaves_repo(&path, repo_root) {
+                    refused.push(Self::link_message(&path));
                     continue;
                 }
                 self.collect_files_recursive(
