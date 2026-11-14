@@ -22,7 +22,9 @@
 
 use crate::ignore_rules::IgnoreMatcher;
 use anyhow::Result;
-use mediagit_versioning::{CheckoutManager, Index, ObjectDatabase, Oid};
+use mediagit_versioning::{
+    CheckoutManager, Commit, FileMode, Index, ObjectDatabase, Oid, Signature, Tree, TreeEntry,
+};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -163,6 +165,56 @@ pub async fn drop_conflict(repo_root: &Path, odb: &ObjectDatabase, head: &Oid) -
         .checkout_commit(head)
         .await?;
     let mut index = Index::load(repo_root)?;
+    index.clear();
+    index.save(repo_root)?;
+    mediagit_versioning::clear_merge_state(&repo_root.join(".mediagit"))?;
+    Ok(())
+}
+
+/// Drop the conflict of a step being skipped (`revert --skip`,
+/// `cherry-pick --skip`). Only the paths the stopped step touched — staged
+/// or unresolved — go back to `head`; other tracked files keep the user's
+/// edits (J4) and untracked files are kept. Then the index and the merge
+/// files are cleared. [`drop_conflict`] is the full restore an abort does.
+pub async fn drop_skipped_step(repo_root: &Path, odb: &ObjectDatabase, head: &Oid) -> Result<()> {
+    let index = Index::load(repo_root)?;
+    let head_tree = Tree::read(odb, &Commit::read(odb, head).await?.tree).await?;
+    let norm = |p: &Path| p.to_string_lossy().replace('\\', "/");
+
+    // What the step left behind: HEAD with its staged changes on top.
+    let mut left = head_tree.clone();
+    for p in index.deleted_paths() {
+        left.remove_entry(&norm(p));
+    }
+    for e in index.entries() {
+        let mode = FileMode::from_u32(e.mode).unwrap_or(FileMode::Regular);
+        left.add_entry(TreeEntry::new(norm(&e.path), mode, e.oid));
+    }
+    // An unresolved path's bytes are the step's whatever its entry says:
+    // leaving it out of `left` makes the diff below always rewrite it.
+    for p in index.unresolved_paths() {
+        if head_tree.has_entry(&norm(&p)) {
+            left.remove_entry(&norm(&p));
+        }
+    }
+
+    // Differential checkout from that state to HEAD touches only the paths
+    // that differ (sparse filter and case twins included).
+    let sig = || Signature::now("MediaGit".to_string(), "mediagit@local".to_string());
+    let left_commit = Commit::with_parents(
+        left.write(odb).await?,
+        vec![*head],
+        sig(),
+        sig(),
+        "skipped step".to_string(),
+    )
+    .write(odb)
+    .await?;
+    CheckoutManager::new(odb, repo_root)
+        .checkout_diff(&left_commit, head)
+        .await?;
+
+    let mut index = index;
     index.clear();
     index.save(repo_root)?;
     mediagit_versioning::clear_merge_state(&repo_root.join(".mediagit"))?;

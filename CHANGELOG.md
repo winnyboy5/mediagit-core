@@ -230,9 +230,15 @@ conflict. Files that are not tracked are left alone.
 
 `cherry-pick` compared against where the two branches split, so picking the
 second version of a branch also brought the first, and could report false
-conflicts. It now copies only the change the picked version made. With
-`--no-commit` the result is staged. `cherry-pick --continue` also works now
-when the pick was given as a branch name or a short id.
+conflicts. It now copies only the change the picked version made, also when
+the pick stops on a conflict: the files that did not clash get the same result
+a clean pick would, so earlier versions are not copied and changes made on
+your branch are kept. With `--no-commit` the result is staged, deletions
+included, and `--no-commit` with several versions builds each one on the
+last. A pick that is refused for another reason (a file not tracked is in the
+way, or the version is the first one) now changes nothing and leaves no
+"cherry-pick in progress". `cherry-pick --continue` also works now when the
+pick was given as a branch name or a short id.
 
 ### Fixed — undoing, cherry-picking or rebasing through a conflict left a phantom "merge in progress", and the app could not open the repository (BUG-020, BUG-021)
 
@@ -243,7 +249,11 @@ now removes them, and `merge --continue` also removes `ORIG_HEAD`.
 `cherry-pick --continue` now refuses while a path still needs a decision, like
 `rebase` and `revert` do. `rebase --skip` now drops the skipped commit's
 conflict. `revert --skip`, `cherry-pick --skip` and `cherry-pick --abort` do the
-same: the files go back to the last version and nothing stays flagged. `status`
+same: the files go back to the last version and nothing stays flagged. A skip
+only puts back the files the skipped step touched; other edits you made are
+kept. `revert --skip` and `revert --continue` now go on with the rest of the
+versions you asked to undo. `--continue` always saves the last version with
+your resolution on top, and refuses to save a version with no files. `status`
 now lists unresolved paths even when no operation is in progress. Separately, `status --machine` printed hint lines before its JSON
 during a conflict, which the app rejected ("more than one line on stdout"), so
 the repository would not open. It now prints one JSON line only, and the data

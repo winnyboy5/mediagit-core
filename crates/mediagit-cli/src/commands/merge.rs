@@ -345,23 +345,14 @@ impl MergeCmd {
 
         // Check for conflicts
         if !result.conflicts.is_empty() {
-            // Load the ours/theirs trees so apply_merge_to_workdir can write clean paths
+            // The writer stages the merge as changes on top of ours.
             let ours_commit = mediagit_versioning::Commit::read(&odb, &our_oid).await?;
-            let theirs_commit = mediagit_versioning::Commit::read(&odb, &their_oid).await?;
             let ours_tree = mediagit_versioning::Tree::read(&odb, &ours_commit.tree).await?;
-            let theirs_tree = mediagit_versioning::Tree::read(&odb, &theirs_commit.tree).await?;
 
             let mut index = Index::load(&repo_root)?;
 
             apply_merge_to_workdir(
-                &result,
-                &ours_tree,
-                &theirs_tree,
-                &odb,
-                &repo_root,
-                &mut index,
-                their_oid,
-                our_oid,
+                &result, &ours_tree, &odb, &repo_root, &mut index, their_oid, our_oid,
             )
             .await
             .context("Failed to apply merge to working directory")?;
@@ -657,19 +648,15 @@ impl MergeCmd {
             index.save(&repo_root)?;
         }
 
-        let mut tree = mediagit_versioning::Tree::new();
-        for entry in index.entries() {
-            tree.add_entry(mediagit_versioning::TreeEntry::new(
-                entry.path.to_string_lossy().to_string(),
-                mediagit_versioning::FileMode::Regular,
-                entry.oid,
-            ));
-        }
-        let tree_oid = tree.write(&odb).await?;
-
         // Get current HEAD
         let refdb = mediagit_versioning::RefDatabase::new(&mediagit_dir);
         let current_oid = refdb.resolve("HEAD").await?;
+
+        // HEAD's tree with the staged merge on top, never the index alone.
+        let head_tree = mediagit_versioning::Commit::read(&odb, &current_oid)
+            .await?
+            .tree;
+        let tree_oid = mediagit_versioning::tree_with_index(&odb, &head_tree, &index).await?;
 
         // Create merge commit with two parents
         let signature = mediagit_versioning::Signature {

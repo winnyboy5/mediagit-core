@@ -7,13 +7,13 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use serde::Serialize;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use tokio::fs;
 
 use mediagit_versioning::{
-    CheckoutManager, Commit, Index, IndexEntry, MergeEngine, MergeStrategy, ObjectDatabase, Oid,
-    RefDatabase, Reflog, ReflogEntry, Signature, Tree, TreeEntry,
+    CheckoutManager, Commit, Index, MergeEngine, MergeStrategy, ObjectDatabase, Oid, RefDatabase,
+    Reflog, ReflogEntry, Signature, Tree,
 };
 
 use super::super::output;
@@ -187,56 +187,86 @@ impl RevertCmd {
         }
         crate::repo::ensure_no_unsafe_paths(&odb, &repo_root, &involved).await?;
 
-        // Process each commit
-        let mut new_commits = Vec::new();
-        for (i, commit_oid) in resolved_commits.iter().enumerate() {
+        let commits: Vec<String> = resolved_commits.iter().map(|o| o.to_hex()).collect();
+        self.run_reverts(
+            &repo_root,
+            &storage_path,
+            &odb,
+            &refs,
+            &commits,
+            0,
+            original_head,
+            Vec::new(),
+            "revert",
+        )
+        .await
+    }
+
+    /// Revert `commits[start..]` in order. A conflict saves the state (this
+    /// revert is the current one) and stops; any other refusal leaves no
+    /// state. Used by the first run, `--continue` and `--skip` alike, so the
+    /// rest of a sequence is always applied the same way.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_reverts(
+        &self,
+        repo_root: &Path,
+        storage_path: &Path,
+        odb: &Arc<ObjectDatabase>,
+        refs: &RefDatabase,
+        commits: &[String],
+        start: usize,
+        original_head: Oid,
+        mut new_commits: Vec<String>,
+        action: &str,
+    ) -> Result<()> {
+        let state_file = storage_path.join(REVERT_STATE_FILE);
+        // `--no-commit`: each revert goes on top of the previous result.
+        let mut onto = None;
+        for (i, spec) in commits.iter().enumerate().skip(start) {
+            let commit_oid = Oid::from_hex(spec)?;
             let result = self
-                .revert_single_commit(&repo_root, &storage_path, &odb, &refs, commit_oid)
+                .revert_single_commit(repo_root, storage_path, odb, refs, &commit_oid, onto)
                 .await;
 
             match result {
-                Ok(Some(oid)) => new_commits.push(oid.to_hex()),
-                Ok(None) => {}
+                Ok(oid) if self.no_commit => onto = Some(oid),
+                Ok(oid) => new_commits.push(oid.to_hex()),
                 Err(e) => {
-                    if e.to_string().contains("conflict") {
-                        let state = RevertState {
-                            commits: resolved_commits.iter().map(|o| o.to_hex()).collect(),
-                            current_index: i,
-                            original_head,
-                        };
-                        fs::write(&state_file, state.to_string()).await?;
+                    let Some(stop) = e.downcast_ref::<ConflictStop>() else {
+                        return Err(e);
+                    };
+                    let state = RevertState {
+                        commits: commits.to_vec(),
+                        current_index: i,
+                        original_head,
+                    };
+                    fs::write(&state_file, state.to_string()).await?;
 
-                        if output::machine_mode() {
-                            let conflicts = e
-                                .downcast_ref::<ConflictStop>()
-                                .map(|c| c.0.clone())
-                                .unwrap_or_default();
-                            output::emit_ok(&RevertReport {
-                                conflicts,
-                                ..revert_report("revert", "conflict", new_commits)
-                            })?;
-                            std::process::exit(1);
-                        }
-
-                        println!(
-                            "{} Revert stopped due to conflicts.",
-                            style("⚠").yellow().bold()
-                        );
-                        println!("  Resolve conflicts and run 'mediagit revert --continue'");
-                        // Non-zero exit so CI can detect a conflict-stop instead of
-                        // silently reporting success (AUD-1).
-                        anyhow::bail!("Revert stopped due to conflicts");
+                    if output::machine_mode() {
+                        output::emit_ok(&RevertReport {
+                            conflicts: stop.0.clone(),
+                            ..revert_report(action, "conflict", new_commits)
+                        })?;
+                        std::process::exit(1);
                     }
-                    return Err(e);
+
+                    println!(
+                        "{} Revert stopped due to conflicts.",
+                        style("⚠").yellow().bold()
+                    );
+                    println!("  Resolve conflicts and run 'mediagit revert --continue'");
+                    // Non-zero exit so CI can detect a conflict-stop instead of
+                    // silently reporting success (AUD-1).
+                    anyhow::bail!("Revert stopped due to conflicts");
                 }
             }
         }
 
-        if !self.quiet() {
+        if !self.quiet() && start < commits.len() {
             println!(
                 "\n{} Successfully reverted {} commit(s)",
                 style("✓").green().bold(),
-                resolved_commits.len()
+                commits.len() - start
             );
         }
 
@@ -246,12 +276,15 @@ impl RevertCmd {
             } else {
                 "reverted"
             };
-            return output::emit_ok(&revert_report("revert", status, new_commits));
+            return output::emit_ok(&revert_report(action, status, new_commits));
         }
 
         Ok(())
     }
 
+    /// Revert one commit on top of `onto` (HEAD when `None`). Returns the new
+    /// revert commit, or under `--no-commit` a temporary commit holding the
+    /// staged result for the next revert to build on.
     async fn revert_single_commit(
         &self,
         repo_root: &Path,
@@ -259,7 +292,8 @@ impl RevertCmd {
         odb: &Arc<ObjectDatabase>,
         refs: &RefDatabase,
         commit_oid: &Oid,
-    ) -> Result<Option<Oid>> {
+        onto: Option<Oid>,
+    ) -> Result<Oid> {
         let commit = Commit::read(odb, commit_oid)
             .await
             .with_context(|| "Failed to read commit to revert")?;
@@ -269,7 +303,8 @@ impl RevertCmd {
             .first()
             .context("Cannot revert initial commit")?;
 
-        let head_oid = refs.resolve("HEAD").await?;
+        let real_head = refs.resolve("HEAD").await?;
+        let head_oid = onto.unwrap_or(real_head);
         let head_commit = Commit::read(odb, &head_oid).await?;
 
         // WT-3: revert had no pre-flight dirty check at all. The merge result
@@ -320,18 +355,16 @@ impl RevertCmd {
             // index (HEAD's own tree) and committed it as "the revert". The
             // command reported success and reverted nothing.
             let ours_tree = Tree::read(odb, &head_commit.tree).await?;
-            let theirs_tree = Tree::read(odb, &parent_commit.tree).await?;
             let mut index = Index::load(repo_root)?;
 
             mediagit_versioning::apply_merge_to_workdir(
                 &merge_result,
                 &ours_tree,
-                &theirs_tree,
                 odb,
                 repo_root,
                 &mut index,
                 *parent_oid,
-                head_oid,
+                real_head,
             )
             .await
             .context("Failed to write revert conflict to the working directory")?;
@@ -368,7 +401,6 @@ impl RevertCmd {
             .tree_oid
             .context("Merge did not produce a tree")?;
 
-        let mut created = None;
         if !self.no_commit {
             // Reverting a change that is already undone would record an empty
             // commit and report success.
@@ -400,7 +432,6 @@ impl RevertCmd {
             );
 
             let new_commit_oid = revert_commit.write(odb).await?;
-            created = Some(new_commit_oid);
 
             // Update refs
             let current_branch = self.get_current_branch(storage_path).await?;
@@ -442,10 +473,16 @@ impl RevertCmd {
                     &new_commit_oid.to_hex()[..7]
                 );
             }
+            Ok(new_commit_oid)
         } else {
-            // No commit mode - save merged tree to index and update working tree
+            // No commit mode - stage the result as changes on top of HEAD
+            // (deletions included) and update the working tree.
             let merged_tree = Tree::read(odb, &new_tree_oid).await?;
-            self.save_tree_to_index(repo_root, &merged_tree)?;
+            let real_head_tree =
+                Tree::read(odb, &Commit::read(odb, &real_head).await?.tree).await?;
+            let mut index = Index::new();
+            mediagit_versioning::stage_tree(&mut index, &real_head_tree, &merged_tree);
+            index.save(repo_root)?;
 
             // Update working tree to match the reverted tree.
             // Create a temporary commit so CheckoutManager can traverse the tree.
@@ -470,28 +507,8 @@ impl RevertCmd {
                     &commit_oid.to_hex()[..7]
                 );
             }
+            Ok(temp_oid)
         }
-
-        Ok(created)
-    }
-
-    fn save_tree_to_index(&self, repo_root: &Path, tree: &Tree) -> Result<()> {
-        let mut index = Index::new();
-        for entry in tree.iter() {
-            if !entry.is_tree() {
-                let idx_entry = IndexEntry::new(
-                    // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- no fs access (index entry)
-                    PathBuf::from(&entry.name),
-                    entry.oid,
-                    entry.mode.as_u32(),
-                    0,
-                    None,
-                );
-                index.add_entry(idx_entry);
-            }
-        }
-        index.save(repo_root)?;
-        Ok(())
     }
 
     async fn do_continue(&self, repo_root: &Path, storage_path: &Path) -> Result<()> {
@@ -537,13 +554,18 @@ impl RevertCmd {
         ));
         let refs = RefDatabase::new(storage_path);
 
-        let index = Index::load(repo_root)?;
-        let tree = self.build_tree_from_index(&index);
-        let tree_oid = tree.write(&odb).await?;
-
-        let head_oid = refs.resolve("HEAD").await?;
+        // Validate first: every id of the sequence must parse.
+        for spec in &state.commits {
+            Oid::from_hex(spec)?;
+        }
         let revert_oid = Oid::from_hex(&state.commits[state.current_index])?;
         let revert_commit = Commit::read(&odb, &revert_oid).await?;
+
+        // HEAD's tree with the resolution staged on top, never the index alone.
+        let head_oid = refs.resolve("HEAD").await?;
+        let mut index = Index::load(repo_root)?;
+        let head_tree = Commit::read(&odb, &head_oid).await?.tree;
+        let tree_oid = mediagit_versioning::tree_with_index(&odb, &head_tree, &index).await?;
 
         let message = self.message.clone().unwrap_or_else(|| {
             format!(
@@ -572,23 +594,33 @@ impl RevertCmd {
         }
 
         // Write, then delete: a failure above leaves the revert continuable.
+        // The resolution is committed, so its staged entries go too.
         fs::remove_file(&state_file).await?;
         mediagit_versioning::clear_merge_state(storage_path)?;
+        index.clear();
+        index.save(repo_root)?;
 
-        if output::machine_mode() {
-            return output::emit_ok(&revert_report(
-                "continue",
-                "reverted",
-                vec![new_commit_oid.to_hex()],
-            ));
+        if !self.quiet() {
+            println!(
+                "{} Revert continued: {}",
+                style("✓").green().bold(),
+                &new_commit_oid.to_hex()[..7]
+            );
         }
-        println!(
-            "{} Revert continued: {}",
-            style("✓").green().bold(),
-            &new_commit_oid.to_hex()[..7]
-        );
 
-        Ok(())
+        // Then the rest of the sequence; a conflict there saves a new state.
+        self.run_reverts(
+            repo_root,
+            storage_path,
+            &odb,
+            &refs,
+            &state.commits,
+            state.current_index + 1,
+            state.original_head,
+            vec![new_commit_oid.to_hex()],
+            "continue",
+        )
+        .await
     }
 
     async fn do_abort(&self, repo_root: &Path, storage_path: &Path) -> Result<()> {
@@ -654,61 +686,53 @@ impl RevertCmd {
 
         // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- repo-internal constant path
         let state_content = fs::read_to_string(&state_file).await?;
-        let mut state = RevertState::from_string(&state_content)?;
+        let state = RevertState::from_string(&state_content)?;
+        let next = state.current_index + 1;
 
-        state.current_index += 1;
+        // Validate first: every id of the sequence must parse.
+        for spec in &state.commits {
+            Oid::from_hex(spec)?;
+        }
 
-        // The skipped revert's conflict is dropped: files back to HEAD, index
-        // cleared, merge files removed. HEAD is read first; the state file is
-        // only touched once that worked.
+        // The skipped revert's conflict is dropped: the paths it touched go
+        // back to HEAD, the index and merge files are cleared. HEAD is read
+        // first; the state file is only touched once that worked.
         let refs = RefDatabase::new(storage_path);
         let head_oid = refs.resolve("HEAD").await?;
         let storage = create_storage_backend(repo_root).await?;
-        let odb = ObjectDatabase::with_smart_compression(storage, 10000);
-        crate::worktree_guard::drop_conflict(repo_root, &odb, &head_oid)
+        let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 10000));
+        crate::worktree_guard::drop_skipped_step(repo_root, &odb, &head_oid)
             .await
             .context("Failed to restore working directory on revert skip")?;
 
-        if output::machine_mode() {
-            let status = if state.current_index >= state.commits.len() {
-                fs::remove_file(&state_file).await?;
-                "completed"
-            } else {
-                fs::write(&state_file, state.to_string()).await?;
-                "skipped"
-            };
-            return output::emit_ok(&revert_report("skip", status, Vec::new()));
-        }
+        // B1: the skip ends this stop. The rest of the sequence runs now (a
+        // conflict there saves a new state); a `--continue` is never left
+        // pointing at a revert that was never applied.
+        fs::remove_file(&state_file).await?;
 
-        if state.current_index >= state.commits.len() {
-            fs::remove_file(&state_file).await?;
+        if next >= state.commits.len() {
+            if output::machine_mode() {
+                return output::emit_ok(&revert_report("skip", "completed", Vec::new()));
+            }
             println!(
                 "{} Revert completed (skipped last)",
                 style("✓").green().bold()
             );
-        } else {
-            fs::write(&state_file, state.to_string()).await?;
-            println!(
-                "{} Skipped, {} commit(s) remaining",
-                style("✓").green(),
-                state.commits.len() - state.current_index
-            );
+            return Ok(());
         }
 
-        Ok(())
-    }
-
-    fn build_tree_from_index(&self, index: &Index) -> Tree {
-        let mut tree = Tree::new();
-        for entry in index.entries() {
-            tree.add_entry(TreeEntry::new(
-                entry.path.to_string_lossy().to_string(),
-                mediagit_versioning::FileMode::from_u32(entry.mode)
-                    .unwrap_or(mediagit_versioning::FileMode::Regular),
-                entry.oid,
-            ));
-        }
-        tree
+        self.run_reverts(
+            repo_root,
+            storage_path,
+            &odb,
+            &refs,
+            &state.commits,
+            next,
+            state.original_head,
+            Vec::new(),
+            "skip",
+        )
+        .await
     }
 
     async fn get_current_branch(&self, storage_path: &Path) -> Result<Option<String>> {

@@ -177,11 +177,23 @@ impl CherryPickCmd {
         // so a refusal cannot come after earlier picks are already committed.
         let mut listed = vec![current_oid];
         for commit_ref in &self.commits {
-            listed.push(
-                self.resolve_commit(&refdb, repo_root, commit_ref)
-                    .await
-                    .context(format!("Failed to resolve commit: {}", commit_ref))?,
-            );
+            let oid = self
+                .resolve_commit(&refdb, repo_root, commit_ref)
+                .await
+                .context(format!("Failed to resolve commit: {}", commit_ref))?;
+            // J3: refusals are found here, before any pick, so they never
+            // leave a "stopped" state behind.
+            if Commit::read(odb.as_ref(), &oid).await?.parents.is_empty() {
+                anyhow::bail!(
+                    "Cannot cherry-pick {}: it is the first version, with nothing \
+                     before it to compare. Nothing was changed.",
+                    &oid.to_hex()[..7]
+                );
+            }
+            crate::worktree_guard::AtRisk::check(repo_root, &odb, Some(&current_oid), Some(&oid))
+                .await?
+                .ensure_clean("cherry-pick")?;
+            listed.push(oid);
         }
         // The state file stores full ids: a branch name or short id would not
         // parse in `--continue`.
@@ -191,12 +203,9 @@ impl CherryPickCmd {
         // Process each commit to cherry-pick
         let mut picked_commits = Vec::new();
         let mut created = Vec::new();
-        for (idx, commit_ref) in self.commits.iter().enumerate() {
-            let commit_oid = self
-                .resolve_commit(&refdb, repo_root, commit_ref)
-                .await
-                .context(format!("Failed to resolve commit: {}", commit_ref))?;
-
+        // J2: under `--no-commit` each pick goes on top of the previous result.
+        let mut onto = None;
+        for (idx, &commit_oid) in listed[1..].iter().enumerate() {
             if !self.quiet() {
                 println!(
                     "{} Applying commit {}",
@@ -206,11 +215,14 @@ impl CherryPickCmd {
             }
 
             match self
-                .apply_commit(&odb, &refdb, repo_root, &commit_oid)
+                .apply_commit(&odb, &refdb, repo_root, &commit_oid, onto)
                 .await
             {
-                Ok(merged_tree_oid) => {
+                Ok((merged_tree_oid, result_oid)) => {
                     picked_commits.push(commit_oid);
+                    if self.no_commit {
+                        onto = Some(result_oid);
+                    }
 
                     if !self.no_commit {
                         // Create commit automatically, using the merged tree
@@ -244,7 +256,11 @@ impl CherryPickCmd {
                     }
                 }
                 Err(e) => {
-                    // Save cherry-pick state for continuation
+                    // J3: only a conflict is a stop to resume. Any other
+                    // refusal leaves no state.
+                    if e.downcast_ref::<ConflictStop>().is_none() {
+                        return Err(e);
+                    }
                     self.save_cherrypick_state(repo_root, &resolved, idx)
                         .await?;
 
@@ -290,13 +306,16 @@ impl CherryPickCmd {
         )
     }
 
+    /// Pick `commit_oid` on top of `onto` (HEAD when `None`). Returns the
+    /// merged tree and a commit holding it (for the next `--no-commit` pick).
     async fn apply_commit(
         &self,
         odb: &Arc<ObjectDatabase>,
         refdb: &RefDatabase,
         repo_root: &PathBuf,
         commit_oid: &Oid,
-    ) -> Result<Oid> {
+        onto: Option<Oid>,
+    ) -> Result<(Oid, Oid)> {
         // Load the commit
         let commit = Commit::read(odb.as_ref(), commit_oid)
             .await
@@ -307,8 +326,8 @@ impl CherryPickCmd {
             anyhow::bail!("Cannot cherry-pick initial commit");
         }
 
-        // Get current HEAD
-        let current_oid = refdb.resolve("HEAD").await?;
+        let head_oid = refdb.resolve("HEAD").await?;
+        let current_oid = onto.unwrap_or(head_oid);
 
         // WT-1: the merge result can only materialize paths from ours (all
         // tracked) or theirs, so checking collisions against the picked commit
@@ -338,22 +357,18 @@ impl CherryPickCmd {
             // merge.rs's continue-merge path) instead of the old bespoke
             // write_conflicts, which Debug-printed OIDs into files and
             // corrupted binaries.
-            let ours_commit = Commit::read(odb.as_ref(), &current_oid).await?;
-            let theirs_commit = Commit::read(odb.as_ref(), commit_oid).await?;
-            let ours_tree = Tree::read(odb.as_ref(), &ours_commit.tree).await?;
-            let theirs_tree = Tree::read(odb.as_ref(), &theirs_commit.tree).await?;
+            let ours_tree = Tree::read(odb.as_ref(), &current_commit.tree).await?;
 
             let mut index = Index::load(repo_root)?;
 
             apply_merge_to_workdir(
                 &merge_result,
                 &ours_tree,
-                &theirs_tree,
                 odb,
                 repo_root,
                 &mut index,
                 *commit_oid,
-                current_oid,
+                head_oid,
             )
             .await?;
 
@@ -392,15 +407,22 @@ impl CherryPickCmd {
         let temp_oid = commit_to_checkout.write(odb.as_ref()).await?;
         checkout_mgr.checkout_commit(&temp_oid).await?;
 
-        // `--no-commit` leaves the result staged (the commit path rebuilds
-        // nothing: the new commit is what the index should match).
+        // `--no-commit` leaves the result staged as changes on top of HEAD,
+        // deletions included (the commit path rebuilds nothing: the new
+        // commit is what the index should match).
         if self.no_commit {
+            let head_tree = Tree::read(
+                odb.as_ref(),
+                &Commit::read(odb.as_ref(), &head_oid).await?.tree,
+            )
+            .await?;
+            let merged = Tree::read(odb.as_ref(), &tree_oid).await?;
             let mut index = Index::new();
-            add_tree_to_index(odb.as_ref(), &tree_oid, PathBuf::new(), &mut index).await?;
+            mediagit_versioning::stage_tree(&mut index, &head_tree, &merged);
             index.save(repo_root)?;
         }
 
-        Ok(tree_oid)
+        Ok((tree_oid, temp_oid))
     }
 
     async fn create_cherry_pick_commit(
@@ -423,27 +445,20 @@ impl CherryPickCmd {
             ));
         }
 
-        // Use the merged tree from the 3-way merge when available. Only fall
-        // back to rebuilding from the index (manual conflict resolution via
-        // `--continue`, where no merge result exists) when it isn't.
+        // Get current HEAD as parent
+        let current_oid = refdb.resolve("HEAD").await?;
+
+        // Use the merged tree from the 3-way merge when available. After a
+        // conflict (`--continue`) it is HEAD's tree with the resolution
+        // staged on top — never the index alone.
         let tree_oid = match merged_tree_oid {
             Some(oid) => oid,
             None => {
                 let index = Index::load(repo_root)?;
-                let mut tree = Tree::new();
-                for entry in index.entries() {
-                    tree.add_entry(mediagit_versioning::TreeEntry::new(
-                        entry.path.to_string_lossy().to_string(),
-                        mediagit_versioning::FileMode::Regular,
-                        entry.oid,
-                    ));
-                }
-                tree.write(odb).await?
+                let head_tree = Commit::read(odb, &current_oid).await?.tree;
+                mediagit_versioning::tree_with_index(odb, &head_tree, &index).await?
             }
         };
-
-        // Get current HEAD as parent
-        let current_oid = refdb.resolve("HEAD").await?;
 
         // A pick that changes nothing (the change is already on this branch)
         // must not manufacture an empty commit and call it success.
@@ -536,14 +551,18 @@ impl CherryPickCmd {
             created.push(new_oid.to_hex());
         }
 
-        // The conflicted pick is done; the next one rewrites these if it conflicts.
+        // The conflicted pick is done; the next one rewrites these if it
+        // conflicts. Its staged entries are committed, so they go too, and so
+        // does the state: a refusal in the rest must not leave a state that
+        // points at the pick just committed.
         mediagit_versioning::clear_merge_state(&mediagit_dir)?;
+        let mut index = Index::load(repo_root)?;
+        index.clear();
+        index.save(repo_root)?;
+        std::fs::remove_file(&state_path)?;
 
         // Continue with remaining commits
         if state.remaining_commits.is_empty() {
-            // Clean up state
-            std::fs::remove_file(&state_path)?;
-
             if !self.quiet() {
                 println!("{} Cherry-pick complete", style("✓").green());
             }
@@ -565,8 +584,6 @@ impl CherryPickCmd {
         };
 
         let mut rest = cmd.start_cherrypick(repo_root).await?;
-        // The next picks went through; a conflict would have rewritten it.
-        std::fs::remove_file(&state_path)?;
         created.append(&mut rest.commits);
         outcome(rest.status, created)
     }
@@ -607,14 +624,14 @@ impl CherryPickCmd {
         }
         crate::repo::ensure_no_unsafe_paths(&odb, repo_root, &listed).await?;
 
-        // Then drop the skipped pick's conflict: files back to HEAD, index
-        // cleared, merge files removed.
-        crate::worktree_guard::drop_conflict(repo_root, &odb, &head_oid).await?;
+        // Then drop the skipped pick's conflict: the paths it touched go back
+        // to HEAD (other edits stay), index cleared, merge files removed. The
+        // stop is over; the rest saves a new state only if it conflicts.
+        crate::worktree_guard::drop_skipped_step(repo_root, &odb, &head_oid).await?;
+        std::fs::remove_file(&state_path)?;
 
         // Continue with remaining commits (skip current)
         if state.remaining_commits.is_empty() {
-            std::fs::remove_file(&state_path)?;
-
             if !self.quiet() {
                 println!("{} Cherry-pick complete", style("✓").green());
             }
@@ -634,10 +651,7 @@ impl CherryPickCmd {
             quiet: self.quiet,
         };
 
-        let rest = cmd.start_cherrypick(repo_root).await?;
-        // The next picks went through; a conflict would have rewritten it.
-        std::fs::remove_file(&state_path)?;
-        Ok(rest)
+        cmd.start_cherrypick(repo_root).await
     }
 
     async fn abort_cherrypick(&self, repo_root: &PathBuf) -> Result<Outcome> {
@@ -767,33 +781,6 @@ struct CherryPickState {
     original_head: Option<String>,
     current_commit: Option<String>,
     remaining_commits: Vec<String>,
-}
-
-/// Stage every file of `tree_oid` (recursing into subtrees).
-fn add_tree_to_index<'a>(
-    odb: &'a ObjectDatabase,
-    tree_oid: &'a Oid,
-    prefix: PathBuf,
-    index: &'a mut Index,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
-    Box::pin(async move {
-        let tree = Tree::read(odb, tree_oid).await?;
-        for entry in tree.iter() {
-            let path = prefix.join(&entry.name);
-            if entry.is_tree() {
-                add_tree_to_index(odb, &entry.oid, path, index).await?;
-            } else {
-                index.add_entry(mediagit_versioning::IndexEntry::new(
-                    path,
-                    entry.oid,
-                    entry.mode.as_u32(),
-                    0,
-                    None,
-                ));
-            }
-        }
-        Ok(())
-    })
 }
 
 #[cfg(test)]

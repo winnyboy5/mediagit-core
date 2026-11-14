@@ -115,7 +115,7 @@ pub use index::{Index, IndexEntry, is_stage_debris_key};
 pub use lca::{LcaFinder, LcaResult};
 pub use merge::{
     FastForwardInfo, MergeEngine, MergeResult, MergeStrategy, apply_merge_to_workdir,
-    clear_merge_state,
+    clear_merge_state, stage_tree, tree_with_index,
 };
 pub use metrics::OdbMetrics;
 pub use object::ObjectType;

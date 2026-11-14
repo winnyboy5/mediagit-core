@@ -105,12 +105,24 @@ async fn merge_conflict_writes_markers_and_stages_clean_paths() {
     let theirs_tip = Oid::hash(b"theirs-tip-sentinel");
     let orig_head = Oid::hash(b"orig-head-sentinel");
 
+    // The three-way result of the paths that did not conflict.
+    let (clean_tree, _) = create_tree_with_entries(
+        &odb,
+        vec![
+            ("shared.txt", base_shared),
+            ("a-only.txt", ours_aonly),
+            ("b-only.txt", theirs_bonly),
+        ],
+    )
+    .await;
+
     let merge_result = MergeResult {
         tree_oid: None,
         conflicts: vec![conflict],
         success: false,
         fast_forward: None,
         strategy: MergeStrategy::Recursive,
+        clean_tree: Some(clean_tree),
     };
 
     let mut index = Index::new();
@@ -118,7 +130,6 @@ async fn merge_conflict_writes_markers_and_stages_clean_paths() {
     apply_merge_to_workdir(
         &merge_result,
         &ours_tree,
-        &theirs_tree,
         &odb,
         workdir,
         &mut index,
@@ -148,24 +159,26 @@ async fn merge_conflict_writes_markers_and_stages_clean_paths() {
         "Missing theirs version of line2"
     );
 
-    // (b) a-only.txt and b-only.txt both present in workdir
+    // (b) b-only.txt written. a-only.txt is ours, so already on disk in real
+    // use: the writer leaves it alone.
     assert!(
-        workdir.join("a-only.txt").exists(),
-        "a-only.txt not in workdir"
+        !workdir.join("a-only.txt").exists(),
+        "a-only.txt is unchanged from ours"
     );
     assert!(
         workdir.join("b-only.txt").exists(),
         "b-only.txt not in workdir"
     );
 
-    // a-only.txt and b-only.txt staged in index at stage 0
+    // Only the change on top of ours is staged: b-only.txt. a-only.txt is
+    // already ours (a continue commits ours with the index on top).
     let a_only_staged = index
         .entries()
         .any(|e| e.path.to_string_lossy() == "a-only.txt");
     let b_only_staged = index
         .entries()
         .any(|e| e.path.to_string_lossy() == "b-only.txt");
-    assert!(a_only_staged, "a-only.txt not staged in index");
+    assert!(!a_only_staged, "a-only.txt is unchanged from ours");
     assert!(b_only_staged, "b-only.txt not staged in index");
 
     // (c) MERGE_HEAD written with theirs_tip OID
@@ -237,9 +250,8 @@ async fn merge_of_chunked_blobs_does_not_use_whole_object_read() {
 
     let mut ours_tree = Tree::new();
     ours_tree.add_entry(TreeEntry::new("c.bin".into(), FileMode::Regular, oids[0]));
-    let mut theirs_tree = Tree::new();
-    theirs_tree.add_entry(TreeEntry::new("c.bin".into(), FileMode::Regular, oids[1]));
-    theirs_tree.add_entry(TreeEntry::new(
+    let mut clean_tree = Tree::new();
+    clean_tree.add_entry(TreeEntry::new(
         "clean.bin".into(),
         FileMode::Regular,
         oids[2],
@@ -261,6 +273,7 @@ async fn merge_of_chunked_blobs_does_not_use_whole_object_read() {
         success: false,
         fast_forward: None,
         strategy: MergeStrategy::Recursive,
+        clean_tree: Some(clean_tree),
     };
 
     let before = odb.metrics().await;
@@ -268,7 +281,6 @@ async fn merge_of_chunked_blobs_does_not_use_whole_object_read() {
     apply_merge_to_workdir(
         &merge_result,
         &ours_tree,
-        &theirs_tree,
         &odb,
         workdir,
         &mut index,

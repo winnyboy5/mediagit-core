@@ -6,8 +6,7 @@ use clap::Parser;
 use console::style;
 use mediagit_versioning::{
     CheckoutManager, Commit, Index, LcaFinder, MergeEngine, MergeStrategy, ObjectDatabase,
-    ObjectType, Oid, Ref, RefDatabase, Signature, Tree, TreeEntry, apply_merge_to_workdir,
-    resolve_revision,
+    ObjectType, Oid, Ref, RefDatabase, Signature, Tree, apply_merge_to_workdir, resolve_revision,
 };
 use serde::Serialize;
 use std::collections::HashSet;
@@ -418,13 +417,11 @@ impl RebaseCmd {
                 // down as a conflict, and `continue_rebase_process` only ever
                 // read `commits_remaining`.
                 let ours_tree_obj = Tree::read(odb, &ours_tree).await?;
-                let theirs_tree_obj = Tree::read(odb, &original_commit.tree).await?;
                 let mut index = Index::load(repo_root)?;
 
                 apply_merge_to_workdir(
                     &merge_result,
                     &ours_tree_obj,
-                    &theirs_tree_obj,
                     odb,
                     repo_root,
                     &mut index,
@@ -667,21 +664,11 @@ impl RebaseCmd {
         if let Some(conflicted_oid) = state.current_commit {
             let original = Commit::read(&odb, &conflicted_oid).await?;
 
+            // The new parent's tree with the resolution staged on top (the
+            // conflict writer stages only changes against it).
             let index = Index::load(repo_root)?;
-            let mut tree = Tree::new();
-            for entry in index.entries() {
-                let path_str = entry.path.to_string_lossy();
-                if mediagit_versioning::is_stage_debris_key(&path_str) {
-                    continue;
-                }
-                tree.add_entry(TreeEntry::new(
-                    path_str.to_string(),
-                    mediagit_versioning::FileMode::from_u32(entry.mode)
-                        .unwrap_or(mediagit_versioning::FileMode::Regular),
-                    entry.oid,
-                ));
-            }
-            let tree_oid = tree.write(&odb).await?;
+            let parent_tree = Commit::read(&odb, &state.new_parent).await?.tree;
+            let tree_oid = mediagit_versioning::tree_with_index(&odb, &parent_tree, &index).await?;
 
             let resolved = Commit {
                 tree: tree_oid,
@@ -703,6 +690,11 @@ impl RebaseCmd {
             state.set_conflicts(Vec::new());
             state.save(repo_root)?;
             mediagit_versioning::clear_merge_state(&storage_path)?;
+            // The resolution is committed; stale entries must not reach the
+            // next stop's tree.
+            let mut index = index;
+            index.clear();
+            index.save(repo_root)?;
 
             if !self.quiet() {
                 println!(

@@ -963,3 +963,270 @@ fn fix1_cherry_pick_skip_moves_on_to_the_next_pick() {
     assert!(!d.join(".mediagit/CHERRY_PICK_STATE").exists());
     assert_no_operation(d, "cherry-pick --skip (two picks)");
 }
+
+// ---- Task 3.2 fix round 1 ----
+
+/// The bytes of `rel` in the commit HEAD points at, `None` if it has no such file.
+fn at_head(dir: &Path, rel: &str) -> Option<String> {
+    let out = run(dir, &["show", &format!("HEAD:{rel}")]);
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+fn tip(dir: &Path, branch: &str) -> String {
+    fs::read_to_string(dir.join(".mediagit/refs/heads").join(branch))
+        .unwrap()
+        .trim()
+        .to_string()
+}
+
+fn switch(dir: &Path, branch: &str) {
+    mediagit()
+        .args(["branch", "switch", branch])
+        .current_dir(dir)
+        .assert()
+        .success();
+}
+
+fn create_branch(dir: &Path, branch: &str) {
+    mediagit()
+        .args(["branch", "create", branch])
+        .current_dir(dir)
+        .assert()
+        .success();
+}
+
+/// `revert A B`: A = "second" (conflicts with "third"), B = the commit that
+/// added b.txt. keep.txt is tracked from the start.
+fn revert_two_with_conflict(dir: &Path) -> (String, String) {
+    init_repo(dir);
+    commit_file(dir, "keep.txt", "keep\n", "keep");
+    commit_file(dir, "shared.txt", "v1\n", "first");
+    commit_file(dir, "shared.txt", "v2\n", "second");
+    let a = tip(dir, "main");
+    commit_file(dir, "shared.txt", "v3\n", "third");
+    commit_file(dir, "b.txt", "b\n", "add b");
+    let b = tip(dir, "main");
+    let out = run(dir, &["revert", &a, &b]);
+    assert!(!out.status.success(), "revert A should stop on a conflict");
+    (a, b)
+}
+
+/// B1: skip the conflicting revert, then `--continue` as `status` suggested.
+/// The tip must still hold every file, and B must be reverted.
+#[test]
+fn fix2_revert_skip_then_continue_keeps_the_tree_and_applies_the_rest() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    revert_two_with_conflict(d);
+    let skip = run(d, &["revert", "--skip"]);
+    assert!(
+        skip.status.success(),
+        "{}",
+        String::from_utf8_lossy(&skip.stderr)
+    );
+    // Whatever skip left, the documented next step must not empty the tip.
+    let _ = run(d, &["revert", "--continue"]);
+    assert_eq!(at_head(d, "keep.txt").as_deref(), Some("keep\n"));
+    assert_eq!(at_head(d, "shared.txt").as_deref(), Some("v3\n"));
+    assert_eq!(at_head(d, "b.txt"), None, "B was never reverted");
+    assert!(!d.join("b.txt").exists());
+    assert_no_operation(d, "revert --skip with a revert left");
+}
+
+/// `--continue` on a multi-commit revert commits the resolution, then
+/// reverts the rest.
+#[test]
+fn fix2_revert_continue_applies_the_remaining_reverts() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    revert_two_with_conflict(d);
+    resolve(d, "shared.txt");
+    let out = run(d, &["revert", "--continue"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(at_head(d, "keep.txt").as_deref(), Some("keep\n"));
+    assert_eq!(at_head(d, "shared.txt").as_deref(), Some("resolved\n"));
+    assert_eq!(at_head(d, "b.txt"), None, "B was never reverted");
+    assert_no_operation(d, "revert --continue with a revert left");
+}
+
+fn assert_refused_without_state(d: &Path, head_before: &str, what: &str) {
+    assert!(
+        !d.join(".mediagit/CHERRY_PICK_STATE").exists(),
+        "{what}: a refusal saved cherry-pick state"
+    );
+    assert_no_operation(d, what);
+    assert!(
+        !run(d, &["cherry-pick", "--continue"]).status.success(),
+        "{what}: --continue found something to continue"
+    );
+    assert_eq!(tip(d, "main"), head_before, "{what}: the branch moved");
+}
+
+/// J3: an untracked file in the way is a refusal, not a conflict.
+#[test]
+fn fix2_cherry_pick_untracked_in_the_way_leaves_no_state() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    init_repo(d);
+    commit_file(d, "base.txt", "base\n", "base");
+    create_branch(d, "feature");
+    switch(d, "feature");
+    commit_file(d, "f.txt", "theirs\n", "add f");
+    let pick = tip(d, "feature");
+    switch(d, "main");
+    fs::write(d.join("f.txt"), "mine\n").unwrap();
+    let before = tip(d, "main");
+    let out = run(d, &["cherry-pick", &pick]);
+    assert!(!out.status.success(), "the pick must refuse");
+    assert_eq!(fs::read_to_string(d.join("f.txt")).unwrap(), "mine\n");
+    assert_refused_without_state(d, &before, "untracked in the way");
+    assert_eq!(at_head(d, "base.txt").as_deref(), Some("base\n"));
+}
+
+/// J3: a root commit cannot be picked; refused before anything changes.
+#[test]
+fn fix2_cherry_pick_root_commit_leaves_no_state() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    init_repo(d);
+    commit_file(d, "base.txt", "base\n", "base");
+    let root = tip(d, "main");
+    commit_file(d, "base.txt", "next\n", "next");
+    let before = tip(d, "main");
+    let out = run(d, &["cherry-pick", &root]);
+    assert!(!out.status.success(), "a root pick must refuse");
+    assert_refused_without_state(d, &before, "root commit");
+    assert_eq!(at_head(d, "base.txt").as_deref(), Some("next\n"));
+}
+
+/// J1: a conflicting pick of x2 must not bring x1's file, and must keep the
+/// change HEAD made to g.txt after the branch point.
+#[test]
+fn fix2_conflicting_pick_applies_only_its_own_change() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    init_repo(d);
+    commit_file(d, "c.txt", "base\n", "base c");
+    commit_file(d, "g.txt", "g0\n", "base g");
+    create_branch(d, "x");
+    switch(d, "x");
+    commit_file(d, "f1.txt", "f1\n", "x1");
+    commit_file(d, "c.txt", "x2\n", "x2");
+    let x2 = tip(d, "x");
+    switch(d, "main");
+    commit_file(d, "c.txt", "main\n", "main c");
+    commit_file(d, "g.txt", "g-main\n", "main g");
+    assert!(!run(d, &["cherry-pick", &x2]).status.success());
+    assert!(!d.join("f1.txt").exists(), "x1's file written at the stop");
+    assert_eq!(fs::read_to_string(d.join("g.txt")).unwrap(), "g-main\n");
+    resolve(d, "c.txt");
+    let out = run(d, &["cherry-pick", "--continue"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(at_head(d, "f1.txt"), None, "x1's file was committed");
+    assert_eq!(at_head(d, "g.txt").as_deref(), Some("g-main\n"));
+    assert_eq!(at_head(d, "c.txt").as_deref(), Some("resolved\n"));
+    assert!(!d.join("f1.txt").exists());
+}
+
+/// J2: `cherry-pick -n A B` keeps A's file.
+#[test]
+fn fix2_no_commit_pick_of_two_keeps_both() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    init_repo(d);
+    commit_file(d, "base.txt", "base\n", "base");
+    create_branch(d, "feature");
+    switch(d, "feature");
+    commit_file(d, "a.txt", "a\n", "add a");
+    let a = tip(d, "feature");
+    commit_file(d, "b.txt", "b\n", "add b");
+    let b = tip(d, "feature");
+    switch(d, "main");
+    let out = run(d, &["cherry-pick", "-n", &a, &b]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(d.join("a.txt").exists(), "A's file was deleted");
+    assert!(d.join("b.txt").exists());
+    mediagit()
+        .args(["commit", "-m", "both"])
+        .current_dir(d)
+        .assert()
+        .success();
+    assert_eq!(at_head(d, "a.txt").as_deref(), Some("a\n"));
+    assert_eq!(at_head(d, "b.txt").as_deref(), Some("b\n"));
+    assert_eq!(at_head(d, "base.txt").as_deref(), Some("base\n"));
+}
+
+/// J4: a tracked file edited during the stop, not part of the conflict,
+/// survives `--skip`.
+#[test]
+fn fix2_cherry_pick_skip_keeps_unrelated_edits() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    init_repo(d);
+    commit_file(d, "notes.txt", "notes\n", "notes");
+    commit_file(d, "shared.txt", "base\n", "base");
+    create_branch(d, "feature");
+    commit_file(d, "shared.txt", "main-change\n", "main edit");
+    switch(d, "feature");
+    commit_file(d, "shared.txt", "feature-change\n", "feature edit");
+    let pick = tip(d, "feature");
+    switch(d, "main");
+    assert!(!run(d, &["cherry-pick", &pick]).status.success());
+    fs::write(d.join("notes.txt"), "my edit\n").unwrap();
+    let out = run(d, &["cherry-pick", "--skip"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(d.join("notes.txt")).unwrap(),
+        "my edit\n",
+        "skip overwrote an edit it had no part in"
+    );
+    assert_eq!(
+        fs::read_to_string(d.join("shared.txt")).unwrap(),
+        "main-change\n"
+    );
+}
+
+/// J4, revert side.
+#[test]
+fn fix2_revert_skip_keeps_unrelated_edits() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    init_repo(d);
+    commit_file(d, "keep.txt", "keep\n", "keep");
+    commit_file(d, "shared.txt", "v1\n", "first");
+    commit_file(d, "shared.txt", "v2\n", "second");
+    let a = tip(d, "main");
+    commit_file(d, "shared.txt", "v3\n", "third");
+    assert!(!run(d, &["revert", &a]).status.success());
+    fs::write(d.join("keep.txt"), "my edit\n").unwrap();
+    let out = run(d, &["revert", "--skip"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(d.join("keep.txt")).unwrap(),
+        "my edit\n",
+        "skip overwrote an edit it had no part in"
+    );
+    assert_eq!(fs::read_to_string(d.join("shared.txt")).unwrap(), "v3\n");
+}

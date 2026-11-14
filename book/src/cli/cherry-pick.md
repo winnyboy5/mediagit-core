@@ -27,8 +27,9 @@ One or more commits to apply. Applied in order (first to last). Accepts full
 ## Options
 
 #### `-n`, `--no-commit`
-Apply changes to the working tree without committing. Allows editing before
-the commit is created.
+Apply changes to the working tree and stage them (deletions included) without
+committing. Allows editing before the commit is created. With several
+versions, each one is applied on top of the last.
 
 #### `-x`, `--append-message`
 Append the original commit hash to the commit message for traceability:

@@ -60,6 +60,11 @@ pub struct MergeResult {
 
     /// Merge strategy used
     pub strategy: MergeStrategy,
+
+    /// With conflicts: the three-way result of every path that did not
+    /// conflict (the same rule a clean merge commits). `apply_merge_to_workdir`
+    /// writes and stages these; a raw side tree would bring back old copies.
+    pub clean_tree: Option<Tree>,
 }
 
 impl MergeResult {
@@ -123,6 +128,7 @@ impl MergeEngine {
                 success: true,
                 fast_forward: None,
                 strategy,
+                clean_tree: None,
             });
         }
 
@@ -207,6 +213,7 @@ impl MergeEngine {
                     is_fast_forward: false, // No actual fast-forward needed
                 }),
                 strategy,
+                clean_tree: None,
             }));
         }
 
@@ -224,6 +231,7 @@ impl MergeEngine {
                     is_fast_forward: true,
                 }),
                 strategy,
+                clean_tree: None,
             }));
         }
 
@@ -250,15 +258,19 @@ impl MergeEngine {
         debug!("Detected {} conflicts", conflicts.len());
 
         // Build merged tree based on strategy
+        let mut clean_tree = None;
         let (tree_oid, final_conflicts, success) = match strategy {
             MergeStrategy::Recursive => {
+                // Every path that did not conflict, merged three-way.
+                let tree = self
+                    .build_merged_tree(base, ours, theirs, &conflicts)
+                    .await?;
                 if conflicts.is_empty() {
-                    // No conflicts - build clean merged tree
-                    let tree = self.build_merged_tree(base, ours, theirs, &[]).await?;
                     let tree_oid = tree.write(&self.odb).await?;
                     (Some(tree_oid), Vec::new(), true)
                 } else {
-                    // Has conflicts - report them without building tree
+                    // No result tree: the conflicts are the user's to settle.
+                    clean_tree = Some(tree);
                     (None, conflicts, false)
                 }
             }
@@ -282,16 +294,17 @@ impl MergeEngine {
             success,
             fast_forward: None,
             strategy,
+            clean_tree,
         })
     }
 
-    /// Build merged tree for clean merge (no conflicts)
+    /// Build the three-way merged tree of every path not in `conflicts`.
     async fn build_merged_tree(
         &self,
         base: &Tree,
         ours: &Tree,
         theirs: &Tree,
-        _conflicts: &[Conflict],
+        conflicts: &[Conflict],
     ) -> Result<Tree> {
         let mut merged = Tree::new();
 
@@ -300,6 +313,9 @@ impl MergeEngine {
         all_paths.extend(base.entries.keys().map(|s| s.as_str()));
         all_paths.extend(ours.entries.keys().map(|s| s.as_str()));
         all_paths.extend(theirs.entries.keys().map(|s| s.as_str()));
+        for c in conflicts {
+            all_paths.remove(c.path.as_str());
+        }
 
         for path in all_paths {
             let base_entry = base.entries.get(path);
@@ -500,18 +516,19 @@ impl MergeEngine {
 
 /// Apply a merge result to the working directory.
 ///
-/// For clean paths (not conflicting): writes the merged blob from `theirs_tree`/`ours_tree`
-/// to the workdir and stages it at index stage 0.
+/// For clean paths (not conflicting): the three-way result
+/// (`result.clean_tree`) is written and staged where it differs from
+/// `ours_tree`, and paths it dropped are deleted and staged as deleted, so
+/// `ours_tree` with the index on top ([`tree_with_index`]) is the merge
+/// result. Paths equal to ours are left alone.
 ///
-/// For conflicting paths: writes a conflict-marker file and stores all three
-/// blobs in the index at stages 1 (base), 2 (ours), 3 (theirs) per Git convention.
+/// For conflicting paths: writes a conflict-marker file (or one side, for
+/// binaries), stages it and flags the path unresolved.
 ///
 /// Also writes `.mediagit/MERGE_HEAD`, `MERGE_MSG`, and `ORIG_HEAD`.
-#[allow(clippy::too_many_arguments)]
 pub async fn apply_merge_to_workdir(
     result: &MergeResult,
     ours_tree: &Tree,
-    theirs_tree: &Tree,
     odb: &Arc<ObjectDatabase>,
     workdir: &Path,
     index: &mut Index,
@@ -524,30 +541,33 @@ pub async fn apply_merge_to_workdir(
     let conflict_paths: std::collections::HashSet<&str> =
         result.conflicts.iter().map(|c| c.path.as_str()).collect();
 
-    // --- Write clean (non-conflicting) paths from union of ours+theirs trees ---
-    let mut all_clean_paths = std::collections::HashSet::new();
-    for path in ours_tree.entries.keys() {
-        if !conflict_paths.contains(path.as_str()) {
-            all_clean_paths.insert(path.clone());
+    // BUG-028: the clean part is the three-way result, never a raw side tree
+    // (that copied earlier versions and undid ours' own changes).
+    let clean = result
+        .clean_tree
+        .as_ref()
+        .context("merge result has no clean tree for its conflicts")?;
+
+    // Paths ours has that the merge dropped: a clean deletion.
+    for path_str in ours_tree.entries.keys() {
+        if conflict_paths.contains(path_str.as_str()) || clean.entries.contains_key(path_str) {
+            continue;
         }
-    }
-    for path in theirs_tree.entries.keys() {
-        if !conflict_paths.contains(path.as_str()) {
-            all_clean_paths.insert(path.clone());
+        let dest = crate::checkout::worktree_path(workdir, Path::new(path_str))?;
+        match std::fs::remove_file(&dest) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("Failed to delete {}", path_str)),
         }
+        index.mark_deleted(std::path::PathBuf::from(path_str));
     }
 
-    for path_str in &all_clean_paths {
-        // Prefer theirs if they have it (their addition), else use ours
-        let entry = theirs_tree
-            .entries
-            .get(path_str)
-            .or_else(|| ours_tree.entries.get(path_str));
-        let entry = match entry {
-            Some(e) => e,
-            None => continue,
-        };
-
+    for (path_str, entry) in &clean.entries {
+        // Unchanged from ours: nothing to write or stage. Every file written
+        // here is staged, so a skip or an abort knows to put it back.
+        if ours_tree.entries.get(path_str).map(|o| o.oid) == Some(entry.oid) {
+            continue;
+        }
         // Write to workdir, streamed: a chunked blob can be far larger than RAM.
         let dest = crate::checkout::worktree_path(workdir, Path::new(path_str))?;
         if let Some(parent) = dest.parent() {
@@ -559,7 +579,6 @@ pub async fn apply_merge_to_workdir(
             .await
             .with_context(|| format!("Failed to write {}", path_str))?;
 
-        // Stage at index stage 0
         let index_entry = IndexEntry::new(
             std::path::PathBuf::from(path_str),
             entry.oid,
@@ -692,6 +711,58 @@ pub fn clear_merge_state(storage_path: &Path) -> Result<usize> {
         }
     }
     Ok(removed)
+}
+
+/// The tree a stopped operation's `--continue` commits: `base` (the tree the
+/// operation stopped on, normally HEAD's) with the index applied on top —
+/// staged deletions removed, staged entries added or replaced. Never the
+/// index alone: after a skip or a refused step the index can be empty, and
+/// that committed a tree with no files.
+///
+/// Refuses a result with no files while `base` has some.
+pub async fn tree_with_index(odb: &ObjectDatabase, base: &Oid, index: &Index) -> Result<Oid> {
+    let base_tree = Tree::read(odb, base).await?;
+    let mut tree = base_tree.clone();
+    for path in index.deleted_paths() {
+        tree.remove_entry(&path.to_string_lossy().replace('\\', "/"));
+    }
+    for entry in index.entries() {
+        let path = entry.path.to_string_lossy().replace('\\', "/");
+        if crate::is_stage_debris_key(&path) {
+            continue;
+        }
+        let mode = crate::FileMode::from_u32(entry.mode).unwrap_or(crate::FileMode::Regular);
+        tree.add_entry(crate::TreeEntry::new(path, mode, entry.oid));
+    }
+    if tree.is_empty() && !base_tree.is_empty() {
+        anyhow::bail!(
+            "Refusing to commit a version with no files: nothing is staged on top of the \
+             current one. Nothing was changed."
+        );
+    }
+    tree.write(odb).await
+}
+
+/// Stage `tree` as changes on top of `base`: entries that differ are added,
+/// paths `base` has and `tree` lacks are staged as deleted. The inverse of
+/// [`tree_with_index`] (used by the `--no-commit` paths).
+pub fn stage_tree(index: &mut Index, base: &Tree, tree: &Tree) {
+    for (path, entry) in &tree.entries {
+        if base.entries.get(path).map(|b| b.oid) != Some(entry.oid) {
+            index.add_entry(IndexEntry::new(
+                std::path::PathBuf::from(path),
+                entry.oid,
+                entry.mode.as_u32(),
+                0,
+                None,
+            ));
+        }
+    }
+    for path in base.entries.keys() {
+        if !tree.entries.contains_key(path) {
+            index.mark_deleted(std::path::PathBuf::from(path));
+        }
+    }
 }
 
 /// Heuristic binary detector: a NUL byte anywhere in the content means it's
@@ -1174,7 +1245,6 @@ mod tests {
         assert_eq!(result.conflicts.len(), 1);
 
         let ours_tree = Tree::read(&odb, &ours_tree_oid).await.unwrap();
-        let theirs_tree = Tree::read(&odb, &theirs_tree_oid).await.unwrap();
 
         let workdir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(workdir.path().join(".mediagit")).unwrap();
@@ -1183,7 +1253,6 @@ mod tests {
         apply_merge_to_workdir(
             &result,
             &ours_tree,
-            &theirs_tree,
             &odb,
             workdir.path(),
             &mut index,
@@ -1199,5 +1268,41 @@ mod tests {
             .collect();
         assert_eq!(paths, vec!["file.txt".to_string()]);
         assert!(!paths.iter().any(|p| crate::is_stage_debris_key(p)));
+    }
+
+    /// B1: `--continue` commits base + index, and never a tree with no files
+    /// while the base has some.
+    #[tokio::test]
+    async fn tree_with_index_keeps_base_and_refuses_empty() {
+        let odb = create_test_odb();
+        let base = create_tree(&odb, vec![("a.txt", b"a"), ("b.txt", b"b")]).await;
+
+        let mut index = Index::new();
+        index.add_entry(IndexEntry::new(
+            std::path::PathBuf::from("b.txt"),
+            Oid::hash(b"b2"),
+            FileMode::Regular.as_u32(),
+            0,
+            None,
+        ));
+        let tree = Tree::read(&odb, &tree_with_index(&odb, &base, &index).await.unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            tree.entries.get("a.txt").map(|e| e.oid),
+            Some(Oid::hash(b"a"))
+        );
+        assert_eq!(
+            tree.entries.get("b.txt").map(|e| e.oid),
+            Some(Oid::hash(b"b2"))
+        );
+
+        let mut index = Index::new();
+        index.mark_deleted(std::path::PathBuf::from("a.txt"));
+        index.mark_deleted(std::path::PathBuf::from("b.txt"));
+        assert!(
+            tree_with_index(&odb, &base, &index).await.is_err(),
+            "a tree with no files was accepted"
+        );
     }
 }
