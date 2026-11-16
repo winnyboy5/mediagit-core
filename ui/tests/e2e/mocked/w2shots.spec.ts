@@ -92,7 +92,7 @@ for (const { w, h } of SIZES) {
     T('V8 conflicts', async (page, t) => {
       await open(page, '/merge', 'Merge & conflicts')
       await startMerge(page)
-      await page.locator('[data-file="art/hero.psd"]').getByRole('button', { name: 'Keep mine' }).click()
+      await page.locator('[data-file="art/hero.psd"]').getByRole('button', { name: 'Keep main' }).click()
       await expect(page.getByTestId('merge-summary')).toContainText('1 resolved')
       await shot(page, 'V8-merge-conflicts', t, w)
     })

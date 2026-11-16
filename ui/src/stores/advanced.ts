@@ -88,8 +88,17 @@ function sequencer(command: 'rebase' | 'cherry-pick') {
     const active = ref(false)
     const clashes = shallowRef<Clash[]>([])
     const conflictCommit = ref<string | null>(null)
+    /** What a rebase was put onto; its version is "ours" while replaying. */
+    const target = ref<string | null>(null)
     const last = shallowRef<Step | null>(null)
 
+    /** Button wording. Rebase: ours is the branch built on, theirs is my replayed branch. Copy: ours is where I am, theirs is the copied version. */
+    const sideNames = computed(() => {
+      const mine = repo.status?.operation?.ours ?? 'my branch'
+      return command === 'rebase'
+        ? { ours: target.value ?? 'the other branch', theirs: mine }
+        : { ours: mine, theirs: 'the copied version' }
+    })
     const resolved = computed(() => clashes.value.filter((c) => c.resolved).length)
     const canContinue = computed(() => active.value && resolved.value === clashes.value.length)
 
@@ -103,18 +112,21 @@ function sequencer(command: 'rebase' | 'cherry-pick') {
     const stopped = (x: RebaseReport | CherryPickReport) => x.status === 'conflict'
     const stepOf = (r: RebaseReport | CherryPickReport): Step => ({ status: r.status, conflicts: r.conflicts, conflictCommit: r.conflict_commit })
 
-    async function start(target: string, extra: SequencerExtra = {}) {
-      const label = command === 'rebase' ? `Rebase onto ${target}` : `Copy ${target.slice(0, 7)}`
+    async function start(targetName: string, extra: SequencerExtra = {}) {
+      const label = command === 'rebase' ? `Rebase onto ${targetName}` : `Copy ${targetName.slice(0, 7)}`
       const r = await run<RebaseReport | CherryPickReport>(
         label,
         (root, report) =>
           command === 'rebase'
-            ? api.rebaseStart(root, target, report, { branch: extra.branch || undefined, keepEmpty: extra.keepEmpty || undefined })
-            : api.pickStart(root, [target], report, { noCommit: extra.noCommit || undefined, appendMessage: extra.appendMessage || undefined }),
+            ? api.rebaseStart(root, targetName, report, { branch: extra.branch || undefined, keepEmpty: extra.keepEmpty || undefined })
+            : api.pickStart(root, [targetName], report, { noCommit: extra.noCommit || undefined, appendMessage: extra.appendMessage || undefined }),
         (x) => stepSummary(stepOf(x)),
         stopped,
       )
-      if (r) apply(stepOf(r.value))
+      if (r) {
+        target.value = command === 'rebase' ? targetName : null
+        apply(stepOf(r.value))
+      }
       return !!r
     }
 
@@ -133,7 +145,11 @@ function sequencer(command: 'rebase' | 'cherry-pick') {
     async function resolve(path: string, side: Side) {
       const theirs = conflictCommit.value
       if (!theirs) return false
-      const r = await run(`Keep ${side === 'ours' ? 'mine' : 'theirs'} of ${path}`, (root) => api.mergeResolve(root, path, side, theirs), () => 'Kept')
+      // During a rebase HEAD is not our side; the status names the commit that is.
+      const ours = repo.status?.operation?.ours_commit ?? (command === 'rebase' ? null : 'HEAD')
+      if (!ours) return false
+      const names = sideNames.value
+      const r = await run(`Keep ${side === 'ours' ? names.ours : names.theirs} of ${path}`, (root) => api.mergeResolve(root, path, side, ours, theirs), () => 'Kept')
       if (r) clashes.value = clashes.value.map((c) => (c.path === path ? { ...c, resolved: side } : c))
       return !!r
     }
@@ -149,7 +165,7 @@ function sequencer(command: 'rebase' | 'cherry-pick') {
       },
     )
 
-    return { active, clashes, conflictCommit, last, resolved, canContinue, busy, error, running, start, control, resolve }
+    return { active, clashes, sideNames, conflictCommit, last, resolved, canContinue, busy, error, running, start, control, resolve }
   }
 }
 

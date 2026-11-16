@@ -112,7 +112,7 @@ const theirsMissing = computed(() => !merge.theirsOid)
           </div>
           <span class="kept">
             <span v-if="c.resolved" class="chip done">
-              {{ c.resolved === 'ours' ? 'Kept mine' : c.resolved === 'theirs' ? 'Kept theirs' : 'Resolved' }}
+              {{ c.resolved === 'ours' ? `Kept ${merge.sideNames.ours}` : c.resolved === 'theirs' ? `Kept ${merge.sideNames.theirs}` : 'Resolved' }}
             </span>
           </span>
           <div class="acts" role="group" :aria-label="`Choose a version of ${c.path}`">
@@ -123,7 +123,7 @@ const theirsMissing = computed(() => !merge.theirsOid)
               :disabled="merge.busy || missingSide(c.kind) === 'ours'"
               @click="merge.resolve(c.path, 'ours')"
             >
-              Keep mine
+              Keep {{ merge.sideNames.ours }}
             </Button>
             <Button
               size="sm"
@@ -132,7 +132,7 @@ const theirsMissing = computed(() => !merge.theirsOid)
               :disabled="merge.busy || theirsMissing || missingSide(c.kind) === 'theirs'"
               @click="merge.resolve(c.path, 'theirs')"
             >
-              Keep theirs
+              Keep {{ merge.sideNames.theirs }}
             </Button>
           </div>
         </li>

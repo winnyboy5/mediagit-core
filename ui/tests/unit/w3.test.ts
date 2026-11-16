@@ -269,9 +269,16 @@ describe('rebase and cherry-pick stores', () => {
     expect(rb.active).toBe(true)
     expect(rb.clashes.map((c) => c.path)).toEqual(['a.psd', 'b.fbx'])
     api.mergeResolve.mockResolvedValue(null)
+    // During a rebase our side is the commit built on, named by status, never literal HEAD.
+    useRepoStore().status = { operation: { kind: 'rebase', ours: 'main', ours_commit: 'oo', theirs: 'cc' } } as never
+    expect(rb.sideNames).toEqual({ ours: 'feature', theirs: 'main' })
+    await rb.resolve('a.psd', 'ours')
+    expect(api.mergeResolve).toHaveBeenLastCalledWith('/repos/hero', 'a.psd', 'ours', 'oo', 'cc')
+    useRepoStore().status = { operation: { kind: 'rebase', ours: 'main', ours_commit: 'oo', theirs: 'cc' } } as never
     await rb.resolve('a.psd', 'theirs')
-    expect(api.mergeResolve).toHaveBeenCalledWith('/repos/hero', 'a.psd', 'theirs', 'cc')
+    expect(api.mergeResolve).toHaveBeenLastCalledWith('/repos/hero', 'a.psd', 'theirs', 'oo', 'cc')
     expect(rb.canContinue).toBe(false)
+    useRepoStore().status = { operation: { kind: 'rebase', ours: 'main', ours_commit: 'oo', theirs: 'cc' } } as never
     await rb.resolve('b.fbx', 'ours')
     expect(rb.canContinue).toBe(true)
     api.sequencerControl.mockResolvedValue({ action: 'continue', status: 'rebased', head: 'h', commits_rebased: 2, conflict_commit: null, conflicts: [] })

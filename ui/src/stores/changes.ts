@@ -58,15 +58,19 @@ function entriesOf(s: StatusReport | null): Record<Group, FileEntry[]> {
   }
 }
 
-const OPERATION_NAME = { merge: 'A merge', rebase: 'A rebase', cherry_pick: 'A cherry-pick', revert: 'An undo' } as const
+const OPERATION_NAME = { merge: 'A merge', rebase: 'A rebase', cherry_pick: 'Copying a version', revert: 'An undo' } as const
+
+/** Where the person decides the files. A stopped undo has no resolve page: it is decided from here. */
+const OPERATION_LINK: Partial<Record<keyof typeof OPERATION_NAME, string>> = { merge: '/branches/merge', rebase: '/settings/advanced', cherry_pick: '/settings/advanced' }
 
 /** What to tell the person when an operation stopped part-way; null when none did. */
-export function stoppedOperation(s: StatusReport | null): { kind: keyof typeof OPERATION_NAME; title: string; detail: string } | null {
+export function stoppedOperation(s: StatusReport | null): { kind: keyof typeof OPERATION_NAME; link: string | null; title: string; detail: string } | null {
   const op = s?.operation
   if (!op) return null
   const n = s.unresolved?.length ?? 0
   return {
     kind: op.kind,
+    link: OPERATION_LINK[op.kind] ?? null,
     title: `${OPERATION_NAME[op.kind]} is in progress`,
     detail: n ? `${n} ${n === 1 ? 'file needs' : 'files need'} a decision.` : 'Every file is decided.',
   }

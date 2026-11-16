@@ -7,7 +7,7 @@
   "untracked": [],
   "ignored": [],
   "media": [],
-  "operation": { "kind": "merge", "ours": "main", "theirs": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+  "operation": { "kind": "merge", "ours": "main", "ours_commit": "1111111111111111111111111111111111111111111111111111111111111111", "theirs": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
   "unresolved": ["notes.txt", "art/photo.jpeg"],
   "summary": { "staged": 2, "modified": 0, "deleted": 0, "untracked": 0, "total_size": null }
 }

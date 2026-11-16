@@ -132,7 +132,7 @@ describe('merge store', () => {
     await m.start('fx', 'recursive', {})
     api.mergeResolve.mockResolvedValue(null)
     expect(await m.resolve('a.psd', 'theirs')).toBe(true)
-    expect(api.mergeResolve).toHaveBeenCalledWith('/repos/hero', 'a.psd', 'theirs', 'bb')
+    expect(api.mergeResolve).toHaveBeenCalledWith('/repos/hero', 'a.psd', 'theirs', 'HEAD', 'bb')
     expect(m.resolved).toBe(1)
     expect(m.canContinue).toBe(false)
     await m.resolve('b.fbx', 'ours')

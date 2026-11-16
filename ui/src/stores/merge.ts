@@ -20,6 +20,8 @@ export const useMergeStore = defineStore('merge', () => {
   const theirsOid = ref<string | null>(null)
   const last = ref<MergeReport | null>(null)
 
+  /** Button wording: the two branches by name. */
+  const sideNames = computed(() => ({ ours: branches.current ?? 'my version', theirs: theirsName.value ?? 'their version' }))
   const resolved = computed(() => conflicts.value.filter((c) => c.resolved).length)
   const canContinue = computed(() => active.value && resolved.value === conflicts.value.length)
 
@@ -52,10 +54,11 @@ export const useMergeStore = defineStore('merge', () => {
   async function resolve(path: string, side: Side) {
     const oid = theirsOid.value
     if (side === 'theirs' && !oid) return false
-    const label = side === 'ours' ? 'mine' : 'theirs'
+    const label = side === 'ours' ? sideNames.value.ours : sideNames.value.theirs
+    const ours = repo.status?.operation?.ours_commit ?? 'HEAD'
     const r = await run(
       `Keep ${label} of ${path}`,
-      (root) => api.mergeResolve(root, path, side, oid ?? ''),
+      (root) => api.mergeResolve(root, path, side, ours, oid ?? ''),
       () => `Kept ${label}`,
     )
     if (r) conflicts.value = conflicts.value.map((c) => (c.path === path ? { ...c, resolved: side } : c))
@@ -81,5 +84,5 @@ export const useMergeStore = defineStore('merge', () => {
     },
   )
 
-  return { active, conflicts, theirsName, theirsOid, last, resolved, canContinue, busy, error, running, start, resolve, continue: () => control('continue'), abort: () => control('abort') }
+  return { active, conflicts, sideNames, theirsName, theirsOid, last, resolved, canContinue, busy, error, running, start, resolve, continue: () => control('continue'), abort: () => control('abort') }
 })

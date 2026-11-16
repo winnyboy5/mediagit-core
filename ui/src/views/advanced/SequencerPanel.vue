@@ -98,10 +98,10 @@ const targetLabel = computed(() => options.value.find((o) => o.value === target.
         <li v-for="c in seq.clashes" :key="c.path" class="row" :data-file="c.path">
           <StatusBadge status="conflict" />
           <span class="mono path">{{ c.path }}</span>
-          <span v-if="c.resolved" class="chip">{{ c.resolved === 'ours' ? 'Kept mine' : 'Kept theirs' }}</span>
+          <span v-if="c.resolved" class="chip">Kept {{ c.resolved === 'ours' ? seq.sideNames.ours : seq.sideNames.theirs }}</span>
           <div class="acts" role="group" :aria-label="`Choose a version of ${c.path}`">
-            <Button size="sm" :variant="c.resolved === 'ours' ? 'primary' : 'secondary'" :aria-pressed="c.resolved === 'ours'" :disabled="seq.busy" @click="seq.resolve(c.path, 'ours')">Keep mine</Button>
-            <Button size="sm" :variant="c.resolved === 'theirs' ? 'primary' : 'secondary'" :aria-pressed="c.resolved === 'theirs'" :disabled="seq.busy" @click="seq.resolve(c.path, 'theirs')">Keep theirs</Button>
+            <Button size="sm" :variant="c.resolved === 'ours' ? 'primary' : 'secondary'" :aria-pressed="c.resolved === 'ours'" :disabled="seq.busy" @click="seq.resolve(c.path, 'ours')">Keep {{ seq.sideNames.ours }}</Button>
+            <Button size="sm" :variant="c.resolved === 'theirs' ? 'primary' : 'secondary'" :aria-pressed="c.resolved === 'theirs'" :disabled="seq.busy" @click="seq.resolve(c.path, 'theirs')">Keep {{ seq.sideNames.theirs }}</Button>
           </div>
         </li>
       </ul>

@@ -286,9 +286,9 @@ export const api = {
     invoke<MergeReport>('repo_merge', { repo, branch, strategy, opts, onProgress: channel(onProgress) }),
   mergeControl: (repo: string, action: 'continue' | 'abort', onProgress: Report) =>
     invoke<MergeReport>('repo_merge_control', { repo, action, onProgress: channel(onProgress) }),
-  /** Take our version (`ours`) or `theirs` (a commit id) of one conflicted file, and stage it. */
-  mergeResolve: (repo: string, path: string, side: 'ours' | 'theirs', theirs: string) =>
-    invoke<unknown>('merge_resolve', { repo, path, side, theirs }),
+  /** Take our version (`ours`) or `theirs` of one conflicted file, and stage it. Both are commit ids from the status `operation`. */
+  mergeResolve: (repo: string, path: string, side: 'ours' | 'theirs', ours: string, theirs: string) =>
+    invoke<unknown>('merge_resolve', { repo, path, side, ours, theirs }),
 
   /** Two versions, or (both null) the working folder against the latest version. */
   /** `cached` (both null): the changes set aside for the next version, against the latest one. */

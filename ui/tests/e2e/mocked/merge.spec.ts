@@ -106,30 +106,30 @@ test.describe('Merge: conflicts', () => {
   test('a side that does not exist cannot be kept', async ({ page }) => {
     await boot(page)
     await startMerge(page)
-    await expect(row(page, 'char/rig.fbx').getByRole('button', { name: 'Keep theirs' })).toBeDisabled()
-    await expect(row(page, 'char/rig.fbx').getByRole('button', { name: 'Keep mine' })).toBeEnabled()
-    await expect(row(page, 'audio/vo_take3.wav').getByRole('button', { name: 'Keep mine' })).toBeDisabled()
-    await expect(row(page, 'audio/vo_take3.wav').getByRole('button', { name: 'Keep theirs' })).toBeEnabled()
+    await expect(row(page, 'char/rig.fbx').getByRole('button', { name: 'Keep feature/grade' })).toBeDisabled()
+    await expect(row(page, 'char/rig.fbx').getByRole('button', { name: 'Keep main' })).toBeEnabled()
+    await expect(row(page, 'audio/vo_take3.wav').getByRole('button', { name: 'Keep main' })).toBeDisabled()
+    await expect(row(page, 'audio/vo_take3.wav').getByRole('button', { name: 'Keep feature/grade' })).toBeEnabled()
   })
 
   test('resolving every file enables Finish; Finish merges and returns to the empty state', async ({ page }) => {
     await boot(page)
     await startMerge(page)
-    await row(page, 'art/hero.psd').getByRole('button', { name: 'Keep mine' }).click()
-    await expect(row(page, 'art/hero.psd')).toContainText('Kept mine')
-    await expect(row(page, 'art/hero.psd').getByRole('button', { name: 'Keep mine' })).toHaveAttribute('aria-pressed', 'true')
+    await row(page, 'art/hero.psd').getByRole('button', { name: 'Keep main' }).click()
+    await expect(row(page, 'art/hero.psd')).toContainText('Kept main')
+    await expect(row(page, 'art/hero.psd').getByRole('button', { name: 'Keep main' })).toHaveAttribute('aria-pressed', 'true')
     await expect(page.getByTestId('merge-summary')).toContainText('3 of 4 files need a decision · 1 resolved')
-    await row(page, 'scenes/opening.blend').getByRole('button', { name: 'Keep theirs' }).click()
-    await row(page, 'char/rig.fbx').getByRole('button', { name: 'Keep mine' }).click()
+    await row(page, 'scenes/opening.blend').getByRole('button', { name: 'Keep feature/grade' }).click()
+    await row(page, 'char/rig.fbx').getByRole('button', { name: 'Keep main' }).click()
     await expect(page.getByRole('button', { name: 'Finish merge' })).toBeDisabled()
-    await row(page, 'audio/vo_take3.wav').getByRole('button', { name: 'Keep theirs' }).click()
-    await expect(row(page, 'audio/vo_take3.wav')).toContainText('Kept theirs')
+    await row(page, 'audio/vo_take3.wav').getByRole('button', { name: 'Keep feature/grade' }).click()
+    await expect(row(page, 'audio/vo_take3.wav')).toContainText('Kept feature/grade')
     await expect(page.getByRole('button', { name: 'Finish merge' })).toBeEnabled()
     expect((await ipcCalls(page, 'merge_resolve')).map((c) => c.args)).toEqual([
-      { repo: '/repos/hero-film', path: 'art/hero.psd', side: 'ours', theirs: '0002000200020002000200020002000200020002' },
-      { repo: '/repos/hero-film', path: 'scenes/opening.blend', side: 'theirs', theirs: '0002000200020002000200020002000200020002' },
-      { repo: '/repos/hero-film', path: 'char/rig.fbx', side: 'ours', theirs: '0002000200020002000200020002000200020002' },
-      { repo: '/repos/hero-film', path: 'audio/vo_take3.wav', side: 'theirs', theirs: '0002000200020002000200020002000200020002' },
+      { repo: '/repos/hero-film', path: 'art/hero.psd', side: 'ours', ours: 'HEAD', theirs: '0002000200020002000200020002000200020002' },
+      { repo: '/repos/hero-film', path: 'scenes/opening.blend', side: 'theirs', ours: 'HEAD', theirs: '0002000200020002000200020002000200020002' },
+      { repo: '/repos/hero-film', path: 'char/rig.fbx', side: 'ours', ours: 'HEAD', theirs: '0002000200020002000200020002000200020002' },
+      { repo: '/repos/hero-film', path: 'audio/vo_take3.wav', side: 'theirs', ours: 'HEAD', theirs: '0002000200020002000200020002000200020002' },
     ])
     await page.getByRole('button', { name: 'Finish merge' }).click()
     await expect.poll(async () => (await ipcCalls(page, 'repo_merge_control')).map((c) => c.args.action)).toEqual(['continue'])
@@ -140,13 +140,13 @@ test.describe('Merge: conflicts', () => {
   test('a failed resolve is shown plainly and the file stays undecided', async ({ page }) => {
     await boot(page, { merge_resolve: { __error: { code: 'error', message: 'Could not write art/hero.psd.' } } })
     await startMerge(page)
-    await row(page, 'art/hero.psd').getByRole('button', { name: 'Keep mine' }).click()
+    await row(page, 'art/hero.psd').getByRole('button', { name: 'Keep main' }).click()
     const alert = page.getByRole('alert')
     await expect(alert).toContainText('Could not write art/hero.psd.')
     await expectNoAxeViolations(page)
     await alert.getByRole('button', { name: 'Dismiss' }).click()
     await expect(alert).toHaveCount(0)
-    await expect(row(page, 'art/hero.psd')).not.toContainText('Kept mine')
+    await expect(row(page, 'art/hero.psd')).not.toContainText('Kept main')
   })
 
   test('cancel merge asks first, explains, then aborts', async ({ page }) => {
@@ -189,14 +189,14 @@ test.describe('Merge: conflicts', () => {
   test('buttons are keyboard reachable with a visible focus ring', async ({ page }) => {
     await boot(page)
     await startMerge(page)
-    await row(page, 'art/hero.psd').getByRole('button', { name: 'Keep mine' }).focus()
+    await row(page, 'art/hero.psd').getByRole('button', { name: 'Keep main' }).focus()
     // The mouse was used to open the dialog; switch the modality to keyboard first.
     await page.keyboard.press('Shift+Tab')
     await page.keyboard.press('Tab')
-    await expect(row(page, 'art/hero.psd').getByRole('button', { name: 'Keep mine' })).toBeFocused()
+    await expect(row(page, 'art/hero.psd').getByRole('button', { name: 'Keep main' })).toBeFocused()
     await expectFocusRing(page)
     await page.keyboard.press('Tab')
-    await expect(row(page, 'art/hero.psd').getByRole('button', { name: 'Keep theirs' })).toBeFocused()
+    await expect(row(page, 'art/hero.psd').getByRole('button', { name: 'Keep feature/grade' })).toBeFocused()
     await expectFocusRing(page)
   })
 })

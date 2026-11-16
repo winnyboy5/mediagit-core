@@ -231,6 +231,15 @@ test.describe('Changes: stopped operation (BUG-021)', () => {
     await expectNoAxeViolations(page)
   })
 
+  for (const [kind, title] of [['rebase', 'A rebase is in progress.'], ['cherry_pick', 'Copying a version is in progress.']] as const) {
+    test(`${kind}: says so in app words and links to where the files are decided`, async ({ page }) => {
+      await boot(page, { repo_status: { ...fixture<Record<string, unknown>>('status_conflict'), operation: { kind, ours: 'main', ours_commit: 'ab12', theirs: 'cd34' } } })
+      const banner = page.getByTestId('operation-banner')
+      await expect(banner).toContainText(title)
+      await expect(banner.getByRole('link', { name: 'Decide the files' })).toHaveAttribute('href', '#/settings/advanced')
+    })
+  }
+
   test('no banner when nothing is stopped', async ({ page }) => {
     await boot(page)
     await expect(page.getByTestId('operation-banner')).toHaveCount(0)

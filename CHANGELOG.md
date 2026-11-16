@@ -247,7 +247,9 @@ that is already in HEAD, `add` saw "nothing changed" and left the file marked
 unresolved, so `--continue` refused. Naming a clashing file in `add` now always
 settles it. `status --machine` also reports `operation.ours_commit`, the commit
 that holds your side (during a rebase that is the branch being built on, not
-HEAD), and the app uses it for "Keep mine".
+HEAD), and the app uses it to take your side. In the app, the keep buttons now name the
+branches ("Keep main"), and the "in progress" banner on Changes uses app words
+and links to where the files are decided.
 
 ### Fixed — undoing, cherry-picking or rebasing through a conflict left a phantom "merge in progress", and the app could not open the repository (BUG-020, BUG-021)
 

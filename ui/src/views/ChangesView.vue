@@ -75,7 +75,7 @@ const MODES = [
         <strong>{{ changes.stopped.title }}.</strong>
         {{ changes.stopped.detail }}
       </span>
-      <RouterLink v-if="changes.stopped.kind === 'merge'" to="/branches/merge" class="link">Open the merge</RouterLink>
+      <RouterLink v-if="changes.stopped.link" :to="changes.stopped.link" class="link">{{ changes.stopped.kind === 'merge' ? 'Open the merge' : 'Decide the files' }}</RouterLink>
     </div>
 
     <div v-if="loadingFirst" class="pad"><SkeletonRows :count="8" /></div>

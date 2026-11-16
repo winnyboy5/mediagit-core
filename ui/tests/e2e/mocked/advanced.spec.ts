@@ -4,6 +4,7 @@ import { fixture, healthy, ipcCalls, ipcRelease, mockIpc, RECENT } from './ipc-m
 
 const REPO = { 'mg.repo': JSON.stringify('/repos/hero-film'), 'mg.recent': RECENT }
 const C = '0004000400040004000400040004000400040004'
+const OURS = '0009000900090009000900090009000900090009'
 const OLDEST = fixture<{ commits: { oid: string }[] }>('log_graph').commits.at(-1)!.oid
 // Copying starts with no version chosen (an empty copy is refused), so tests choose one.
 async function chooseVersion(page: Page, name: string | RegExp = /Merge grade pass into main/) {
@@ -63,7 +64,9 @@ test.describe('Advanced: rebase', () => {
   })
 
   test('a clash lists the files; each is decided with the replayed version as "theirs"; continue finishes', async ({ page }) => {
-    await boot(page, 'Rebase', { rebase_start: fixture('rebase_conflict'), sequencer_control: fixture('rebase_done') })
+    // Status names the rebase, the branch being moved, and the commit holding the other side.
+    const status = { ...fixture<Record<string, unknown>>('status_conflict'), operation: { kind: 'rebase', ours: 'main', ours_commit: OURS, theirs: C } }
+    await boot(page, 'Rebase', { rebase_start: fixture('rebase_conflict'), sequencer_control: fixture('rebase_done'), repo_status: status })
     await page.getByRole('button', { name: 'Start rebase…' }).click()
     await page.getByRole('alertdialog').getByRole('button', { name: 'Start rebase' }).click()
     const sum = page.getByTestId('rebase-summary')
@@ -71,12 +74,12 @@ test.describe('Advanced: rebase', () => {
     await expect(page.getByRole('list', { name: 'Clashing files' }).getByRole('listitem')).toHaveCount(2)
     await expect(page.getByRole('button', { name: 'Continue rebase' })).toBeDisabled()
     await expectNoAxeViolations(page)
-    await file(page, 'art/hero.psd').getByRole('button', { name: 'Keep mine' }).click()
-    await file(page, 'scenes/opening.blend').getByRole('button', { name: 'Keep theirs' }).click()
+    await file(page, 'art/hero.psd').getByRole('button', { name: 'Keep feature/grade' }).click()
+    await file(page, 'scenes/opening.blend').getByRole('button', { name: 'Keep main' }).click()
     await expect(sum).toContainText('0 of 2 files need a decision · 2 resolved')
     expect((await ipcCalls(page, 'merge_resolve')).map((c) => c.args)).toEqual([
-      { repo: '/repos/hero-film', path: 'art/hero.psd', side: 'ours', theirs: C },
-      { repo: '/repos/hero-film', path: 'scenes/opening.blend', side: 'theirs', theirs: C },
+      { repo: '/repos/hero-film', path: 'art/hero.psd', side: 'ours', ours: OURS, theirs: C },
+      { repo: '/repos/hero-film', path: 'scenes/opening.blend', side: 'theirs', ours: OURS, theirs: C },
     ])
     await page.getByRole('button', { name: 'Continue rebase' }).click()
     await expect.poll(async () => (await ipcCalls(page, 'sequencer_control')).map((c) => [c.args.command, c.args.action])).toEqual([['rebase', 'continue']])
@@ -168,7 +171,7 @@ test.describe('Advanced: cherry-pick', () => {
     await page.getByRole('button', { name: 'Copy version' }).click()
     await page.getByRole('alertdialog').getByRole('button', { name: 'Copy version' }).click()
     await expect(page.getByTestId('pick-summary')).toContainText('1 of 1 files need a decision')
-    await file(page, 'audio/vo_take3.wav').getByRole('button', { name: 'Keep theirs' }).click()
+    await file(page, 'audio/vo_take3.wav').getByRole('button', { name: 'Keep the copied version' }).click()
     await expectNoAxeViolations(page)
     await page.getByRole('button', { name: 'Continue copy' }).click()
     await expect.poll(async () => (await ipcCalls(page, 'sequencer_control')).map((c) => [c.args.command, c.args.action])).toEqual([['cherry-pick', 'continue']])

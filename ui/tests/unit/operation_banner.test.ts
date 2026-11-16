@@ -16,16 +16,19 @@ describe('stoppedOperation (BUG-021: the app now sees a stopped operation)', () 
   })
 
   it('names the operation and counts the files that need a decision', () => {
-    expect(stoppedOperation(conflict as StatusReport)).toEqual({ kind: 'merge', title: 'A merge is in progress', detail: '2 files need a decision.' })
+    expect(stoppedOperation(conflict as StatusReport)).toEqual({ kind: 'merge', link: '/branches/merge', title: 'A merge is in progress', detail: '2 files need a decision.' })
   })
 
   it('uses plain words per kind, singular for one file, and says when all are decided', () => {
     const base = conflict as StatusReport
-    const of = (kind: 'rebase' | 'cherry_pick' | 'revert', unresolved: string[]) => stoppedOperation({ ...base, operation: { kind, ours: null, theirs: null }, unresolved })!
+    const of = (kind: 'rebase' | 'cherry_pick' | 'revert', unresolved: string[]) => stoppedOperation({ ...base, operation: { kind, ours: null, ours_commit: null, theirs: null }, unresolved })!
     expect(of('revert', ['a']).title).toBe('An undo is in progress')
     expect(of('revert', ['a']).detail).toBe('1 file needs a decision.')
-    expect(of('cherry_pick', []).title).toBe('A cherry-pick is in progress')
+    expect(of('cherry_pick', []).title).toBe('Copying a version is in progress')
     expect(of('rebase', []).detail).toBe('Every file is decided.')
+    // The banner links to where the files are decided, for every kind that has such a place.
+    expect(of('rebase', ['a']).link).toBe('/settings/advanced')
+    expect(of('cherry_pick', ['a']).link).toBe('/settings/advanced')
   })
 
   it('reaches the Changes store from the repo status', () => {
