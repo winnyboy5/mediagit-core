@@ -59,6 +59,10 @@ pub struct OperationReport {
     pub kind: OperationKind,
     /// Branch the operation is running on; `None` when HEAD is detached.
     pub ours: Option<String>,
+    /// Commit holding "our" side of a conflict (hex). For a rebase it is the
+    /// commit the replayed work is being put on (HEAD still points at the
+    /// user's own branch tip there); otherwise it is HEAD.
+    pub ours_commit: Option<String>,
     /// Commit being brought in (hex), when the operation recorded one. For
     /// merge, cherry-pick and rebase it is the commit being merged, picked or
     /// replayed; for revert it is the parent of the commit being undone.
@@ -753,6 +757,12 @@ impl StatusCmd {
                 ours: branch_name_for_upstream
                     .clone()
                     .filter(|_| matches!(branch_state, BranchState::OnBranch(_))),
+                ours_commit: match o.kind {
+                    OperationKind::Rebase => super::rebase_state::RebaseState::load(&repo_root)
+                        .ok()
+                        .map(|st| st.new_parent.to_hex()),
+                    _ => head_oid.map(|h| h.to_hex()),
+                },
                 theirs: std::fs::read_to_string(storage_path.join("MERGE_HEAD"))
                     .ok()
                     .map(|t| t.trim().to_string())

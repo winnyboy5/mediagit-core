@@ -1230,3 +1230,99 @@ fn fix2_revert_skip_keeps_unrelated_edits() {
     );
     assert_eq!(fs::read_to_string(d.join("shared.txt")).unwrap(), "v3\n");
 }
+
+// ============================================================================
+// BUG-029 — keeping the bytes HEAD already has must still resolve the path.
+// ============================================================================
+
+/// Write `bytes`, stage the file, run `--continue`, and expect a clean finish.
+fn keep_and_continue(dir: &Path, cmd: &str, bytes: &str) {
+    fs::write(dir.join("shared.txt"), bytes).unwrap();
+    let add = run(dir, &["add", "--", "shared.txt"]);
+    assert!(
+        add.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let out = run(dir, &[cmd, "--continue"]);
+    assert!(
+        out.status.success(),
+        "{cmd} --continue after keeping HEAD's bytes: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_no_operation(dir, cmd);
+}
+
+#[test]
+fn bug029_rebase_keeping_head_bytes_resolves() {
+    let t = TempDir::new().unwrap();
+    setup_rebase_conflict(t.path());
+    keep_and_continue(t.path(), "rebase", "feature-change\n");
+}
+
+/// Keeping HEAD's bytes makes the pick empty. The path must still count as decided
+/// (so `--continue` gets past the unresolved check), and `--skip` then ends it cleanly.
+#[test]
+fn bug029_cherry_pick_keeping_head_bytes_resolves() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    setup_cherry_pick_conflict(d);
+    fs::write(
+        d.join("shared.txt"),
+        "main-change
+",
+    )
+    .unwrap();
+    assert!(run(d, &["add", "--", "shared.txt"]).status.success());
+    let out = run(d, &["cherry-pick", "--continue"]);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !text.contains("unresolved"),
+        "path still unresolved: {text}"
+    );
+    if !out.status.success() {
+        assert!(text.contains("nothing to commit"), "{text}");
+        assert!(run(d, &["cherry-pick", "--skip"]).status.success());
+    }
+    assert_no_operation(d, "cherry-pick");
+}
+
+#[test]
+fn bug029_revert_keeping_head_bytes_resolves() {
+    let t = TempDir::new().unwrap();
+    revert_conflict(t.path());
+    keep_and_continue(t.path(), "revert", "v3\n");
+}
+
+/// The side that is "ours" in a rebase is the commit being built on, not HEAD.
+#[test]
+fn bug029_status_names_the_commit_holding_our_side() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    let ours = |d: &Path| -> String {
+        let out = run(d, &["status", "--machine"]);
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        v["data"]["operation"]["ours_commit"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    setup_rebase_conflict(d);
+    assert_eq!(
+        ours(d),
+        tip(d, "main"),
+        "rebase: our side is the upstream tip"
+    );
+    let t2 = TempDir::new().unwrap();
+    setup_cherry_pick_conflict(t2.path());
+    assert_eq!(
+        ours(t2.path()),
+        tip(t2.path(), "main"),
+        "cherry-pick: our side is HEAD"
+    );
+}

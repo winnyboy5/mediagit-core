@@ -240,6 +240,15 @@ way, or the version is the first one) now changes nothing and leaves no
 "cherry-pick in progress". `cherry-pick --continue` also works now when the
 pick was given as a branch name or a short id.
 
+### Fixed — keeping HEAD's file in a stopped rebase, pick or undo did not count as a decision (BUG-029)
+
+When a rebase, cherry-pick or undo stopped on a clash and you kept the version
+that is already in HEAD, `add` saw "nothing changed" and left the file marked
+unresolved, so `--continue` refused. Naming a clashing file in `add` now always
+settles it. `status --machine` also reports `operation.ours_commit`, the commit
+that holds your side (during a rebase that is the branch being built on, not
+HEAD), and the app uses it for "Keep mine".
+
 ### Fixed — undoing, cherry-picking or rebasing through a conflict left a phantom "merge in progress", and the app could not open the repository (BUG-020, BUG-021)
 
 After `revert`, `cherry-pick` or `rebase` stopped on a conflict, leaving it

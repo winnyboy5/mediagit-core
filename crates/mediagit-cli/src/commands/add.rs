@@ -12,7 +12,7 @@ use clap::Parser;
 use mediagit_versioning::{
     ChunkStrategy, Commit, Index, IndexEntry, ObjectDatabase, ObjectType, Oid, RefDatabase, Tree,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -64,6 +64,8 @@ pub async fn stage_files_for_commit(paths: &[String], repo_root: &std::path::Pat
         Arc::new(map)
     };
 
+    let unresolved: HashSet<PathBuf> = index.unresolved_paths().into_iter().collect();
+
     // Stage each path sequentially
     let mut added_count = 0u64;
     for path_str in paths {
@@ -79,6 +81,7 @@ pub async fn stage_files_for_commit(paths: &[String], repo_root: &std::path::Pat
                 &odb,
                 &head_files,
                 &index_files,
+                &unresolved,
                 true,
                 None,
             )
@@ -453,6 +456,10 @@ impl AddCmd {
             Arc::new(map)
         };
 
+        // BUG-029: a path left unresolved by a stopped operation is always re-staged.
+        let unresolved: Arc<HashSet<PathBuf>> =
+            Arc::new(index.unresolved_paths().into_iter().collect());
+
         // Get HEAD commit tree to identify already-tracked files
         let refdb = RefDatabase::new(&storage_path);
         let head_files: Arc<HashMap<PathBuf, Oid>> = {
@@ -570,6 +577,7 @@ impl AddCmd {
                     let odb = odb.clone();
                     let head_files = head_files.clone();
                     let index_files = index_files.clone();
+                    let unresolved = unresolved.clone();
                     let repo_root = repo_root.clone();
                     let progress_bytes = progress_bytes.clone();
                     let progress_files = progress_files.clone();
@@ -615,6 +623,7 @@ impl AddCmd {
                             &odb,
                             &head_files,
                             &index_files,
+                            &unresolved,
                             delta_enabled,
                             on_bytes,
                         )
@@ -711,6 +720,7 @@ impl AddCmd {
                         &odb,
                         &head_files,
                         &index_files,
+                        &unresolved,
                         delta_enabled,
                         on_bytes_seq.clone(),
                     )
@@ -961,12 +971,14 @@ impl AddCmd {
     /// Returns `Ok(Some(FileResult))` if file was staged,
     /// `Ok(None)` if file was skipped (unchanged from HEAD),
     /// `Err` on failure.
+    #[allow(clippy::too_many_arguments)] // one shared per-file worker; a params struct would be churn
     pub async fn process_single_file(
         file_path: &Path,
         repo_root: &Path,
         odb: &ObjectDatabase,
         head_files: &HashMap<PathBuf, Oid>,
         index_files: &HashMap<PathBuf, (u64, Option<u64>)>,
+        unresolved: &HashSet<PathBuf>,
         delta_enabled: bool,
         on_bytes: Option<Arc<dyn Fn(u64) + Send + Sync>>,
     ) -> Result<(Option<FileResult>, u64)> {
@@ -1001,7 +1013,12 @@ impl AddCmd {
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs());
 
-        if let Some(&(idx_size, Some(idx_mtime))) = index_files.get(&relative_path)
+        // BUG-029: naming a conflicted path is the decision, even when its
+        // bytes equal HEAD's, so it never takes the "unchanged" exits below.
+        let conflicted = unresolved.contains(&relative_path);
+
+        if !conflicted
+            && let Some(&(idx_size, Some(idx_mtime))) = index_files.get(&relative_path)
             && idx_size == file_size
             && let Some(current_mtime) = file_mtime
             && idx_mtime == current_mtime
@@ -1074,7 +1091,8 @@ impl AddCmd {
             );
 
             // Check if unchanged from HEAD
-            if let Some(head_oid) = head_files.get(&relative_path)
+            if !conflicted
+                && let Some(head_oid) = head_files.get(&relative_path)
                 && *head_oid == content_oid
             {
                 if let Some(ref cb) = on_bytes {
@@ -1105,7 +1123,8 @@ impl AddCmd {
             let content_oid = Oid::hash(&content);
 
             // Check if unchanged from HEAD
-            if let Some(head_oid) = head_files.get(&relative_path)
+            if !conflicted
+                && let Some(head_oid) = head_files.get(&relative_path)
                 && *head_oid == content_oid
             {
                 if let Some(ref cb) = on_bytes {

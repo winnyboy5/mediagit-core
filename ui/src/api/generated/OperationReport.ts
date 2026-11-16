@@ -7,6 +7,12 @@ export type OperationReport = { kind: OperationKind,
  */
 ours: string | null, 
 /**
+ * Commit holding "our" side of a conflict (hex). For a rebase it is the
+ * commit the replayed work is being put on (HEAD still points at the
+ * user's own branch tip there); otherwise it is HEAD.
+ */
+ours_commit: string | null, 
+/**
  * Commit being brought in (hex), when the operation recorded one. For
  * merge, cherry-pick and rebase it is the commit being merged, picked or
  * replayed; for revert it is the parent of the commit being undone.

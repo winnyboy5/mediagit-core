@@ -268,15 +268,17 @@ fn file_at_argv(repo: &Path, rev: &str, path: &str) -> Result<(String, Vec<Strin
     Ok((rel, argv))
 }
 
-/// Resolve one conflicted file: take our (`HEAD`) or their version of it, then stage it.
+/// Resolve one conflicted file: take our or their version of it, then stage it. Both sides
+/// are commits named by the status `operation` (during a rebase `HEAD` is not "ours").
 fn merge_resolve_argvs(
     repo: &Path,
     path: &str,
     side: &str,
+    ours: &str,
     theirs: &str,
 ) -> Result<[Vec<String>; 2], EngineError> {
     let rev = match side {
-        "ours" => "HEAD",
+        "ours" => ours,
         "theirs" => theirs,
         _ => return Err(invalid("side", side)),
     };
@@ -1175,7 +1177,7 @@ pub async fn repo_merge_control(
     .await
 }
 
-/// Resolve one conflicted file with our version (`ours`) or `theirs` (a commit id), and stage it.
+/// Resolve one conflicted file with our version (`ours`) or `theirs`; both sides are commit ids, and stage it.
 #[tauri::command]
 pub async fn merge_resolve(
     engine: tauri::State<'_, Engine>,
@@ -1183,10 +1185,11 @@ pub async fn merge_resolve(
     repo: String,
     path: String,
     side: String,
+    ours: String,
     theirs: String,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    let [show, add] = merge_resolve_argvs(&repo, &path, &side, &theirs)?;
+    let [show, add] = merge_resolve_argvs(&repo, &path, &side, &ours, &theirs)?;
     queues
         .write(&repo, async {
             read(&engine, &repo, &show).await?;
@@ -1697,24 +1700,44 @@ mod tests {
     fn merge_resolve_extracts_one_side_then_stages_the_path() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path();
+        let ours = "fedcba9876543210fedcba9876543210";
         let theirs = "0123456789abcdef0123456789abcdef";
         let out = repo.join("art/hero.psd").to_string_lossy().into_owned();
-        let [show, add] = merge_resolve_argvs(repo, "art/hero.psd", "ours", theirs).unwrap();
+        let [show, add] = merge_resolve_argvs(repo, "art/hero.psd", "ours", ours, theirs).unwrap();
+        // BUG-029: "ours" is the commit the status named, never the literal HEAD.
         assert_eq!(
             show,
-            ["show", "HEAD:art/hero.psd", "--output", out.as_str()]
+            [
+                "show",
+                format!("{ours}:art/hero.psd").as_str(),
+                "--output",
+                out.as_str()
+            ]
         );
         assert_eq!(add, ["add", "--", "art/hero.psd"]);
-        let [show, _] = merge_resolve_argvs(repo, "art/hero.psd", "theirs", theirs).unwrap();
+        let [show, _] = merge_resolve_argvs(repo, "art/hero.psd", "theirs", ours, theirs).unwrap();
         assert_eq!(show[1], format!("{theirs}:art/hero.psd"));
-        assert!(bad_pair(merge_resolve_argvs(repo, "../x", "ours", theirs)));
-        assert!(bad_pair(merge_resolve_argvs(repo, "-x", "ours", theirs)));
-        assert!(bad_pair(merge_resolve_argvs(repo, ".", "ours", theirs)));
-        assert!(bad_pair(merge_resolve_argvs(repo, "a.psd", "both", theirs)));
         assert!(bad_pair(merge_resolve_argvs(
-            repo, "a.psd", "theirs", "main"
+            repo, "../x", "ours", ours, theirs
         )));
-        assert!(bad_pair(merge_resolve_argvs(repo, "a.psd", "theirs", "")));
+        assert!(bad_pair(merge_resolve_argvs(
+            repo, "-x", "ours", ours, theirs
+        )));
+        assert!(bad_pair(merge_resolve_argvs(
+            repo, ".", "ours", ours, theirs
+        )));
+        assert!(bad_pair(merge_resolve_argvs(
+            repo, "a.psd", "both", ours, theirs
+        )));
+        assert!(bad_pair(merge_resolve_argvs(
+            repo, "a.psd", "theirs", ours, "main"
+        )));
+        assert!(bad_pair(merge_resolve_argvs(
+            repo, "a.psd", "theirs", ours, ""
+        )));
+        assert!(bad_pair(merge_resolve_argvs(
+            repo, "a.psd", "ours", "", theirs
+        )));
     }
 
     #[allow(clippy::needless_pass_by_value)] // call sites pass temporaries
