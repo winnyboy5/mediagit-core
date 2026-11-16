@@ -142,6 +142,14 @@ impl CherryPickCmd {
     }
 
     async fn start_cherrypick(&self, repo_root: &PathBuf) -> Result<Outcome> {
+        // X1: a stop after the first version cannot be continued or skipped
+        // without mixing the versions, so refuse before anything is written.
+        if self.no_commit && self.commits.len() > 1 {
+            anyhow::bail!(
+                "--no-commit takes one version at a time. Pick them one at a time, \
+                 or leave out -n to save each one. Nothing was changed."
+            );
+        }
         let mediagit_dir = repo_root.join(".mediagit");
         let storage = create_storage_backend(repo_root).await?;
         let odb = Arc::new(ObjectDatabase::with_smart_compression(
@@ -248,6 +256,8 @@ impl CherryPickCmd {
                                 if idx + 1 < self.commits.len() {
                                     self.save_cherrypick_state(repo_root, &resolved, idx)
                                         .await?;
+                                } else {
+                                    remove_state(repo_root)?;
                                 }
                                 return Err(e);
                             }
@@ -287,6 +297,9 @@ impl CherryPickCmd {
                 }
             }
         }
+
+        // X3: the rest of a `--continue` / `--skip` ran; its state goes now.
+        remove_state(repo_root)?;
 
         if !self.quiet() {
             println!(
@@ -549,25 +562,30 @@ impl CherryPickCmd {
                 .create_cherry_pick_commit(&odb, &refdb, repo_root, &current_oid, None)
                 .await?;
             created.push(new_oid.to_hex());
-        }
 
-        // The conflicted pick is done; the next one rewrites these if it
-        // conflicts. Its staged entries are committed, so they go too, and so
-        // does the state: a refusal in the rest must not leave a state that
-        // points at the pick just committed.
-        mediagit_versioning::clear_merge_state(&mediagit_dir)?;
-        let mut index = Index::load(repo_root)?;
-        index.clear();
-        index.save(repo_root)?;
-        std::fs::remove_file(&state_path)?;
+            // The conflicted pick is done; the next one rewrites these if it
+            // conflicts. Its staged entries are committed, so they go too.
+            mediagit_versioning::clear_merge_state(&mediagit_dir)?;
+            let mut index = Index::load(repo_root)?;
+            index.clear();
+            index.save(repo_root)?;
+        }
 
         // Continue with remaining commits
         if state.remaining_commits.is_empty() {
+            std::fs::remove_file(&state_path)?;
             if !self.quiet() {
                 println!("{} Cherry-pick complete", style("✓").green());
             }
             return outcome("completed", created);
         }
+        // X3: no pick is pending now, but the rest stays listed until it ran,
+        // so a refusal in it can be continued after the cause is fixed.
+        write_rest_state(
+            repo_root,
+            refdb.resolve("HEAD").await?,
+            &state.remaining_commits,
+        )?;
 
         // Process remaining commits
         let remaining: Vec<String> = state.remaining_commits.clone();
@@ -597,7 +615,13 @@ impl CherryPickCmd {
         // Load state
         // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- repo-internal constant path
         let state_json = std::fs::read_to_string(&state_path)?;
-        let state: CherryPickState = serde_json::from_str(&state_json)?;
+        let mut state: CherryPickState = serde_json::from_str(&state_json)?;
+        // X3: with no pick pending (the rest was refused), skip the version
+        // that was refused: the first one left.
+        let pending = state.current_commit.is_some();
+        if !pending && !state.remaining_commits.is_empty() {
+            state.current_commit = Some(state.remaining_commits.remove(0));
+        }
 
         if !self.quiet() {
             println!(
@@ -627,17 +651,21 @@ impl CherryPickCmd {
         // Then drop the skipped pick's conflict: the paths it touched go back
         // to HEAD (other edits stay), index cleared, merge files removed. The
         // stop is over; the rest saves a new state only if it conflicts.
-        crate::worktree_guard::drop_skipped_step(repo_root, &odb, &head_oid).await?;
-        std::fs::remove_file(&state_path)?;
+        if pending {
+            crate::worktree_guard::drop_skipped_step(repo_root, &odb, &head_oid).await?;
+        }
 
         // Continue with remaining commits (skip current)
         if state.remaining_commits.is_empty() {
+            std::fs::remove_file(&state_path)?;
             if !self.quiet() {
                 println!("{} Cherry-pick complete", style("✓").green());
             }
             return outcome("completed", Vec::new());
         }
 
+        // X3: listed until it ran (see `continue_cherrypick`).
+        write_rest_state(repo_root, head_oid, &state.remaining_commits)?;
         let remaining: Vec<String> = state.remaining_commits.clone();
         drop(state);
 
@@ -773,6 +801,27 @@ impl CherryPickCmd {
             .resolve(commit_ref)
             .await
             .context(format!("Cannot resolve commit reference: {}", commit_ref))
+    }
+}
+
+/// A stop with no pick pending: `remaining` still to run on top of `head`.
+fn write_rest_state(repo_root: &std::path::Path, head: Oid, remaining: &[String]) -> Result<()> {
+    let state = CherryPickState {
+        original_head: Some(head.to_hex()),
+        current_commit: None,
+        remaining_commits: remaining.to_vec(),
+    };
+    std::fs::write(
+        repo_root.join(".mediagit/CHERRY_PICK_STATE"),
+        serde_json::to_string_pretty(&state)?,
+    )?;
+    Ok(())
+}
+
+fn remove_state(repo_root: &std::path::Path) -> Result<()> {
+    match std::fs::remove_file(repo_root.join(".mediagit/CHERRY_PICK_STATE")) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+        _ => Ok(()),
     }
 }
 

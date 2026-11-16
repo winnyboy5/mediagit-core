@@ -158,8 +158,20 @@ pub async fn tracked_paths(
 /// Drop a stopped operation's conflict: put every tracked file back to
 /// `head` (untracked files are kept), clear the index and remove the merge
 /// files, so no marker text or unresolved flag outlives the operation.
-pub async fn drop_conflict(repo_root: &Path, odb: &ObjectDatabase, head: &Oid) -> Result<()> {
-    let tracked = tracked_paths(repo_root, odb, Some(head)).await?;
+/// Files of `on_disk` (the commit the stop checked out) count as tracked too.
+pub async fn drop_conflict(
+    repo_root: &Path,
+    odb: &ObjectDatabase,
+    head: &Oid,
+    on_disk: &Oid,
+) -> Result<()> {
+    let mut tracked = tracked_paths(repo_root, odb, Some(head)).await?;
+    tracked.extend(
+        CheckoutManager::new(odb, repo_root)
+            .tracked_files_at(on_disk)
+            .await?
+            .into_keys(),
+    );
     CheckoutManager::new(odb, repo_root)
         .with_tracked_paths(tracked)
         .checkout_commit(head)
@@ -186,7 +198,10 @@ pub async fn drop_skipped_step(repo_root: &Path, odb: &ObjectDatabase, head: &Oi
     for p in index.deleted_paths() {
         left.remove_entry(&norm(p));
     }
-    for e in index.entries() {
+    for e in index
+        .entries()
+        .filter(|e| !mediagit_versioning::is_stage_debris_key(&e.path.to_string_lossy()))
+    {
         let mode = FileMode::from_u32(e.mode).unwrap_or(FileMode::Regular);
         left.add_entry(TreeEntry::new(norm(&e.path), mode, e.oid));
     }

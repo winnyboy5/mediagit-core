@@ -300,7 +300,14 @@ impl RebaseCmd {
 
         // Rebase commits one by one
         let result = self
-            .apply_commits(&repo_root, &odb, &refdb, &mut state, &commits_to_rebase)
+            .apply_commits(
+                &repo_root,
+                &odb,
+                &refdb,
+                &mut state,
+                &commits_to_rebase,
+                current_oid,
+            )
             .await;
 
         match result {
@@ -345,7 +352,8 @@ impl RebaseCmd {
         }
     }
 
-    /// Apply commits during rebase, updating state as we go.
+    /// Apply commits during rebase, updating state as we go. `on_disk` is the
+    /// commit the working tree holds now (the replay itself runs in memory).
     async fn apply_commits(
         &self,
         repo_root: &std::path::Path,
@@ -353,6 +361,7 @@ impl RebaseCmd {
         _refdb: &RefDatabase,
         state: &mut RebaseState,
         commits: &[(Oid, Commit)],
+        on_disk: Oid,
     ) -> Result<Oid> {
         let mut new_parent = state.new_parent;
         let merge_engine = MergeEngine::new(odb.clone());
@@ -418,6 +427,15 @@ impl RebaseCmd {
                 // read `commits_remaining`.
                 let ours_tree_obj = Tree::read(odb, &ours_tree).await?;
                 let mut index = Index::load(repo_root)?;
+
+                // X2: the writer writes only what differs from ours, so the
+                // working tree must hold ours (the new base) first, not the
+                // old branch tip. Only paths that differ move; untracked
+                // files are never touched.
+                CheckoutManager::new(odb, repo_root)
+                    .checkout_diff(&on_disk, &new_parent)
+                    .await
+                    .context("Failed to check out the new base at the rebase stop")?;
 
                 apply_merge_to_workdir(
                     &merge_result,
@@ -576,8 +594,15 @@ impl RebaseCmd {
             .context("Cannot read the commit this rebase started from; nothing was changed")?;
 
         // Put tracked files back to the original head, clear the index and the
-        // merge files (BUG-026). Untracked files are kept.
-        crate::worktree_guard::drop_conflict(repo_root, &odb, &state.original_head).await?;
+        // merge files (BUG-026). Untracked files are kept. X2: the stop
+        // checked out the new base, whose files go too.
+        crate::worktree_guard::drop_conflict(
+            repo_root,
+            &odb,
+            &state.original_head,
+            &state.new_parent,
+        )
+        .await?;
 
         // Restore HEAD to original position
         if let Some(ref branch) = state.original_branch {
@@ -733,9 +758,18 @@ impl RebaseCmd {
             return Ok(Outcome::new("rebased", Some(state.new_parent), None));
         }
 
-        // Continue applying remaining commits
+        // Continue applying remaining commits. The working tree holds the
+        // last stop's new base with the resolution on top.
+        let on_disk = state.new_parent;
         let result = self
-            .apply_commits(repo_root, &odb, &refdb, &mut state, &remaining_commits)
+            .apply_commits(
+                repo_root,
+                &odb,
+                &refdb,
+                &mut state,
+                &remaining_commits,
+                on_disk,
+            )
             .await;
 
         match result {

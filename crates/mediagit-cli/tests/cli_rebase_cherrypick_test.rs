@@ -646,6 +646,13 @@ fn stopped_rebase(d: &Path, extra_pick: bool) -> Vec<(&'static str, String)> {
             .contains("<<<<<<<"),
         "the rebase stopped with markers in notes.txt"
     );
+    // X2: the stop shows the new base, so the abort below has a file only
+    // the new base has to remove.
+    assert_eq!(
+        fs::read_to_string(d.join("up.txt")).ok().as_deref(),
+        Some("from main\n"),
+        "the stop shows the new base's up.txt"
+    );
     before
 }
 

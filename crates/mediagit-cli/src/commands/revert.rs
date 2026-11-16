@@ -101,15 +101,19 @@ struct RevertState {
     commits: Vec<String>,
     current_index: usize,
     original_head: Oid,
+    /// X3: false when `commits[current_index]` has not run yet (the rest was
+    /// refused), so `--continue` has no conflict to commit first.
+    pending: bool,
 }
 
 impl std::fmt::Display for RevertState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{}\n{}\n{}",
+            "{}\n{}{}\n{}",
             self.original_head.to_hex(),
             self.current_index,
+            if self.pending { "" } else { " next" },
             self.commits.join("\n")
         )
     }
@@ -121,12 +125,22 @@ impl RevertState {
         if lines.len() < 3 {
             anyhow::bail!("Invalid revert state file");
         }
+        let (index, pending) = match lines[1].strip_suffix(" next") {
+            Some(i) => (i, false),
+            None => (lines[1], true),
+        };
 
         Ok(Self {
             original_head: Oid::from_hex(lines[0])?,
-            current_index: lines[1].parse()?,
+            current_index: index.parse()?,
             commits: lines[2..].iter().map(|s| s.to_string()).collect(),
+            pending,
         })
+    }
+
+    async fn save(&self, state_file: &Path) -> Result<()> {
+        fs::write(state_file, self.to_string()).await?;
+        Ok(())
     }
 }
 
@@ -220,6 +234,14 @@ impl RevertCmd {
         action: &str,
     ) -> Result<()> {
         let state_file = storage_path.join(REVERT_STATE_FILE);
+        // X1: a stop after the first revert cannot be continued or skipped
+        // without mixing the reverts, so refuse before anything is written.
+        if self.no_commit && commits.len().saturating_sub(start) > 1 {
+            anyhow::bail!(
+                "--no-commit takes one version at a time. Undo them one at a time, \
+                 or leave out -n to save each one. Nothing was changed."
+            );
+        }
         // `--no-commit`: each revert goes on top of the previous result.
         let mut onto = None;
         for (i, spec) in commits.iter().enumerate().skip(start) {
@@ -232,15 +254,24 @@ impl RevertCmd {
                 Ok(oid) if self.no_commit => onto = Some(oid),
                 Ok(oid) => new_commits.push(oid.to_hex()),
                 Err(e) => {
-                    let Some(stop) = e.downcast_ref::<ConflictStop>() else {
+                    let stop = e.downcast_ref::<ConflictStop>();
+                    // X3: a refusal inside `--continue` / `--skip` (the state
+                    // exists) keeps this revert and the rest listed. A first
+                    // run's refusal leaves no state.
+                    if stop.is_none() && !state_file.exists() {
                         return Err(e);
-                    };
-                    let state = RevertState {
+                    }
+                    RevertState {
                         commits: commits.to_vec(),
                         current_index: i,
                         original_head,
+                        pending: stop.is_some(),
+                    }
+                    .save(&state_file)
+                    .await?;
+                    let Some(stop) = stop else {
+                        return Err(e);
                     };
-                    fs::write(&state_file, state.to_string()).await?;
 
                     if output::machine_mode() {
                         output::emit_ok(&RevertReport {
@@ -260,6 +291,11 @@ impl RevertCmd {
                     anyhow::bail!("Revert stopped due to conflicts");
                 }
             }
+        }
+
+        // X3: the whole sequence ran; a `--continue` / `--skip` state goes now.
+        if state_file.exists() {
+            fs::remove_file(&state_file).await?;
         }
 
         if !self.quiet() && start < commits.len() {
@@ -558,14 +594,61 @@ impl RevertCmd {
         for spec in &state.commits {
             Oid::from_hex(spec)?;
         }
+
+        // X3: with no revert pending (the rest was refused), nothing is
+        // committed here; the rest starts at `current_index`.
+        let mut created = Vec::new();
+        let mut next = state.current_index;
+        if state.pending {
+            let new_commit_oid = self
+                .commit_resolution(repo_root, storage_path, &odb, &refs, &state)
+                .await?;
+            created.push(new_commit_oid.to_hex());
+            next += 1;
+        }
+
+        // Then the rest of the sequence, listed until it ran: a conflict
+        // there saves a new state, a refusal keeps this one.
+        RevertState {
+            commits: state.commits.clone(),
+            current_index: next,
+            original_head: state.original_head,
+            pending: false,
+        }
+        .save(&state_file)
+        .await?;
+        self.run_reverts(
+            repo_root,
+            storage_path,
+            &odb,
+            &refs,
+            &state.commits,
+            next,
+            state.original_head,
+            created,
+            "continue",
+        )
+        .await
+    }
+
+    /// Commit the resolved revert `state.commits[state.current_index]` on
+    /// HEAD, then clear its staged entries and the merge files.
+    async fn commit_resolution(
+        &self,
+        repo_root: &Path,
+        storage_path: &Path,
+        odb: &Arc<ObjectDatabase>,
+        refs: &RefDatabase,
+        state: &RevertState,
+    ) -> Result<Oid> {
         let revert_oid = Oid::from_hex(&state.commits[state.current_index])?;
-        let revert_commit = Commit::read(&odb, &revert_oid).await?;
+        let revert_commit = Commit::read(odb, &revert_oid).await?;
 
         // HEAD's tree with the resolution staged on top, never the index alone.
         let head_oid = refs.resolve("HEAD").await?;
         let mut index = Index::load(repo_root)?;
-        let head_tree = Commit::read(&odb, &head_oid).await?.tree;
-        let tree_oid = mediagit_versioning::tree_with_index(&odb, &head_tree, &index).await?;
+        let head_tree = Commit::read(odb, &head_oid).await?.tree;
+        let tree_oid = mediagit_versioning::tree_with_index(odb, &head_tree, &index).await?;
 
         let message = self.message.clone().unwrap_or_else(|| {
             format!(
@@ -583,7 +666,7 @@ impl RevertCmd {
             message,
         );
 
-        let new_commit_oid = new_commit.write(&odb).await?;
+        let new_commit_oid = new_commit.write(odb).await?;
 
         let current_branch = self.get_current_branch(storage_path).await?;
         if let Some(ref branch) = current_branch {
@@ -593,9 +676,8 @@ impl RevertCmd {
             refs.update("HEAD", new_commit_oid, true).await?;
         }
 
-        // Write, then delete: a failure above leaves the revert continuable.
+        // Write, then clear: a failure above leaves the revert continuable.
         // The resolution is committed, so its staged entries go too.
-        fs::remove_file(&state_file).await?;
         mediagit_versioning::clear_merge_state(storage_path)?;
         index.clear();
         index.save(repo_root)?;
@@ -607,20 +689,7 @@ impl RevertCmd {
                 &new_commit_oid.to_hex()[..7]
             );
         }
-
-        // Then the rest of the sequence; a conflict there saves a new state.
-        self.run_reverts(
-            repo_root,
-            storage_path,
-            &odb,
-            &refs,
-            &state.commits,
-            state.current_index + 1,
-            state.original_head,
-            vec![new_commit_oid.to_hex()],
-            "continue",
-        )
-        .await
+        Ok(new_commit_oid)
     }
 
     async fn do_abort(&self, repo_root: &Path, storage_path: &Path) -> Result<()> {
@@ -701,14 +770,30 @@ impl RevertCmd {
         let head_oid = refs.resolve("HEAD").await?;
         let storage = create_storage_backend(repo_root).await?;
         let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 10000));
-        crate::worktree_guard::drop_skipped_step(repo_root, &odb, &head_oid)
-            .await
-            .context("Failed to restore working directory on revert skip")?;
+        // X3: with no revert pending (the rest was refused), the skipped one
+        // never ran, so there is nothing to put back.
+        if state.pending {
+            crate::worktree_guard::drop_skipped_step(repo_root, &odb, &head_oid)
+                .await
+                .context("Failed to restore working directory on revert skip")?;
+        }
 
         // B1: the skip ends this stop. The rest of the sequence runs now (a
         // conflict there saves a new state); a `--continue` is never left
-        // pointing at a revert that was never applied.
-        fs::remove_file(&state_file).await?;
+        // pointing at a revert that was never applied. X3: the rest stays
+        // listed until it ran, so a refusal in it can be continued.
+        if next < state.commits.len() {
+            RevertState {
+                commits: state.commits.clone(),
+                current_index: next,
+                original_head: state.original_head,
+                pending: false,
+            }
+            .save(&state_file)
+            .await?;
+        } else {
+            fs::remove_file(&state_file).await?;
+        }
 
         if next >= state.commits.len() {
             if output::machine_mode() {

@@ -224,7 +224,9 @@ delete -r` removes its entry too. The new file is optional; repositories without
 `rebase --abort` put the branch back but left the clashing file full of
 conflict markers, kept the conflict flagged, and blocked a new rebase. It now
 puts every tracked file back to how it was before the rebase and clears the
-conflict. Files that are not tracked are left alone.
+conflict. Files that are not tracked are left alone. While a rebase is stopped,
+your files now show the new base with the clashing commit on top; before, files
+changed only on the new base still showed your branch's old copy.
 
 ### Fixed — `cherry-pick` copied every earlier version of the source branch too (BUG-028)
 
@@ -234,8 +236,10 @@ conflicts. It now copies only the change the picked version made, also when
 the pick stops on a conflict: the files that did not clash get the same result
 a clean pick would, so earlier versions are not copied and changes made on
 your branch are kept. With `--no-commit` the result is staged, deletions
-included, and `--no-commit` with several versions builds each one on the
-last. A pick that is refused for another reason (a file not tracked is in the
+included. `--no-commit` (for `cherry-pick` and `revert`) now takes one version
+at a time and refuses several, changing nothing: a stop on a later version
+used to save all of them as one version on `--continue`, or throw the earlier
+ones away on `--skip`. A pick that is refused for another reason (a file not tracked is in the
 way, or the version is the first one) now changes nothing and leaves no
 "cherry-pick in progress". `cherry-pick --continue` also works now when the
 pick was given as a branch name or a short id.
@@ -263,7 +267,9 @@ conflict. `revert --skip`, `cherry-pick --skip` and `cherry-pick --abort` do the
 same: the files go back to the last version and nothing stays flagged. A skip
 only puts back the files the skipped step touched; other edits you made are
 kept. `revert --skip` and `revert --continue` now go on with the rest of the
-versions you asked to undo. `--continue` always saves the last version with
+versions you asked to undo. If the rest is refused (for example a file you
+edited is in the way), `cherry-pick` and `revert` keep the versions not yet
+applied listed: fix the cause and run `--continue` again. `--continue` always saves the last version with
 your resolution on top, and refuses to save a version with no files. `status`
 now lists unresolved paths even when no operation is in progress. Separately, `status --machine` printed hint lines before its JSON
 during a conflict, which the app rejected ("more than one line on stdout"), so

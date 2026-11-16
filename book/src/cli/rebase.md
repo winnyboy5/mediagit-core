@@ -47,6 +47,10 @@ argument.
 resolution under the original commit's message and author, then keeps
 replaying the remaining commits.
 
+While a rebase is stopped, your files show the new base with the clashing
+commit's changes on top, so what you see is what `--continue` will save.
+`--abort` puts every tracked file back to how it was before the rebase.
+
 `rebase` refuses with an error before writing anything if the working tree
 has uncommitted changes, and refuses to start a second rebase while one is
 already in progress.

@@ -28,8 +28,9 @@ One or more commits to apply. Applied in order (first to last). Accepts full
 
 #### `-n`, `--no-commit`
 Apply changes to the working tree and stage them (deletions included) without
-committing. Allows editing before the commit is created. With several
-versions, each one is applied on top of the last.
+committing. Allows editing before the commit is created. Takes one version
+at a time: with several versions the command refuses and changes nothing.
+Pick them one at a time, or leave out `-n` to save each one.
 
 #### `-x`, `--append-message`
 Append the original commit hash to the commit message for traceability:
@@ -40,6 +41,10 @@ Abort the cherry-pick sequence and restore the pre-operation state.
 
 #### `--skip`
 Skip the current commit and continue with the rest of the sequence.
+
+If the rest is refused after `--continue` or `--skip` (for example a file you
+edited would be overwritten), the versions not yet applied stay listed. Fix
+the cause, then run `--continue` again, or `--skip` to drop the next one.
 
 #### `-q`, `--quiet`
 Suppress output.
@@ -115,7 +120,7 @@ $ mediagit cherry-pick --abort
 ### Apply without auto-committing
 
 ```bash
-$ mediagit cherry-pick --no-commit abc1234 def5678
+$ mediagit cherry-pick --no-commit abc1234
 Changes applied but not committed. Review and then commit:
   mediagit commit -m "Apply hotfixes from v1.1 branch"
 ```

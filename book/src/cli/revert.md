@@ -30,7 +30,9 @@ refs (e.g., `HEAD~2`).
 
 #### `-n`, `--no-commit`
 Apply the inverse changes to the working tree without creating commits.
-Allows inspection and editing before committing.
+Allows inspection and editing before committing. Takes one version at a time:
+with several versions the command refuses and changes nothing. Undo them one
+at a time, or leave out `-n` to save each one.
 
 #### `-m <MESSAGE>`, `--message <MESSAGE>`
 Override the auto-generated revert commit message.
@@ -45,6 +47,10 @@ Abort a multi-commit revert in progress and restore pre-revert state.
 
 #### `--skip`
 Skip the current commit during a multi-commit revert sequence.
+
+If the rest is refused after `--continue` or `--skip` (for example a file you
+edited would be overwritten), the versions not yet undone stay listed. Fix
+the cause, then run `--continue` again, or `--skip` to drop the next one.
 
 #### `-q`, `--quiet`
 Suppress output.
@@ -96,7 +102,7 @@ Reverting: Adjust lighting rig (1/3)
 ### Revert without committing (inspect first)
 
 ```bash
-$ mediagit revert --no-commit HEAD~2..HEAD
+$ mediagit revert --no-commit HEAD
 Changes staged but not committed. Review and then:
   mediagit commit -m "Revert recent changes"
 ```
