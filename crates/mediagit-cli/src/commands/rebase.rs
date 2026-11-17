@@ -428,6 +428,29 @@ impl RebaseCmd {
                 let ours_tree_obj = Tree::read(odb, &ours_tree).await?;
                 let mut index = Index::load(repo_root)?;
 
+                // Y4: the checkout below writes paths an earlier replayed commit
+                // added. An untracked file there is the user's: refuse.
+                let risk = crate::worktree_guard::AtRisk::check(
+                    repo_root,
+                    odb,
+                    Some(&on_disk),
+                    Some(&new_parent),
+                )
+                .await?;
+                let risk = crate::worktree_guard::AtRisk {
+                    modified: Vec::new(),
+                    ..risk
+                };
+                if !risk.is_empty() {
+                    // First stop: nothing was written yet, so drop the state and
+                    // leave the repository as it was. (An abort would delete
+                    // the new base's files, the untracked one included.)
+                    if on_disk == state.original_head {
+                        RebaseState::clear(repo_root)?;
+                    }
+                    return Err(risk.bail("rebase"));
+                }
+
                 // X2: the writer writes only what differs from ours, so the
                 // working tree must hold ours (the new base) first, not the
                 // old branch tip. Only paths that differ move; untracked

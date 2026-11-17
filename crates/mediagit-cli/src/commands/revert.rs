@@ -703,6 +703,21 @@ impl RevertCmd {
         let state = RevertState::from_string(&state_content)?;
 
         let refs = RefDatabase::new(storage_path);
+        let storage = create_storage_backend(repo_root).await?;
+        let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 10000));
+        // Y1: with no conflict stopped (the rest was refused) an edit on disk
+        // is the user's. Refuse before any write rather than wipe it.
+        if !state.pending {
+            let head = refs.resolve("HEAD").await?;
+            crate::worktree_guard::AtRisk::check(
+                repo_root,
+                &odb,
+                Some(&head),
+                Some(&state.original_head),
+            )
+            .await?
+            .ensure_clean("revert --abort")?;
+        }
         let current_branch = self.get_current_branch(storage_path).await?;
         if let Some(ref branch) = current_branch {
             refs.update(&format!("refs/heads/{}", branch), state.original_head, true)
@@ -716,8 +731,6 @@ impl RevertCmd {
         // too); do_revert_single_commit's save_tree_to_index left the index
         // fully populated on conflict, so without this `status` would show
         // everything staged after an abort.
-        let storage = create_storage_backend(repo_root).await?;
-        let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 10000));
         // WT-1: an abort must not take untracked files with it.
         let tracked =
             crate::worktree_guard::tracked_paths(repo_root, &odb, Some(&state.original_head))

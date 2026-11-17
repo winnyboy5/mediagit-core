@@ -693,7 +693,9 @@ impl CherryPickCmd {
         let state_json = std::fs::read_to_string(&state_path)?;
         let state: CherryPickState = serde_json::from_str(&state_json)?;
 
-        if let Some(original_head) = &state.original_head {
+        // Y1: no pick is stopped (the rest was refused), so HEAD already is the
+        // original and any edit on disk is the user's. Only the state goes.
+        if let (Some(original_head), Some(_)) = (&state.original_head, &state.current_commit) {
             // Reset to original HEAD
             let mediagit_dir = repo_root.join(".mediagit");
             let storage = create_storage_backend(repo_root).await?;

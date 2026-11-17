@@ -1295,6 +1295,66 @@ fn fix3_revert_skip_refused_rest_stays_listed() {
     assert_eq!(at_head(d, "shared.txt").as_deref(), Some("v3\n"));
 }
 
+/// Y1: after the rest was refused for an edit, `--abort` must not wipe it.
+#[test]
+fn fix4_cherry_pick_abort_after_refused_rest_keeps_the_edit() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    pick_two_with_conflict(d);
+    fs::write(
+        d.join("notes.txt"),
+        "my edit
+",
+    )
+    .unwrap();
+    resolve(d, "shared.txt");
+    assert!(!run(d, &["cherry-pick", "--continue"]).status.success());
+    let head = tip(d, "main");
+    let out = run(d, &["cherry-pick", "--abort"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(d.join("notes.txt")).unwrap(),
+        "my edit
+"
+    );
+    assert_eq!(tip(d, "main"), head, "abort moved HEAD");
+    assert!(!d.join(".mediagit/CHERRY_PICK_STATE").exists());
+}
+
+#[test]
+fn fix4_revert_abort_after_refused_rest_refuses_and_keeps_the_edit() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    revert_two_with_conflict(d);
+    fs::write(
+        d.join("keep.txt"),
+        "my edit
+",
+    )
+    .unwrap();
+    resolve(d, "shared.txt");
+    assert!(!run(d, &["revert", "--continue"]).status.success());
+    let head = tip(d, "main");
+    let out = run(d, &["revert", "--abort"]);
+    assert!(!out.status.success(), "abort should refuse");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("keep.txt"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(d.join("keep.txt")).unwrap(),
+        "my edit
+"
+    );
+    assert_eq!(tip(d, "main"), head, "refused abort moved the branch");
+    assert!(d.join(".mediagit/REVERT_STATE").exists());
+}
+
 /// J4: a tracked file edited during the stop, not part of the conflict,
 /// survives `--skip`.
 #[test]
@@ -1546,6 +1606,70 @@ fn bug029_deleting_their_copy_keeps_our_deletion() {
         s["deleted"],
         serde_json::json!([]),
         "their copy committed: {s}"
+    );
+}
+
+/// Y4: a path an earlier branch commit adds and the stopping commit deletes
+/// is written at the stop. An untracked file there must stop it, not be
+/// overwritten.
+#[test]
+fn fix4_rebase_stop_does_not_overwrite_an_untracked_file() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    init_repo(d);
+    commit_file(
+        d,
+        "shared.txt",
+        "base
+",
+        "base",
+    );
+    create_branch(d, "feature");
+    commit_file(
+        d,
+        "shared.txt",
+        "main-change
+",
+        "main edit",
+    );
+    switch(d, "feature");
+    commit_file(
+        d, "x.txt", "x
+", "add x",
+    );
+    fs::remove_file(d.join("x.txt")).unwrap();
+    fs::write(
+        d.join("shared.txt"),
+        "feature-change
+",
+    )
+    .unwrap();
+    assert!(run(d, &["add", "-A"]).status.success());
+    assert!(
+        run(d, &["commit", "-m", "drop x, edit shared"])
+            .status
+            .success()
+    );
+    fs::write(
+        d.join("x.txt"),
+        "mine
+",
+    )
+    .unwrap();
+    let out = run(d, &["rebase", "main"]);
+    assert!(!out.status.success(), "rebase should refuse");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("x.txt"), "{err}");
+    assert_eq!(
+        fs::read_to_string(d.join("x.txt")).unwrap(),
+        "mine
+"
+    );
+    assert_no_operation(d, "refused rebase");
+    assert_eq!(
+        fs::read_to_string(d.join("x.txt")).unwrap(),
+        "mine
+"
     );
 }
 
