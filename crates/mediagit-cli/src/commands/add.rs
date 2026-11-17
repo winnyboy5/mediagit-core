@@ -825,6 +825,7 @@ impl AddCmd {
                     }
                 }
             }
+            crate::phash_index::flush(&repo_root).await;
         } else if self.dry_run {
             added_count = files_to_add.len() as u64;
         }
@@ -1214,7 +1215,11 @@ impl AddCmd {
             // should_use_delta() always skips jpg/png/webp (poor byte-level
             // delta candidates), so without this, images never even attempt
             // delta. MEDIAGIT_PHASH=0 restores that exact prior behavior.
-            let phash_lookup = if delta_enabled && crate::phash_index::is_hashable_image(filename) {
+            // Already stored: nothing to nominate or record, skip the decode.
+            let phash_lookup = if delta_enabled
+                && crate::phash_index::is_hashable_image(filename)
+                && !odb.exists(&content_oid).await.unwrap_or(false)
+            {
                 crate::phash_index::compute_and_nominate(repo_root, &content).await
             } else {
                 None

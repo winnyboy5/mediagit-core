@@ -4392,6 +4392,7 @@ dependencies = [
  "hex",
  "husky-rs",
  "ignore",
+ "image",
  "indicatif",
  "keyring",
  "mediagit-compression",

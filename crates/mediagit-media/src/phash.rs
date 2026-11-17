@@ -139,6 +139,12 @@ impl PerceptualHasher {
     /// Compute perceptual hash for an image
     #[instrument(skip(data), fields(size = data.len()))]
     pub async fn hash(&self, data: &[u8]) -> Result<PerceptualHash> {
+        self.hash_blocking(data)
+    }
+
+    /// Synchronous body of [`hash`](Self::hash): decode is CPU-bound, so
+    /// callers on a runtime should run this in `spawn_blocking`.
+    pub fn hash_blocking(&self, data: &[u8]) -> Result<PerceptualHash> {
         let start = Instant::now();
 
         // Load image

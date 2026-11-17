@@ -71,6 +71,8 @@ struct Entry {
 #[derive(Default)]
 struct PhashIndex {
     entries: Vec<Entry>,
+    /// Entries recorded since the last save.
+    dirty: bool,
 }
 
 impl PhashIndex {
@@ -94,7 +96,10 @@ impl PhashIndex {
         }
 
         match postcard::from_bytes::<Vec<Entry>>(&bytes[1..]) {
-            Ok(entries) => Self { entries },
+            Ok(entries) => Self {
+                entries,
+                dirty: false,
+            },
             Err(e) => {
                 debug!(error = %e, path = %path.display(), "phash index corrupt, starting empty");
                 Self::default()
@@ -163,11 +168,20 @@ pub async fn compute_and_nominate(repo_root: &Path, data: &[u8]) -> Option<Phash
         return None;
     }
 
-    let hasher = PerceptualHasher::new();
-    let hash = match hasher.hash(data).await {
-        Ok(h) => h,
-        Err(e) => {
+    // Decode is CPU-bound (25 MP PNG ~ 100 MB RGBA) and the CLI runtime is
+    // single-threaded, so run it on the blocking pool. Concurrency is already
+    // bounded by add's per-file semaphore (`--jobs`, default min(cpus, 8)).
+    let owned = data.to_vec();
+    let hashed =
+        tokio::task::spawn_blocking(move || PerceptualHasher::new().hash_blocking(&owned)).await;
+    let hash = match hashed {
+        Ok(Ok(h)) => h,
+        Ok(Err(e)) => {
             debug!(error = %e, "phash decode failed, skipping nomination");
+            return None;
+        }
+        Err(e) => {
+            debug!(error = %e, "phash decode task failed, skipping nomination");
             return None;
         }
     };
@@ -210,8 +224,20 @@ pub async fn record(repo_root: &Path, hash: u64, oid: Oid) {
         oid: *oid.as_bytes(),
     });
 
-    if let Err(e) = idx.save(repo_root).await {
-        debug!(error = %e, "failed to persist phash index, will retry on next add");
+    idx.dirty = true;
+}
+
+/// Persist the index once, at the end of an add run (no-op if nothing was
+/// recorded). Best-effort like `record`.
+pub async fn flush(repo_root: &Path) {
+    let mut guard = index_lock().lock().await;
+    if let Some(idx) = guard.as_mut()
+        && idx.dirty
+    {
+        match idx.save(repo_root).await {
+            Ok(()) => idx.dirty = false,
+            Err(e) => debug!(error = %e, "failed to persist phash index"),
+        }
     }
 }
 
@@ -256,6 +282,7 @@ mod tests {
                     oid: *oid_from_byte(3).as_bytes(),
                 },
             ],
+            ..Default::default()
         };
 
         let nearest = idx.nearest(0);
@@ -269,6 +296,7 @@ mod tests {
                 hash: 0,
                 oid: *oid_from_byte(1).as_bytes(),
             }],
+            ..Default::default()
         };
         // All 64 bits differ - distance 64, way beyond NOMINATION_MAX_DISTANCE
         assert!(idx.nearest(u64::MAX).is_none());
@@ -343,5 +371,36 @@ mod tests {
 
         let loaded = PhashIndex::load(tmp.path()).await;
         assert_eq!(loaded.entries.len(), 0);
+    }
+
+    /// BUG-001: N records write the index once (at flush), not N times.
+    #[tokio::test]
+    async fn test_record_defers_save_until_flush() {
+        let dir = TempDir::new().unwrap();
+        let path = PhashIndex::index_path(dir.path());
+        for i in 0..3u8 {
+            record(dir.path(), i as u64, oid_from_byte(i)).await;
+            assert!(!path.exists(), "record must not save per image");
+        }
+        flush(dir.path()).await;
+        assert!(path.exists());
+        assert_eq!(PhashIndex::load(dir.path()).await.entries.len(), 3);
+    }
+
+    /// Pinned hash of a deterministic image: the decode/threading change must
+    /// not alter phash values (or old indexes would stop matching).
+    #[tokio::test]
+    async fn test_phash_value_pinned() {
+        let img = image::RgbImage::from_fn(64, 48, |x, y| {
+            image::Rgb([(x * 4) as u8, (y * 5) as u8, ((x ^ y) * 3) as u8])
+        });
+        let mut png = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let hash = compute_and_nominate(TempDir::new().unwrap().path(), &png)
+            .await
+            .unwrap()
+            .hash;
+        assert_eq!(hash, 18446744073709545455, "phash changed");
     }
 }
