@@ -666,25 +666,29 @@ pub async fn auth_run(
 #[tauri::command]
 pub async fn auth_register(
     engine: tauri::State<'_, Engine>,
+    repo: Option<String>,
     server: Option<String>,
     username: String,
     email: String,
     password: String,
 ) -> Result<Value, EngineError> {
+    let repo = optional_repo(repo.as_deref())?;
     let cmd = auth_register_cmd(server.as_deref(), &username, &email, password)?;
-    run(&engine, None, &cmd).await
+    run(&engine, repo.as_deref(), &cmd).await
 }
 
 /// Change your own password. Both passwords go on stdin only.
 #[tauri::command]
 pub async fn auth_passwd(
     engine: tauri::State<'_, Engine>,
+    repo: Option<String>,
     server: Option<String>,
     current: String,
     new: String,
 ) -> Result<Value, EngineError> {
+    let repo = optional_repo(repo.as_deref())?;
     let cmd = auth_passwd_cmd(server.as_deref(), current, new)?;
-    run(&engine, None, &cmd).await
+    run(&engine, repo.as_deref(), &cmd).await
 }
 
 /// Re-lock the repository's key under a new master key (a key file or a passphrase).
