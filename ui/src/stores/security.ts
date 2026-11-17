@@ -66,11 +66,21 @@ export const useSecurityStore = defineStore('security', () => {
   const logout = (all: boolean) => run(all ? 'Sign out everywhere' : 'Sign out', (root) => api.authRun(root, 'logout', null, all), () => 'Signed out')
 
   async function enableEncryption(passphrase: string) {
-    const r = await run('Turn on encryption', (root) => api.keyInit(root, passphrase || null), (k) => (k.source ? `Encryption is on, unlocks with ${k.source}` : 'Encryption is on'), undefined, true)
-    if (r?.value.recovery_code) {
-      recoveryCode.value = r.value.recovery_code
-      keySource.value = r.value.source
-    }
+    const r = await run(
+      'Turn on encryption',
+      // The code is shown the moment init returns: `run` then refreshes, and that can wait on the unlock prompt.
+      (root) =>
+        api.keyInit(root, passphrase || null).then((k) => {
+          if (k.recovery_code) {
+            recoveryCode.value = k.recovery_code
+            keySource.value = k.source
+          }
+          return k
+        }),
+      (k) => (k.source ? `Encryption is on, unlocks with ${k.source}` : 'Encryption is on'),
+      undefined,
+      true,
+    )
     return !!r
   }
   const recover = (code: string, passphrase: string) =>
