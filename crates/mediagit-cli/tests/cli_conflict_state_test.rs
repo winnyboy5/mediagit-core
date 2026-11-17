@@ -1709,3 +1709,73 @@ fn rebase_add_compares_against_the_commit_being_built_on() {
     let s = status_data(d);
     assert_eq!(s["modified"], serde_json::json!([]), "edit dropped: {s}");
 }
+
+/// Fix round 2 (F1): "unchanged" means equal to what is already staged. A
+/// cleanly merged file holds feature's bytes in the index; putting it back to
+/// the new base's bytes must restage it, not skip it as unchanged.
+#[test]
+fn rebase_add_restages_a_clean_file_put_back_to_the_base() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    init_repo(d);
+    commit_file(d, "shared.txt", "base\n", "base");
+    commit_file(d, "extra.txt", "base\n", "extra");
+    switch_new(d, "feature");
+    fs::write(d.join("shared.txt"), "feature-change\n").unwrap();
+    fs::write(d.join("extra.txt"), "feature\n").unwrap();
+    assert!(run(d, &["add", "shared.txt", "extra.txt"]).status.success());
+    assert!(run(d, &["commit", "-m", "feature both"]).status.success());
+    switch(d, "main");
+    commit_file(d, "shared.txt", "main-change\n", "main edit");
+    switch(d, "feature");
+    assert!(!run(d, &["rebase", "main"]).status.success());
+    // extra.txt merged cleanly: feature's bytes are staged. Put it back to main's.
+    fs::write(d.join("extra.txt"), "base\n").unwrap();
+    fs::write(d.join("shared.txt"), "resolved\n").unwrap();
+    assert!(
+        run(d, &["add", "--", "extra.txt", "shared.txt"])
+            .status
+            .success()
+    );
+    let out = run(d, &["rebase", "--continue"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(d.join("extra.txt")).unwrap(),
+        "base\n",
+        "feature bytes committed over the person's choice"
+    );
+}
+
+/// Fix round 2 (F2): a file the picked commit added cleanly, deleted by hand
+/// and staged with `add -A`, must not come back in the rebased commit.
+#[test]
+fn rebase_add_all_stages_deletion_of_a_pick_added_file() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    init_repo(d);
+    commit_file(d, "shared.txt", "base\n", "base");
+    switch_new(d, "feature");
+    fs::write(d.join("shared.txt"), "feature-change\n").unwrap();
+    fs::write(d.join("added.txt"), "new\n").unwrap();
+    assert!(run(d, &["add", "shared.txt", "added.txt"]).status.success());
+    assert!(run(d, &["commit", "-m", "feature both"]).status.success());
+    switch(d, "main");
+    commit_file(d, "shared.txt", "main-change\n", "main edit");
+    switch(d, "feature");
+    assert!(!run(d, &["rebase", "main"]).status.success());
+    // added.txt merged cleanly and is staged; the person deletes it.
+    fs::remove_file(d.join("added.txt")).unwrap();
+    fs::write(d.join("shared.txt"), "resolved\n").unwrap();
+    assert!(run(d, &["add", "-A"]).status.success());
+    let out = run(d, &["rebase", "--continue"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!d.join("added.txt").exists(), "deleted file came back");
+}

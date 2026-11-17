@@ -41,10 +41,10 @@ pub async fn stage_files_for_commit(paths: &[String], repo_root: &std::path::Pat
     // Load the base tree for unchanged detection
     let head_files = Arc::new(base_files(&repo_root, &storage_path, &odb).await?);
 
-    let index_files: Arc<std::collections::HashMap<std::path::PathBuf, (u64, Option<u64>)>> = {
+    let index_files: Arc<IndexStat> = {
         let mut map = std::collections::HashMap::new();
         for entry in index.entries() {
-            map.insert(entry.path.clone(), (entry.size, entry.mtime));
+            map.insert(entry.path.clone(), (entry.size, entry.mtime, entry.oid));
         }
         Arc::new(map)
     };
@@ -121,6 +121,23 @@ async fn base_files(
         }
     }
     Ok(files)
+}
+
+/// Per index path: size, mtime (stat cache) and staged oid.
+type IndexStat = HashMap<PathBuf, (u64, Option<u64>, Oid)>;
+
+/// What the next commit would hold for `path` today: the staged entry if any,
+/// else the base tree's. "Unchanged" means equal to this, not just to the base:
+/// an index entry that differs from the base must be overwritten.
+fn staged_or_base(
+    index_files: &IndexStat,
+    base: &HashMap<PathBuf, Oid>,
+    path: &Path,
+) -> Option<Oid> {
+    index_files
+        .get(path)
+        .map(|e| e.2)
+        .or_else(|| base.get(path).copied())
 }
 
 /// `--machine` data for `add`.
@@ -461,10 +478,10 @@ impl AddCmd {
         }
 
         // Build index lookup for stat-cache change detection (size + mtime)
-        let index_files: Arc<HashMap<PathBuf, (u64, Option<u64>)>> = {
+        let index_files: Arc<IndexStat> = {
             let mut map = HashMap::new();
             for entry in index.entries() {
-                map.insert(entry.path.clone(), (entry.size, entry.mtime));
+                map.insert(entry.path.clone(), (entry.size, entry.mtime, entry.oid));
             }
             Arc::new(map)
         };
@@ -843,7 +860,14 @@ impl AddCmd {
         let unresolved_new = all_unresolved
             .iter()
             .filter(|p| !head_files.contains_key(*p));
-        for head_path in head_files.as_ref().keys().chain(unresolved_new) {
+        // F2: so is a staged path the base lacks (the pick added it cleanly).
+        let staged_new = index_files.keys().filter(|p| !head_files.contains_key(*p));
+        for head_path in head_files
+            .as_ref()
+            .keys()
+            .chain(unresolved_new)
+            .chain(staged_new)
+        {
             // BUG-008 way out: the last commit holds an absolute or `..` path.
             // Stage its removal whatever the pathspec or --ignore-removal; the
             // file itself, if present, was re-added above under its real path.
@@ -991,7 +1015,7 @@ impl AddCmd {
         repo_root: &Path,
         odb: &ObjectDatabase,
         head_files: &HashMap<PathBuf, Oid>,
-        index_files: &HashMap<PathBuf, (u64, Option<u64>)>,
+        index_files: &IndexStat,
         unresolved: &HashSet<PathBuf>,
         delta_enabled: bool,
         on_bytes: Option<Arc<dyn Fn(u64) + Send + Sync>>,
@@ -1032,7 +1056,7 @@ impl AddCmd {
         let conflicted = unresolved.contains(&relative_path);
 
         if !conflicted
-            && let Some(&(idx_size, Some(idx_mtime))) = index_files.get(&relative_path)
+            && let Some(&(idx_size, Some(idx_mtime), _)) = index_files.get(&relative_path)
             && idx_size == file_size
             && let Some(current_mtime) = file_mtime
             && idx_mtime == current_mtime
@@ -1106,8 +1130,7 @@ impl AddCmd {
 
             // Check if unchanged from HEAD
             if !conflicted
-                && let Some(head_oid) = head_files.get(&relative_path)
-                && *head_oid == content_oid
+                && staged_or_base(index_files, head_files, &relative_path) == Some(content_oid)
             {
                 if let Some(ref cb) = on_bytes {
                     cb(file_size);
@@ -1138,8 +1161,7 @@ impl AddCmd {
 
             // Check if unchanged from HEAD
             if !conflicted
-                && let Some(head_oid) = head_files.get(&relative_path)
-                && *head_oid == content_oid
+                && staged_or_base(index_files, head_files, &relative_path) == Some(content_oid)
             {
                 if let Some(ref cb) = on_bytes {
                     cb(file_size);
