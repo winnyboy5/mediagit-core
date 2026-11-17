@@ -1003,30 +1003,21 @@ mod tests {
         );
     }
 
-    /// When the container is genuinely missing and every create attempt is
-    /// rejected, the error must carry ALL attempts, not just the last.
+    /// BUG-043: a genuinely missing container is reported as missing and is
+    /// never created.
     #[tokio::test]
-    async fn create_failure_reports_every_attempt() {
-        let (conn, _seen) = stub_azure(|method, nth| match (method, nth) {
-            ("PUT", 0) => ("403 Forbidden", azure_error_xml("AuthorizationFailure")),
-            ("PUT", _) => (
-                "411 Length Required",
-                azure_error_xml("MissingContentLengthHeader"),
-            ),
-            _ => ("404 Not Found", azure_error_xml("ContainerNotFound")),
-        })
-        .await;
+    async fn missing_container_is_reported_not_created() {
+        let (conn, seen) =
+            stub_azure(|_, _| ("404 Not Found", azure_error_xml("ContainerNotFound"))).await;
         let err = match AzureBackend::with_connection_string("c", conn).await {
-            Ok(_) => panic!("rejected creates must fail"),
+            Ok(_) => panic!("a missing container must fail"),
             Err(e) => e.to_string(),
         };
+        assert!(err.contains("does not exist"), "{err}");
         assert!(
-            err.contains("403") && err.contains("AuthorizationFailure"),
-            "{err}"
-        );
-        assert!(
-            err.contains("411") && err.contains("MissingContentLengthHeader"),
-            "{err}"
+            !seen.lock().unwrap().iter().any(|l| l.starts_with("PUT")),
+            "must not attempt to create the container: {:?}",
+            seen.lock().unwrap()
         );
     }
 
