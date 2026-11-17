@@ -168,6 +168,13 @@ changes fix real bugs.
   not a repository they now fail with "Not a mediagit repository" and write nothing.
   Before, they said "PERFECT" and left a hidden `.mediagit` folder behind.
 
+### Fixed — a typo in the bucket name no longer creates a new bucket (BUG-043)
+
+- Opening S3, S3-compatible and Azure storage never creates the bucket or container.
+  A missing one is refused ("That bucket does not exist"), and "Test connection" in the
+  server set-up changes nothing in your storage account. Create the bucket first.
+  Scripts that relied on the old auto-create must create their bucket themselves.
+
 ### Fixed — "Get latest" failed when both sides changed the same file (BUG-033)
 
 - `pull` now stops with the same conflict as `merge`: markers in the file,

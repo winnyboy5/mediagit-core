@@ -363,6 +363,15 @@ fn resolve_repo_id(
     Ok(id)
 }
 
+/// A missing bucket or container is 404 (the probe turns it into plain words);
+/// every other backend init failure stays a 500.
+fn init_status(e: &anyhow::Error) -> StatusCode {
+    match e.downcast_ref::<mediagit_storage::StorageError>() {
+        Some(mediagit_storage::StorageError::BucketNotFound(_)) => StatusCode::NOT_FOUND,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
 /// Prove `storage` works: build the backend exactly as a served repo would, then
 /// put, get and delete a tiny probe object. Backend init errors are logged by
 /// `build_storage_backend`; this reports a short cause.
@@ -376,7 +385,11 @@ pub async fn probe_storage(storage: &mediagit_config::StorageConfig) -> anyhow::
         };
         cfg.save(&dir)?;
         let backend = build_storage_backend(&dir).await.map_err(|c| {
-            anyhow::anyhow!("could not open the storage backend ({c}); see the log")
+            if c == StatusCode::NOT_FOUND {
+                anyhow::anyhow!("That bucket does not exist. Create it first, then test again.")
+            } else {
+                anyhow::anyhow!("could not open the storage backend ({c}); see the log")
+            }
         })?;
         let (key, body) = (format!("mediagit-probe/{nonce}"), b"mediagit probe");
         backend.put(&key, body).await?;
@@ -471,7 +484,7 @@ async fn build_storage_backend(repo_path: &StdPath) -> Result<Arc<dyn StorageBac
                             "Failed to initialize Azure backend with connection string: {}",
                             e
                         );
-                        StatusCode::INTERNAL_SERVER_ERROR
+                        init_status(&e)
                     })?
                 }
                 AzureAuth::AccountKey {
@@ -486,7 +499,7 @@ async fn build_storage_backend(repo_path: &StdPath) -> Result<Arc<dyn StorageBac
                 .await
                 .map_err(|e| {
                     tracing::error!("Failed to initialize Azure backend with account key: {}", e);
-                    StatusCode::INTERNAL_SERVER_ERROR
+                    init_status(&e)
                 })?,
                 AzureAuth::Sas {
                     account_name,
@@ -500,7 +513,7 @@ async fn build_storage_backend(repo_path: &StdPath) -> Result<Arc<dyn StorageBac
                 .await
                 .map_err(|e| {
                     tracing::error!("Failed to initialize Azure backend with SAS token: {}", e);
-                    StatusCode::INTERNAL_SERVER_ERROR
+                    init_status(&e)
                 })?,
                 AzureAuth::Emulator => AzureBackend::with_connection_string_and_prefix(
                     &azure_config.container,
@@ -510,7 +523,7 @@ async fn build_storage_backend(repo_path: &StdPath) -> Result<Arc<dyn StorageBac
                 .await
                 .map_err(|e| {
                     tracing::error!("Failed to initialize Azure backend for emulator: {}", e);
-                    StatusCode::INTERNAL_SERVER_ERROR
+                    init_status(&e)
                 })?,
             };
             Arc::new(storage)
@@ -629,7 +642,7 @@ async fn build_minio_compatible_storage(
     .map(|b| Arc::new(b) as Arc<dyn StorageBackend>)
     .map_err(|e| {
         tracing::error!("Failed to initialize MinIO backend: {:#}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
+        init_status(&e)
     })
 }
 
@@ -664,7 +677,7 @@ async fn build_aws_s3_storage(
         .map(|b| Arc::new(b) as Arc<dyn StorageBackend>)
         .map_err(|e| {
             tracing::error!("Failed to initialize AWS S3 backend: {:#}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            init_status(&e)
         })
 }
 

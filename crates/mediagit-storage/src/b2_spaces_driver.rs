@@ -166,6 +166,18 @@ pub struct B2SpacesDriverConfig {
     pub prefix: Option<String>,
 }
 
+/// HEAD the bucket. Missing is `StorageError::BucketNotFound`; any other
+/// error passes through. Never creates anything.
+async fn check_bucket(client: &Client, bucket: &str) -> Result<()> {
+    let Err(e) = client.head_bucket().bucket(bucket).send().await else {
+        return Ok(());
+    };
+    if e.as_service_error().is_some_and(|se| se.is_not_found()) {
+        return Err(crate::StorageError::BucketNotFound(bucket.to_string()).into());
+    }
+    Err(e).context(format!("Failed to access S3 bucket: {bucket}"))
+}
+
 impl Default for B2SpacesDriverConfig {
     fn default() -> Self {
         B2SpacesDriverConfig {
@@ -399,26 +411,8 @@ impl B2SpacesDriver {
             Client::new(&sdk_config)
         };
 
-        // Ensure bucket exists; use create_bucket and treat "already exists" as success.
-        match client.create_bucket().bucket(&config.bucket).send().await {
-            Ok(_) => {
-                debug!("S3 bucket '{}' created successfully", config.bucket);
-            }
-            Err(e) => {
-                let already_exists = e
-                    .as_service_error()
-                    .map(|se| se.is_bucket_already_owned_by_you() || se.is_bucket_already_exists())
-                    .unwrap_or(false);
-                if already_exists {
-                    debug!("S3 bucket '{}' already exists, continuing", config.bucket);
-                } else {
-                    return Err(e).context(format!(
-                        "Failed to access or create S3 bucket: {}",
-                        config.bucket
-                    ));
-                }
-            }
-        }
+        // Never create the bucket (BUG-043): HEAD only; missing is a typed error.
+        check_bucket(&client, &config.bucket).await?;
 
         debug!(
             "Successfully connected to S3 bucket: {} with endpoint: {:?}",
@@ -518,33 +512,8 @@ impl B2SpacesDriver {
 
         let client = Client::from_conf(s3_config_builder.build());
 
-        // Ensure bucket exists; use create_bucket and ignore "already exists" errors.
-        match client.create_bucket().bucket(&config.bucket).send().await {
-            Ok(_) => {
-                debug!(
-                    "S3-compatible bucket '{}' created successfully",
-                    config.bucket
-                );
-            }
-            Err(e) => {
-                let err_str = e.to_string().to_lowercase();
-                if err_str.contains("bucketalreadyownedbyou")
-                    || err_str.contains("bucketalreadyexists")
-                    || err_str.contains("already owned")
-                    || err_str.contains("already exists")
-                {
-                    debug!(
-                        "S3-compatible bucket '{}' already exists, continuing",
-                        config.bucket
-                    );
-                } else {
-                    return Err(e).context(format!(
-                        "Failed to access or create S3-compatible bucket: {}. Check credentials and endpoint.",
-                        config.bucket
-                    ));
-                }
-            }
-        }
+        // Never create the bucket (BUG-043): HEAD only; missing is a typed error.
+        check_bucket(&client, &config.bucket).await?;
 
         debug!(
             "Successfully connected to S3-compatible bucket: {} at {:?}",

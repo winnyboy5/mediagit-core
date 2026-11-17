@@ -205,3 +205,63 @@ fn storage_test_reports_failure_as_json_and_exit_code() {
     let all = format!("{stdout}{}", String::from_utf8_lossy(&out.stderr));
     assert!(!all.contains(SECRET), "secret printed: {all}");
 }
+
+/// BUG-043: a missing bucket is refused in plain words and never created.
+/// Needs a local Silo (MG_SILO_ENDPOINT, default 127.0.0.1:9000); skips when down.
+#[test]
+fn storage_test_refuses_missing_bucket_without_creating_it() {
+    let endpoint =
+        std::env::var("MG_SILO_ENDPOINT").unwrap_or_else(|_| "http://127.0.0.1:9000".into());
+    let addr = endpoint.trim_start_matches("http://");
+    if std::net::TcpStream::connect(addr).is_err() {
+        eprintln!("skip: no Silo at {endpoint}");
+        return;
+    }
+    let bucket = format!(
+        "mg-bug043-srv-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let out = run(
+        &[
+            "storage-test",
+            "--storage",
+            "s3",
+            "--storage-bucket",
+            &bucket,
+            "--storage-endpoint",
+            &endpoint,
+            "--storage-secret-stdin",
+        ],
+        "access-key-id=minioadmin\nsecret-access-key=minioadmin\n",
+    );
+    assert!(!out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(v["ok"], false);
+    assert_eq!(
+        v["error"], "That bucket does not exist. Create it first, then test again.",
+        "got: {stdout}"
+    );
+    // Creating the bucket would make a probe against it succeed on its own;
+    // a second probe still failing the same way proves it was not created.
+    let again = run(
+        &[
+            "storage-test",
+            "--storage",
+            "s3",
+            "--storage-bucket",
+            &bucket,
+            "--storage-endpoint",
+            &endpoint,
+            "--storage-secret-stdin",
+        ],
+        "access-key-id=minioadmin\nsecret-access-key=minioadmin\n",
+    );
+    assert!(
+        !again.status.success(),
+        "bucket was created by the first probe"
+    );
+}

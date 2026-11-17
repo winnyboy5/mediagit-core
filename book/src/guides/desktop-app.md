@@ -97,7 +97,7 @@ Run and manage a MediaGit server from the app. You can also point it at a server
 3. Create the first admin account (username, email, password).
 4. Under storage, choose where new repositories keep their files:
    - **This computer's folder** (the default).
-   - **Amazon S3 or MinIO**: bucket, access key ID and secret key. For MinIO or another S3-compatible service also enter its endpoint address, for example `http://localhost:9000`. A folder inside the bucket is optional.
+   - **Amazon S3 or MinIO**: bucket, access key ID and secret key. For MinIO or another S3-compatible service also enter its endpoint address, for example `http://localhost:9000`. The bucket must already exist; the app never creates one. A folder inside the bucket is optional.
    - **Google Cloud**: bucket and project. Add a service account key file, or leave it empty to use the Google sign-in already on this computer.
    - **Azure Blob**: container, storage account and account key. Azure support is in preview.
 5. Choose **Test connection** before you continue. The app writes a small test file to the bucket, reads it back and deletes it, then tells you whether the credentials work.

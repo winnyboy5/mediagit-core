@@ -28,15 +28,10 @@
 //! Azurite. Presign coverage therefore lives in the live-Azure leg of
 //! `06_remote`, not in the Azurite suite.
 //!
-//! # Container creation
+//! # Container
 //!
-//! OpenDAL is data-plane only and has no container management. Creating the
-//! container is one signed REST call, made with `reqsign-azure-storage` — the
-//! same signer OpenDAL uses internally — so we do not hand-roll Azure's
-//! Shared Key signing. It requires an account key, so backends built from a
-//! SAS token cannot auto-create (a SAS holder generally lacks that right
-//! anyway); those surface a clear error if the container is absent.
-
+//! The container is never created (BUG-043): a missing one is
+//! `StorageError::BucketNotFound`. Create it first.
 use crate::StorageBackend;
 use crate::error::StorageError;
 use async_trait::async_trait;
@@ -76,12 +71,6 @@ pub struct AzureBackend {
     prefix: String,
     /// OpenDAL operator scoped to the container.
     op: Operator,
-    /// Blob-service endpoint root (no container segment), used for the
-    /// container-create REST call.
-    endpoint: String,
-    /// Account key, when we have one. `None` for SAS-authenticated backends,
-    /// which cannot sign a container-create request.
-    account_key: Option<String>,
 }
 
 impl fmt::Debug for AzureBackend {
@@ -272,8 +261,6 @@ impl AzureBackend {
             container_name,
             prefix,
             op,
-            endpoint,
-            account_key: None,
         })
     }
 
@@ -400,8 +387,6 @@ impl AzureBackend {
             container_name,
             prefix,
             op,
-            endpoint,
-            account_key,
         };
 
         // Bounded: the SDK default can hang for tens of seconds. The backend
@@ -438,151 +423,24 @@ impl AzureBackend {
         strip_prefix_with(&self.prefix, full)
     }
 
-    /// Create the container if it is absent.
-    ///
-    /// OpenDAL has no container API, so this is one Shared-Key-signed REST
-    /// call via `reqsign-azure-storage` — the signer OpenDAL itself uses.
-    /// Treats 409 `ContainerAlreadyExists` as success (another process may
-    /// have won the race between our check and our create).
+    /// Check the container exists. Never creates it (BUG-043): a missing one
+    /// is `StorageError::BucketNotFound`, any other failure passes through.
     async fn ensure_container_exists(&self) -> anyhow::Result<()> {
-        // Check before mutating: a listable container needs no create call at
-        // all, which is the overwhelmingly common case (the container is
-        // provisioned once, then reused for the life of the deployment). This
-        // also keeps the signed-create path — the fragile part — off the hot
-        // path entirely.
         match self.op.list_with("").limit(1).await {
             Ok(_) => {
                 tracing::debug!(container = %self.container_name, "Azure container reachable");
-                return Ok(());
+                Ok(())
             }
-            // Only "the container is missing" may proceed to create. Any other
-            // failure (a disabled account, bad credentials, a network error)
-            // is the real problem; creating would only bury it under a
-            // misleading "could not be created".
-            Err(e) if e.kind() == opendal::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(anyhow::anyhow!(
-                    "Azure container '{}' is not usable: {} (OpenDAL kind {:?}).                      Not attempting to create it; fix this error first.",
-                    self.container_name,
-                    e,
-                    e.kind()
-                ));
+            Err(e) if e.kind() == opendal::ErrorKind::NotFound => {
+                Err(crate::StorageError::BucketNotFound(self.container_name.clone()).into())
             }
+            Err(e) => Err(anyhow::anyhow!(
+                "Azure container '{}' is not usable: {} (OpenDAL kind {:?}).",
+                self.container_name,
+                e,
+                e.kind()
+            )),
         }
-
-        let Some(account_key) = &self.account_key else {
-            // SAS-authenticated: cannot sign a create, and a SAS holder
-            // generally lacks that right anyway.
-            return Err(anyhow::anyhow!(
-                "Azure container '{}' is not reachable and cannot be created with SAS authentication. Create it first, or configure account-key auth.",
-                self.container_name
-            ));
-        };
-
-        use reqsign_azure_storage::{RequestSigner, StaticCredentialProvider};
-        use reqsign_core::{Context, Signer};
-
-        let url = format!(
-            "{}/{}?restype=container",
-            self.endpoint.trim_end_matches('/'),
-            self.container_name
-        );
-
-        let signer = Signer::new(
-            // Shared Key signing is a local HMAC over the canonicalised
-            // request — no network or filesystem access — so a bare Context
-            // is sufficient.
-            Context::new(),
-            StaticCredentialProvider::new_shared_key(&self.account_name, account_key),
-            RequestSigner::new(),
-        );
-
-        // Real Azure and Azurite disagree about Content-Length on a zero-body
-        // PUT, and the two requirements are mutually exclusive (measured
-        // 2026-07-23):
-        //
-        //   real Azure : header REQUIRED -> 411 Length Required without it,
-        //                and signed as "" per the Shared Key spec.
-        //   Azurite    : canonicalises the header's literal "0" instead of "",
-        //                so sending it yields 403 AuthorizationFailure.
-        //
-        // Send the spec-correct form first and fall back once. Cheap (this
-        // runs at most once per backend, only when the container is absent)
-        // and avoids hardcoding emulator detection, which would misfire on
-        // Azurite behind TLS or a custom endpoint.
-        let mut attempts: Vec<(bool, reqwest::StatusCode, String)> = Vec::new();
-        for send_content_length in [true, false] {
-            let mut builder = http::Request::builder()
-                .method(http::Method::PUT)
-                .uri(&url)
-                .header("x-ms-version", "2023-11-03");
-            if send_content_length {
-                builder = builder.header(http::header::CONTENT_LENGTH, "0");
-            }
-            let mut parts = builder
-                .body(())
-                .map_err(|e| anyhow::anyhow!("Failed to build container-create request: {e}"))?
-                .into_parts()
-                .0;
-
-            signer
-                .sign(&mut parts, None)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to sign container-create request: {e}"))?;
-
-            let client = reqwest::Client::new();
-            let mut req = client.request(
-                reqwest::Method::from_bytes(parts.method.as_str().as_bytes())?,
-                parts.uri.to_string(),
-            );
-            for (name, value) in parts.headers.iter() {
-                req = req.header(name.as_str(), value.as_bytes());
-            }
-            let resp = req
-                .send()
-                .await
-                .map_err(|e| anyhow::anyhow!("Container-create request failed: {e}"))?;
-
-            let status = resp.status();
-            if status.is_success() || status == reqwest::StatusCode::CONFLICT {
-                tracing::info!(
-                    container = %self.container_name,
-                    content_length_sent = send_content_length,
-                    "Azure container ready"
-                );
-                return Ok(());
-            }
-            let body = resp.text().await.unwrap_or_default();
-            tracing::debug!(
-                container = %self.container_name,
-                content_length_sent = send_content_length,
-                %status,
-                "container-create attempt rejected; trying alternate Content-Length form"
-            );
-            attempts.push((send_content_length, status, body));
-        }
-
-        // Report EVERY attempt: the first (spec-correct) one usually carries the
-        // real cause, e.g. a 403 AccountIsDisabled that the Azurite-compat
-        // fallback then masks with an unrelated 411.
-        let detail = attempts
-            .iter()
-            .map(|(with_len, status, body)| {
-                let excerpt: String = body.chars().take(300).collect();
-                format!(
-                    "[{} Content-Length] {} {}",
-                    if *with_len { "with" } else { "without" },
-                    status,
-                    excerpt
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("; ");
-        Err(anyhow::anyhow!(
-            "Azure container '{}' does not exist and could not be created. Attempts: {}. Create it manually and retry.",
-            self.container_name,
-            detail
-        ))
     }
 
     /// Single-shot upload for payloads below the block threshold.

@@ -446,67 +446,26 @@ impl MinIOBackend {
 
         let client = Client::from_conf(s3_config);
 
-        // Idempotent bucket init: HEAD first; only CREATE on NotFound.
-        // Avoids the slow "create-then-ignore-AlreadyExists" path on every
-        // backend construction for buckets that already exist.
-        match client.head_bucket().bucket(&config.bucket).send().await {
-            Ok(_) => {
-                debug!("MinIO bucket '{}' already exists", config.bucket);
+        // Never create the bucket: a typo would silently make a new one in the
+        // user's account. HEAD only; a missing bucket is a typed error.
+        if let Err(head_err) = client.head_bucket().bucket(&config.bucket).send().await {
+            let not_found = head_err
+                .as_service_error()
+                .map(|se| se.is_not_found())
+                .unwrap_or(false);
+            tracing::error!(
+                "head_bucket '{}' (region={}, endpoint={}): not_found={} | {}",
+                config.bucket,
+                config.region,
+                config.endpoint,
+                not_found,
+                head_err
+            );
+            if not_found {
+                return Err(crate::StorageError::BucketNotFound(config.bucket.clone()).into());
             }
-            Err(head_err) => {
-                let not_found = head_err
-                    .as_service_error()
-                    .map(|se| se.is_not_found())
-                    .unwrap_or(false);
-                // Log the real AWS error so the operator can diagnose auth/region/existence issues.
-                tracing::error!(
-                    "head_bucket '{}' (region={}, endpoint={}): not_found={} | {}",
-                    config.bucket,
-                    config.region,
-                    config.endpoint,
-                    not_found,
-                    head_err
-                );
-                let mut create_req = client.create_bucket().bucket(&config.bucket);
-                if config.region != "us-east-1" {
-                    use aws_sdk_s3::types::{BucketLocationConstraint, CreateBucketConfiguration};
-                    let constraint = BucketLocationConstraint::from(config.region.as_str());
-                    let cfg = CreateBucketConfiguration::builder()
-                        .location_constraint(constraint)
-                        .build();
-                    create_req = create_req.create_bucket_configuration(cfg);
-                }
-                match create_req.send().await {
-                    Ok(_) => {
-                        debug!("MinIO bucket '{}' created successfully", config.bucket);
-                    }
-                    Err(e) => {
-                        let already_exists = e
-                            .as_service_error()
-                            .map(|se| {
-                                se.is_bucket_already_owned_by_you() || se.is_bucket_already_exists()
-                            })
-                            .unwrap_or(false);
-                        if already_exists {
-                            debug!(
-                                "MinIO bucket '{}' already exists (race-resolved)",
-                                config.bucket
-                            );
-                        } else {
-                            tracing::error!(
-                                "create_bucket '{}' (region={}) failed: {}",
-                                config.bucket,
-                                config.region,
-                                e
-                            );
-                            return Err(e).context(format!(
-                                "Failed to access or create MinIO bucket: {}",
-                                config.bucket
-                            ));
-                        }
-                    }
-                }
-            }
+            return Err(head_err)
+                .context(format!("Failed to access MinIO bucket: {}", config.bucket));
         }
 
         debug!("Successfully connected to MinIO bucket: {}", config.bucket);

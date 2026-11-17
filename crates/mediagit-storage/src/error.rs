@@ -16,6 +16,10 @@ pub enum StorageError {
     #[error("object not found: {0}")]
     NotFound(String),
 
+    /// The bucket (or container) does not exist. Backends never create one.
+    #[error("bucket '{0}' does not exist")]
+    BucketNotFound(String),
+
     /// Permission denied for the requested operation
     #[error("permission denied: {0}")]
     PermissionDenied(String),

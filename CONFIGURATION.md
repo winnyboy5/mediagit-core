@@ -136,7 +136,7 @@ secret_access_key = "..."
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `backend` | string | — | Must be `"s3"`. |
-| `bucket` | string | — | **Required.** S3 bucket name. |
+| `bucket` | string | — | **Required.** S3 bucket name. The bucket must already exist. MediaGit never creates one. |
 | `region` | string | — | **Required.** AWS region. |
 | `access_key_id` | string \| absent | absent | **Required in practice** — see below. |
 | `secret_access_key` | string \| absent | absent | **Required in practice** — see below. |
@@ -216,7 +216,7 @@ prefix = ""
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `backend` | string | — | Must be `"gcs"`. |
-| `bucket` | string | — | **Required.** GCS bucket name. |
+| `bucket` | string | — | **Required.** GCS bucket name. The bucket must already exist. |
 | `project_id` | string | — | **Required.** GCP project ID. |
 | `credentials_path` | string \| absent | absent | Path to service-account JSON key (prefer `GOOGLE_APPLICATION_CREDENTIALS`/ADC). |
 | `prefix` | string | `""` | Object prefix. |
