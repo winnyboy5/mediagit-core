@@ -14,6 +14,14 @@ CLI. Release candidates are not code-signed; see
 on each OS. The CLI and the server changed along the way, and a few of those
 changes fix real bugs.
 
+### Security
+
+- **The server reads S3 credentials from the environment.** Set
+  `MEDIAGIT_S3_ACCESS_KEY_ID` and `MEDIAGIT_S3_SECRET_ACCESS_KEY` to keep the
+  secret out of the config file; they win over the file. Missing credentials now
+  fail with a message naming both options instead of an "access key cannot be
+  empty" error. `mediagit-server init` makes its config owner-only on Unix.
+
 ### Added
 
 #### Desktop app

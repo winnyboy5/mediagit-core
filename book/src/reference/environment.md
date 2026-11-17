@@ -170,6 +170,7 @@ MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurre
 | `MEDIAGIT_METRICS_ADDR` | `host:port` to bind the Prometheus metrics endpoint. | unset (metrics server not started) |
 | `MEDIAGIT_ALLOW_INSECURE_BIND` | Bypasses the startup refusal to bind a non-loopback host when auth is disabled. | `0` (OFF) |
 | `MEDIAGIT_JWT_SECRET` | JWT signing secret. Env wins over config file `jwt_secret` if both set. | none |
+| `MEDIAGIT_S3_ACCESS_KEY_ID`, `MEDIAGIT_S3_SECRET_ACCESS_KEY` | Server: S3 credentials. Env wins over `access_key_id` / `secret_access_key` in the repo config, each independently. Missing from both is an error naming both options. | none |
 | `MEDIAGIT_STARTUP_PROBE` | Server scans `repos_dir` for repo health at startup. `0` skips it. | `1` (ON) |
 | `MEDIAGIT_AUTH_PERSIST` | Persist auth state (users/grants) to disk. `0` keeps auth in-memory only. | `1` (ON) |
 | `MEDIAGIT_GRANTS_ENFORCE` | Per-repo permission grants. `0` = off everywhere (flat roles only); `strict` = enforce on every repo, so one with no grants denies instead of falling back; unset = per repo (enforced only on repos that have grants). | unset (per repo) |

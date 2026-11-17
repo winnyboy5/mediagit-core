@@ -49,6 +49,12 @@ secret_access_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 > cannot be empty". Protect the file instead: keep it out of version control
 > and restrict its permissions.
 >
+>
+> **Server exception.** `mediagit-server` also reads `MEDIAGIT_S3_ACCESS_KEY_ID`
+> and `MEDIAGIT_S3_SECRET_ACCESS_KEY` from its environment. They win over the
+> file and keep the secret out of it, so prefer them for services and containers.
+> `AWS_*` variables are still ignored.
+>
 > GCS is the one exception — see [GCS](#google-cloud-storage) below.
 
 ---

@@ -275,7 +275,15 @@ fn generate_jwt_secret() -> String {
 
 fn write_config_file(path: &Path, config: &ServerConfig) -> Result<()> {
     let toml_str = toml::to_string_pretty(config).context("serializing config")?;
-    std::fs::write(path, toml_str).with_context(|| format!("writing {:?}", path))
+    std::fs::write(path, toml_str).with_context(|| format!("writing {:?}", path))?;
+    // The file can hold storage secrets: owner-only where the OS has modes.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("restricting {:?}", path))?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------
@@ -294,6 +302,9 @@ pub enum StorageKind {
 /// `--storage-secret-stdin` they are read as `name=value` lines
 /// (`access-key-id`, `secret-access-key`, `account-key`, `connection-string`,
 /// `credentials-path`), after the admin password line when both are given.
+/// They are saved in the server config (owner-only on Unix); for services and
+/// containers prefer `MEDIAGIT_S3_ACCESS_KEY_ID` / `MEDIAGIT_S3_SECRET_ACCESS_KEY`
+/// in the environment, which win over the file.
 #[derive(Args, Debug, Default, Clone)]
 pub struct StorageArgs {
     /// Backend for new repos: filesystem (the default, nothing written), s3, gcs or azure.

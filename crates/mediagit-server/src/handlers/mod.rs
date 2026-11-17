@@ -399,6 +399,10 @@ pub async fn probe_storage(storage: &mediagit_config::StorageConfig) -> anyhow::
         let backend = build_storage_backend(&dir).await.map_err(|c| {
             if c == StatusCode::NOT_FOUND {
                 anyhow::anyhow!("That bucket does not exist. Create it first, then test again.")
+            } else if c == StatusCode::UNPROCESSABLE_ENTITY {
+                anyhow::anyhow!(
+                    "No S3 credentials. Set {S3_ACCESS_KEY_ENV} and {S3_SECRET_KEY_ENV} in the server's environment, or save them in the config."
+                )
             } else {
                 anyhow::anyhow!("could not open the storage backend ({c}); see the log")
             }
@@ -421,6 +425,15 @@ pub async fn probe_storage(storage: &mediagit_config::StorageConfig) -> anyhow::
 /// [`mediagit_storage::NamespacedBackend`] — one of exactly two production
 /// construction sites (the other is the CLI's `create_storage_backend`).
 async fn build_storage_backend(repo_path: &StdPath) -> Result<Arc<dyn StorageBackend>, StatusCode> {
+    build_storage_backend_with_env(repo_path, &|k| std::env::var(k).ok()).await
+}
+
+/// `build_storage_backend` with the environment injected (tests cannot set
+/// process env: the workspace forbids `unsafe`).
+async fn build_storage_backend_with_env(
+    repo_path: &StdPath,
+    env: &(dyn Fn(&str) -> Option<String> + Sync),
+) -> Result<Arc<dyn StorageBackend>, StatusCode> {
     // Load repository configuration
     let config = mediagit_config::Config::load(repo_path)
         .await
@@ -456,9 +469,9 @@ async fn build_storage_backend(repo_path: &StdPath) -> Result<Arc<dyn StorageBac
         }
         mediagit_config::StorageConfig::S3(s3_config) => {
             if s3_config.endpoint.is_some() {
-                build_minio_compatible_storage(s3_config).await?
+                build_minio_compatible_storage(s3_config, env).await?
             } else {
-                build_aws_s3_storage(s3_config).await?
+                build_aws_s3_storage(s3_config, env).await?
             }
         }
         mediagit_config::StorageConfig::Azure(azure_config) => {
@@ -631,10 +644,96 @@ fn gcs_config_with_prefix(gcs_config: &mediagit_config::GCSStorage) -> GcsConfig
     config
 }
 
+/// Environment variables that supply S3 credentials; they win over the repo config.
+pub const S3_ACCESS_KEY_ENV: &str = "MEDIAGIT_S3_ACCESS_KEY_ID";
+pub const S3_SECRET_KEY_ENV: &str = "MEDIAGIT_S3_SECRET_ACCESS_KEY";
+
+/// Resolved S3 credentials. `Debug` never shows the values.
+pub struct S3Creds {
+    pub access_key: String,
+    pub secret_key: String,
+    access_src: &'static str,
+    secret_src: &'static str,
+}
+
+impl std::fmt::Debug for S3Creds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "S3Creds({})", self.log_line())
+    }
+}
+
+impl S3Creds {
+    /// Says where each credential came from, never what it is.
+    pub fn log_line(&self) -> String {
+        format!(
+            "S3 access key id from {}, secret access key from {}",
+            self.access_src, self.secret_src
+        )
+    }
+}
+
+/// The ONE place S3 credentials are resolved: environment first, then the
+/// repo config. Every S3 backend (and the startup probe, which builds through
+/// `build_storage_backend`) goes through here.
+pub fn resolve_s3_credentials(
+    s3: &mediagit_config::S3Storage,
+    env: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<S3Creds> {
+    let pick = |var: &str, file: &Option<String>| -> Option<(String, &'static str)> {
+        env(var)
+            .filter(|v| !v.is_empty())
+            .map(|v| (v, "environment"))
+            .or_else(|| {
+                file.clone()
+                    .filter(|v| !v.is_empty())
+                    .map(|v| (v, "config file"))
+            })
+    };
+    let id = pick(S3_ACCESS_KEY_ENV, &s3.access_key_id);
+    let secret = pick(S3_SECRET_KEY_ENV, &s3.secret_access_key);
+    match (id, secret) {
+        (Some((access_key, access_src)), Some((secret_key, secret_src))) => Ok(S3Creds {
+            access_key,
+            secret_key,
+            access_src,
+            secret_src,
+        }),
+        (id, secret) => {
+            let mut missing = Vec::new();
+            if id.is_none() {
+                missing.push(format!(
+                    "access key id (set {S3_ACCESS_KEY_ENV} in the environment, or `access_key_id` in the repo config)"
+                ));
+            }
+            if secret.is_none() {
+                missing.push(format!(
+                    "secret access key (set {S3_SECRET_KEY_ENV} in the environment, or `secret_access_key` in the repo config)"
+                ));
+            }
+            anyhow::bail!("S3 credentials missing: {}", missing.join("; "))
+        }
+    }
+}
+
+/// Resolve from the process environment. Missing credentials are a 422 so the
+/// probe can say so in plain words instead of "see the log".
+fn s3_credentials_or_status(
+    s3: &mediagit_config::S3Storage,
+    env: &(dyn Fn(&str) -> Option<String> + Sync),
+) -> Result<S3Creds, StatusCode> {
+    let creds = resolve_s3_credentials(s3, env).map_err(|e| {
+        tracing::error!("{e}");
+        StatusCode::UNPROCESSABLE_ENTITY
+    })?;
+    tracing::info!("{}", creds.log_line());
+    Ok(creds)
+}
+
 /// MinIO / S3-compatible storage (MinIO, DigitalOcean Spaces, Cloudflare R2, etc.).
 /// Used when the repo config has an explicit `endpoint` URL.
 async fn build_minio_compatible_storage(
     s3_config: &mediagit_config::S3Storage,
+    env: &(dyn Fn(&str) -> Option<String> + Sync),
 ) -> Result<Arc<dyn StorageBackend>, StatusCode> {
     let endpoint = s3_config.endpoint.as_deref().unwrap_or_default();
     tracing::info!(
@@ -643,11 +742,12 @@ async fn build_minio_compatible_storage(
         endpoint,
         s3_config.prefix
     );
+    let creds = s3_credentials_or_status(s3_config, env)?;
     MinIOBackend::new_with_prefix(
         endpoint,
         &s3_config.bucket,
-        s3_config.access_key_id.as_deref().unwrap_or(""),
-        s3_config.secret_access_key.as_deref().unwrap_or(""),
+        &creds.access_key,
+        &creds.secret_key,
         &s3_config.prefix,
     )
     .await
@@ -663,6 +763,7 @@ async fn build_minio_compatible_storage(
 /// Passes the correct region for SigV4 signing and uses virtual-hosted-style addressing.
 async fn build_aws_s3_storage(
     s3_config: &mediagit_config::S3Storage,
+    env: &(dyn Fn(&str) -> Option<String> + Sync),
 ) -> Result<Arc<dyn StorageBackend>, StatusCode> {
     tracing::info!(
         "Using AWS S3 backend: bucket={}, region={}, prefix='{}'",
@@ -670,15 +771,12 @@ async fn build_aws_s3_storage(
         s3_config.region,
         s3_config.prefix
     );
+    let creds = s3_credentials_or_status(s3_config, env)?;
     let aws_config = mediagit_storage::minio::MinIOConfig {
         endpoint: format!("https://s3.{}.amazonaws.com", s3_config.region),
         bucket: s3_config.bucket.clone(),
-        access_key: s3_config.access_key_id.as_deref().unwrap_or("").to_string(),
-        secret_key: s3_config
-            .secret_access_key
-            .as_deref()
-            .unwrap_or("")
-            .to_string(),
+        access_key: creds.access_key,
+        secret_key: creds.secret_key,
         prefix: s3_config.prefix.clone(),
         region: s3_config.region.clone(),
         path_style: false,
@@ -1350,6 +1448,120 @@ async fn load_jsonl_index(
 mod tests {
     use super::*;
     use mediagit_security::auth::middleware::AuthMethod;
+
+    // ---- Task 4.6: S3 credentials from the environment (fake values only) ----
+
+    fn s3(id: Option<&str>, secret: Option<&str>) -> mediagit_config::S3Storage {
+        mediagit_config::S3Storage {
+            bucket: "fake-bucket".into(),
+            region: "us-east-1".into(),
+            access_key_id: id.map(Into::into),
+            secret_access_key: secret.map(Into::into),
+            endpoint: Some("http://127.0.0.1:1".into()),
+            prefix: String::new(),
+        }
+    }
+
+    fn env_of(
+        id: Option<&'static str>,
+        secret: Option<&'static str>,
+    ) -> impl Fn(&str) -> Option<String> {
+        move |k| match k {
+            S3_ACCESS_KEY_ENV => id.map(Into::into),
+            S3_SECRET_KEY_ENV => secret.map(Into::into),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn s3_env_used_when_file_empty() {
+        let c = resolve_s3_credentials(
+            &s3(None, None),
+            env_of(Some("fake-id-env"), Some("fake-sec-env")),
+        )
+        .unwrap();
+        assert_eq!(
+            (c.access_key.as_str(), c.secret_key.as_str()),
+            ("fake-id-env", "fake-sec-env")
+        );
+    }
+
+    #[test]
+    fn s3_env_wins_over_file() {
+        let c = resolve_s3_credentials(
+            &s3(Some("fake-id-file"), Some("fake-sec-file")),
+            env_of(Some("fake-id-env"), Some("fake-sec-env")),
+        )
+        .unwrap();
+        assert_eq!(
+            (c.access_key.as_str(), c.secret_key.as_str()),
+            ("fake-id-env", "fake-sec-env")
+        );
+    }
+
+    #[test]
+    fn s3_file_used_when_env_unset() {
+        let c = resolve_s3_credentials(
+            &s3(Some("fake-id-file"), Some("fake-sec-file")),
+            env_of(None, None),
+        )
+        .unwrap();
+        assert_eq!(c.secret_key, "fake-sec-file");
+        assert!(c.log_line().contains("config file"));
+    }
+
+    #[test]
+    fn s3_neither_names_both_options() {
+        let e = resolve_s3_credentials(&s3(None, None), env_of(None, None))
+            .unwrap_err()
+            .to_string();
+        for want in [
+            S3_ACCESS_KEY_ENV,
+            S3_SECRET_KEY_ENV,
+            "access_key_id",
+            "secret_access_key",
+        ] {
+            assert!(e.contains(want), "error must name {want}");
+        }
+    }
+
+    #[test]
+    fn s3_log_names_source_never_value() {
+        let c = resolve_s3_credentials(
+            &s3(None, Some("fake-sec-file")),
+            env_of(Some("fake-id-env"), None),
+        )
+        .unwrap();
+        let shown = format!("{} | {:?}", c.log_line(), c);
+        assert!(shown.contains("environment") && shown.contains("config file"));
+        assert!(!shown.contains("fake-id-env") && !shown.contains("fake-sec-file"));
+    }
+
+    /// Dead-config guard: the real server build path (`build_storage_backend`,
+    /// also used by the startup probe) must read the environment. Without it a
+    /// credential-less repo is refused with 422; with it, the build gets past
+    /// the credential step (and then fails to connect, which is not 422).
+    #[tokio::test]
+    async fn s3_env_reachable_from_build_storage_backend() {
+        let dir = std::env::temp_dir().join(format!("mg-s3env-{}", uuid::Uuid::new_v4()));
+        let cfg = mediagit_config::Config {
+            storage: mediagit_config::StorageConfig::S3(s3(None, None)),
+            ..Default::default()
+        };
+        cfg.save(&dir).unwrap();
+        let before = build_storage_backend_with_env(&dir, &env_of(None, None))
+            .await
+            .err();
+        assert_eq!(before, Some(StatusCode::UNPROCESSABLE_ENTITY));
+        let env = env_of(Some("fake-id-env"), Some("fake-sec-env"));
+        let after = build_storage_backend_with_env(&dir, &env).await.err();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_ne!(
+            after,
+            Some(StatusCode::UNPROCESSABLE_ENTITY),
+            "env not read on the real build path"
+        );
+    }
 
     /// `MEDIAGIT_GRANTS_ENFORCE` is a process-wide env var (like
     /// `MEDIAGIT_AUTH_PERSIST` in `persist.rs`). Only one test below

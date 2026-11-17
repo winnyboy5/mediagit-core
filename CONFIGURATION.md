@@ -143,23 +143,26 @@ secret_access_key = "..."
 | `endpoint` | string \| absent | absent | Custom endpoint — set this to point at MinIO or another S3-compatible service (e.g. `http://localhost:9000`). |
 | `prefix` | string | `""` | Object key prefix. |
 
-**Credentials come from this file and nowhere else.** There is no environment-variable
-override and no IAM-role/instance-profile path: `create_storage_backend`
-(`mediagit-cli/src/repo.rs`) passes `access_key_id`/`secret_access_key` straight
-through, and `MinIOBackend::new_with_prefix` rejects an empty key outright
-("access key cannot be empty"). `MinIOBackend::from_env` exists and reads
-`MINIO_*`, but nothing in the shipping binaries calls it. The schema comment
-saying these "can be overridden via env" describes an override that was never
-implemented.
+**Where the credentials come from.** The `mediagit` CLI reads them from this file only:
+`create_storage_backend` (`mediagit-cli/src/repo.rs`) passes
+`access_key_id`/`secret_access_key` straight through, and there is no IAM-role or
+instance-profile path. `MinIOBackend::new_with_prefix` rejects an empty key
+("access key cannot be empty").
 
-Two consequences worth planning around:
+**`mediagit-server` also reads the environment**, and the environment wins:
+`MEDIAGIT_S3_ACCESS_KEY_ID` and `MEDIAGIT_S3_SECRET_ACCESS_KEY`. Each is resolved
+on its own (environment, then the file), for every served S3 repository, the
+startup probe and `mediagit-server storage-test`. If a credential is in neither
+place the server says so and names both options. The log names where each came
+from, never the value. Prefer the environment for services and containers so the
+secret stays out of the file. `AWS_ACCESS_KEY_ID` and friends are still not read.
 
-- Secrets live on disk in the repo's own `.mediagit/config.toml`. On Unix,
-  MediaGit warns when that file is world-readable. Treat the file as a secret.
-- Automation that has credentials in the environment must **render** them into
-  `config.toml` rather than exporting them. That is exactly what this project's
-  own QA harness does — it substitutes `AWS_ACCESS_KEY_ID` into a config
-  template; the variable never reaches `mediagit` itself.
+- Secrets set through `mediagit-server init --storage s3 --storage-secret-stdin` are
+  written to the server config, which `init` makes owner-only on Unix. On the CLI
+  side, `.mediagit/config.toml` holds them in clear text and MediaGit warns when
+  it is world-readable. Treat both files as secrets.
+- CLI automation that has credentials in the environment must **render** them into
+  `config.toml` rather than exporting them (this project's QA harness does).
 
 > **Permissions.** The S3 credentials need `s3:GetObject`, `s3:PutObject`,
 > `s3:DeleteObject` and `s3:ListBucket` on the bucket. Without `s3:ListBucket`,
@@ -572,6 +575,7 @@ Where both an environment variable and a TOML key configure the same thing, **th
 | Variable | Default | Effect |
 |----------|---------|--------|
 | `MEDIAGIT_JWT_SECRET` | unset | Server: JWT signing secret, used when `enable_auth = true`. Wins over the config file's `jwt_secret` key (warns if both set). Required — from either source — when auth is enabled. |
+| `MEDIAGIT_S3_ACCESS_KEY_ID` / `MEDIAGIT_S3_SECRET_ACCESS_KEY` | unset | Server: S3 credentials for served repositories and the default storage. Win over `access_key_id` / `secret_access_key` in the repo config, each independently. Neither place set is an error that names both. |
 | `MEDIAGIT_ALLOW_INSECURE_BIND` | unset | Server: set to `1` to allow binding a non-loopback host with `enable_auth = false`. Without it, the server refuses to start in that combination (`main.rs:197-212`). |
 | `MEDIAGIT_METRICS_ADDR` | unset (metrics endpoint off) | Server: set to `host:port` (e.g. `127.0.0.1:9090`) to start a separate Prometheus `/metrics` listener at boot. Invalid `host:port` logs an error and leaves metrics disabled. |
 | `MEDIAGIT_STARTUP_PROBE` | on (any value except `"0"`) | Server: validates every served repo's storage backend at boot before accepting traffic (up to 4 concurrent probes, `main.rs:418` `buffer_unordered(4)`). Set to `0` to skip. |
