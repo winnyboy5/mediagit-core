@@ -3,6 +3,7 @@ import { ref, shallowRef, watch } from 'vue'
 import { api, toApiError, type ApiError, type AuthReport, type KeyReport } from '@/api'
 import { useAction } from './action'
 import { useRepoStore } from './repo'
+import { useUnlockStore } from './unlock'
 
 /**
  * Security: the signed-in account and the repository's encryption key.
@@ -23,6 +24,8 @@ export const useSecurityStore = defineStore('security', () => {
   /** How the new key unlocks on this machine (keychain, passphrase...), shown with the code. Not a secret. */
   const keySource = ref<string | null>(null)
   let token = 0
+  const unlock = useUnlockStore()
+  watch(recoveryCode, (c) => (unlock.hold = c !== null), { flush: 'sync' })
 
   async function refresh() {
     const root = repo.path

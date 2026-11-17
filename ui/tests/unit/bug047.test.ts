@@ -14,6 +14,7 @@ vi.mock('@/api', async (orig) => ({ ...(await orig<typeof import('@/api')>()), a
 
 import { useRepoStore } from '@/stores/repo'
 import { useSecurityStore } from '@/stores/security'
+import { useUnlockStore } from '@/stores/unlock'
 
 beforeEach(() => {
   setActivePinia(createPinia())
@@ -35,6 +36,19 @@ describe('BUG-047: recovery code with a passphrase', () => {
     void sec.enableEncryption('pw')
     await vi.waitFor(() => expect(api.keyStatus).toHaveBeenCalled())
     expect(sec.recoveryCode).toBe('RC-SECRET')
+  })
+})
+
+describe('BUG-047: unlock prompt waits for the recovery code', () => {
+  it('opens only after the person closes the code dialog', async () => {
+    const sec = useSecurityStore()
+    const unlock = useUnlockStore()
+    sec.recoveryCode = 'RC-SECRET'
+    void unlock.unlockRepo('/repos/hero')
+    await new Promise((r) => setTimeout(r, 10))
+    expect(unlock.open).toBe(false)
+    sec.dismissRecovery()
+    await vi.waitFor(() => expect(unlock.open).toBe(true))
   })
 })
 

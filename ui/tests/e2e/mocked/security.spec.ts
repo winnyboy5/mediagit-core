@@ -35,7 +35,7 @@ test.describe('Security: states', () => {
     await expect(account(page).getByRole('list', { name: 'Projects you can reach' })).toContainText('trailer-cut')
     await expect(enc(page)).toContainText('This repository is encrypted.')
     await expect(enc(page)).toContainText('OS keychain')
-    await expect(enc(page)).toContainText('Saved')
+    await expect(enc(page)).toContainText('Set up')
     await expectNoAxeViolations(page)
   })
 

@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { reactive, ref } from 'vue'
+import { reactive, ref, watch } from 'vue'
 import { api, toApiError } from '@/api'
 
 /**
@@ -21,8 +21,15 @@ export const useUnlockStore = defineStore('unlock', () => {
   /** Prompts run one at a time: a second asker waits its turn instead of replacing the first. */
   let turn: Promise<unknown> = Promise.resolve()
 
+  /** Set while a one-time recovery code is on screen: the prompt waits so it never covers the code. */
+  const hold = ref(false)
+  const released = () => new Promise<void>((done) => {
+    if (!hold.value) return done()
+    const stop = watch(hold, (h) => !h && (stop(), done()), { flush: 'sync' })
+  })
+
   function ask(again: boolean): Promise<string | null> {
-    const asked = turn.then(
+    const asked = turn.then(released).then(
       () =>
         new Promise<string | null>((resolve) => {
           retry.value = again
@@ -105,5 +112,5 @@ export const useUnlockStore = defineStore('unlock', () => {
     locked.add(repo)
   }
 
-  return { open, retry, unlocked, locked, markLocked, answer, withUnlock, unlockRepo, lock }
+  return { open, hold, retry, unlocked, locked, markLocked, answer, withUnlock, unlockRepo, lock }
 })
