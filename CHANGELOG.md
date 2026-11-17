@@ -162,6 +162,12 @@ changes fix real bugs.
 - **A multi-commit cherry-pick that hit an empty commit mid-way** now saves its
   state so `--skip` can continue.
 
+### Fixed — `fsck`, `verify`, `gc` and `tag` no longer invent a repository (BUG-003)
+
+- They find the repository from a subfolder, like `status` does. In a folder that is
+  not a repository they now fail with "Not a mediagit repository" and write nothing.
+  Before, they said "PERFECT" and left a hidden `.mediagit` folder behind.
+
 ### Fixed — "Get latest" failed when both sides changed the same file (BUG-033)
 
 - `pull` now stops with the same conflict as `merge`: markers in the file,

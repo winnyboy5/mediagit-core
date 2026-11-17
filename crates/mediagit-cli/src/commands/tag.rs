@@ -8,7 +8,7 @@ use mediagit_versioning::{
     Commit, ObjectDatabase, ObjectType, Oid, Ref, RefDatabase, Signature, Tag, Tree,
 };
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// `--machine` data for `tag list`.
 #[derive(Debug, Clone, Serialize)]
@@ -424,12 +424,12 @@ impl TagCmd {
         tags = self.sort_tags(tags, &opts.sort, opts.reverse);
 
         if crate::output::machine_mode() {
-            return self.list_machine(&refdb, tags).await;
+            return self.list_machine(&repo_path, &refdb, tags).await;
         }
 
         // Display tags
         if opts.show_info {
-            self.list_verbose(&refdb, tags).await?;
+            self.list_verbose(&repo_path, &refdb, tags).await?;
         } else {
             self.list_simple(tags);
         }
@@ -437,9 +437,13 @@ impl TagCmd {
         Ok(())
     }
 
-    async fn list_machine(&self, refdb: &RefDatabase, tags: Vec<String>) -> Result<()> {
-        let repo_path = std::env::current_dir()?;
-        let storage = create_storage_backend(&repo_path).await?;
+    async fn list_machine(
+        &self,
+        repo_path: &Path,
+        refdb: &RefDatabase,
+        tags: Vec<String>,
+    ) -> Result<()> {
+        let storage = create_storage_backend(repo_path).await?;
         let odb = ObjectDatabase::with_smart_compression(storage, 1000);
 
         let mut out = Vec::with_capacity(tags.len());
@@ -537,9 +541,13 @@ impl TagCmd {
     }
 
     /// List tags with verbose output
-    async fn list_verbose(&self, refdb: &RefDatabase, tags: Vec<String>) -> Result<()> {
-        let repo_path = std::env::current_dir()?;
-        let storage = create_storage_backend(&repo_path).await?;
+    async fn list_verbose(
+        &self,
+        repo_path: &Path,
+        refdb: &RefDatabase,
+        tags: Vec<String>,
+    ) -> Result<()> {
+        let storage = create_storage_backend(repo_path).await?;
         let odb = ObjectDatabase::with_smart_compression(storage, 1000);
 
         for tag_ref in tags {

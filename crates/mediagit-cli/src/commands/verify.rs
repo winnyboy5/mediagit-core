@@ -117,8 +117,10 @@ pub struct VerifyCmd {
 impl VerifyCmd {
     pub async fn execute(&self) -> Result<()> {
         // Determine repository path
-        let repo_path_str = self.path.as_deref().unwrap_or(".");
-        let repo_path = std::path::PathBuf::from(repo_path_str);
+        let repo_path = match self.path.as_deref() {
+            Some(p) => crate::repo::find_repo_root_from(std::path::Path::new(p))?,
+            None => crate::repo::find_repo_root()?,
+        };
         let mediagit_dir = repo_path.join(".mediagit");
 
         if !self.quiet && !crate::output::machine_mode() {

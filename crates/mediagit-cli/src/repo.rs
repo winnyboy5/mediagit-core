@@ -721,6 +721,12 @@ async fn resolve_repo_id(repo_root: &Path, config: &mediagit_config::Config) -> 
 /// # Returns
 /// An `Arc<dyn StorageBackend>` configured per the repository's config.toml
 pub async fn create_storage_backend(repo_root: &Path) -> Result<Arc<dyn StorageBackend>> {
+    // BUG-003: opening storage creates files (config, layout marker). Only
+    // `init` and `clone` build `.mediagit` first; every other caller must
+    // already be inside a repository, or a read command would invent one.
+    if !repo_root.join(".mediagit").is_dir() {
+        anyhow::bail!("Not a mediagit repository: {}", repo_root.display());
+    }
     // DC-7/D3: the at-rest key is installed once per process, from the root
     // `find_repo_root()` walks *upward* to. Every local ODB gets its storage
     // from here, so this is the one place that can tell whether the repository
@@ -1016,6 +1022,19 @@ mod tests {
         // Should find root from nested path
         let found = find_repo_root_from(&nested).unwrap();
         assert_eq!(found, repo_root);
+    }
+
+    /// BUG-003: opening storage outside a repository must fail and write nothing.
+    #[tokio::test]
+    async fn create_storage_backend_refuses_a_folder_without_mediagit() {
+        let temp = TempDir::new().unwrap();
+        let result = create_storage_backend(temp.path()).await;
+        assert!(result.is_err(), "storage opened outside a repository");
+        assert_eq!(
+            std::fs::read_dir(temp.path()).unwrap().count(),
+            0,
+            "a failed open left files behind"
+        );
     }
 
     #[test]

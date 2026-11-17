@@ -725,7 +725,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         Some(Commands::Remote(cmd)) => cmd.execute().await,
         Some(Commands::Branch(cmd)) => cmd.execute().await,
         Some(Commands::Tag(cmd)) => {
-            let repo_path = std::env::current_dir()?;
+            let repo_path = repo::find_repo_root()?;
             cmd.execute(repo_path).await
         }
         Some(Commands::Lock(cmd)) => cmd.execute().await,

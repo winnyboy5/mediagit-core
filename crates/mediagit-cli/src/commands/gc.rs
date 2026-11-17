@@ -1649,12 +1649,8 @@ async fn run_gc_stats(opts: &GcOptions) -> Result<GcStats> {
     let start = Instant::now();
 
     // Determine repository root (canonicalize to match index paths)
-    let repo_root = dunce::canonicalize(std::env::current_dir()?)
-        .unwrap_or_else(|_| std::env::current_dir().expect("current dir"));
-
-    if !repo_root.join(".mediagit").exists() {
-        anyhow::bail!("Not a MediaGit repository (no .mediagit directory found)");
-    }
+    let found = crate::repo::find_repo_root()?;
+    let repo_root = dunce::canonicalize(&found).unwrap_or(found);
 
     if opts.dry_run && !opts.quiet {
         println!(
