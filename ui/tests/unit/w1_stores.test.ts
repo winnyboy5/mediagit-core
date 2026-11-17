@@ -264,6 +264,16 @@ describe('branches store', () => {
   })
 })
 
+describe('repo store', () => {
+  it('BUG-004: opening a subfolder keeps the repository root, not the picked folder', async () => {
+    api.repoStatus.mockResolvedValue({ root: '/repos/hero', branch: { name: 'main' } })
+    const repo = useRepoStore()
+    expect(await repo.open('/repos/hero/art/sub')).toBe(true)
+    expect(repo.path).toBe('/repos/hero')
+    expect(api.allowRepo).toHaveBeenCalledWith('/repos/hero')
+  })
+})
+
 describe('sync store', () => {
   const remotes = { remotes: [{ name: 'origin', url: 'https://h.example/r' }, { name: 'backup', url: '/mnt/b' }] }
 

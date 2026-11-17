@@ -107,7 +107,14 @@ export async function mockIpc(page: Page, scenario: Scenario): Promise<void> {
           : /\.wav$/i.test(p)
             ? 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA='
             : p,
-      async invoke(cmd: string, args: Record<string, unknown> = {}) {
+      // The real status names the repository root; a mocked repo's root is the folder it was opened on (fixtures carry a placeholder).
+      invoke(cmd: string, args: Record<string, unknown> = {}) {
+        const out = invoke(cmd, args) as Promise<Record<string, unknown> | null>
+        return cmd === 'repo_status' ? out.then((s) => (s && typeof s === 'object' && 'root' in s ? { ...s, root: args.repo } : s)) : out
+      },
+    }
+
+    async function invoke(cmd: string, args: Record<string, unknown>): Promise<unknown> {
         calls.push({ cmd, args: JSON.parse(JSON.stringify(args)) })
         if (cmd === 'plugin:event|listen') {
           const list = listeners.get(args.event as string) ?? []
@@ -131,7 +138,6 @@ export async function mockIpc(page: Page, scenario: Scenario): Promise<void> {
           return runScript(script, channel?.id)
         }
         return reply(sc.commands?.[cmd])
-      },
     }
   }, scenario)
 }

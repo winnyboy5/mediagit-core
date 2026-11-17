@@ -62,14 +62,16 @@ export const useRepoStore = defineStore('repo', () => {
       return false
     }
     token++ // supersede any refresh of the previous repo
-    if (path.value && path.value !== dir) lock(path.value)
-    path.value = dir
+    // The picked folder may be inside the repository; the app works on its root.
+    const root = s.root
+    if (path.value && path.value !== root) lock(path.value)
+    path.value = root
     status.value = s
     error.value = null
     loading.value = false
-    allow(dir)
-    save(KEY, dir)
-    useRecentStore().add(dir, (status.value as StatusReport | null)?.branch.name)
+    allow(root)
+    save(KEY, root)
+    useRecentStore().add(root, (status.value as StatusReport | null)?.branch.name)
     return true
   }
 

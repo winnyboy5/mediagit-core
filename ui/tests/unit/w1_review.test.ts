@@ -16,7 +16,7 @@ import { useHistoryStore } from '@/stores/history'
 import { useOpsStore } from '@/stores/ops'
 import { useRepoStore } from '@/stores/repo'
 
-const STATUS = { branch: { name: 'main' }, staged: [], modified: ['a.psd'], deleted: [], untracked: [] }
+const STATUS = { root: '/b', branch: { name: 'main' }, staged: [], modified: ['a.psd'], deleted: [], untracked: [] }
 
 beforeEach(() => {
   setActivePinia(createPinia())

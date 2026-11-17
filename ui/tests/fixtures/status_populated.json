@@ -1,5 +1,6 @@
 {
   "format_version": 1,
+  "root": "/repos/hero-film",
   "branch": { "name": "main", "detached": false, "detached_oid": null, "has_commits": true, "upstream": { "name": "origin/main", "ahead": 3, "behind": 0 } },
   "staged": [
     { "path": "art/hero.psd", "kind": "modified" },
