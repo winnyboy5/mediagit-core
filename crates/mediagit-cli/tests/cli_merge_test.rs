@@ -609,3 +609,35 @@ fn test_merge_abort_and_continue_refuse_during_sequencer_operations() {
         assert_eq!(fs::read_to_string(dir.join("file.bin")).unwrap(), before);
     }
 }
+
+// BUG-024: `--ff-only` on diverged branches must refuse and change nothing.
+#[test]
+fn test_merge_ff_only_refuses_diverged_branches() {
+    let temp_dir = TempDir::new().unwrap();
+    let dir = temp_dir.path();
+    init_repo(dir);
+    add_and_commit(dir, "base.txt", "Base", "Base commit");
+    create_and_switch_branch(dir, "feature");
+    add_and_commit(dir, "feature.txt", "Feature", "Feature commit");
+    mediagit()
+        .args(["branch", "switch", "refs/heads/main"])
+        .current_dir(dir)
+        .assert()
+        .success();
+    add_and_commit(dir, "main.txt", "Main", "Main commit");
+
+    let tip = dir.join(".mediagit/refs/heads/main");
+    let before = fs::read_to_string(&tip).unwrap();
+
+    mediagit()
+        .args(["merge", "--ff-only", "feature"])
+        .current_dir(dir)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("ast-forward"));
+
+    assert_eq!(fs::read_to_string(&tip).unwrap(), before, "tip moved");
+    assert!(!dir.join(".mediagit/MERGE_HEAD").exists());
+    assert!(!dir.join("feature.txt").exists(), "working files changed");
+    assert_eq!(fs::read_to_string(dir.join("main.txt")).unwrap(), "Main");
+}

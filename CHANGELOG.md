@@ -173,6 +173,11 @@ changes fix real bugs.
 - `merge --abort` and `merge --continue` refuse during a rebase, cherry-pick or
   revert, and name the command to use instead.
 
+### Fixed — `merge --ff-only` made a merge commit on diverged branches (BUG-024)
+
+- `merge --ff-only` now stops with "Not possible to fast-forward" when the branches
+  have diverged, and changes nothing. Before, it made a merge commit anyway.
+
 ### Fixed — a file with a very long path made the whole version impossible to check out (BUG-008, BUG-009)
 
 On Windows a path over 260 characters, a reserved name such as `aux.txt`, or a

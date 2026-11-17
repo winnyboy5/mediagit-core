@@ -222,6 +222,14 @@ impl MergeCmd {
 
         let result = engine.merge(&our_oid, &their_oid, strategy).await?;
 
+        // BUG-024: --ff-only refuses anything but a fast-forward or an
+        // up-to-date branch, before any ref or file write.
+        if self.ff_only && result.fast_forward.is_none() {
+            anyhow::bail!(
+                "Not possible to fast-forward: the branches have diverged. Merge without --ff-only, or rebase first."
+            );
+        }
+
         // Handle merge result
         if let Some(ff_info) = &result.fast_forward {
             if ff_info.is_fast_forward && self.squash {
@@ -293,53 +301,49 @@ impl MergeCmd {
                 }
                 return Ok(());
             }
-            if ff_info.is_fast_forward {
-                if self.ff_only || !self.no_ff {
-                    // Fast-forward merge
-                    if !self.quiet() {
-                        println!(
-                            "{} Fast-forwarding {} -> {}",
-                            style("✓").green(),
-                            &ff_info.from.to_string()[..7],
-                            &ff_info.to.to_string()[..7]
-                        );
-                    }
-
-                    // Update HEAD to point to their commit
-                    if let Some(ref target) = head_target {
-                        let new_ref = Ref::new_direct(target.clone(), their_oid);
-                        refdb.write(&new_ref).await?;
-                    } else {
-                        let new_ref = Ref::new_direct("HEAD".to_string(), their_oid);
-                        refdb.write(&new_ref).await?;
-                    }
-
-                    // Update working directory to match the merged commit (ISS-008 fix)
-                    let checkout_mgr =
-                        CheckoutManager::new(&odb, &repo_root).with_tracked_paths(tracked);
-                    checkout_mgr
-                        .checkout_commit(&their_oid)
-                        .await
-                        .context("Failed to update working directory after fast-forward merge")?;
-
-                    // Record reflog entry
-                    let reflog = Reflog::new(&storage_path);
-                    let reflog_msg = format!("merge {}: fast-forward", branch);
-                    let entry =
-                        ReflogEntry::now(our_oid, their_oid, "user", "user@mediagit", &reflog_msg);
-                    let _ = reflog.append("HEAD", &entry).await;
-
-                    if output::machine_mode() {
-                        return output::emit_ok(&merge_report(
-                            "merge",
-                            "fast_forward",
-                            Some(their_oid),
-                        ));
-                    }
-                    return Ok(());
-                } else if self.ff_only {
-                    anyhow::bail!("Fast-forward only requested but not possible");
+            if ff_info.is_fast_forward && (self.ff_only || !self.no_ff) {
+                // Fast-forward merge
+                if !self.quiet() {
+                    println!(
+                        "{} Fast-forwarding {} -> {}",
+                        style("✓").green(),
+                        &ff_info.from.to_string()[..7],
+                        &ff_info.to.to_string()[..7]
+                    );
                 }
+
+                // Update HEAD to point to their commit
+                if let Some(ref target) = head_target {
+                    let new_ref = Ref::new_direct(target.clone(), their_oid);
+                    refdb.write(&new_ref).await?;
+                } else {
+                    let new_ref = Ref::new_direct("HEAD".to_string(), their_oid);
+                    refdb.write(&new_ref).await?;
+                }
+
+                // Update working directory to match the merged commit (ISS-008 fix)
+                let checkout_mgr =
+                    CheckoutManager::new(&odb, &repo_root).with_tracked_paths(tracked);
+                checkout_mgr
+                    .checkout_commit(&their_oid)
+                    .await
+                    .context("Failed to update working directory after fast-forward merge")?;
+
+                // Record reflog entry
+                let reflog = Reflog::new(&storage_path);
+                let reflog_msg = format!("merge {}: fast-forward", branch);
+                let entry =
+                    ReflogEntry::now(our_oid, their_oid, "user", "user@mediagit", &reflog_msg);
+                let _ = reflog.append("HEAD", &entry).await;
+
+                if output::machine_mode() {
+                    return output::emit_ok(&merge_report(
+                        "merge",
+                        "fast_forward",
+                        Some(their_oid),
+                    ));
+                }
+                return Ok(());
             }
         }
 
