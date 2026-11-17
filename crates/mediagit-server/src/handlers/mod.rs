@@ -190,7 +190,19 @@ pub async fn get_or_init_storage(
     if let Some(backend) = map.get(&key).cloned() {
         return Ok(backend);
     }
-    let backend = build_storage_backend(repo_path).await?;
+    let backend = build_storage_backend(repo_path).await.map_err(|c| {
+        // 404 here would read as "repo not created yet" to clients (push
+        // auto-create, clone "not found"); only the probe may use it.
+        if c == StatusCode::NOT_FOUND {
+            tracing::error!(
+                "Storage bucket for {} does not exist; create it, then retry",
+                repo_path.display()
+            );
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            c
+        }
+    })?;
     map.insert(key, Arc::clone(&backend));
 
     // AU-5: this is the first time in this process that we have resolved the

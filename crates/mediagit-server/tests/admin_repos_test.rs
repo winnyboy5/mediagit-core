@@ -445,3 +445,39 @@ async fn trailing_dot_space_and_device_names_are_400() {
         assert_eq!(s, StatusCode::BAD_REQUEST, "delete {name:?}");
     }
 }
+
+/// BUG-043 fix 1: a served repo whose bucket is gone answers 503, never 404.
+/// Clients read 404 on refs as "repo not created yet" and carry on.
+/// Needs a local Silo (MG_SILO_ENDPOINT, default 127.0.0.1:9000); skips when down.
+#[tokio::test]
+async fn served_repo_with_missing_bucket_is_503_not_404() {
+    let endpoint =
+        std::env::var("MG_SILO_ENDPOINT").unwrap_or_else(|_| "http://127.0.0.1:9000".into());
+    if std::net::TcpStream::connect(endpoint.trim_start_matches("http://")).is_err() {
+        eprintln!("skip: no Silo at {endpoint}");
+        return;
+    }
+    let fx = fixture().await;
+    assert_eq!(create(&fx, "gone").await, StatusCode::CREATED);
+    let repo = fx.repos_dir.join("gone");
+    let mut cfg = mediagit_config::Config::load(&repo).await.unwrap();
+    cfg.storage = mediagit_config::StorageConfig::S3(mediagit_config::S3Storage {
+        bucket: format!(
+            "mg-bug043-fix1-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ),
+        region: "us-east-1".into(),
+        access_key_id: Some("minioadmin".into()),
+        secret_access_key: Some("minioadmin".into()),
+        endpoint: Some(endpoint),
+        prefix: String::new(),
+    });
+    cfg.save(&repo).unwrap();
+    // Create cached the filesystem backend; drop it so the new config is read.
+    fx.state.storage_backends.write().await.clear();
+    let (s, _) = call(&fx, req("GET", "/gone/info/refs", Some(&fx.admin), None)).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
+}
