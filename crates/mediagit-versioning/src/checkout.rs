@@ -154,7 +154,17 @@ async fn checkout_entry_differential(
     full_path: &Path,
     oid: &Oid,
     mode: FileMode,
+    stat: Option<&crate::StatCache>,
+    rel: &str,
 ) -> Result<bool> {
+    // BUG-039: a stat-cache hit (size, mtime, file id, change time, not racy)
+    // already says what the file hashes to, so it need not be read again.
+    if matches!(mode, FileMode::Regular | FileMode::Executable)
+        && let Ok(meta) = fs::symlink_metadata(full_path)
+        && stat.is_some_and(|c| c.lookup(rel, &meta) == Some(*oid))
+    {
+        return Ok(false);
+    }
     if matches!(mode, FileMode::Regular | FileMode::Executable)
         && full_path.exists()
         && let Ok(metadata) = fs::metadata(full_path)
@@ -687,17 +697,25 @@ impl<'a> CheckoutManager<'a> {
 
         let semaphore = Arc::new(Semaphore::new(checkout_parallelism()));
         let mut tasks: JoinSet<Result<bool>> = JoinSet::new();
+        let stat = differential.then(|| Arc::new(crate::StatCache::load(&self.repo_root)));
 
         for (full_path, oid, mode) in entries {
             let sem = semaphore.clone();
             let odb = self.odb.clone();
+            let stat = stat.clone();
+            let rel = full_path
+                .strip_prefix(&self.repo_root)
+                .unwrap_or(&full_path)
+                .to_string_lossy()
+                .into_owned();
             tasks.spawn(async move {
                 let _permit = sem
                     .acquire_owned()
                     .await
                     .map_err(|_| anyhow::anyhow!("checkout semaphore closed"))?;
                 if differential {
-                    checkout_entry_differential(&odb, &full_path, &oid, mode).await
+                    checkout_entry_differential(&odb, &full_path, &oid, mode, stat.as_deref(), &rel)
+                        .await
                 } else {
                     write_entry_to_disk(&odb, &full_path, &oid, mode).await?;
                     Ok(true)

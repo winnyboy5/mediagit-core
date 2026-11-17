@@ -61,13 +61,27 @@ impl AtRisk {
 
         // WT-2: `tracked_files_at` flattens the whole tree, subdirectories
         // included — the bug was a top-level-only `tree.iter()`.
-        let mut modified: Vec<PathBuf> = head_files
-            .iter()
-            .filter(|(path, (oid, _))| {
-                working_oid(&repo_root.join(path)).is_some_and(|w| w != *oid)
+        // BUG-039: the stat cache answers for files `status`/`add` already
+        // hashed; a miss is hashed once and recorded for the next run.
+        use rayon::prelude::*;
+        let mut stat = mediagit_versioning::StatCache::load(repo_root);
+        let hashed: Vec<_> = head_files
+            .par_iter()
+            .filter_map(|(path, (oid, _))| {
+                let (w, fresh) = working_oid(repo_root, path, &stat)?;
+                Some((path.clone(), w != *oid, fresh.map(|m| (m, w))))
             })
-            .map(|(path, _)| path.clone())
             .collect();
+        let mut modified: Vec<PathBuf> = Vec::new();
+        for (path, differs, fresh) in hashed {
+            if let Some((meta, oid)) = fresh {
+                stat.record(&path.to_string_lossy(), &meta, oid);
+            }
+            if differs {
+                modified.push(path);
+            }
+        }
+        let _ = stat.save();
         modified.sort();
 
         let untracked_collisions = match target {
@@ -265,14 +279,25 @@ fn untracked_paths(repo_root: &Path, tracked: &HashSet<PathBuf>) -> Result<HashS
 
 /// Hash a working-tree file the same way `add`/`status` do; `None` if it is
 /// missing or unreadable (absence is not this guard's concern).
-fn working_oid(full_path: &Path) -> Option<Oid> {
-    let metadata = std::fs::metadata(full_path).ok()?;
-    if metadata.len() >= crate::commands::utils::STREAMING_THRESHOLD {
-        Oid::from_file(full_path).ok()
+fn working_oid(
+    repo_root: &Path,
+    rel: &Path,
+    stat: &mediagit_versioning::StatCache,
+) -> Option<(Oid, Option<std::fs::Metadata>)> {
+    let full_path = repo_root.join(rel);
+    // Same lookup `status` makes: symlink_metadata, never the link's target.
+    let sym = std::fs::symlink_metadata(&full_path).ok()?;
+    if let Some(oid) = stat.lookup(&rel.to_string_lossy(), &sym) {
+        return Some((oid, None));
+    }
+    let len = std::fs::metadata(&full_path).ok()?.len();
+    let oid = if len >= crate::commands::utils::STREAMING_THRESHOLD {
+        Oid::from_file(&full_path).ok()?
     } else {
         // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- read-only probe of local worktree
-        std::fs::read(full_path).ok().map(|c| Oid::hash(&c))
-    }
+        Oid::hash(&std::fs::read(&full_path).ok()?)
+    };
+    Some((oid, Some(sym)))
 }
 
 fn indent(paths: &[PathBuf]) -> String {

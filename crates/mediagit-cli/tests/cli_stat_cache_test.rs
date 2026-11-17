@@ -81,6 +81,8 @@ fn status_writes_cache() {
 #[test]
 fn disabled_cache_writes_nothing_and_output_matches() {
     let d = committed_repo();
+    // `add` (BUG-039) now records the cache too; this test is about `status`.
+    let _ = fs::remove_file(cache_file(d.path()));
     fs::write(d.path().join("a.bin"), b"HELLO!").unwrap();
     let off = porcelain(d.path(), true);
     assert!(!cache_file(d.path()).exists());

@@ -50,6 +50,7 @@ pub async fn stage_files_for_commit(paths: &[String], repo_root: &std::path::Pat
     };
 
     let unresolved: HashSet<PathBuf> = index.unresolved_paths().into_iter().collect();
+    let stat = std::sync::Mutex::new(mediagit_versioning::StatCache::load(&repo_root));
 
     // Stage each path sequentially
     let mut added_count = 0u64;
@@ -67,6 +68,7 @@ pub async fn stage_files_for_commit(paths: &[String], repo_root: &std::path::Pat
                 &head_files,
                 &index_files,
                 &unresolved,
+                &stat,
                 true,
                 None,
             )
@@ -91,6 +93,7 @@ pub async fn stage_files_for_commit(paths: &[String], repo_root: &std::path::Pat
 
     // Save index
     index.save(&repo_root).context("Failed to save index")?;
+    let _ = stat.lock().unwrap().save();
 
     Ok(added_count)
 }
@@ -504,6 +507,12 @@ impl AddCmd {
         // The tree the next commit builds on, to identify already-tracked files
         let head_files = Arc::new(base_files(&repo_root, &storage_path, &odb).await?);
 
+        // BUG-039: the index is empty after a commit, so size+mtime against it
+        // cannot skip anything. The stat cache (the one `status` fills) can.
+        let stat = Arc::new(std::sync::Mutex::new(mediagit_versioning::StatCache::load(
+            &repo_root,
+        )));
+
         // Tracked paths = union of HEAD tree paths and current index paths.
         // Used by `-u`/`--update` to restrict staging to already-tracked
         // files (never untracked ones) — see expand_paths.
@@ -603,6 +612,7 @@ impl AddCmd {
                     let odb = odb.clone();
                     let head_files = head_files.clone();
                     let index_files = index_files.clone();
+                    let stat = stat.clone();
                     let unresolved = unresolved.clone();
                     let repo_root = repo_root.clone();
                     let progress_bytes = progress_bytes.clone();
@@ -650,6 +660,7 @@ impl AddCmd {
                             &head_files,
                             &index_files,
                             &unresolved,
+                            &stat,
                             delta_enabled,
                             on_bytes,
                         )
@@ -747,6 +758,7 @@ impl AddCmd {
                         &head_files,
                         &index_files,
                         &unresolved,
+                        &stat,
                         delta_enabled,
                         on_bytes_seq.clone(),
                     )
@@ -823,9 +835,12 @@ impl AddCmd {
         // must not stage unrelated deletions.
         let mut deleted_count = 0;
 
-        let working_files: std::collections::HashSet<PathBuf> = files_to_add
+        // '/'-normalized once so the per-HEAD-path check below is a set lookup,
+        // not a scan of every working file (BUG-039).
+        let working_files: std::collections::HashSet<String> = files_to_add
             .iter()
             .filter_map(|p| crate::repo::repo_relative(&repo_root, p).ok())
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
             .collect();
 
         // Pathspec prefixes (repo-relative, '/'-normalized) that scope which
@@ -900,9 +915,7 @@ impl AddCmd {
                 continue;
             }
 
-            let exists_in_working_dir = working_files.iter().any(|wp| {
-                wp.to_string_lossy().replace('\\', "/") == head_path_normalized.to_string_lossy()
-            });
+            let exists_in_working_dir = working_files.contains(&head_str);
 
             // Stage deletion unless --ignore-removal is set
             if !exists_in_working_dir
@@ -931,6 +944,7 @@ impl AddCmd {
         // Save the index
         if !self.dry_run {
             index.save(&repo_root).context("Failed to save index")?;
+            let _ = stat.lock().unwrap().save();
         }
 
         if !self.quiet {
@@ -1017,6 +1031,7 @@ impl AddCmd {
         head_files: &HashMap<PathBuf, Oid>,
         index_files: &IndexStat,
         unresolved: &HashSet<PathBuf>,
+        stat: &std::sync::Mutex<mediagit_versioning::StatCache>,
         delta_enabled: bool,
         on_bytes: Option<Arc<dyn Fn(u64) + Send + Sync>>,
     ) -> Result<(Option<FileResult>, u64)> {
@@ -1065,6 +1080,22 @@ impl AddCmd {
                 cb(file_size);
             }
             return Ok((None, file_size)); // Unchanged since last staging
+        }
+
+        // BUG-039: the stat cache answers "what does this file hash to" without
+        // reading it (size, mtime, file id, change time and the racy margin all
+        // have to match). Equal to what the next commit holds = unchanged.
+        let rel_key = relative_path.to_string_lossy().into_owned();
+        let sym_meta = tokio::fs::symlink_metadata(file_path).await.ok();
+        if !conflicted
+            && let Some(m) = &sym_meta
+            && let Some(cached) = stat.lock().unwrap().lookup(&rel_key, m)
+            && staged_or_base(index_files, head_files, &relative_path) == Some(cached)
+        {
+            if let Some(ref cb) = on_bytes {
+                cb(file_size);
+            }
+            return Ok((None, file_size));
         }
 
         let filename = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -1128,6 +1159,10 @@ impl AddCmd {
                 _oid_timer.elapsed(),
             );
 
+            if let Some(m) = &sym_meta {
+                stat.lock().unwrap().record(&rel_key, m, content_oid);
+            }
+
             // Check if unchanged from HEAD
             if !conflicted
                 && staged_or_base(index_files, head_files, &relative_path) == Some(content_oid)
@@ -1158,6 +1193,10 @@ impl AddCmd {
                 .context(format!("Failed to read file: {}", file_path.display()))?;
 
             let content_oid = Oid::hash(&content);
+
+            if let Some(m) = &sym_meta {
+                stat.lock().unwrap().record(&rel_key, m, content_oid);
+            }
 
             // Check if unchanged from HEAD
             if !conflicted
@@ -1477,17 +1516,39 @@ impl AddCmd {
         let entries = std::fs::read_dir(dir)
             .context(format!("Failed to read directory: {}", dir.display()))?;
 
+        // BUG-039: canonicalizing every file costs several syscalls each. A
+        // plain file (not a link) inside an already-canonical folder has the
+        // canonical path `canon_dir/name`, so the folder is resolved once.
+        let canon_dir = dunce::canonicalize(dir).ok();
+
         for entry in entries {
             let entry = entry?;
             let path = entry.path();
+            // `file_type` comes from the directory listing itself, so it still
+            // answers for names a path lookup rewrites (trailing dot, BUG-009).
+            let ft = entry.file_type()?;
 
-            if !Self::is_outside_mediagit(&path, mediagit_dir) {
+            let fast = (ft.is_file()
+                && !(cfg!(windows) && windows_unstorable_name(&path).is_some()))
+            .then(|| canon_dir.as_ref().map(|d| d.join(entry.file_name())))
+            .flatten()
+            .filter(|c| crate::repo::repo_relative(repo_root, c).is_ok());
+
+            let outside = match &fast {
+                Some(c) => !c.starts_with(mediagit_dir),
+                None => Self::is_outside_mediagit(&path, mediagit_dir),
+            };
+            if !outside {
                 continue;
             }
 
             // Check .mediagitignore before descending into dirs or staging files
+            let rel_for_ignore = match &fast {
+                Some(c) => crate::repo::repo_relative(repo_root, c).ok(),
+                None => Self::ignore_relative_path(&path, repo_root),
+            };
             if let Some(m) = matcher
-                && let Some(rel) = Self::ignore_relative_path(&path, repo_root)
+                && let Some(rel) = rel_for_ignore
             {
                 let is_dir = path.is_dir();
                 if m.is_ignored(&rel, is_dir) {
@@ -1498,10 +1559,9 @@ impl AddCmd {
                 }
             }
 
-            // `file_type` comes from the directory listing itself, so it still
-            // answers for names a path lookup rewrites (trailing dot, BUG-009).
-            let ft = entry.file_type()?;
-            if path.is_file() || ft.is_file() {
+            if let Some(c) = fast {
+                files.push(c);
+            } else if path.is_file() || ft.is_file() {
                 match Self::resolve_entry(&path, repo_root) {
                     Ok(f) => files.push(f),
                     Err(m) => refused.push(m),
