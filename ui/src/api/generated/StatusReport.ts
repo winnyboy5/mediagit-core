@@ -14,7 +14,12 @@ export type StatusReport = {
 /**
  * Bumped only if the JSON shape changes incompatibly.
  */
-format_version: number, branch: BranchReport, staged: Array<StagedFileReport>, modified: Array<string>, deleted: Array<string>, untracked: Array<string>, ignored: Array<string>, 
+format_version: number, 
+/**
+ * Repository root (the folder holding `.mediagit`), however deep the
+ * command was run from.
+ */
+root: string, branch: BranchReport, staged: Array<StagedFileReport>, modified: Array<string>, deleted: Array<string>, untracked: Array<string>, ignored: Array<string>, 
 /**
  * Media metadata lines for modified/staged media files (M5 T3),
  * gated by `MEDIAGIT_MEDIA_META`. Additive — empty unless the knob is

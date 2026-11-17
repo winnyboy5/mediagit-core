@@ -385,3 +385,27 @@ fn json_output_is_a_single_document_with_no_leading_text() {
         panic!("expected --json stdout to be a single JSON document: {e}\n{stdout}")
     });
 }
+
+/// BUG-004: `status --json` names the repository root, so a caller that was
+/// handed a subfolder can tell which folder owns the `.mediagit`.
+#[test]
+fn json_carries_repo_root_from_subfolder() {
+    let temp_dir = TempDir::new().unwrap();
+    init_repo(temp_dir.path());
+    let sub = temp_dir.path().join("sub");
+    fs::create_dir(&sub).unwrap();
+
+    let output = mediagit()
+        .arg("status")
+        .arg("--json")
+        .current_dir(&sub)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let root = v["root"].as_str().expect("status json has a `root` string");
+    assert_eq!(
+        fs::canonicalize(root).unwrap(),
+        fs::canonicalize(temp_dir.path()).unwrap()
+    );
+}

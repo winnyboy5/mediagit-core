@@ -23,6 +23,9 @@ use crate::ignore_rules::IgnoreMatcher;
 pub struct StatusReport {
     /// Bumped only if the JSON shape changes incompatibly.
     pub format_version: u32,
+    /// Repository root (the folder holding `.mediagit`), however deep the
+    /// command was run from.
+    pub root: String,
     pub branch: BranchReport,
     pub staged: Vec<StagedFileReport>,
     pub modified: Vec<String>,
@@ -745,6 +748,7 @@ impl StatusCmd {
 
         let report = StatusReport {
             format_version: 1,
+            root: repo_root.display().to_string(),
             branch: branch_report,
             staged,
             modified,
