@@ -715,6 +715,15 @@ impl RebaseCmd {
             );
         }
 
+        // A real stop always records its conflicts. None recorded means the
+        // stop failed after its first write; committing now would lose the
+        // stopped commit's change.
+        if state.current_commit.is_some() && state.conflict_files.is_empty() {
+            anyhow::bail!(
+                "The last rebase stop did not finish writing.                  Run `mediagit rebase --abort` and start again."
+            );
+        }
+
         if !self.quiet() {
             println!("{} Continuing rebase...", style("→").cyan());
         }

@@ -1942,3 +1942,53 @@ fn fix5_case_collision_refusal_keeps_the_commit() {
 "
     );
 }
+
+/// R1: a stop that failed after its first disk write leaves a stopped commit
+/// with no recorded conflicts. `--continue` must refuse, not commit it as the
+/// tip's tree and lose its change.
+#[test]
+fn r1_continue_refuses_stopped_commit_without_conflicts() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    init_repo(d);
+    commit_file(
+        d,
+        "shared.txt",
+        "base
+",
+        "base",
+    );
+    switch_new(d, "feature");
+    commit_file(
+        d,
+        "shared.txt",
+        "f1
+",
+        "C1",
+    );
+    switch(d, "main");
+    commit_file(
+        d,
+        "shared.txt",
+        "main
+",
+        "main edit",
+    );
+    switch(d, "feature");
+    assert!(!run(d, &["rebase", "main"]).status.success());
+    let sf = d.join(".mediagit/rebase-apply/state.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&fs::read(&sf).unwrap()).unwrap();
+    v["conflict_files"] = serde_json::json!([]);
+    fs::write(&sf, serde_json::to_vec(&v).unwrap()).unwrap();
+    fs::write(
+        d.join("shared.txt"),
+        "r1
+",
+    )
+    .unwrap();
+    assert!(run(d, &["add", "shared.txt"]).status.success());
+    let out = run(d, &["rebase", "--continue"]);
+    assert!(!out.status.success(), "continue must refuse");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("rebase --abort"));
+    assert!(sf.exists(), "state kept");
+}
