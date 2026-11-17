@@ -51,6 +51,42 @@ fn compress_permits() -> &'static tokio::sync::Semaphore {
     })
 }
 
+/// Delta-encode `target` against `base` on a blocking thread.
+///
+/// The CLI runs `add` on a current-thread runtime, so encoding inline (zstd
+/// level 19 with the base as dictionary, ~0.6 s per 1.3 MB chunk) ran every
+/// chunk's encode back to back on the one thread that also drives all I/O
+/// (BUG-018: 165 s for a 269 MB safetensors). Output bytes are unchanged.
+/// Returns the serialized delta and its size ratio; when an XP encode is
+/// rejected by `threshold` it falls back to the dictionary codec.
+pub(crate) async fn encode_delta_blocking(
+    base: Arc<Vec<u8>>,
+    target: Vec<u8>,
+    xp: Option<(u8, u8)>,
+    threshold: f64,
+) -> anyhow::Result<(Vec<u8>, f64)> {
+    let _permit = compress_permits()
+        .acquire()
+        .await
+        .map_err(|e| anyhow::anyhow!("delta permit: {}", e))?;
+    tokio::task::spawn_blocking(move || {
+        let ratio = |b: &[u8]| b.len() as f64 / target.len() as f64;
+        let mut bytes = match xp {
+            Some((w, phase)) => DeltaEncoder::encode_xor_planes(&base, &target, w, phase),
+            None => DeltaEncoder::encode(&base, &target),
+        }
+        .to_bytes();
+        // XP rejected: try the dictionary codec against the same base.
+        if xp.is_some() && ratio(&bytes) >= threshold {
+            bytes = DeltaEncoder::encode(&base, &target).to_bytes();
+        }
+        let r = ratio(&bytes);
+        (bytes, r)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("delta encode task: {}", e))
+}
+
 /// Whether `chunk` takes part in chunk-delta: it may be nominated a delta base
 /// and, if later chunks pick it, must be reachable in `base_chunk_cache`.
 /// Single source of truth for the producer's similarity step AND the cache
@@ -1659,27 +1695,13 @@ impl ObjectDatabase {
                                     let _encode_timer = std::time::Instant::now();
                                     let threshold =
                                         delta_ratio_threshold(chunk.codec_hint, chunk.chunk_type);
-                                    let delta = match xp_params {
-                                        Some((w, phase)) => DeltaEncoder::encode_xor_planes(
-                                            &base_data,
-                                            &chunk.data,
-                                            w,
-                                            phase,
-                                        ),
-                                        None => DeltaEncoder::encode(&base_data, &chunk.data),
-                                    };
-                                    let mut delta_bytes = delta.to_bytes();
-                                    let mut delta_ratio =
-                                        delta_bytes.len() as f64 / chunk.data.len() as f64;
-                                    // XP rejected: try the dictionary codec against the
-                                    // same base before giving up (never run when XP won,
-                                    // so the fast path pays nothing).
-                                    if xp_params.is_some() && delta_ratio >= threshold {
-                                        delta_bytes = DeltaEncoder::encode(&base_data, &chunk.data)
-                                            .to_bytes();
-                                        delta_ratio =
-                                            delta_bytes.len() as f64 / chunk.data.len() as f64;
-                                    }
+                                    let (delta_bytes, delta_ratio) = encode_delta_blocking(
+                                        base_data.clone(),
+                                        chunk.data.clone(),
+                                        xp_params,
+                                        threshold,
+                                    )
+                                    .await?;
                                     crate::add_phases::record(
                                         crate::add_phases::Phase::DeltaEncode,
                                         _encode_timer.elapsed(),
@@ -5065,5 +5087,52 @@ mod tensor_xp_tests {
                 ms[2]
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod encode_blocking_tests {
+    use super::*;
+
+    /// BUG-018: the encode must not run on the runtime thread. On a
+    /// current-thread runtime (the CLI's) a ticker task keeps advancing while
+    /// the encode runs only if the encode is off that thread.
+    #[tokio::test(flavor = "current_thread")]
+    async fn delta_encode_does_not_block_the_runtime_thread() {
+        let mut x = 0x2545F491u32;
+        let mut rnd = |n: usize| -> Vec<u8> {
+            (0..n)
+                .map(|_| {
+                    x ^= x << 13;
+                    x ^= x >> 17;
+                    x ^= x << 5;
+                    (x >> 8) as u8
+                })
+                .collect()
+        };
+        let base = Arc::new(rnd(1 << 22));
+        let mut target = base.to_vec();
+        target.extend(rnd(1 << 20));
+        let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let t = ticks.clone();
+        let ticker = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                t.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+        let start = std::time::Instant::now();
+        let (bytes, ratio) = encode_delta_blocking(base.clone(), target.clone(), None, 0.9)
+            .await
+            .unwrap();
+        let elapsed = start.elapsed();
+        ticker.abort();
+        // Output is the plain encoder's, byte for byte.
+        assert_eq!(bytes, DeltaEncoder::encode(&base, &target).to_bytes());
+        assert!(ratio < 1.0);
+        // Windows timers tick ~15 ms; demand one tick per 40 ms, at least 2.
+        let min = ((elapsed.as_millis() / 40) as usize).max(2);
+        let got = ticks.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(got >= min, "runtime starved: {got} ticks in {elapsed:?}");
     }
 }
