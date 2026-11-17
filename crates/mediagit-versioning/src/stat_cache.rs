@@ -20,8 +20,12 @@
 //! - A missing, corrupt or wrong-version cache file loads as empty, which is
 //!   the old behaviour: hash everything.
 //! - Identity is size + mtime + file id (inode, Unix) + change time (ctime on
-//!   Unix, creation time on Windows), so an editor that saves via a temp file
-//!   and rename is caught even if it preserves size and mtime.
+//!   Unix, NTFS ChangeTime on Windows; both are bumped by every write and cannot
+//!   be set back by tools that restore mtime), so an in-place edit or a
+//!   temp-file-and-rename save is caught even if it preserves size and mtime.
+//! - `recorded_ns` is the time the cache was loaded, which precedes every
+//!   read/hash the caller does, so content that changes during a long hash is
+//!   never trusted.
 //! - Callers pass `symlink_metadata`; symlinks and other non-regular files
 //!   are never cached.
 //! - `MEDIAGIT_STAT_CACHE=0` disables the cache entirely.
@@ -37,7 +41,7 @@ use serde::{Deserialize, Serialize};
 use crate::Oid;
 use crate::atomic_write::write_atomic;
 
-const FORMAT_VERSION: u8 = 1;
+const FORMAT_VERSION: u8 = 2;
 const FILE_NAME: &str = "stat-cache";
 
 /// An entry recorded less than this long after the file's mtime is racy and
@@ -62,6 +66,8 @@ pub struct StatCache {
     entries: BTreeMap<String, StatEntry>,
     enabled: bool,
     dirty: bool,
+    /// Taken before any file is read; stamped on every record (see module docs).
+    started_ns: u128,
 }
 
 impl StatCache {
@@ -84,6 +90,7 @@ impl StatCache {
             entries,
             enabled,
             dirty: false,
+            started_ns: now_ns(),
         }
     }
 
@@ -94,8 +101,7 @@ impl StatCache {
         let mtime_ns = mtime_ns(meta)?;
         let trusted = entry.size == meta.len()
             && entry.mtime_ns == mtime_ns
-            && Some(entry.file_id) == file_id(&self.root.join(rel_path), meta)
-            && entry.change_ns == change_ns(meta)
+            && Some((entry.file_id, entry.change_ns)) == identity(&self.root.join(rel_path), meta)
             && meta.is_file()
             && mtime_ns.saturating_add(RACY_MARGIN_NS) < entry.recorded_ns;
         trusted.then_some(entry.oid)
@@ -106,8 +112,8 @@ impl StatCache {
         if !self.enabled || !meta.is_file() {
             return;
         }
-        let (Some(mtime_ns), Some(file_id)) =
-            (mtime_ns(meta), file_id(&self.root.join(rel_path), meta))
+        let (Some(mtime_ns), Some((file_id, change_ns))) =
+            (mtime_ns(meta), identity(&self.root.join(rel_path), meta))
         else {
             return;
         };
@@ -115,9 +121,9 @@ impl StatCache {
             size: meta.len(),
             mtime_ns,
             file_id,
-            change_ns: change_ns(meta),
+            change_ns,
             oid,
-            recorded_ns: now_ns(),
+            recorded_ns: self.started_ns,
         };
         if self
             .entries
@@ -186,52 +192,72 @@ fn now_ns() -> u128 {
         .map_or(0, |d| d.as_nanos())
 }
 
-/// Status-change time on Unix (updated by every write, cannot be set by
-/// tools that preserve mtime); creation time on Windows (new for a file
-/// replaced via save-to-temp-and-rename). 0 if unavailable.
+/// (file id, change time). Change time is ctime on Unix and NTFS ChangeTime on
+/// Windows: updated by every write, not settable via utimes/SetFileTime.
 #[cfg(unix)]
-fn change_ns(meta: &Metadata) -> u128 {
+fn identity(_path: &Path, meta: &Metadata) -> Option<(u64, u128)> {
     use std::os::unix::fs::MetadataExt;
-    (meta.ctime().max(0) as u128) * 1_000_000_000 + meta.ctime_nsec().max(0) as u128
+    let ctime = (meta.ctime().max(0) as u128) * 1_000_000_000 + meta.ctime_nsec().max(0) as u128;
+    Some((meta.ino(), ctime))
 }
 
-#[cfg(not(unix))]
-fn change_ns(meta: &Metadata) -> u128 {
-    meta.created()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |d| d.as_nanos())
-}
-
-#[cfg(unix)]
-fn file_id(_path: &Path, meta: &Metadata) -> Option<u64> {
-    use std::os::unix::fs::MetadataExt;
-    Some(meta.ino())
-}
-
-/// NTFS file index. Creation time alone is not enough on Windows: a name
-/// deleted and reused within ~15 s gets the OLD creation time back
-/// ("tunnelling"), so a delete-then-rename replacement with restored size and
-/// mtime would otherwise look unchanged. Costs one handle open per file; an
-/// unreadable file returns None and is simply re-hashed.
+/// NTFS file index + ChangeTime from one handle open. The file index is needed
+/// because a name deleted and reused within ~15 s gets the OLD creation time
+/// back ("tunnelling"); ChangeTime because an in-place same-size edit keeps the
+/// file index and creation time, and mtime can be restored with SetFileTime.
+/// An unreadable file returns None and is simply re-hashed.
 #[cfg(windows)]
-fn file_id(path: &Path, _meta: &Metadata) -> Option<u64> {
+#[allow(unsafe_code)] // audited: one FFI call on an open handle into a correctly sized FILE_BASIC_INFO
+fn identity(path: &Path, _meta: &Metadata) -> Option<(u64, u128)> {
     use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    // Zero access rights: no sharing violation even if another app holds the file.
+    const FILE_READ_ATTRIBUTES: u32 = 0x80;
+    #[repr(C)]
+    #[derive(Default)]
+    struct FileBasicInfo {
+        creation: i64,
+        access: i64,
+        write: i64,
+        change: i64,
+        attrs: u32,
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFileInformationByHandleEx(
+            h: *mut core::ffi::c_void,
+            class: i32,
+            info: *mut core::ffi::c_void,
+            len: u32,
+        ) -> i32;
+    }
     let file = std::fs::OpenOptions::new()
-        .access_mode(0)
+        .access_mode(FILE_READ_ATTRIBUTES)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)
         .ok()?;
-    winapi_util::file::information(&file)
-        .ok()
-        .map(|i| i.file_index())
+    let id = winapi_util::file::information(&file).ok()?.file_index();
+    let mut info = FileBasicInfo::default();
+    // SAFETY: valid open handle; `info` is a correctly sized FILE_BASIC_INFO; class 0 = FileBasicInfo.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            0,
+            (&mut info as *mut FileBasicInfo).cast(),
+            core::mem::size_of::<FileBasicInfo>() as u32,
+        )
+    };
+    (ok != 0).then_some((id, info.change as u128))
 }
 
 #[cfg(not(any(unix, windows)))]
-fn file_id(_path: &Path, _meta: &Metadata) -> Option<u64> {
-    Some(0)
+fn identity(_path: &Path, meta: &Metadata) -> Option<(u64, u128)> {
+    let created = meta
+        .created()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    Some((0, created))
 }
 
 #[cfg(test)]

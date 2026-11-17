@@ -155,22 +155,87 @@ fn corrupt_cache_is_ignored() {
 /// Documents the known limit (same as Git) and proves the cache is really
 /// consulted: on Windows an in-place rewrite that restores size and mtime
 /// keeps the creation time, so the cached hash is trusted. The escape hatch
-/// `MEDIAGIT_STAT_CACHE=0` still sees the edit.
-#[cfg(windows)]
+/// Warm the cache, then rewrite `a.bin` in place with the same size and put the
+/// original aged mtime back (what `exiftool -P`, Mp3tag or `robocopy /COPY:T`
+/// do). Only the change time (ctime / NTFS ChangeTime) reveals the edit.
+fn edit_keeping_size_and_mtime(p: &Path) {
+    porcelain(p, false); // warm
+    porcelain(p, false); // served from cache
+    let t = fs::metadata(p.join("a.bin")).unwrap().modified().unwrap();
+    fs::write(p.join("a.bin"), b"jello").unwrap();
+    set_mtime(&p.join("a.bin"), t);
+}
+
 #[test]
-fn in_place_rewrite_with_same_size_and_mtime_is_the_documented_limit() {
+fn in_place_edit_with_restored_mtime_is_seen_by_status_add_and_reset() {
     let d = committed_repo();
     let p = d.path();
-    porcelain(p, false); // warm
-    let t = fs::metadata(p.join("a.bin")).unwrap().modified().unwrap();
-    fs::write(p.join("a.bin"), b"HELLO").unwrap();
-    set_mtime(&p.join("a.bin"), t);
-    assert_eq!(
-        porcelain(p, false),
-        "",
-        "cache hit expected (documented limit)"
+    edit_keeping_size_and_mtime(p);
+    assert!(
+        porcelain(p, false).contains("a.bin"),
+        "status missed the edit"
     );
-    assert!(porcelain(p, true).contains("a.bin"));
+    mediagit(p).args(["add", "--all", "-q"]).assert().success();
+    let staged = porcelain(p, false);
+    mediagit(p)
+        .args(["reset", "--hard", "HEAD"])
+        .assert()
+        .success();
+    assert_eq!(fs::read(p.join("a.bin")).unwrap(), b"hello", "{staged:?}");
+}
+
+#[test]
+fn add_all_stages_in_place_edit_with_restored_mtime() {
+    let d = committed_repo();
+    let p = d.path();
+    edit_keeping_size_and_mtime(p);
+    mediagit(p).args(["add", "--all", "-q"]).assert().success();
+    mediagit(p)
+        .args(["commit", "-m", "e", "-q"])
+        .assert()
+        .success();
+    // Committed content must be the edit: a hard reset keeps it.
+    mediagit(p)
+        .args(["reset", "--hard", "HEAD"])
+        .assert()
+        .success();
+    assert_eq!(fs::read(p.join("a.bin")).unwrap(), b"jello");
+}
+
+#[test]
+fn branch_switch_refuses_in_place_edit_with_restored_mtime() {
+    let d = committed_repo();
+    let p = d.path();
+    mediagit(p)
+        .args(["branch", "create", "other"])
+        .assert()
+        .success();
+    mediagit(p)
+        .args(["branch", "switch", "other"])
+        .assert()
+        .success();
+    fs::write(p.join("a.bin"), b"HELLO").unwrap();
+    mediagit(p).args(["add", "a.bin", "-q"]).assert().success();
+    mediagit(p)
+        .args(["commit", "-m", "o", "-q"])
+        .assert()
+        .success();
+    mediagit(p)
+        .args(["branch", "switch", "main"])
+        .assert()
+        .success();
+    set_mtime(&p.join("a.bin"), an_hour_ago());
+    set_mtime(&p.join("b.bin"), an_hour_ago());
+    edit_keeping_size_and_mtime(p);
+    mediagit(p)
+        .args(["branch", "switch", "other"])
+        .assert()
+        .failure();
+    assert_eq!(
+        fs::read(p.join("a.bin")).unwrap(),
+        b"jello",
+        "edit was overwritten"
+    );
 }
 
 /// Status lists come from hash sets and a parallel walk; output must still
