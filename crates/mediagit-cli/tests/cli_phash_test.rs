@@ -286,3 +286,26 @@ fn test_phash_kill_switch_restores_prior_behavior() {
         "MEDIAGIT_PHASH=0 must not attempt a delta for jpg (matches pre-P4a behavior)"
     );
 }
+
+/// BUG-001: an image whose bytes are already stored is not hashed again
+/// (no second index entry for identical content under another name).
+#[test]
+fn test_phash_skips_already_stored_object() {
+    let img =
+        image::RgbImage::from_fn(64, 48, |x, y| image::Rgb([(x * 4) as u8, (y * 5) as u8, 7]));
+    let tmp = TempDir::new().unwrap();
+    init_repo(tmp.path());
+    img.save(tmp.path().join("a.png")).unwrap();
+    mediagit()
+        .args(["add", "a.png"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    fs::copy(tmp.path().join("a.png"), tmp.path().join("b.png")).unwrap();
+    mediagit()
+        .args(["add", "b.png"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    assert_eq!(read_index_entries(tmp.path()).len(), 1);
+}
