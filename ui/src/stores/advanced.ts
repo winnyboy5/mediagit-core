@@ -147,7 +147,10 @@ function sequencer(command: 'rebase' | 'cherry-pick') {
       if (!theirs) return false
       // During a rebase HEAD is not our side; the status names the commit that is.
       const ours = repo.status?.operation?.ours_commit ?? (command === 'rebase' ? null : 'HEAD')
-      if (!ours) return false
+      if (!ours) {
+        error.value = { code: 'unknown', message: 'Could not tell which version is which. Refresh and try again.' }
+        return false
+      }
       const names = sideNames.value
       const r = await run(`Keep ${side === 'ours' ? names.ours : names.theirs} of ${path}`, (root) => api.mergeResolve(root, path, side, ours, theirs), () => 'Kept')
       if (r) clashes.value = clashes.value.map((c) => (c.path === path ? { ...c, resolved: side } : c))

@@ -269,6 +269,11 @@ describe('rebase and cherry-pick stores', () => {
     expect(rb.active).toBe(true)
     expect(rb.clashes.map((c) => c.path)).toEqual(['a.psd', 'b.fbx'])
     api.mergeResolve.mockResolvedValue(null)
+    // Status without the rebase's commit: say so instead of silently doing nothing.
+    useRepoStore().status = { operation: { kind: 'rebase', ours: 'main', ours_commit: null, theirs: 'cc' } } as never
+    expect(await rb.resolve('a.psd', 'ours')).toBe(false)
+    expect(api.mergeResolve).not.toHaveBeenCalled()
+    expect(rb.error?.message).toBe('Could not tell which version is which. Refresh and try again.')
     // During a rebase our side is the commit built on, named by status, never literal HEAD.
     useRepoStore().status = { operation: { kind: 'rebase', ours: 'main', ours_commit: 'oo', theirs: 'cc' } } as never
     expect(rb.sideNames).toEqual({ ours: 'feature', theirs: 'main' })

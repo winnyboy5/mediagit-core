@@ -286,7 +286,7 @@ export const api = {
     invoke<MergeReport>('repo_merge', { repo, branch, strategy, opts, onProgress: channel(onProgress) }),
   mergeControl: (repo: string, action: 'continue' | 'abort', onProgress: Report) =>
     invoke<MergeReport>('repo_merge_control', { repo, action, onProgress: channel(onProgress) }),
-  /** Take our version (`ours`) or `theirs` of one conflicted file, and stage it. Both are commit ids from the status `operation`. */
+  /** Take our version (`ours`) or `theirs` of one conflicted file, and stage it. Both are commit ids from the status `operation`; with no operation the stores pass the literal 'HEAD' for `ours`, which is right for a merge or a copy (never for a rebase). */
   mergeResolve: (repo: string, path: string, side: 'ours' | 'theirs', ours: string, theirs: string) =>
     invoke<unknown>('merge_resolve', { repo, path, side, ours, theirs }),
 

@@ -38,23 +38,8 @@ pub async fn stage_files_for_commit(paths: &[String], repo_root: &std::path::Pat
     // Load index
     let mut index = Index::load(&repo_root)?;
 
-    // Load HEAD for unchanged detection
-    let refdb = RefDatabase::new(&storage_path);
-    let head_files: Arc<std::collections::HashMap<std::path::PathBuf, Oid>> = {
-        let mut files = std::collections::HashMap::new();
-        if let Ok(head_oid) = refdb.resolve("HEAD").await
-            && let Ok(commit_data) = odb.read(&head_oid).await
-            && let Ok(commit) =
-                mediagit_versioning::format::deserialize_exact::<Commit>(&commit_data)
-            && let Ok(tree_data) = odb.read(&commit.tree).await
-            && let Ok(tree) = mediagit_versioning::format::deserialize_exact::<Tree>(&tree_data)
-        {
-            for entry in tree.iter() {
-                files.insert(std::path::PathBuf::from(&entry.name), entry.oid);
-            }
-        }
-        Arc::new(files)
-    };
+    // Load the base tree for unchanged detection
+    let head_files = Arc::new(base_files(&repo_root, &storage_path, &odb).await?);
 
     let index_files: Arc<std::collections::HashMap<std::path::PathBuf, (u64, Option<u64>)>> = {
         let mut map = std::collections::HashMap::new();
@@ -108,6 +93,34 @@ pub async fn stage_files_for_commit(paths: &[String], repo_root: &std::path::Pat
     index.save(&repo_root).context("Failed to save index")?;
 
     Ok(added_count)
+}
+
+/// Files of the tree the next commit builds on, for "unchanged" detection and
+/// deletions. That is HEAD, except during a rebase: `--continue` commits on
+/// top of the rebase's new parent while HEAD still names the branch being
+/// moved, so comparing with HEAD skipped edits that differ from the new parent.
+async fn base_files(
+    repo_root: &Path,
+    storage_path: &Path,
+    odb: &ObjectDatabase,
+) -> Result<HashMap<PathBuf, Oid>> {
+    let base = if super::rebase_state::RebaseState::in_progress(repo_root) {
+        Some(super::rebase_state::RebaseState::load(repo_root)?.new_parent)
+    } else {
+        RefDatabase::new(storage_path).resolve("HEAD").await.ok()
+    };
+    let mut files = HashMap::new();
+    if let Some(base_oid) = base
+        && let Ok(commit_data) = odb.read(&base_oid).await
+        && let Ok(commit) = mediagit_versioning::format::deserialize_exact::<Commit>(&commit_data)
+        && let Ok(tree_data) = odb.read(&commit.tree).await
+        && let Ok(tree) = mediagit_versioning::format::deserialize_exact::<Tree>(&tree_data)
+    {
+        for entry in tree.iter() {
+            files.insert(PathBuf::from(&entry.name), entry.oid);
+        }
+    }
+    Ok(files)
 }
 
 /// `--machine` data for `add`.
@@ -456,27 +469,23 @@ impl AddCmd {
             Arc::new(map)
         };
 
-        // BUG-029: a path left unresolved by a stopped operation is always re-staged.
-        let unresolved: Arc<HashSet<PathBuf>> =
-            Arc::new(index.unresolved_paths().into_iter().collect());
+        // BUG-029: an unresolved path named directly as a file is always
+        // re-staged: naming it is the decision. A folder or `.` walk is not,
+        // so it never settles a clash whose bytes happen to equal ours.
+        let all_unresolved: HashSet<PathBuf> = index.unresolved_paths().into_iter().collect();
+        let unresolved: Arc<HashSet<PathBuf>> = Arc::new(
+            self.paths
+                .iter()
+                .map(Path::new)
+                .filter(|p| p.is_file())
+                .filter_map(|p| dunce::canonicalize(p).ok())
+                .filter_map(|p| crate::repo::repo_relative(&repo_root, &p).ok())
+                .filter(|p| all_unresolved.contains(p))
+                .collect(),
+        );
 
-        // Get HEAD commit tree to identify already-tracked files
-        let refdb = RefDatabase::new(&storage_path);
-        let head_files: Arc<HashMap<PathBuf, Oid>> = {
-            let mut files = HashMap::new();
-            if let Ok(head_oid) = refdb.resolve("HEAD").await
-                && let Ok(commit_data) = odb.read(&head_oid).await
-                && let Ok(commit) =
-                    mediagit_versioning::format::deserialize_exact::<Commit>(&commit_data)
-                && let Ok(tree_data) = odb.read(&commit.tree).await
-                && let Ok(tree) = mediagit_versioning::format::deserialize_exact::<Tree>(&tree_data)
-            {
-                for entry in tree.iter() {
-                    files.insert(PathBuf::from(&entry.name), entry.oid);
-                }
-            }
-            Arc::new(files)
-        };
+        // The tree the next commit builds on, to identify already-tracked files
+        let head_files = Arc::new(base_files(&repo_root, &storage_path, &odb).await?);
 
         // Tracked paths = union of HEAD tree paths and current index paths.
         // Used by `-u`/`--update` to restrict staging to already-tracked
@@ -829,7 +838,12 @@ impl AddCmd {
             .context("Failed to load sparse-checkout patterns")?;
 
         let mut on_disk = ExactNames::default();
-        for head_path in head_files.as_ref().keys() {
+        // A clashing path the base lacks (we deleted, they edited) holds a
+        // provisional staged copy; deleting it from disk is a decision too.
+        let unresolved_new = all_unresolved
+            .iter()
+            .filter(|p| !head_files.contains_key(*p));
+        for head_path in head_files.as_ref().keys().chain(unresolved_new) {
             // BUG-008 way out: the last commit holds an absolute or `..` path.
             // Stage its removal whatever the pathspec or --ignore-removal; the
             // file itself, if present, was re-added above under its real path.

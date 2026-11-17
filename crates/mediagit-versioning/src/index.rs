@@ -226,7 +226,11 @@ impl Index {
     // ===== Deletion tracking methods =====
 
     /// Mark a file as deleted (to be removed from tree at commit time)
+    ///
+    /// Like [`Index::add_entry`], staging a deletion clears any
+    /// unresolved-conflict marker: deleting a clashing file is a decision.
     pub fn mark_deleted(&mut self, path: PathBuf) {
+        self.unresolved.remove(&path);
         // If file was staged for addition, remove it from entries
         self.entries.remove(&path);
         // Add to deleted entries

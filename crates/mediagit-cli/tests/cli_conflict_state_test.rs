@@ -1410,10 +1410,9 @@ fn bug029_cherry_pick_keeping_head_bytes_resolves() {
         !text.contains("unresolved"),
         "path still unresolved: {text}"
     );
-    if !out.status.success() {
-        assert!(text.contains("nothing to commit"), "{text}");
-        assert!(run(d, &["cherry-pick", "--skip"]).status.success());
-    }
+    assert!(!out.status.success(), "an empty pick must stop: {text}");
+    assert!(text.contains("nothing to commit"), "{text}");
+    assert!(run(d, &["cherry-pick", "--skip"]).status.success());
     assert_no_operation(d, "cherry-pick");
 }
 
@@ -1450,4 +1449,139 @@ fn bug029_status_names_the_commit_holding_our_side() {
         tip(t2.path(), "main"),
         "cherry-pick: our side is HEAD"
     );
+}
+
+/// A merge stopped on a binary clash at art.bin. The working copy holds our
+/// side, whose bytes equal HEAD. notes.txt is a tracked file with no clash.
+fn setup_binary_merge_clash(dir: &Path) {
+    init_repo(dir);
+    commit_file(dir, "notes.txt", "notes\n", "notes");
+    commit_binary(dir, "art.bin", &binary_blob(0x00), "base art");
+    switch_new(dir, "other");
+    commit_binary(dir, "art.bin", &binary_blob(0x22), "other art");
+    switch(dir, "main");
+    commit_binary(dir, "art.bin", &binary_blob(0x11), "main art");
+    let out = run(dir, &["merge", "other"]);
+    assert!(!out.status.success(), "merge should stop on a binary clash");
+    assert_eq!(
+        status_data(dir)["unresolved"],
+        serde_json::json!(["art.bin"])
+    );
+}
+
+fn switch_new(dir: &Path, branch: &str) {
+    for args in [["branch", "create", branch], ["branch", "switch", branch]] {
+        mediagit().args(args).current_dir(dir).assert().success();
+    }
+}
+
+/// Fix round 1, M1: a folder walk must not decide a clash; naming the file does.
+#[test]
+fn bug029_only_a_named_file_decides_a_clash() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    setup_binary_merge_clash(d);
+    fs::write(d.join("notes.txt"), "edited\n").unwrap();
+    assert!(run(d, &["add", "."]).status.success());
+    assert_eq!(
+        status_data(d)["unresolved"],
+        serde_json::json!(["art.bin"]),
+        "add . decided a clash nobody named"
+    );
+    assert!(run(d, &["add", "--", "art.bin"]).status.success());
+    assert_eq!(status_data(d)["unresolved"], serde_json::json!([]));
+}
+
+/// Fix round 1: deleting a clashing file is a decision; staging the deletion clears it.
+#[test]
+fn bug029_deleting_a_clashing_file_decides_it() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    setup_binary_merge_clash(d);
+    fs::remove_file(d.join("art.bin")).unwrap();
+    assert!(run(d, &["add", "-A"]).status.success());
+    assert_eq!(
+        status_data(d)["unresolved"],
+        serde_json::json!([]),
+        "staged deletion left the clash unresolved"
+    );
+    let out = run(d, &["merge", "--continue"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!d.join("art.bin").exists());
+    assert_eq!(status_data(d)["deleted"], serde_json::json!([]));
+}
+
+/// We deleted art.bin, they edited it. Deleting their copy keeps our deletion;
+/// the provisional staged copy must not reach the commit.
+#[test]
+fn bug029_deleting_their_copy_keeps_our_deletion() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    init_repo(d);
+    commit_file(d, "notes.txt", "notes\n", "notes");
+    commit_binary(d, "art.bin", &binary_blob(0x00), "base art");
+    switch_new(d, "other");
+    commit_binary(d, "art.bin", &binary_blob(0x22), "other art");
+    switch(d, "main");
+    fs::remove_file(d.join("art.bin")).unwrap();
+    assert!(run(d, &["add", "-A"]).status.success());
+    assert!(run(d, &["commit", "-m", "drop art"]).status.success());
+    assert!(!run(d, &["merge", "other"]).status.success());
+    assert_eq!(status_data(d)["unresolved"], serde_json::json!(["art.bin"]));
+    fs::remove_file(d.join("art.bin")).unwrap();
+    assert!(run(d, &["add", "-A"]).status.success());
+    assert_eq!(status_data(d)["unresolved"], serde_json::json!([]));
+    let out = run(d, &["merge", "--continue"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = status_data(d);
+    assert_eq!(
+        s["deleted"],
+        serde_json::json!([]),
+        "their copy committed: {s}"
+    );
+}
+
+/// Fix round 1: during a rebase stop, `add` compares against the commit being
+/// built on. A file edited back to the moved branch's bytes was skipped as
+/// "unchanged" and dropped from the resolved commit.
+#[test]
+fn rebase_add_compares_against_the_commit_being_built_on() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    init_repo(d);
+    commit_file(d, "shared.txt", "base\n", "base");
+    commit_file(d, "extra.txt", "base\n", "extra");
+    switch_new(d, "feature");
+    commit_file(d, "shared.txt", "feature-change\n", "feature edit");
+    switch(d, "main");
+    commit_file(d, "shared.txt", "main-change\n", "main edit");
+    commit_file(d, "extra.txt", "main\n", "main extra");
+    switch(d, "feature");
+    assert!(!run(d, &["rebase", "main"]).status.success());
+    assert_eq!(fs::read_to_string(d.join("extra.txt")).unwrap(), "main\n");
+    // The person puts extra.txt back to feature's bytes and decides shared.txt.
+    fs::write(d.join("extra.txt"), "base\n").unwrap();
+    fs::write(d.join("shared.txt"), "resolved\n").unwrap();
+    assert!(
+        run(d, &["add", "--", "extra.txt", "shared.txt"])
+            .status
+            .success()
+    );
+    let out = run(d, &["rebase", "--continue"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(fs::read_to_string(d.join("extra.txt")).unwrap(), "base\n");
+    let s = status_data(d);
+    assert_eq!(s["modified"], serde_json::json!([]), "edit dropped: {s}");
 }

@@ -249,7 +249,11 @@ pick was given as a branch name or a short id.
 When a rebase, cherry-pick or undo stopped on a clash and you kept the version
 that is already in HEAD, `add` saw "nothing changed" and left the file marked
 unresolved, so `--continue` refused. Naming a clashing file in `add` now always
-settles it. `status --machine` also reports `operation.ours_commit`, the commit
+settles it. Adding a folder or `.` does not: it never decides a clash you did
+not name. Deleting a clashing file and staging the deletion (`add -A`) also
+settles it. During a rebase, `add` now compares your files with the commit the
+rebase builds on, not HEAD, so an edit back to your branch's version is no
+longer skipped and lost. `status --machine` also reports `operation.ours_commit`, the commit
 that holds your side (during a rebase that is the branch being built on, not
 HEAD), and the app uses it to take your side. In the app, the keep buttons now name the
 branches ("Keep main"), and the "in progress" banner on Changes uses app words

@@ -11,8 +11,10 @@ import { test } from '@playwright/test'
 //      "Keep feature" (the branch being moved), never "Keep mine".
 //   4. Click one, then "Continue rebase". The rebase finishes.
 //   5. Assert with `cat notes.txt`: "Keep main" gives main's text, "Keep feature" gives feature's.
-//      The two runs must differ, and neither may fail because the bytes equal HEAD's
-//      (before the fix, "Keep main" left the file unresolved and Continue was refused).
+//      The two runs must differ, and neither may fail because the bytes equal HEAD's.
+//      During a rebase HEAD is feature (the branch being moved), so before the fix keeping
+//      feature's bytes left the file unresolved and Continue was refused; the old
+//      "Keep mine" also took HEAD, which was the wrong side.
 test.describe('BUG-029: finish a rebase conflict with each side', () => {
   test.fixme('keep main, then keep feature: results differ and both finish', async () => {})
 })
