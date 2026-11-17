@@ -2469,6 +2469,29 @@ mod tests {
             .write(ObjectType::Blob, b"young garbage")
             .await
             .unwrap();
+        // A live blob stored as a delta whose base is old and unreachable:
+        // only the deltas/ listing keeps the base out of the deletion set.
+        let base = writer
+            .odb
+            .write(ObjectType::Blob, b"old delta base")
+            .await
+            .unwrap();
+        let live_delta = Oid::hash(b"live delta");
+        reachable.insert(live_delta);
+        writer
+            .storage
+            .put(&format!("deltas/{}", live_delta.to_hex()), b"d")
+            .await
+            .unwrap();
+        writer
+            .storage
+            .put(
+                &format!("deltas/{}.meta", live_delta.to_hex()),
+                format!("base:{}", base.to_hex()).as_bytes(),
+            )
+            .await
+            .unwrap();
+        old.push(base.to_hex());
         let h = |s: &str| Oid::hash(s.as_bytes()).to_hex();
         let (m_old, m_young) = (h("m old"), h("m young"));
         let (c_old, c_young) = (h("c old"), h("c young"));
