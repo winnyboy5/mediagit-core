@@ -50,10 +50,10 @@ export const useSecurityStore = defineStore('security', () => {
     run('Sign in', (root) => api.authLogin(root, server || null, username || null, password), () => 'Signed in', undefined, true)
   /** Make an account on a server that allows sign-up; the password is passed on and forgotten. */
   const register = (server: string, username: string, email: string, password: string) =>
-    run('Create account', () => api.authRegister(server || null, username, email, password), () => 'Account created. You can sign in now', undefined, true)
+    run('Create account', (root) => api.authRegister(root, server || null, username, email, password), () => 'Account created. You can sign in now', undefined, true)
   /** Both passwords are passed on and forgotten. */
   const changePassword = (server: string, current: string, next: string) =>
-    run('Change password', () => api.authPasswd(server || null, current, next), () => 'Password changed', undefined, true)
+    run('Change password', (root) => api.authPasswd(root, server || null, current, next), () => 'Password changed', undefined, true)
   /** A new master key: a key file path, or a passphrase. Secrets are passed on and forgotten. */
   const rotateMaster = (newKeyfile: string, current: string, newPassphrase: string) =>
     run(

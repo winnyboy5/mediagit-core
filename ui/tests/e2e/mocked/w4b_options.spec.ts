@@ -325,7 +325,7 @@ test.describe('Security: account and key options', () => {
     await dlg.getByLabel('Repeat password').fill(PW)
     await dlg.getByRole('button', { name: 'Create account' }).click()
     await polled(page, 'auth_register').toBe(1)
-    expect((await calls(page, 'auth_register'))[0]).toEqual({ server: 'https://mediagit.studio.example', username: 'lena', email: 'lena@studio.example', password: PW })
+    expect((await calls(page, 'auth_register'))[0]).toEqual({ repo: '/repos/hero-film', server: 'https://mediagit.studio.example', username: 'lena', email: 'lena@studio.example', password: PW })
     expect(await seen(page)).not.toContain(PW)
   })
 
@@ -339,7 +339,7 @@ test.describe('Security: account and key options', () => {
     await expectNoAxeViolations(page)
     await dlg.getByRole('button', { name: 'Change password' }).click()
     await polled(page, 'auth_passwd').toBe(1)
-    expect((await calls(page, 'auth_passwd'))[0]).toEqual({ server: null, current: 'Old-pw-One-77!', new: PW })
+    expect((await calls(page, 'auth_passwd'))[0]).toEqual({ repo: '/repos/hero-film', server: null, current: 'Old-pw-One-77!', new: PW })
     const text = await seen(page)
     expect(text).not.toContain(PW)
     expect(text).not.toContain('Old-pw-One-77')

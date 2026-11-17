@@ -387,10 +387,10 @@ export const api = {
   serverRepoDelete: (server: string, name: string, typedName: string, force: boolean) =>
     rawInvoke<HostedRepoActionReport>('server_repo_delete', { server, name, typedName, force, confirm: true }),
 
-  authRegister: (server: string | null, username: string, email: string, password: string) =>
-    rawInvoke<AuthOpReport>('auth_register', { server, username, email, password }),
-  authPasswd: (server: string | null, current: string, newPassword: string) =>
-    rawInvoke<AuthOpReport>('auth_passwd', { server, current, new: newPassword }),
+  authRegister: (repo: string | null, server: string | null, username: string, email: string, password: string) =>
+    rawInvoke<AuthOpReport>('auth_register', { repo, server, username, email, password }),
+  authPasswd: (repo: string | null, server: string | null, current: string, newPassword: string) =>
+    rawInvoke<AuthOpReport>('auth_passwd', { repo, server, current, new: newPassword }),
   /** Re-lock the key under a new master: a key file path, or a new passphrase (`current` only if the key is passphrase-protected now). */
   keyRotateMaster: (repo: string, newKeyfile: string | null, current: string | null, newPassphrase: string | null) =>
     rawInvoke<KeyReport>('key_rotate_master', { repo, newKeyfile, current, newPassphrase }),
