@@ -312,6 +312,49 @@ struct GarbageCollector {
     refdb: RefDatabase,
     branch_mgr: BranchManager,
     reflog: Reflog,
+    /// Every key in storage, listed once for the duration of one [`Self::scan`]
+    /// (the scan runs inside every 50th commit via auto-gc, and listing the
+    /// store seven times made it cost O(repo) times seven). `None` outside a
+    /// scan, so every other caller lists fresh.
+    snapshot: std::sync::Mutex<Option<Arc<Vec<String>>>>,
+}
+
+/// Everything one gc scan decided was reclaimable.
+struct Scan {
+    objects_scanned: u64,
+    unreachable: Vec<(Oid, u64)>,
+    orphan_manifests: Vec<String>,
+    orphan_chunks: Vec<(String, u64)>,
+    orphan_blob_deltas: Vec<(String, String, u64)>,
+    orphan_chunk_deltas: Vec<(String, String, u64)>,
+}
+
+impl GarbageCollector {
+    /// The read-only scan: which loose objects, manifests, chunks and deltas
+    /// are unreachable and past the grace period.
+    async fn scan(&self, reachable: &mut HashSet<Oid>) -> Result<Scan> {
+        *self.snapshot.lock().unwrap() = Some(Arc::new(self.storage.list_objects("").await?));
+        let scan = self.scan_snapshotted(reachable).await;
+        *self.snapshot.lock().unwrap() = None;
+        scan
+    }
+
+    async fn scan_snapshotted(&self, reachable: &mut HashSet<Oid>) -> Result<Scan> {
+        let objects_scanned = self.list_object_keys().await?.len() as u64;
+        let unreachable = self.find_unreachable_objects(reachable).await?;
+        let (orphan_manifests, orphan_chunks, live_chunk_ids) =
+            self.find_orphan_chunks_and_manifests(reachable).await?;
+        let orphan_blob_deltas = self.find_orphan_blob_deltas(reachable).await?;
+        let orphan_chunk_deltas = self.find_orphan_chunk_deltas(&live_chunk_ids).await?;
+        Ok(Scan {
+            objects_scanned,
+            unreachable,
+            orphan_manifests,
+            orphan_chunks,
+            orphan_blob_deltas,
+            orphan_chunk_deltas,
+        })
+    }
 }
 
 impl GarbageCollector {
@@ -326,7 +369,27 @@ impl GarbageCollector {
             refdb: RefDatabase::new(root_path),
             branch_mgr: BranchManager::new(root_path),
             reflog: Reflog::new(root_path),
+            snapshot: std::sync::Mutex::new(None),
         }
+    }
+
+    /// `storage.list_objects(prefix)`, served from the scan snapshot when one
+    /// is active.
+    async fn keys(&self, prefix: &str) -> Result<Vec<String>> {
+        let snap = self.snapshot.lock().unwrap().clone();
+        match snap {
+            Some(all) => Ok(all
+                .iter()
+                .filter(|k| k.starts_with(prefix))
+                .cloned()
+                .collect()),
+            None => Ok(self.storage.list_objects(prefix).await?),
+        }
+    }
+
+    /// Size of `key`, stat only. Unknown reads as 0, as before.
+    async fn size_of(&self, key: &str) -> u64 {
+        self.storage.head(key).await.ok().flatten().unwrap_or(0)
     }
 
     /// Build reachability graph from all branch refs AND current index
@@ -721,34 +784,22 @@ impl GarbageCollector {
         })
     }
 
-    /// List all objects in ODB
-    async fn list_all_objects(&self) -> Result<Vec<(Oid, u64, String)>> {
+    /// Every loose object (oid, storage key). No sizes: `head()` is a stat
+    /// per object, and only objects gc may delete need one (BUG-040).
+    async fn list_object_keys(&self) -> Result<Vec<(Oid, String)>> {
         debug!("Enumerating all objects in storage");
         let mut objects = Vec::new();
 
-        // List all objects (LocalBackend already operates within objects/ directory)
-        let object_keys = self.storage.list_objects("").await?;
-
-        for key in object_keys {
-            // LocalBackend returns hex OIDs directly (no "objects/" prefix)
-            // The key is already the hex string
-            if true {
-                let path_part = &key;
-                let hex = path_part.replace('/', "");
-                if hex.len() == 64
-                    && let Ok(oid) = Oid::from_hex(&hex)
-                {
-                    // Size only — `head()` stats, `get()` would read and decompress
-                    // the whole object just to call `.len()`. This scan runs on
-                    // EVERY add and commit via auto-gc, so reading the full corpus
-                    // here is what pegged the CPU as history grew (measured
-                    // 2026-08-03: 500-commit churn went 125s -> 1620s per 100).
-                    let size = self.storage.head(&key).await.ok().flatten().unwrap_or(0);
-                    // Key carried so the grace-period check below can ask the
-                    // backend for this object's age; it cannot be rederived
-                    // from the oid without duplicating backend layout rules.
-                    objects.push((oid, size, key.clone()));
-                }
+        // LocalBackend returns hex OIDs directly (no "objects/" prefix)
+        for key in self.keys("").await? {
+            let hex = key.replace('/', "");
+            if hex.len() == 64
+                && let Ok(oid) = Oid::from_hex(&hex)
+            {
+                // Key carried so the grace-period check below can ask the
+                // backend for this object's age; it cannot be rederived
+                // from the oid without duplicating backend layout rules.
+                objects.push((oid, key));
             }
         }
 
@@ -768,12 +819,13 @@ impl GarbageCollector {
         &self,
         reachable: &mut HashSet<Oid>,
     ) -> Result<Vec<(Oid, u64)>> {
-        let all_objects = self.list_all_objects().await?;
-
-        let candidates: Vec<(Oid, u64, String)> = all_objects
-            .into_iter()
-            .filter(|(oid, _, _)| !reachable.contains(oid))
-            .collect();
+        let mut candidates: Vec<(Oid, u64, String)> = Vec::new();
+        for (oid, key) in self.list_object_keys().await? {
+            if !reachable.contains(&oid) {
+                let size = self.size_of(&key).await;
+                candidates.push((oid, size, key));
+            }
+        }
 
         let old: Vec<(Oid, u64, String)> = self
             .past_grace(candidates.clone(), |(_, _, key)| key, "object")
@@ -819,8 +871,7 @@ impl GarbageCollector {
         // `.meta` to follow. Keyed on `.meta` so a delta whose sidecar is not
         // written yet is skipped, not misread.
         let delta_ids: HashSet<Oid> = self
-            .storage
-            .list_objects("deltas/")
+            .keys("deltas/")
             .await?
             .iter()
             .filter_map(|k| k.strip_prefix("deltas/")?.strip_suffix(".meta"))
@@ -1067,7 +1118,7 @@ impl GarbageCollector {
     /// Manifests are stored as `manifests/{blob_oid_hex}` keys.
     /// Returns (blob_oid, storage_key) pairs.
     async fn list_all_manifests(&self) -> Result<Vec<(Oid, String)>> {
-        let all_keys = self.storage.list_objects("").await?;
+        let all_keys = self.keys("").await?;
         let mut manifests = Vec::new();
 
         for key in all_keys {
@@ -1087,17 +1138,8 @@ impl GarbageCollector {
     ///
     /// Chunks are stored as `chunks/{chunk_hash_hex}` keys.
     /// Returns (storage_key, size) pairs.
-    async fn list_all_chunks(&self) -> Result<Vec<(String, u64)>> {
-        let all_keys = self.storage.list_objects("").await?;
-        let mut chunks = Vec::new();
-
-        for key in all_keys {
-            if key.starts_with("chunks/") {
-                // Size only — see `list_all_objects`: stat, don't read.
-                let size = self.storage.head(&key).await.ok().flatten().unwrap_or(0);
-                chunks.push((key, size));
-            }
-        }
+    async fn list_all_chunks(&self) -> Result<Vec<String>> {
+        let chunks = self.keys("chunks/").await?;
 
         debug!("Found {} chunks in storage", chunks.len());
         Ok(chunks)
@@ -1134,8 +1176,7 @@ impl GarbageCollector {
         // One listing tells which chunks are stored as deltas; only those
         // have a `.meta` to follow. `ids.insert` doubles as the cycle guard.
         let delta_ids: HashSet<String> = self
-            .storage
-            .list_objects("chunk-deltas/")
+            .keys("chunk-deltas/")
             .await?
             .iter()
             .filter_map(|k| k.strip_prefix("chunk-deltas/")?.strip_suffix(".meta"))
@@ -1233,11 +1274,13 @@ impl GarbageCollector {
         debug!("Found {} live chunk references", live_chunk_keys.len());
 
         // Step 4: Find orphan chunks
-        let all_chunks = self.list_all_chunks().await?;
-        let orphan_chunks: Vec<(String, u64)> = all_chunks
-            .into_iter()
-            .filter(|(key, _)| !live_chunk_keys.contains(key))
-            .collect();
+        let mut orphan_chunks: Vec<(String, u64)> = Vec::new();
+        for key in self.list_all_chunks().await? {
+            if !live_chunk_keys.contains(&key) {
+                let size = self.size_of(&key).await;
+                orphan_chunks.push((key, size));
+            }
+        }
         let orphan_chunks = self
             .past_grace(orphan_chunks, |(key, _)| key, "chunk")
             .await;
@@ -1251,8 +1294,8 @@ impl GarbageCollector {
     ///
     /// Blob deltas are stored as `deltas/{oid_hex}` with metadata at `deltas/{oid_hex}.meta`.
     /// Returns (oid, delta_key, meta_key, total_size) tuples.
-    async fn list_all_blob_deltas(&self) -> Result<Vec<(Oid, String, String, u64)>> {
-        let all_keys = self.storage.list_objects("").await?;
+    async fn list_all_blob_deltas(&self) -> Result<Vec<(Oid, String, String)>> {
+        let all_keys = self.keys("deltas/").await?;
         let mut deltas = Vec::new();
 
         for key in &all_keys {
@@ -1263,16 +1306,7 @@ impl GarbageCollector {
                 && let Ok(oid) = Oid::from_hex(hex)
             {
                 let meta_key = format!("deltas/{}.meta", hex);
-                // Size only — see `list_all_objects`: stat, don't read.
-                let delta_size = self.storage.head(key).await.ok().flatten().unwrap_or(0);
-                let meta_size = self
-                    .storage
-                    .head(&meta_key)
-                    .await
-                    .ok()
-                    .flatten()
-                    .unwrap_or(0);
-                deltas.push((oid, key.clone(), meta_key, delta_size + meta_size));
+                deltas.push((oid, key.clone(), meta_key));
             }
         }
 
@@ -1285,8 +1319,8 @@ impl GarbageCollector {
     /// Chunk deltas are stored as `chunk-deltas/{chunk_hex}` with metadata at
     /// `chunk-deltas/{chunk_hex}.meta`.
     /// Returns (delta_key, meta_key, total_size) tuples.
-    async fn list_all_chunk_delta_keys(&self) -> Result<Vec<(String, String, u64)>> {
-        let all_keys = self.storage.list_objects("").await?;
+    async fn list_all_chunk_delta_keys(&self) -> Result<Vec<(String, String)>> {
+        let all_keys = self.keys("chunk-deltas/").await?;
         let mut chunk_deltas = Vec::new();
 
         for key in &all_keys {
@@ -1295,16 +1329,7 @@ impl GarbageCollector {
                 && !hex.contains('.')
             {
                 let meta_key = format!("chunk-deltas/{}.meta", hex);
-                // Size only — see `list_all_objects`: stat, don't read.
-                let delta_size = self.storage.head(key).await.ok().flatten().unwrap_or(0);
-                let meta_size = self
-                    .storage
-                    .head(&meta_key)
-                    .await
-                    .ok()
-                    .flatten()
-                    .unwrap_or(0);
-                chunk_deltas.push((key.clone(), meta_key, delta_size + meta_size));
+                chunk_deltas.push((key.clone(), meta_key));
             }
         }
 
@@ -1319,12 +1344,13 @@ impl GarbageCollector {
         &self,
         reachable: &HashSet<Oid>,
     ) -> Result<Vec<(String, String, u64)>> {
-        let all_blob_deltas = self.list_all_blob_deltas().await?;
-        let orphans: Vec<(String, String, u64)> = all_blob_deltas
-            .into_iter()
-            .filter(|(oid, _, _, _)| !reachable.contains(oid))
-            .map(|(_, delta_key, meta_key, size)| (delta_key, meta_key, size))
-            .collect();
+        let mut orphans: Vec<(String, String, u64)> = Vec::new();
+        for (oid, delta_key, meta_key) in self.list_all_blob_deltas().await? {
+            if !reachable.contains(&oid) {
+                let size = self.size_of(&delta_key).await + self.size_of(&meta_key).await;
+                orphans.push((delta_key, meta_key, size));
+            }
+        }
         let orphans = self
             .past_grace(orphans, |(key, _, _)| key, "blob delta")
             .await;
@@ -1347,18 +1373,18 @@ impl GarbageCollector {
             live_chunk_ids.iter().map(|id| id.to_hex()).collect();
 
         // Find chunk-deltas whose chunk ID is NOT in reachable set
-        let all_chunk_deltas = self.list_all_chunk_delta_keys().await?;
-        let orphans: Vec<(String, String, u64)> = all_chunk_deltas
-            .into_iter()
-            .filter(|(key, _, _)| {
-                // Extract chunk ID hex from "chunk-deltas/{hex}"
-                if let Some(hex) = key.strip_prefix("chunk-deltas/") {
-                    !reachable_chunk_ids.contains(hex)
-                } else {
-                    true // Unknown format, treat as orphan
-                }
-            })
-            .collect();
+        let mut orphans: Vec<(String, String, u64)> = Vec::new();
+        for (key, meta_key) in self.list_all_chunk_delta_keys().await? {
+            // Extract chunk ID hex from "chunk-deltas/{hex}"
+            let orphan = match key.strip_prefix("chunk-deltas/") {
+                Some(hex) => !reachable_chunk_ids.contains(hex),
+                None => true, // Unknown format, treat as orphan
+            };
+            if orphan {
+                let size = self.size_of(&key).await + self.size_of(&meta_key).await;
+                orphans.push((key, meta_key, size));
+            }
+        }
         let orphans = self
             .past_grace(orphans, |(key, _, _)| key, "chunk delta")
             .await;
@@ -1676,18 +1702,20 @@ async fn run_gc_stats(opts: &GcOptions) -> Result<GcStats> {
     let mut reachable = gc.build_reachability_set(&repo_root).await?;
     stats.reachable_objects = reachable.len() as u64;
 
-    // Step 2: List all objects
+    // Steps 2-3: list all objects and identify everything unreachable
     if !opts.quiet {
         println!("{} Scanning object database...", style("→").cyan());
-    }
-    let all_objects = gc.list_all_objects().await?;
-    stats.objects_scanned = all_objects.len() as u64;
-
-    // Step 3: Identify unreachable objects
-    if !opts.quiet {
         println!("{} Identifying unreachable objects...", style("→").cyan());
     }
-    let unreachable = gc.find_unreachable_objects(&mut reachable).await?;
+    let Scan {
+        objects_scanned,
+        unreachable,
+        orphan_manifests,
+        orphan_chunks,
+        orphan_blob_deltas,
+        orphan_chunk_deltas,
+    } = gc.scan(&mut reachable).await?;
+    stats.objects_scanned = objects_scanned;
     stats.unreachable_objects = unreachable.len() as u64;
 
     // Even if no unreachable loose objects, still check chunks/manifests
@@ -1695,18 +1723,8 @@ async fn run_gc_stats(opts: &GcOptions) -> Result<GcStats> {
 
     // Calculate total size to reclaim
     let total_size: u64 = unreachable.iter().map(|(_, size)| size).sum();
-
-    // Pre-scan orphan chunks/manifests/deltas for both auto-gating and the
-    // normal flow below. We do this once so auto mode can decide whether
-    // to proceed without paying the cost twice.
-    let (orphan_manifests, orphan_chunks, live_chunk_ids) =
-        gc.find_orphan_chunks_and_manifests(&reachable).await?;
     let chunk_total_size: u64 = orphan_chunks.iter().map(|(_, size)| size).sum();
-
-    let orphan_blob_deltas = gc.find_orphan_blob_deltas(&reachable).await?;
     let blob_delta_total_size: u64 = orphan_blob_deltas.iter().map(|(_, _, s)| s).sum();
-
-    let orphan_chunk_deltas = gc.find_orphan_chunk_deltas(&live_chunk_ids).await?;
     let chunk_delta_total_size: u64 = orphan_chunk_deltas.iter().map(|(_, _, s)| s).sum();
 
     // Auto-mode threshold check: if reclaimable work is below threshold, exit
@@ -2383,5 +2401,180 @@ mod tests {
             chunk_deltas.is_empty(),
             "live or fresh chunk deltas deleted: {chunk_deltas:?}"
         );
+    }
+
+    /// Counts the storage calls that scale with repository size.
+    #[derive(Debug)]
+    struct Counting {
+        inner: Arc<dyn StorageBackend>,
+        lists: std::sync::atomic::AtomicUsize,
+        heads: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl StorageBackend for Counting {
+        async fn get(&self, key: &str) -> anyhow::Result<Vec<u8>> {
+            self.inner.get(key).await
+        }
+        async fn put(&self, key: &str, data: &[u8]) -> anyhow::Result<()> {
+            self.inner.put(key, data).await
+        }
+        async fn exists(&self, key: &str) -> anyhow::Result<bool> {
+            self.inner.exists(key).await
+        }
+        async fn delete(&self, key: &str) -> anyhow::Result<()> {
+            self.inner.delete(key).await
+        }
+        async fn list_objects(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
+            self.lists.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.list_objects(prefix).await
+        }
+        async fn head(&self, key: &str) -> anyhow::Result<Option<u64>> {
+            self.heads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.head(key).await
+        }
+        async fn modified_at(&self, key: &str) -> anyhow::Result<Option<std::time::SystemTime>> {
+            self.inner.modified_at(key).await
+        }
+    }
+
+    /// 40 reachable blobs plus old and young garbage on every path (loose
+    /// object, manifest, chunk, blob delta, chunk delta). Returns the gc, its
+    /// reachable set and the backend call counters.
+    async fn mixed_repo(tmp: &Path) -> (GarbageCollector, HashSet<Oid>, Arc<Counting>) {
+        let objects = tmp.join("objects");
+        let local: Arc<dyn StorageBackend> =
+            Arc::new(mediagit_storage::LocalBackend::new(&objects).await.unwrap());
+        let writer = GarbageCollector::new(local.clone(), tmp);
+        let mut reachable = HashSet::new();
+        for i in 0..40 {
+            let oid = writer
+                .odb
+                .write(ObjectType::Blob, format!("reachable {i}").as_bytes())
+                .await
+                .unwrap();
+            reachable.insert(oid);
+        }
+        let mut old = Vec::new();
+        for i in 0..3 {
+            let oid = writer
+                .odb
+                .write(ObjectType::Blob, format!("old garbage {i}").as_bytes())
+                .await
+                .unwrap();
+            old.push(oid.to_hex());
+        }
+        let young = writer
+            .odb
+            .write(ObjectType::Blob, b"young garbage")
+            .await
+            .unwrap();
+        let h = |s: &str| Oid::hash(s.as_bytes()).to_hex();
+        let (m_old, m_young) = (h("m old"), h("m young"));
+        let (c_old, c_young) = (h("c old"), h("c young"));
+        let (d_old, d_young) = (h("d old"), h("d young"));
+        let (cd_old, cd_young) = (h("cd old"), h("cd young"));
+        for (key, len) in [
+            (format!("manifests/{m_old}"), 3),
+            (format!("chunks/{c_old}"), 5),
+            (format!("chunks/{c_young}"), 6),
+            (format!("deltas/{d_old}"), 7),
+            (format!("deltas/{d_old}.meta"), 8),
+            (format!("deltas/{d_young}"), 9),
+            (format!("chunk-deltas/{cd_old}"), 10),
+            (format!("chunk-deltas/{cd_old}.meta"), 11),
+            (format!("chunk-deltas/{cd_young}"), 12),
+            (format!("chunk-deltas/{cd_young}.meta"), 13),
+        ] {
+            local.put(&key, &vec![b'x'; len]).await.unwrap();
+        }
+        let empty = mediagit_versioning::ChunkManifest {
+            chunks: vec![],
+            total_size: 0,
+            filename: None,
+        };
+        local
+            .put(&format!("manifests/{m_young}"), &empty.to_bytes().unwrap())
+            .await
+            .unwrap();
+        local
+            .put(
+                &format!("deltas/{d_young}.meta"),
+                format!("base:{}", young.to_hex()).as_bytes(),
+            )
+            .await
+            .unwrap();
+        for needle in old.iter().chain([&m_old, &c_old, &d_old, &cd_old]) {
+            age_files(&objects, needle);
+        }
+        let counting = Arc::new(Counting {
+            inner: local,
+            lists: Default::default(),
+            heads: Default::default(),
+        });
+        let gc = GarbageCollector::new(counting.clone(), tmp);
+        (gc, reachable, counting)
+    }
+
+    /// One scan lists the store once and stats only what it may delete or
+    /// protect, not every object (BUG-040: the scan is O(repo) and runs
+    /// inside every 50th commit).
+    #[tokio::test]
+    async fn scan_lists_once_and_stats_only_candidates() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (gc, mut reachable, counting) = mixed_repo(tmp.path()).await;
+        gc.scan(&mut reachable).await.unwrap();
+        let lists = counting.lists.load(std::sync::atomic::Ordering::SeqCst);
+        let heads = counting.heads.load(std::sync::atomic::Ordering::SeqCst);
+        println!("scan work: lists={lists} heads={heads}");
+        assert_eq!(lists, 1, "scan listed the store {lists} times");
+        assert!(
+            heads <= 20,
+            "scan stat {heads} keys; 40 reachable objects must not be stat'ed"
+        );
+    }
+
+    /// The scan deletes exactly the old unreachable objects and keeps the
+    /// young ones, with sizes. Expected set pinned from the pre-change code.
+    #[tokio::test]
+    async fn scan_deletion_set_is_unchanged() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (gc, mut reachable, _) = mixed_repo(tmp.path()).await;
+        let scan = gc.scan(&mut reachable).await.unwrap();
+        let mut got: Vec<String> = Vec::new();
+        got.extend(scan.unreachable.iter().map(|(o, s)| format!("obj {o} {s}")));
+        got.extend(scan.orphan_manifests.iter().map(|k| format!("man {k}")));
+        got.extend(
+            scan.orphan_chunks
+                .iter()
+                .map(|(k, s)| format!("chunk {k} {s}")),
+        );
+        got.extend(
+            scan.orphan_blob_deltas
+                .iter()
+                .map(|(k, m, s)| format!("bd {k} {m} {s}")),
+        );
+        got.extend(
+            scan.orphan_chunk_deltas
+                .iter()
+                .map(|(k, m, s)| format!("cd {k} {m} {s}")),
+        );
+        got.sort();
+        let out = format!(
+            "scanned={}
+{}
+",
+            scan.objects_scanned,
+            got.join(
+                "
+"
+            )
+        );
+        println!(
+            "DELETION SET
+{out}"
+        );
+        let expected = include_str!("gc_parity_expected.txt").replace(char::from(13), "");
+        assert_eq!(out, expected);
     }
 }
