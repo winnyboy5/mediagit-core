@@ -117,6 +117,11 @@ impl StatCache {
         else {
             return;
         };
+        // Racy rule for the change time, same shape as the mtime one: a change
+        // within the margin of load may have landed during the caller's hash.
+        if change_ns.saturating_add(RACY_MARGIN_NS) >= self.started_ns {
+            return;
+        }
         let entry = StatEntry {
             size: meta.len(),
             mtime_ns,
@@ -247,7 +252,11 @@ fn identity(path: &Path, _meta: &Metadata) -> Option<(u64, u128)> {
             core::mem::size_of::<FileBasicInfo>() as u32,
         )
     };
-    (ok != 0).then_some((id, info.change as u128))
+    // FILETIME (100 ns since 1601) -> Unix ns, so it compares with `started_ns`.
+    (ok != 0).then_some((
+        id,
+        (info.change as i128 - 116_444_736_000_000_000).max(0) as u128 * 100,
+    ))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -283,6 +292,14 @@ mod tests {
         p
     }
 
+    /// Load as if the command started later, so just-created test files
+    /// (fresh ctime) are outside the change-time racy margin.
+    fn load_later(root: &Path) -> StatCache {
+        let mut c = StatCache::load(root);
+        c.started_ns += 10 * RACY_MARGIN_NS;
+        c
+    }
+
     fn repo() -> tempfile::TempDir {
         let d = tempfile::tempdir().unwrap();
         fs::create_dir(d.path().join(".mediagit")).unwrap();
@@ -294,7 +311,7 @@ mod tests {
         let d = repo();
         let p = old_file(d.path(), "a.bin", b"hello");
         let oid = Oid::hash(b"hello");
-        let mut c = StatCache::load(d.path());
+        let mut c = load_later(d.path());
         c.record("a.bin", &fs::metadata(&p).unwrap(), oid);
         c.save().unwrap();
         let c = StatCache::load(d.path());
@@ -306,7 +323,7 @@ mod tests {
         let d = repo();
         fs::create_dir(d.path().join("dir")).unwrap();
         let p = old_file(d.path(), "dir/a.bin", b"x");
-        let mut c = StatCache::load(d.path());
+        let mut c = load_later(d.path());
         c.record("dir\\a.bin", &fs::metadata(&p).unwrap(), Oid::hash(b"x"));
         assert!(c.lookup("dir/a.bin", &fs::metadata(&p).unwrap()).is_some());
     }
@@ -400,6 +417,24 @@ mod tests {
         set_mtime(&tmp, t);
         fs::remove_file(&p).unwrap();
         fs::rename(&tmp, &p).unwrap();
+        assert_eq!(c.lookup("a.bin", &fs::symlink_metadata(&p).unwrap()), None);
+    }
+
+    #[test]
+    fn edit_during_hash_with_restored_mtime_is_not_trusted() {
+        // The caller stats, hashes (slow), then records. A same-size write
+        // during the hash that restores mtime must not end up trusted: on
+        // Windows `record` reads the change time after the hash, so it sees
+        // the post-edit value and would pair it with the stale oid.
+        let d = repo();
+        let p = old_file(d.path(), "a.bin", b"hello");
+        let mut c = StatCache::load(d.path());
+        let old_meta = fs::symlink_metadata(&p).unwrap();
+        let t = old_meta.modified().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        fs::write(&p, b"HELLO").unwrap();
+        set_mtime(&p, t);
+        c.record("a.bin", &old_meta, Oid::hash(b"hello"));
         assert_eq!(c.lookup("a.bin", &fs::symlink_metadata(&p).unwrap()), None);
     }
 

@@ -52,6 +52,8 @@ fn committed_repo() -> TempDir {
         .success();
     set_mtime(&p.join("a.bin"), an_hour_ago());
     set_mtime(&p.join("b.bin"), an_hour_ago());
+    // Change times within the racy margin of a command start are never cached.
+    std::thread::sleep(std::time::Duration::from_millis(2500));
     d
 }
 
@@ -152,9 +154,6 @@ fn corrupt_cache_is_ignored() {
     assert!(porcelain(p, false).contains("a.bin"));
 }
 
-/// Documents the known limit (same as Git) and proves the cache is really
-/// consulted: on Windows an in-place rewrite that restores size and mtime
-/// keeps the creation time, so the cached hash is trusted. The escape hatch
 /// Warm the cache, then rewrite `a.bin` in place with the same size and put the
 /// original aged mtime back (what `exiftool -P`, Mp3tag or `robocopy /COPY:T`
 /// do). Only the change time (ctime / NTFS ChangeTime) reveals the edit.

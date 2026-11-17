@@ -153,6 +153,9 @@ fn unchanged_files_are_not_read_by_add_or_reset_when_the_cache_is_warm() {
     let locked = p.join("d000").join("f00003.txt");
     let other = p.join("d000").join("f00004.txt");
 
+    // Entries whose change time is within the racy margin of the command start
+    // are never cached, so let the fresh files age past it first.
+    std::thread::sleep(std::time::Duration::from_millis(2500));
     run(p, &["add", "--all", "-q"]);
     run(p, &["commit", "-m", "first", "-q"]);
     run(p, &["status"]);
