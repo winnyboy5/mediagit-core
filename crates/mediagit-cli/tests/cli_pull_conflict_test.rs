@@ -106,3 +106,82 @@ async fn pull_conflict_stops_like_merge_and_continue_makes_two_parents() {
     .unwrap();
     assert_eq!(commit.parents.len(), 2, "merge commit has two parents");
 }
+
+/// A conflicting pull must not overwrite an untracked file at a path the
+/// remote adds: refuse first, change nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pull_conflict_refuses_untracked_collision() {
+    let repos_root = TempDir::new().unwrap();
+    let base_url = start_test_server(repos_root.path().to_path_buf()).await;
+    fs::create_dir_all(repos_root.path().join("p35")).unwrap();
+    let url = format!("{base_url}/p35");
+
+    let ben = TempDir::new().unwrap();
+    let b = ben.path();
+    mediagit(b).args(["init", "-q"]).assert().success();
+    save(
+        b, "base
+", "base",
+    );
+    mediagit(b)
+        .args(["remote", "add", "origin", &url])
+        .assert()
+        .success();
+    mediagit(b)
+        .args(["push", "-u", "origin"])
+        .assert()
+        .success();
+
+    let parent = TempDir::new().unwrap();
+    let a = parent.path().join("ana");
+    mediagit(parent.path())
+        .arg("clone")
+        .arg(&url)
+        .arg(&a)
+        .assert()
+        .success();
+
+    fs::write(
+        b.join("new.txt"),
+        "remote new
+",
+    )
+    .unwrap();
+    mediagit(b).args(["add", "new.txt"]).assert().success();
+    save(
+        b, "ben
+", "ben edit",
+    );
+    mediagit(b).args(["push", "origin"]).assert().success();
+    save(
+        &a, "ana
+", "ana edit",
+    );
+    fs::write(
+        a.join("new.txt"),
+        "precious local
+",
+    )
+    .unwrap();
+
+    let out = mediagit(&a).args(["pull", "origin"]).output().unwrap();
+    assert!(!out.status.success(), "pull must refuse");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("new.txt"), "names the file: {text}");
+    assert_eq!(
+        fs::read_to_string(a.join("new.txt")).unwrap(),
+        "precious local
+",
+        "untracked file intact"
+    );
+    assert!(!a.join(".mediagit/MERGE_HEAD").exists(), "no MERGE_HEAD");
+    assert_eq!(
+        fs::read_to_string(a.join("notes.txt")).unwrap(),
+        "ana
+"
+    );
+}

@@ -622,13 +622,17 @@ impl PullCmd {
                     result = "fast_forward";
                     new_head = Some(remote_oid.clone());
                 } else {
-                    // WT-3: refuse before the merge writes anything. The merge
-                    // tree does not exist yet, so collisions cannot be checked
-                    // here — `target: None` limits this to uncommitted edits to
-                    // tracked files, which is the hazard a merge introduces.
-                    crate::worktree_guard::AtRisk::check(&repo_root, &odb, Some(&head_oid), None)
-                        .await?
-                        .ensure_clean("merge")?;
+                    // WT-3: refuse before the merge writes anything. The remote
+                    // tip is the target: a conflict writes its added paths, so
+                    // untracked files there must be checked, as `merge` does.
+                    crate::worktree_guard::AtRisk::check(
+                        &repo_root,
+                        &odb,
+                        Some(&head_oid),
+                        Some(&remote_oid_parsed),
+                    )
+                    .await?
+                    .ensure_clean("merge")?;
 
                     let merge_engine = mediagit_versioning::MergeEngine::new(Arc::clone(&odb));
 
