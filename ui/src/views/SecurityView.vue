@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import { onBeforeRouteLeave } from 'vue-router'
 import { Copy, KeyRound, Lock, LockOpen, LogIn, ShieldCheck } from 'lucide-vue-next'
 import AlertDialog from '@/components/AlertDialog.vue'
 import Button from '@/components/Button.vue'
@@ -18,6 +19,8 @@ const repo = useRepoStore()
 const unlock = useUnlockStore()
 const isUnlocked = computed(() => !!repo.path && unlock.unlocked.has(repo.path))
 onMounted(() => void sec.refresh())
+// The held unlock prompt waits for the code dialog, which lives only here: stay until Done.
+onBeforeRouteLeave(() => sec.recoveryCode === null)
 
 const a = computed(() => sec.auth)
 const k = computed(() => sec.key)
