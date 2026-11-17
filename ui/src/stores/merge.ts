@@ -52,7 +52,7 @@ export const useMergeStore = defineStore('merge', () => {
   }
 
   async function resolve(path: string, side: Side) {
-    const oid = theirsOid.value
+    const oid = theirsOid.value ?? repo.status?.operation?.theirs ?? null
     if (side === 'theirs' && !oid) return false
     const label = side === 'ours' ? sideNames.value.ours : sideNames.value.theirs
     const ours = repo.status?.operation?.ours_commit ?? 'HEAD'
@@ -84,5 +84,5 @@ export const useMergeStore = defineStore('merge', () => {
     },
   )
 
-  return { active, conflicts, sideNames, theirsName, theirsOid, last, resolved, canContinue, busy, error, running, start, resolve, continue: () => control('continue'), abort: () => control('abort') }
+  return { apply, active, conflicts, sideNames, theirsName, theirsOid, last, resolved, canContinue, busy, error, running, start, resolve, continue: () => control('continue'), abort: () => control('abort') }
 })

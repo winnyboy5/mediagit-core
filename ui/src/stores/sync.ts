@@ -1,14 +1,19 @@
 import { defineStore } from 'pinia'
 import { computed, reactive, ref, shallowRef, watch } from 'vue'
-import { api, toApiError, type ApiError, type FetchReport, type PullReport, type PushReport, type RemoteReport, type RemoteShowReport } from '@/api'
+import { api, toApiError, type ApiError, type FetchReport, type MergeReport, type PullReport, type PushReport, type RemoteReport, type RemoteShowReport } from '@/api'
 import { load, save } from '@/lib/persist'
+import { mergeSummary } from '@/lib/merge'
 import { emptyForm, pushIsRisky, summarizeTransfer, transferOpts } from '@/lib/sync'
+import { router } from '@/router'
+import { useMergeStore } from './merge'
 import { useOpsStore, type OpKind } from './ops'
 import { useRepoStore } from './repo'
 
 const KEY = 'mg.lastsync'
 export type TransferKind = Extract<OpKind, 'fetch' | 'pull' | 'push'>
 const TRANSFERS: readonly OpKind[] = ['fetch', 'pull', 'push']
+/** A pull that hit a clash reports the same shape as a merge that stopped. */
+const stoppedOnConflict = (r: unknown): r is MergeReport => (r as MergeReport).status === 'conflict'
 const LABEL: Record<TransferKind, string> = { fetch: 'Fetch', pull: 'Get latest', push: 'Send' }
 
 /** Remotes plus fetch / pull / push, all tracked as cancellable ops. */
@@ -118,7 +123,7 @@ export const useSyncStore = defineStore('sync', () => {
     let id = ''
     const cancel = () => api.cancelOp(id)
     try {
-      await ops.track<FetchReport | PullReport | PushReport>(
+      const done = await ops.track<FetchReport | PullReport | PushReport | MergeReport>(
         { kind, label: `${LABEL[kind]}${target ? ` ${target}` : ''}`, cancel, retry: () => void run(kind, confirmed) },
         (report, opId) => {
           id = opId
@@ -128,8 +133,14 @@ export const useSyncStore = defineStore('sync', () => {
               ? api.pull(root, target, opId, report, opts as never)
               : api.push(root, target, opId, report, opts as never)
         },
-        (r) => summarizeTransfer(kind as never, r as never),
+        (r) => (stoppedOnConflict(r) ? mergeSummary(r) : summarizeTransfer(kind as never, r as never)),
+        stoppedOnConflict,
       )
+      // A pull that meets a clash stops like Merge does: send the person to resolve it.
+      if (stoppedOnConflict(done)) {
+        useMergeStore().apply(done, null, null)
+        void router.push('/branches/merge')
+      }
       lastSync.value = { ...lastSync.value, [root]: Date.now() }
       save(KEY, lastSync.value)
       return true
