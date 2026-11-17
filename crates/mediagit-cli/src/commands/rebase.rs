@@ -363,6 +363,7 @@ impl RebaseCmd {
         commits: &[(Oid, Commit)],
         on_disk: Oid,
     ) -> Result<Oid> {
+        let entry = state.clone();
         let mut new_parent = state.new_parent;
         let merge_engine = MergeEngine::new(odb.clone());
 
@@ -447,6 +448,11 @@ impl RebaseCmd {
                     // the new base's files, the untracked one included.)
                     if on_disk == state.original_head {
                         RebaseState::clear(repo_root)?;
+                    } else {
+                        // Later stop: put the state back as it was on entry, so
+                        // it matches the disk (Y6).
+                        *state = entry;
+                        state.save(repo_root)?;
                     }
                     return Err(risk.bail("rebase"));
                 }

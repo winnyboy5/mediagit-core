@@ -144,10 +144,14 @@ impl RebaseState {
         Some(next)
     }
 
-    /// Skip the current commit and advance to next.
-    pub fn skip_current(&mut self) -> Option<Oid> {
-        // Just advance without applying
-        self.advance()
+    /// Drop the commit the rebase stopped on. The next one stays in
+    /// `commits_remaining` to be replayed normally.
+    pub fn skip_current(&mut self) {
+        if self.current_commit.take().is_none() {
+            self.advance();
+            self.current_commit = None;
+        }
+        self.conflict_files.clear();
     }
 
     /// Mark files as conflicted.

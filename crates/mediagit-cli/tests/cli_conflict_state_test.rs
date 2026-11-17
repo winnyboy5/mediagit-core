@@ -1779,3 +1779,88 @@ fn rebase_add_all_stages_deletion_of_a_pick_added_file() {
     );
     assert!(!d.join("added.txt").exists(), "deleted file came back");
 }
+
+/// Fix round 4: `rebase --skip` drops the stopped commit only. The next
+/// commit must still bring its change.
+#[test]
+fn fix4_rebase_skip_keeps_the_next_commits_change() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    init_repo(d);
+    commit_file(d, "shared.txt", "base\n", "base");
+    switch_new(d, "feature");
+    commit_file(d, "shared.txt", "feature-change\n", "feature edit");
+    commit_file(d, "extra.txt", "extra\n", "add extra");
+    switch(d, "main");
+    commit_file(d, "shared.txt", "main-change\n", "main edit");
+    switch(d, "feature");
+    assert!(!run(d, &["rebase", "main"]).status.success());
+    let out = run(d, &["rebase", "--skip"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(fs::read_to_string(d.join("extra.txt")).unwrap(), "extra\n");
+    let log = run(d, &["log", "--oneline"]);
+    let log = String::from_utf8_lossy(&log.stdout);
+    assert!(log.contains("add extra"), "{log}");
+    // The file is in the commit: deleting it shows as a deletion.
+    fs::remove_file(d.join("extra.txt")).unwrap();
+    let s = status_data(d);
+    assert_eq!(s["deleted"], serde_json::json!(["extra.txt"]), "{s}");
+}
+
+/// Fix round 4 (Y6): C1 and C3 conflict with main, C2 adds x.txt, C3 deletes
+/// it. An untracked x.txt makes the second stop refuse. The saved state must
+/// then match the disk.
+fn setup_later_stop_refusal(dir: &Path) {
+    init_repo(dir);
+    commit_file(dir, "shared.txt", "base\n", "base");
+    switch_new(dir, "feature");
+    commit_file(dir, "shared.txt", "f1\n", "C1");
+    commit_file(dir, "x.txt", "x\n", "C2 add x");
+    fs::remove_file(dir.join("x.txt")).unwrap();
+    fs::write(dir.join("shared.txt"), "f3\n").unwrap();
+    assert!(run(dir, &["add", "-A"]).status.success());
+    assert!(run(dir, &["commit", "-m", "C3 drop x"]).status.success());
+    switch(dir, "main");
+    commit_file(dir, "shared.txt", "main\n", "main edit");
+    switch(dir, "feature");
+    fs::write(dir.join("x.txt"), "mine\n").unwrap();
+    assert!(!run(dir, &["rebase", "main"]).status.success());
+    fs::write(dir.join("shared.txt"), "r1\n").unwrap();
+    assert!(run(dir, &["add", "shared.txt"]).status.success());
+    let out = run(dir, &["rebase", "--continue"]);
+    assert!(!out.status.success(), "second stop should refuse");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("x.txt"));
+}
+
+#[test]
+fn fix4_later_stop_refusal_then_abort_keeps_the_untracked_file() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    setup_later_stop_refusal(d);
+    assert!(run(d, &["rebase", "--abort"]).status.success());
+    assert_eq!(fs::read_to_string(d.join("x.txt")).unwrap(), "mine\n");
+}
+
+#[test]
+fn fix4_later_stop_refusal_then_continue_keeps_the_stopping_commit() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    setup_later_stop_refusal(d);
+    fs::rename(d.join("x.txt"), d.join("x.moved")).unwrap();
+    let out = run(d, &["rebase", "--continue"]);
+    assert!(!out.status.success(), "C3 should stop on its conflict");
+    fs::write(d.join("shared.txt"), "r3\n").unwrap();
+    assert!(run(d, &["add", "shared.txt"]).status.success());
+    let out = run(d, &["rebase", "--continue"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!d.join("x.txt").exists());
+    assert_eq!(fs::read_to_string(d.join("shared.txt")).unwrap(), "r3\n");
+}
