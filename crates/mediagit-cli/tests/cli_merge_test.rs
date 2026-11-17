@@ -532,3 +532,80 @@ fn test_merge_continue_purges_stage_debris_and_branch_switch_round_trips() {
     assert!(!temp_dir.path().join("file.bin::stage1").exists());
     assert!(!temp_dir.path().join("file.bin::stage2").exists());
 }
+
+/// Two branches that both change `file.bin`; leaves `main` mid-merge.
+fn conflicted_merge(dir: &Path) {
+    init_repo(dir);
+    add_and_commit(dir, "file.bin", "base content", "base");
+    create_and_switch_branch(dir, "side");
+    add_and_commit(dir, "file.bin", "side content", "side change");
+    mediagit()
+        .args(["branch", "switch", "main"])
+        .current_dir(dir)
+        .assert()
+        .success();
+    add_and_commit(dir, "file.bin", "main content", "main change");
+    mediagit()
+        .args(["merge", "side"])
+        .current_dir(dir)
+        .assert()
+        .failure();
+}
+
+#[test]
+fn test_merge_continue_refuses_while_conflicts_remain() {
+    let temp_dir = TempDir::new().unwrap();
+    let dir = temp_dir.path();
+    conflicted_merge(dir);
+
+    let out = mediagit()
+        .args(["merge", "--continue"])
+        .current_dir(dir)
+        .assert()
+        .failure();
+    let err = String::from_utf8_lossy(&out.get_output().stderr).to_string();
+    assert!(err.contains("file.bin"), "names the unresolved path: {err}");
+    assert!(
+        dir.join(".mediagit/MERGE_HEAD").exists(),
+        "merge still open"
+    );
+}
+
+#[test]
+fn test_merge_abort_and_continue_refuse_during_sequencer_operations() {
+    for (marker, is_dir, command) in [
+        ("rebase-apply", true, "rebase"),
+        ("CHERRY_PICK_STATE", false, "cherry-pick"),
+        ("REVERT_STATE", false, "revert"),
+    ] {
+        let temp_dir = TempDir::new().unwrap();
+        let dir = temp_dir.path();
+        conflicted_merge(dir);
+        let path = dir.join(".mediagit").join(marker);
+        if is_dir {
+            fs::create_dir(&path).unwrap();
+        } else {
+            fs::write(&path, "x").unwrap();
+        }
+        let before = fs::read_to_string(dir.join("file.bin")).unwrap();
+
+        for flag in ["--abort", "--continue"] {
+            let out = mediagit()
+                .args(["merge", flag])
+                .current_dir(dir)
+                .assert()
+                .failure();
+            let err = String::from_utf8_lossy(&out.get_output().stderr).to_string();
+            assert!(
+                err.contains(&format!("{command} {flag}")),
+                "{marker} {flag}: names the right command: {err}"
+            );
+        }
+        assert!(path.exists(), "{marker} untouched");
+        assert!(
+            dir.join(".mediagit/MERGE_HEAD").exists(),
+            "{marker}: merge state untouched"
+        );
+        assert_eq!(fs::read_to_string(dir.join("file.bin")).unwrap(), before);
+    }
+}

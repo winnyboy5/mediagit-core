@@ -162,6 +162,17 @@ changes fix real bugs.
 - **A multi-commit cherry-pick that hit an empty commit mid-way** now saves its
   state so `--skip` can continue.
 
+### Fixed — "Get latest" failed when both sides changed the same file (BUG-033)
+
+- `pull` now stops with the same conflict as `merge`: markers in the file,
+  `MERGE_HEAD` written, the file listed by `status`. Finish with
+  `merge --continue`. Before, it ended with "Merge failed: no tree result" and
+  left nothing to resolve.
+- `merge --continue` refuses while a conflicted file is not yet added, and names
+  the files.
+- `merge --abort` and `merge --continue` refuse during a rebase, cherry-pick or
+  revert, and name the command to use instead.
+
 ### Fixed — a file with a very long path made the whole version impossible to check out (BUG-008, BUG-009)
 
 On Windows a path over 260 characters, a reserved name such as `aux.txt`, or a

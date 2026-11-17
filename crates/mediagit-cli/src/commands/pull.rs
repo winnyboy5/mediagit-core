@@ -641,6 +641,19 @@ impl PullCmd {
                         .merge(&head_oid, &remote_oid_parsed, MergeStrategy::Recursive)
                         .await?;
 
+                    // Conflicts stop here exactly as `merge` does.
+                    if !merge_result.conflicts.is_empty() {
+                        return super::merge::stop_for_conflicts(
+                            &merge_result,
+                            &odb,
+                            &repo_root,
+                            head_oid,
+                            remote_oid_parsed,
+                            self.verbose(),
+                        )
+                        .await;
+                    }
+
                     // Create merge commit
                     if let Some(tree_oid) = merge_result.tree_oid {
                         let author = Signature::new(

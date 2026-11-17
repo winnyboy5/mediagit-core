@@ -345,50 +345,8 @@ impl MergeCmd {
 
         // Check for conflicts
         if !result.conflicts.is_empty() {
-            // The writer stages the merge as changes on top of ours.
-            let ours_commit = mediagit_versioning::Commit::read(&odb, &our_oid).await?;
-            let ours_tree = mediagit_versioning::Tree::read(&odb, &ours_commit.tree).await?;
-
-            let mut index = Index::load(&repo_root)?;
-
-            apply_merge_to_workdir(
-                &result, &ours_tree, &odb, &repo_root, &mut index, their_oid, our_oid,
-            )
-            .await
-            .context("Failed to apply merge to working directory")?;
-
-            index.save(&repo_root)?;
-
-            if output::machine_mode() {
-                let mut report = merge_report("merge", "conflict", None);
-                report.conflicts = result
-                    .conflicts
-                    .iter()
-                    .map(|c| MergeConflictReport {
-                        path: c.path.clone(),
-                        state: "unresolved".into(),
-                        kind: conflict_kind(&c.conflict_type).into(),
-                    })
-                    .collect();
-                output::emit_ok(&report)?;
-                std::process::exit(1);
-            }
-            println!(
-                "{} Merge conflicts detected in {} file(s):",
-                style("⚠").yellow().bold(),
-                result.conflicts.len()
-            );
-            for conflict in &result.conflicts {
-                println!("  {} {}", style("conflict:").red(), conflict.path);
-                if self.verbose {
-                    println!("    Type: {:?}", conflict.conflict_type);
-                }
-            }
-            println!(
-                "\n{} Conflict markers written. Resolve conflicts, 'add' them, then run 'mediagit merge --continue'",
-                style("→").cyan()
-            );
-            std::process::exit(1);
+            return stop_for_conflicts(&result, &odb, &repo_root, our_oid, their_oid, self.verbose)
+                .await;
         }
 
         // No conflicts - create merge commit
@@ -518,6 +476,7 @@ impl MergeCmd {
 
         let repo_root = find_repo_root()?;
         let mediagit_dir = repo_root.join(".mediagit");
+        refuse_sequencer(&mediagit_dir, "--abort")?;
 
         // Clean up merge state files
         let merge_head = mediagit_dir.join("MERGE_HEAD");
@@ -599,6 +558,7 @@ impl MergeCmd {
 
         let repo_root = find_repo_root()?;
         let mediagit_dir = repo_root.join(".mediagit");
+        refuse_sequencer(&mediagit_dir, "--continue")?;
 
         // Check if merge is in progress
         let merge_head_path = mediagit_dir.join("MERGE_HEAD");
@@ -626,6 +586,14 @@ impl MergeCmd {
 
         // Load index and create tree
         let mut index = mediagit_versioning::Index::load(&repo_root)?;
+        let unresolved = index.unresolved_paths();
+        if !unresolved.is_empty() {
+            let names: Vec<String> = unresolved.iter().map(|p| p.display().to_string()).collect();
+            anyhow::bail!(
+                "Conflicts remain in: {}. Fix them and 'add' each file, then run 'merge --continue'.",
+                names.join(", ")
+            );
+        }
         if index.is_empty() {
             anyhow::bail!("No changes staged. Use 'add' to stage resolved files.");
         }
@@ -720,6 +688,79 @@ impl MergeCmd {
 
         Ok(())
     }
+}
+
+/// Write the conflict state of a merge that could not complete (markers,
+/// index, `MERGE_HEAD`), report it and exit 1. Shared by `merge` and `pull`.
+pub(crate) async fn stop_for_conflicts(
+    result: &mediagit_versioning::MergeResult,
+    odb: &Arc<ObjectDatabase>,
+    repo_root: &std::path::Path,
+    our_oid: Oid,
+    their_oid: Oid,
+    verbose: bool,
+) -> Result<()> {
+    // The writer stages the merge as changes on top of ours.
+    let ours_commit = mediagit_versioning::Commit::read(odb, &our_oid).await?;
+    let ours_tree = mediagit_versioning::Tree::read(odb, &ours_commit.tree).await?;
+
+    let mut index = Index::load(repo_root)?;
+
+    apply_merge_to_workdir(
+        result, &ours_tree, odb, repo_root, &mut index, their_oid, our_oid,
+    )
+    .await
+    .context("Failed to apply merge to working directory")?;
+
+    index.save(repo_root)?;
+
+    if output::machine_mode() {
+        let mut report = merge_report("merge", "conflict", None);
+        report.conflicts = result
+            .conflicts
+            .iter()
+            .map(|c| MergeConflictReport {
+                path: c.path.clone(),
+                state: "unresolved".into(),
+                kind: conflict_kind(&c.conflict_type).into(),
+            })
+            .collect();
+        output::emit_ok(&report)?;
+        std::process::exit(1);
+    }
+    println!(
+        "{} Merge conflicts detected in {} file(s):",
+        style("⚠").yellow().bold(),
+        result.conflicts.len()
+    );
+    for conflict in &result.conflicts {
+        println!("  {} {}", style("conflict:").red(), conflict.path);
+        if verbose {
+            println!("    Type: {:?}", conflict.conflict_type);
+        }
+    }
+    println!(
+        "
+{} Conflict markers written. Resolve conflicts, 'add' them, then run 'mediagit merge --continue'",
+        style("→").cyan()
+    );
+    std::process::exit(1);
+}
+
+/// `merge --abort` and `--continue` only own a plain merge. A rebase,
+/// cherry-pick or revert also writes `MERGE_HEAD`; leave those to their
+/// own commands.
+fn refuse_sequencer(mediagit_dir: &std::path::Path, flag: &str) -> Result<()> {
+    for (marker, command) in [
+        ("rebase-apply", "rebase"),
+        ("CHERRY_PICK_STATE", "cherry-pick"),
+        ("REVERT_STATE", "revert"),
+    ] {
+        if mediagit_dir.join(marker).exists() {
+            anyhow::bail!("A {command} is in progress. Use '{command} {flag}' instead.");
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
