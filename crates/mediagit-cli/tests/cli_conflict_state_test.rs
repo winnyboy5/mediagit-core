@@ -1864,3 +1864,81 @@ fn fix4_later_stop_refusal_then_continue_keeps_the_stopping_commit() {
     assert!(!d.join("x.txt").exists());
     assert_eq!(fs::read_to_string(d.join("shared.txt")).unwrap(), "r3\n");
 }
+
+/// Fix round 5 (P2): a refused rebase has no stopped commit. `--skip` must
+/// refuse and change nothing, so the clean commit C2 is not dropped.
+#[test]
+fn fix5_skip_without_a_stopped_commit_refuses() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    setup_later_stop_refusal(d);
+    let out = run(d, &["rebase", "--skip"]);
+    assert!(!out.status.success(), "skip must refuse");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("No stopped commit"));
+    fs::rename(d.join("x.txt"), d.join("x.moved")).unwrap();
+    assert!(!run(d, &["rebase", "--continue"]).status.success());
+    fs::write(
+        d.join("shared.txt"),
+        "r3
+",
+    )
+    .unwrap();
+    assert!(run(d, &["add", "shared.txt"]).status.success());
+    assert!(run(d, &["rebase", "--continue"]).status.success());
+    let log = String::from_utf8_lossy(&run(d, &["log", "--oneline"]).stdout).to_string();
+    assert!(log.contains("C2 add x"), "C2 was dropped: {log}");
+}
+
+/// Fix round 5 (P1): any non-conflict error at a stop (here a new case-only
+/// name pair at commit time) must leave the state matching the disk.
+#[test]
+fn fix5_case_collision_refusal_keeps_the_commit() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    init_repo(d);
+    commit_file(
+        d, "a.txt", "a
+", "base",
+    );
+    switch_new(d, "feature");
+    commit_file(
+        d,
+        "foo.txt",
+        "f
+",
+        "C1 add foo",
+    );
+    commit_file(
+        d,
+        "a.txt",
+        "a2
+",
+        "C2 edit a",
+    );
+    switch(d, "main");
+    commit_file(
+        d,
+        "Foo.txt",
+        "F
+",
+        "main add Foo",
+    );
+    switch(d, "feature");
+    let out = run(d, &["rebase", "main"]);
+    assert!(!out.status.success(), "case pair should be refused");
+    let out = run(d, &["rebase", "--continue"]);
+    assert!(
+        !out.status.success(),
+        "continue must not commit an empty change"
+    );
+    let log = String::from_utf8_lossy(&run(d, &["log", "--oneline"]).stdout).to_string();
+    assert!(
+        log.contains("C1 add foo") && !log.contains("main add Foo"),
+        "{log}"
+    );
+    assert_eq!(
+        fs::read_to_string(d.join("foo.txt")).unwrap(),
+        "f
+"
+    );
+}

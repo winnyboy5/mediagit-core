@@ -354,7 +354,40 @@ impl RebaseCmd {
 
     /// Apply commits during rebase, updating state as we go. `on_disk` is the
     /// commit the working tree holds now (the replay itself runs in memory).
+    ///
+    /// Any error other than a conflict stop, raised before the working tree is
+    /// touched, puts the state back as it was on entry so it matches the disk.
     async fn apply_commits(
+        &self,
+        repo_root: &std::path::Path,
+        odb: &Arc<ObjectDatabase>,
+        refdb: &RefDatabase,
+        state: &mut RebaseState,
+        commits: &[(Oid, Commit)],
+        on_disk: Oid,
+    ) -> Result<Oid> {
+        let entry = state.clone();
+        let mut written = false;
+        let res = self
+            .apply_commits_inner(repo_root, odb, refdb, state, commits, on_disk, &mut written)
+            .await;
+        if let Err(e) = &res
+            && !written
+            && e.downcast_ref::<ConflictStop>().is_none()
+        {
+            if on_disk == state.original_head {
+                // First stop: nothing moved, so drop the state.
+                RebaseState::clear(repo_root)?;
+            } else {
+                *state = entry;
+                state.save(repo_root)?;
+            }
+        }
+        res
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn apply_commits_inner(
         &self,
         repo_root: &std::path::Path,
         odb: &Arc<ObjectDatabase>,
@@ -362,8 +395,8 @@ impl RebaseCmd {
         state: &mut RebaseState,
         commits: &[(Oid, Commit)],
         on_disk: Oid,
+        written: &mut bool,
     ) -> Result<Oid> {
-        let entry = state.clone();
         let mut new_parent = state.new_parent;
         let merge_engine = MergeEngine::new(odb.clone());
 
@@ -443,17 +476,6 @@ impl RebaseCmd {
                     ..risk
                 };
                 if !risk.is_empty() {
-                    // First stop: nothing was written yet, so drop the state and
-                    // leave the repository as it was. (An abort would delete
-                    // the new base's files, the untracked one included.)
-                    if on_disk == state.original_head {
-                        RebaseState::clear(repo_root)?;
-                    } else {
-                        // Later stop: put the state back as it was on entry, so
-                        // it matches the disk (Y6).
-                        *state = entry;
-                        state.save(repo_root)?;
-                    }
                     return Err(risk.bail("rebase"));
                 }
 
@@ -461,6 +483,7 @@ impl RebaseCmd {
                 // working tree must hold ours (the new base) first, not the
                 // old branch tip. Only paths that differ move; untracked
                 // files are never touched.
+                *written = true;
                 CheckoutManager::new(odb, repo_root)
                     .checkout_diff(&on_disk, &new_parent)
                     .await
@@ -841,8 +864,11 @@ impl RebaseCmd {
 
         let mut state = RebaseState::load(repo_root)?;
 
-        if state.current_commit.is_none() && state.commits_remaining.is_empty() {
-            anyhow::bail!("No commit to skip");
+        // Nothing stopped (a refused rebase): skipping would drop a clean commit.
+        if state.current_commit.is_none() {
+            anyhow::bail!(
+                "No stopped commit to skip. Run 'mediagit rebase --continue' or '--abort'."
+            );
         }
 
         if !self.quiet() {

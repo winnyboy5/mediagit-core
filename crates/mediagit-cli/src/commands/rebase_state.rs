@@ -147,10 +147,7 @@ impl RebaseState {
     /// Drop the commit the rebase stopped on. The next one stays in
     /// `commits_remaining` to be replayed normally.
     pub fn skip_current(&mut self) {
-        if self.current_commit.take().is_none() {
-            self.advance();
-            self.current_commit = None;
-        }
+        self.current_commit = None;
         self.conflict_files.clear();
     }
 
