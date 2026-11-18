@@ -30,7 +30,6 @@ const repo = useRepoStore()
 onMounted(() => !ts.loading && void ts.refresh())
 
 const message = ref('')
-const includeUntracked = ref<boolean | 'indeterminate'>(false)
 
 const s = computed(() => repo.status?.summary)
 const tracked = computed(() => (s.value ? s.value.staged + s.value.modified + s.value.deleted : 0))
@@ -46,13 +45,13 @@ const changed = computed(() => {
     ...st.staged.map((f) => f.path),
     ...st.modified,
     ...st.deleted,
-    ...(includeUntracked.value === true ? st.untracked : []),
+    ...st.untracked,
   ]
   return [...new Set(all)]
 })
 const pickedPaths = computed(() => changed.value.filter((p) => picked.value.has(p)))
 const stashable = computed(() =>
-  pickedPaths.value.length ? true : tracked.value > 0 || (includeUntracked.value === true && (s.value?.untracked ?? 0) > 0),
+  pickedPaths.value.length ? true : tracked.value > 0 || (s.value?.untracked ?? 0) > 0,
 )
 const saveLabel = computed(() =>
   pickedPaths.value.length ? `Set aside ${pickedPaths.value.length} selected file${pickedPaths.value.length === 1 ? '' : 's'}` : 'Stash my changes',
@@ -66,7 +65,7 @@ function togglePath(p: string, on: boolean | 'indeterminate') {
 
 async function save() {
   if (!stashable.value || ts.busy) return
-  if (await ts.save(message.value, includeUntracked.value === true, pickedPaths.value)) {
+  if (await ts.save(message.value, true, pickedPaths.value)) {
     message.value = ''
     picked.value = new Set()
   }
@@ -216,7 +215,6 @@ const when = (iso: string) => (Number.isNaN(Date.parse(iso)) ? '' : timeAgo(Date
         </div>
         <form class="save" @submit.prevent="save">
           <TextField v-model="message" label="Message (optional)" placeholder="WIP lighting" />
-          <Checkbox v-model="includeUntracked" label="Include new files" />
           <MoreOptions label="Choose which files to set aside">
             <p class="hint">Tick files to set aside only those. Everything else stays as it is. With nothing ticked, all changes are stashed.</p>
             <ul v-if="changed.length" class="picks" aria-label="Changed files" data-testid="stash-files">

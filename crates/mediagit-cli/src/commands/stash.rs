@@ -122,7 +122,7 @@ pub struct PushOpts {
     #[arg(short = 'm', long = "message", value_name = "MESSAGE")]
     pub message: Option<String>,
 
-    /// Include untracked files
+    /// Accepted for compatibility. New files are always stashed, with or without it
     #[arg(short = 'u', long)]
     pub include_untracked: bool,
 
@@ -145,7 +145,7 @@ pub struct SaveOpts {
     #[arg(value_name = "MESSAGE")]
     pub message_positional: Option<String>,
 
-    /// Include untracked files
+    /// Accepted for compatibility. New files are always stashed, with or without it
     #[arg(short = 'u', long)]
     pub include_untracked: bool,
 

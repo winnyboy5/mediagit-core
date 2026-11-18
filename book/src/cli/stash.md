@@ -35,7 +35,7 @@ mediagit stash save [-m <MESSAGE>] [-u] [PATHS...]
 
 Options:
 - `-m`, `--message <MESSAGE>` — Descriptive message for the stash entry
-- `-u`, `--include-untracked` — Also stash untracked files
+- `-u`, `--include-untracked` — Accepted for compatibility. New files are always stashed, with or without it
 - `PATHS` — Stash only specific files/directories (optional)
 - `-q`, `--quiet` — Suppress output
 
@@ -147,7 +147,7 @@ All stash entries cleared.
 
 `push`:
 - `-m`, `--message <MESSAGE>` — Stash message
-- `-u`, `--include-untracked` — Include untracked files
+- `-u`, `--include-untracked` — Accepted for compatibility. New files are always stashed
 
 `show`:
 - `-p`, `--patch` — Show the stash as a patch

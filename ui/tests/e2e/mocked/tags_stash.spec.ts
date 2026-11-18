@@ -121,10 +121,10 @@ test.describe('Tags & Stash: tags', () => {
 })
 
 test.describe('Tags & Stash: stash actions', () => {
-  test('save: message and untracked option go to the CLI, the form clears', async ({ page }) => {
+  test('save: message goes to the CLI and new files are always included, the form clears', async ({ page }) => {
     await boot(page, { stash_save: { action: 'save', index: 0, oid: 'aa'.repeat(20), message: 'WIP', files_updated: null, stashes: [] } })
     await page.getByLabel('Message (optional)').fill('  Grade pass  ')
-    await page.getByRole('checkbox', { name: 'Include new files' }).click()
+    await expect(page.getByRole('checkbox', { name: 'Include new files' })).toHaveCount(0)
     await page.getByRole('button', { name: 'Stash my changes' }).click()
     await expect.poll(async () => (await ipcCalls(page, 'stash_save')).map((c) => c.args)).toMatchObject([
       { repo: '/repos/hero-film', message: 'Grade pass', includeUntracked: true, paths: [] },
