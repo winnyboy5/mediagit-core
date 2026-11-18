@@ -26,9 +26,12 @@ const parts = computed(() => {
   const head = (i < 0 ? m : m.slice(0, i)).trim()
   return { title: head || 'Something went wrong', rest: i < 0 ? '' : m.slice(i + 1).trim() }
 })
-const noRemote = computed(() => /no remote|remote .*(not (found|configured|set))|no such remote/i.test(props.message))
-// Retrying cannot fix a missing repo, a missing remote or a refusal.
-const canRetry = computed(() => view.value.retry && !noRemote.value && !/not a mediagit repository|protected|refused|permission/i.test(props.message))
+// The code is often just "error"; the raw text, kept under Details, says what failed.
+const raw = computed(() => `${props.message}
+${view.value.details}`)
+const noRemote = computed(() => /no remote|remote .*(not (found|configured|set))|no such remote/i.test(raw.value))
+// Retrying cannot fix a missing repo, a missing remote or a refusal; the table decides the rest.
+const canRetry = computed(() => view.value.retry && !noRemote.value && !/not a mediagit repository|protected|refused/i.test(raw.value))
 </script>
 
 <template>

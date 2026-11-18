@@ -249,7 +249,7 @@ test.describe('Server: Overview, this computer', () => {
 
   test('status failure is an error state with retry', async ({ page }) => {
     await boot(page, { server_local_status: { __error: { code: 'spawn_failed', message: 'could not read the server state' } } })
-    await expect(page.getByText('could not start its engine')).toBeVisible()
+    await expect(page.getByText('could not start its core')).toBeVisible()
     await expectNoAxeViolations(page)
   })
 

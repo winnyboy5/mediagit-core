@@ -106,7 +106,8 @@ const STATE = {
         v-if="server.localError"
         :code="server.localError.code"
         :message="server.localError.message"
-        :details="server.localError.details"        @retry="server.refreshLocal()"
+        :details="server.localError.details"
+        @retry="server.refreshLocal()"
       />
       <SkeletonRows v-else-if="!l" :count="4" />
       <template v-else-if="l.state === 'not_set_up'">

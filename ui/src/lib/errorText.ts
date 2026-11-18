@@ -40,12 +40,12 @@ const TABLE: Record<string, Entry> = {
   invalid_args: { text: 'Those options do not fit together. Change them and try again.', retry: false, own: true },
   invalid_argument: { text: 'The app refused something you entered. Check it and try again.', retry: false, own: true },
   keychain_unavailable: { text: 'This computer’s password store is not available. Unlock it, then try again.', retry: true },
-  json_unsupported: { text: 'The app cannot run that command. Update MediaGit so the app and its engine match.', retry: false },
+  json_unsupported: { text: 'The app cannot run that command. Update MediaGit so the app and its core match.', retry: false },
   internal: { text: 'MediaGit hit an unexpected problem. Try again; if it keeps happening, send the details to support.', retry: true },
-  cli_not_found: { text: 'MediaGit could not find its engine next to the app. Reinstall MediaGit to restore it.', retry: true },
-  contract_mismatch: { text: 'This app and its engine were built for different versions. Reinstall MediaGit so they match.', retry: true },
-  spawn_failed: { text: 'MediaGit could not start its engine. Restart the app; if it keeps happening, reinstall MediaGit.', retry: true },
-  protocol: { text: 'The app and its engine did not understand each other. Restart the app and try again.', retry: true },
+  cli_not_found: { text: 'MediaGit could not find its core files next to the app. Reinstall MediaGit to restore it.', retry: true },
+  contract_mismatch: { text: 'This app and the MediaGit core were built for different versions. Reinstall MediaGit so they match.', retry: true },
+  spawn_failed: { text: 'MediaGit could not start its core. Restart the app; if it keeps happening, reinstall MediaGit.', retry: true },
+  protocol: { text: 'The app and the MediaGit core did not understand each other. Restart the app and try again.', retry: true },
   setup_failed: { text: 'Setup did not finish. Check what you entered and try again.', retry: true, own: true },
   cancelled: { text: 'Stopped.', retry: false },
   error: { text: GENERIC, retry: true, own: true },
@@ -89,23 +89,27 @@ export function plainError(code: string, message: string, details?: string | nul
 
 const RESERVED = /^(con|prn|aux|nul|(com|lpt)[1-9])$/i
 
-/** The server's rule for a new repository name (repos_admin.rs). */
+/** The server's rule for a new repository name (repos_admin.rs and security.rs validate_repo_name). */
 export function repoNameError(name: string): string | undefined {
   if (!name) return undefined
   if (name.includes('/')) return 'Names cannot contain a slash.'
   if (name.startsWith('.')) return 'Names cannot start with a dot.'
   if (/[. ]$/.test(name)) return 'Names cannot end in a dot or a space.'
   if (RESERVED.test(name.split('.')[0]!.trimEnd())) return 'That name is reserved by Windows. Choose another.'
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) return 'Use letters, numbers, dots, dashes and underscores.'
+  if (name.includes('..')) return 'Names cannot contain two dots in a row.'
+  if (!/^[\p{Alphabetic}\p{N}._-]+$/u.test(name)) return 'Use letters, numbers, dots, dashes and underscores.'
   return undefined
 }
 
+// The server counts bytes, not characters.
+const byteLength = (s: string) => new TextEncoder().encode(s).length
+
 /** Username and password rules of the server (auth/handlers.rs). */
 export function usernameError(name: string): string | undefined {
-  return name && name.trim().length < 3 ? 'Usernames need at least 3 characters.' : undefined
+  return name && byteLength(name.trim()) < 3 ? 'Usernames need at least 3 characters.' : undefined
 }
 export function passwordError(pw: string): string | undefined {
-  return pw && pw.length < 8 ? 'Passwords need at least 8 characters.' : undefined
+  return pw && byteLength(pw) < 8 ? 'Passwords need at least 8 characters.' : undefined
 }
 
 /** What a storage form still lacks before a test or setup can work, in plain words. */

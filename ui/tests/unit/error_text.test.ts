@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { mount } from '@vue/test-utils'
+import { routerKey } from 'vue-router'
+import ErrorState from '@/components/ErrorState.vue'
 import { passwordError, plainError, repoNameError, storageMissing, usernameError } from '@/lib/errorText'
 import { toApiError } from '@/api'
 
@@ -62,8 +65,15 @@ describe('plainError', () => {
 
 describe('form checks', () => {
   it('repository names follow the server rule', () => {
-    for (const bad of ['CON', 'con.txt', 'film.', 'film ', 'a/b', '.hidden', 'COM3', 'lpt9.x']) expect(repoNameError(bad), bad).toBeTruthy()
-    for (const ok of ['hero-film', 'a.b', 'Project_2', 'COM10', 'console']) expect(repoNameError(ok), ok).toBeUndefined()
+    for (const bad of ['CON', 'con.txt', 'film.', 'film ', 'a/b', '.hidden', 'COM3', 'lpt9.x', 'a..b', 'a b', 'a:b', 'a\b']) expect(repoNameError(bad), bad).toBeTruthy()
+    // security.rs validate_repo_name: any Unicode letter or digit, and a leading dash or underscore, are fine.
+    for (const ok of ['hero-film', 'a.b', 'Project_2', 'COM10', 'console', '-x', '_x', 'Filmé', 'フィルム', 'a-.b']) expect(repoNameError(ok), ok).toBeUndefined()
+  })
+  it('usernames count bytes like the server', () => {
+    expect(usernameError('éa')).toBeUndefined() // 3 bytes
+    expect(usernameError('ab ')).toBeTruthy() // the server trims first
+    expect(passwordError('éééé')).toBeUndefined() // 8 bytes
+    expect(passwordError('abcdefg')).toBeTruthy()
   })
   it('usernames and passwords', () => {
     expect(usernameError('ab')).toBeTruthy()
@@ -77,5 +87,23 @@ describe('form checks', () => {
     expect(storageMissing({ kind: 's3', bucket: 'b' })).toBeUndefined()
     expect(storageMissing({ kind: 'filesystem' })).toBeUndefined()
     expect(storageMissing({ kind: 'azure' })).toBeTruthy()
+  })
+})
+
+describe('ErrorState actions follow the code and the raw text', () => {
+  const show = (code: string, message: string, details?: string) =>
+    mount(ErrorState, { props: { code, message, details }, global: { provide: { [routerKey as symbol]: { push: () => {} } } } })
+  const GENERIC = 'Something went wrong. Try again; if it keeps happening, open Details and send them to support.'
+  it('a missing remote offers Add remote, not Retry', () => {
+    const w = show('error', GENERIC, "No such remote: 'origin'")
+    expect(w.text()).toContain('Add remote')
+    expect(w.text()).not.toContain('Retry')
+  })
+  it('a folder that is not a repository offers no Retry', () => {
+    const w = show('error', GENERIC, 'Not a mediagit repository (or any parent up to mount point)')
+    expect(w.text()).not.toContain('Retry')
+  })
+  it('permission_denied keeps Retry, as the table says', () => {
+    expect(show('permission_denied', 'Access to a file or folder was denied. Check its permissions, then try again.').text()).toContain('Retry')
   })
 })
