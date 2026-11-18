@@ -186,13 +186,15 @@ export const useChangesStore = defineStore('changes', () => {
     error.value = null
     preview.value = null
     let dry = 0
+    let id = ''
     try {
       await ops.track(
-        { kind: 'add', label, retry: () => void stagePaths(paths, label) },
-        async (report) => {
+        { kind: 'add', label, retry: () => void stagePaths(paths, label), cancel: () => api.cancelOp(id) },
+        async (report, opId) => {
+          id = opId
           const join = new ProgressJoin()
           for (const batch of batchPaths(paths)) {
-            const r = await api.add(root, batch, { ...addOpts }, (p) => report(join.map(p)))
+            const r = await api.add(root, batch, { ...addOpts }, (p) => report(join.map(p)), opId)
             join.next()
             if (addOpts.dryRun) dry += r.added + r.modified + r.deleted
           }
@@ -202,7 +204,10 @@ export const useChangesStore = defineStore('changes', () => {
       if (addOpts.dryRun) preview.value = `Preview only: ${dry} ${dry === 1 ? 'file' : 'files'} would be staged. Nothing changed.`
       else clearSelection()
     } catch (e) {
-      error.value = toApiError(e)
+      const err = toApiError(e)
+      // Each step writes the index once, at its end: a stopped step includes nothing.
+      if (err.code === 'cancelled') preview.value = 'Stopped. You can include the rest again later.'
+      else error.value = err
     } finally {
       busy.value = null
       await repo.refresh()

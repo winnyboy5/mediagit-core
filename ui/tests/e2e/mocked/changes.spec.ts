@@ -70,6 +70,23 @@ test.describe('Changes: states', () => {
   })
 })
 
+test.describe('Changes: cancel staging (BUG-038)', () => {
+  test('Cancel staging stops it, says so, and the controls come back', async ({ page }) => {
+    await boot(page, {}, {}, { repo_add: [{ hold: true }, { resolve: null }] })
+    const all = page.getByRole('button', { name: 'Include all', exact: true })
+    await all.click()
+    await expect(all).toBeDisabled()
+    await page.getByRole('button', { name: 'Cancel staging' }).click()
+    await expect.poll(async () => (await ipcCalls(page, 'cancel_op')).length).toBe(1)
+    const addArgs = (await ipcCalls(page, 'repo_add'))[0]!.args as { opId: string }
+    expect(addArgs.opId).not.toBe('')
+    expect((await ipcCalls(page, 'cancel_op'))[0]!.args).toEqual({ opId: addArgs.opId })
+    await expect(all).toBeEnabled()
+    await expect(page.getByTestId('preview-note')).toContainText('Stopped')
+    await expect(page.getByRole('alert')).toHaveCount(0)
+  })
+})
+
 test.describe('Changes: tree and flat', () => {
   test('Tree groups by folder and collapses; Flat lists paths; choice persists', async ({ page }) => {
     await boot(page, {}, { 'mg.changes.mode': JSON.stringify('tree') })

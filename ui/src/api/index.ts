@@ -209,9 +209,9 @@ export type MergeStrategy = 'recursive' | 'ours' | 'theirs'
 export const api = {
   engineInfo: () => invoke<EngineInfo>('engine_info'),
   repoStatus: (repo: string) => invoke<StatusReport>('repo_status', { repo }),
-  /** Streams two bars: bytes and items (files done / total). */
-  add: (repo: string, paths: string[], opts?: AddOpts, onProgress?: Report) =>
-    invoke<AddReport>('repo_add', { repo, paths, opts: opts ?? null, onProgress: channel(onProgress) }),
+  /** Streams two bars: bytes and items (files done / total). With an `opId`, `cancelOp(opId)` stops it. */
+  add: (repo: string, paths: string[], opts?: AddOpts, onProgress?: Report, opId?: string) =>
+    invoke<AddReport>('repo_add', { repo, paths, opts: opts ?? null, opId: opId ?? '', onProgress: channel(onProgress) }),
   /** Every file of the working folder with its status; `ignored` adds the files the ignore list skips. */
   lsFiles: (repo: string, ignored = false, paths?: string[]) =>
     invoke<LsFilesReport>('repo_ls_files', { repo, paths: paths ?? null, ignored }),

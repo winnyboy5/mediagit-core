@@ -117,17 +117,17 @@ describe('anti-flicker', () => {
 })
 
 describe('cancel visibility', () => {
-  it('only push/pull/fetch/clone keep a cancel hook', () => {
+  it('only push/pull/fetch/clone/add keep a cancel hook', () => {
     const cancel = vi.fn()
     for (const kind of ['push', 'pull', 'fetch', 'clone', 'add', 'commit', 'init'] as const) {
       const id = ops.begin({ kind, label: kind, cancel }, 0)
-      expect(!!ops.ops.find((o) => o.id === id)!.cancel).toBe(['push', 'pull', 'fetch', 'clone'].includes(kind))
+      expect(!!ops.ops.find((o) => o.id === id)!.cancel).toBe(['push', 'pull', 'fetch', 'clone', 'add'].includes(kind))
     }
   })
 
   it('cancel calls the hook once and is a no-op for non-cancellable or finished ops', async () => {
     const cancel = vi.fn()
-    const a = ops.begin({ kind: 'add', label: 'Add', cancel }, 0)
+    const a = ops.begin({ kind: 'commit', label: 'Save', cancel }, 0)
     await ops.cancel(a)
     const p = ops.begin({ kind: 'push', label: 'Push', cancel }, 0)
     await ops.cancel(p)

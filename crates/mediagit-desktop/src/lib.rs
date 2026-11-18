@@ -249,6 +249,7 @@ async fn repo_status(engine: tauri::State<'_, Engine>, repo: String) -> Result<V
 
 /// Stage files (`mediagit add`).
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn repo_add(
     engine: tauri::State<'_, Engine>,
     ops: tauri::State<'_, Ops>,
@@ -256,6 +257,7 @@ async fn repo_add(
     repo: String,
     paths: Vec<String>,
     opts: Option<commands::views_a::AddOpts>,
+    op_id: String,
     on_progress: Channel<Progress>,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
@@ -270,8 +272,10 @@ async fn repo_add(
         &queues,
         &repo,
         &argv,
-        "",
-        false,
+        &op_id,
+        // `add` writes the index once, atomically, at its end: stopping it
+        // mid-way leaves what was staged before untouched. No id, no cancel.
+        !op_id.is_empty(),
         &on_progress,
     )
     .await

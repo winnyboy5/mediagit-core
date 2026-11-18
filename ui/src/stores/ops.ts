@@ -7,8 +7,8 @@ import { useToast } from '@/components/useToast'
 export type OpKind = 'push' | 'pull' | 'fetch' | 'clone' | 'add' | 'commit' | 'init' | 'download' | 'other'
 export type OpStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
 
-/** Only these can be killed safely (kill-safety gate G3, incl. pull since issues 93 and 95). */
-export const CANCELLABLE: ReadonlySet<OpKind> = new Set(['push', 'pull', 'fetch', 'clone', 'download'])
+/** Only these can be killed safely (kill-safety gate G3, incl. pull since issues 93 and 95). `add` writes its index once, at the end, in one atomic step. */
+export const CANCELLABLE: ReadonlySet<OpKind> = new Set(['push', 'pull', 'fetch', 'clone', 'download', 'add'])
 /** Bars appear only for ops running longer than this (anti-flicker). */
 export const BAR_DELAY_MS = 400
 /** Taskbar progress only for ops running longer than this. */

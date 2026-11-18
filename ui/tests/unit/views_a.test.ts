@@ -3,6 +3,7 @@ import { createPinia, setActivePinia } from 'pinia'
 
 const api = vi.hoisted(() => ({
   add: vi.fn(),
+  cancelOp: vi.fn(),
   commit: vi.fn(),
   unstage: vi.fn(),
   repoStatus: vi.fn(),
@@ -24,6 +25,7 @@ vi.mock('@/api', async (orig) => ({ ...(await orig<typeof import('@/api')>()), a
 import { emptyForm, parseRefspecs, pushIsRisky, transferOpts } from '@/lib/sync'
 import { useChangesStore } from '@/stores/changes'
 import { useLocksStore } from '@/stores/locks'
+import { useOpsStore } from '@/stores/ops'
 import { useRepoStore } from '@/stores/repo'
 import { useSyncStore } from '@/stores/sync'
 
@@ -140,7 +142,7 @@ describe('changes options', () => {
     api.add.mockResolvedValue({ added: 2, modified: 0, deleted: 1, bytes: 0 })
     c.addOpts.force = true
     await c.stageAll()
-    expect(api.add).toHaveBeenCalledWith('/repos/hero', ['.'], expect.objectContaining({ force: true, dryRun: false }), expect.any(Function))
+    expect(api.add).toHaveBeenCalledWith('/repos/hero', ['.'], expect.objectContaining({ force: true, dryRun: false }), expect.any(Function), expect.any(String))
     c.addOpts.dryRun = true
     await c.stageAll()
     expect(c.preview).toContain('3 files would be staged')
@@ -181,6 +183,29 @@ describe('changes options', () => {
     api.commit.mockClear()
     await c.commit()
     expect(api.commit).toHaveBeenCalledWith('/repos/hero', 'two', {})
+  })
+
+  it('BUG-038: staging can be cancelled; a cancel is not an error and the files stay as they were', async () => {
+    await open()
+    const c = useChangesStore()
+    const ops = useOpsStore()
+    let opId = ''
+    api.add.mockImplementation((_r: string, _p: string[], _o: unknown, _cb: unknown, id: string) => {
+      opId = id
+      return new Promise((_res, rej) => {
+        api.cancelOp.mockImplementation(async () => rej({ code: 'cancelled', message: 'Cancelled' }))
+      })
+    })
+    const staging = c.stageAll()
+    await vi.waitFor(() => expect(ops.running.length).toBe(1))
+    expect(opId).not.toBe('')
+    await ops.cancel(ops.running[0]!.id)
+    await staging
+    expect(api.cancelOp).toHaveBeenCalledWith(opId)
+    expect(c.error).toBeNull()
+    expect(c.busy).toBeNull()
+    expect(ops.finished[0]!.status).toBe('cancelled')
+    expect(c.preview).toContain('Stopped')
   })
 
   it('unstage sends paths; Unstage all sends a dot', async () => {

@@ -11,7 +11,7 @@ import MoreOptions from '@/components/MoreOptions.vue'
 import OptionCheck from '@/components/OptionCheck.vue'
 import SegmentedControl from '@/components/SegmentedControl.vue'
 import SkeletonRows from '@/components/SkeletonRows.vue'
-import { primaryBar } from '@/stores/ops'
+import { primaryBar, useOpsStore } from '@/stores/ops'
 import { useChangesStore } from '@/stores/changes'
 import { useRepoStore } from '@/stores/repo'
 import { useShellStore } from '@/stores/shell'
@@ -24,6 +24,7 @@ const repo = useRepoStore()
 const changes = useChangesStore()
 const shell = useShellStore()
 const undo = useUndoStore()
+const ops = useOpsStore()
 const MORE = [{ id: 'discard', label: 'Discard all unsaved changes…', danger: true }]
 
 const loadingFirst = computed(() => !repo.status && !repo.error)
@@ -52,6 +53,7 @@ const MODES = [
         <template v-if="changes.counts.total">{{ changes.counts.total }} {{ changes.counts.total === 1 ? 'change' : 'changes' }} since the last saved version</template>
       </p>
       <div class="tools">
+        <Button v-if="changes.adding?.cancel" size="sm" variant="danger" @click="ops.cancel(changes.adding.id)">Cancel staging</Button>
         <SegmentedControl v-model="changes.mode" label="Folder view" :options="MODES" />
         <DropdownMenu :items="MORE" @select="undo.ask({ kind: 'reset', mode: 'hard', rev: 'HEAD' })">
           <IconButton label="More actions" variant="secondary" :disabled="busy || undo.busy || !changes.counts.total"><Ellipsis :size="18" /></IconButton>
