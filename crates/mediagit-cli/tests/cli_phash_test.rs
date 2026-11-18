@@ -3,10 +3,10 @@
 
 //! Integration tests for P4a: pHash-guided delta-base nomination.
 //!
-//! Uses the `dev-tests/dedup-pairs/` fixtures — jpg_v1.jpg/jpg_v2.jpg are a
-//! quality-90/quality-85 re-export of the same photo: perceptually
-//! near-identical, byte-dissimilar (exactly the case plain byte-sampling
-//! similarity detection misses, and the case pHash exists for).
+//! The images are generated here, so these tests run on every machine and
+//! cannot pass by skipping. A quality-90/quality-85 re-export of one picture
+//! is perceptually near-identical and byte-dissimilar (exactly the case plain
+//! byte-sampling similarity detection misses, and the case pHash exists for).
 
 use assert_cmd::Command;
 use mediagit_versioning::Oid;
@@ -14,17 +14,36 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
-// Dedup-pair fixtures, resolved from the workspace root at runtime.
-// These were two cfg-gated absolute paths baked to one developer's
-// machine, so everywhere else the lookups missed and the tests skipped.
-fn dedup_pairs_dir() -> std::path::PathBuf {
-    mediagit_test_utils::TestPaths::announce_fixture_root(
-        mediagit_test_utils::TestPaths::project_root()
-            .join("dev-tests")
-            .join("dedup-pairs"),
-        "dev-tests/dedup-pairs/",
-    )
+/// A photo-like picture (smooth gradient plus noise), JPEG-encoded.
+fn photo_jpeg(quality: u8) -> Vec<u8> {
+    let img = image::RgbImage::from_fn(1024, 768, |x, y| {
+        let n = (x.wrapping_mul(2654435761) ^ y.wrapping_mul(40503)).wrapping_mul(2246822519) >> 27;
+        image::Rgb([
+            ((x / 5) as u8).saturating_add(n as u8),
+            ((y / 4) as u8).saturating_add(n as u8),
+            (((x + y) / 8) as u8).saturating_add(n as u8),
+        ])
+    });
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality)
+        .encode_image(&img)
+        .unwrap();
+    out
 }
+
+/// The same encode with a COM (comment) segment right after SOI: only
+/// metadata changed, the compressed image data is untouched.
+fn with_comment(jpeg: &[u8]) -> Vec<u8> {
+    let text = b"edited metadata";
+    let len = (text.len() + 2) as u16;
+    let mut out = jpeg[..2].to_vec();
+    out.extend_from_slice(&[0xFF, 0xFE]);
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(text);
+    out.extend_from_slice(&jpeg[2..]);
+    out
+}
+
 /// Mirrors the private `Entry` layout in `mediagit_cli::phash_index` — same
 /// field order/types, so postcard decodes it identically without needing to
 /// expose the type. Used only to verify the index round-tripped real data.
@@ -55,16 +74,6 @@ fn init_repo(dir: &Path) {
         .current_dir(dir)
         .assert()
         .success();
-}
-
-fn fixture_paths() -> Option<(PathBuf, PathBuf)> {
-    let v1 = dedup_pairs_dir().join("jpg_v1.jpg");
-    let v2 = dedup_pairs_dir().join("jpg_v2.jpg");
-    if v1.exists() && v2.exists() {
-        Some((v1, v2))
-    } else {
-        None
-    }
 }
 
 /// Where the filesystem storage backend actually lands the `deltas/<hex>.meta`
@@ -100,23 +109,19 @@ fn read_index_entries(repo_root: &Path) -> Vec<IndexEntry> {
 
 #[test]
 fn test_phash_nominates_and_records_reexported_jpeg() {
-    let Some((v1_path, v2_path)) = fixture_paths() else {
-        println!("SKIP: dev-tests/dedup-pairs fixtures not found");
-        return;
-    };
+    let v1_data = photo_jpeg(90);
+    let v2_data = photo_jpeg(85);
 
     let temp_dir = TempDir::new().unwrap();
     init_repo(temp_dir.path());
 
-    let v1_data = fs::read(&v1_path).unwrap();
-    let v2_data = fs::read(&v2_path).unwrap();
     let v1_oid = Oid::hash(&v1_data);
     let v2_oid = Oid::hash(&v2_data);
 
     let dest = temp_dir.path().join("photo.jpg");
 
     // Commit v1 first, so it exists in the ODB as a candidate base.
-    fs::copy(&v1_path, &dest).unwrap();
+    fs::write(&dest, &v1_data).unwrap();
     mediagit()
         .arg("add")
         .arg("photo.jpg")
@@ -137,7 +142,7 @@ fn test_phash_nominates_and_records_reexported_jpeg() {
     fs::write(temp_dir.path().join("noise2.bin"), vec![9u8; 8192]).unwrap();
 
     // Overwrite with the re-exported v2 and add everything.
-    fs::copy(&v2_path, &dest).unwrap();
+    fs::write(&dest, &v2_data).unwrap();
     mediagit()
         .arg("add")
         .arg(".")
@@ -180,23 +185,17 @@ fn test_phash_nominates_and_records_reexported_jpeg() {
 /// version, the delta passes the 80% gate easily and gets stored.
 #[test]
 fn test_phash_delta_accepted_for_metadata_edit() {
-    let v1_path = dedup_pairs_dir().join("jpg_v1.jpg");
-    let v2_path = dedup_pairs_dir().join("jpg_meta_v2.jpg");
-    if !v1_path.exists() || !v2_path.exists() {
-        println!("SKIP: dev-tests/dedup-pairs metadata-edit fixtures not found");
-        return;
-    }
+    let v1_data = photo_jpeg(90);
+    let v2_data = with_comment(&v1_data);
 
     let temp_dir = TempDir::new().unwrap();
     init_repo(temp_dir.path());
 
-    let v1_data = fs::read(&v1_path).unwrap();
-    let v2_data = fs::read(&v2_path).unwrap();
     let v1_oid = Oid::hash(&v1_data);
     let v2_oid = Oid::hash(&v2_data);
 
     let dest = temp_dir.path().join("photo.jpg");
-    fs::copy(&v1_path, &dest).unwrap();
+    fs::write(&dest, &v1_data).unwrap();
     mediagit()
         .arg("add")
         .arg("photo.jpg")
@@ -211,7 +210,7 @@ fn test_phash_delta_accepted_for_metadata_edit() {
         .assert()
         .success();
 
-    fs::copy(&v2_path, &dest).unwrap();
+    fs::write(&dest, &v2_data).unwrap();
     mediagit()
         .arg("add")
         .arg("photo.jpg")
@@ -234,19 +233,16 @@ fn test_phash_delta_accepted_for_metadata_edit() {
 
 #[test]
 fn test_phash_kill_switch_restores_prior_behavior() {
-    let Some((v1_path, v2_path)) = fixture_paths() else {
-        println!("SKIP: dev-tests/dedup-pairs fixtures not found");
-        return;
-    };
+    let v1_data = photo_jpeg(90);
+    let v2_data = photo_jpeg(85);
 
     let temp_dir = TempDir::new().unwrap();
     init_repo(temp_dir.path());
 
-    let v2_data = fs::read(&v2_path).unwrap();
     let v2_oid = Oid::hash(&v2_data);
 
     let dest = temp_dir.path().join("photo.jpg");
-    fs::copy(&v1_path, &dest).unwrap();
+    fs::write(&dest, &v1_data).unwrap();
     mediagit()
         .arg("add")
         .env("MEDIAGIT_PHASH", "0")
@@ -262,7 +258,7 @@ fn test_phash_kill_switch_restores_prior_behavior() {
         .assert()
         .success();
 
-    fs::copy(&v2_path, &dest).unwrap();
+    fs::write(&dest, &v2_data).unwrap();
     mediagit()
         .arg("add")
         .env("MEDIAGIT_PHASH", "0")
