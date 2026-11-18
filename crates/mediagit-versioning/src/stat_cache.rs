@@ -191,6 +191,11 @@ fn mtime_ns(meta: &Metadata) -> Option<u128> {
         .map(|d| d.as_nanos())
 }
 
+/// Filesystem identity of `path` (inode / NTFS file index), `None` if unreadable.
+pub(crate) fn file_id(path: &Path) -> Option<u64> {
+    identity(path, &std::fs::metadata(path).ok()?).map(|(id, _)| id)
+}
+
 fn now_ns() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

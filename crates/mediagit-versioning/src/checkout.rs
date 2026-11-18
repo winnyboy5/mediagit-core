@@ -403,6 +403,18 @@ impl<'a> CheckoutManager<'a> {
                 let here_old = self.repo_root.join(&new_prefix).join(a.as_os_str());
                 let here_new = self.repo_root.join(&new_prefix).join(b.as_os_str());
                 if a != b {
+                    // The fold above is Rust's, not the filesystem's (Kelvin
+                    // sign vs k): never replace a file that is not this one.
+                    if here_new.exists()
+                        && crate::stat_cache::file_id(&here_new)
+                            != crate::stat_cache::file_id(&here_old)
+                    {
+                        anyhow::bail!(
+                            "Cannot rename {} to {}: a different file already has that name",
+                            here_old.display(),
+                            here_new.display()
+                        );
+                    }
                     fs::rename(&here_old, &here_new).with_context(|| {
                         format!(
                             "Failed to rename {} to {}",
@@ -2576,5 +2588,43 @@ mod overlap_split_parity_tests {
             assert!(err.is_ok(), "case-sensitive fs: both paths are distinct");
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod case_twin_tests {
+    use super::*;
+    use mediagit_storage::LocalBackend;
+    use std::sync::Arc;
+
+    /// DL-6: `to_lowercase` folds the Kelvin sign (U+212A) to `k`, but NTFS
+    /// keeps `\u{212A}.txt` and `k.txt` apart. Renaming one onto the other
+    /// would replace a distinct file; the move must refuse and touch nothing.
+    #[tokio::test]
+    async fn case_twin_rename_refuses_a_distinct_existing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        fs::create_dir(&root).unwrap();
+        if !fs_is_case_insensitive(&root) {
+            return;
+        }
+        let kelvin = root.join("\u{212A}.txt");
+        let plain = root.join("k.txt");
+        fs::write(&kelvin, "kelvin").unwrap();
+        fs::write(&plain, "plain").unwrap();
+        if fs::read_to_string(&kelvin).unwrap() != "kelvin" {
+            return; // this filesystem folds the Kelvin sign: they are one file
+        }
+
+        let storage: Arc<dyn mediagit_storage::StorageBackend> =
+            Arc::new(LocalBackend::new(tmp.path().join("odb")).await.unwrap());
+        let odb = ObjectDatabase::new(storage, 100);
+        let mgr = CheckoutManager::new(&odb, &root);
+        let targets: HashSet<PathBuf> = [PathBuf::from("k.txt")].into();
+        let res = mgr.move_case_twins(&[PathBuf::from("\u{212A}.txt")], &targets);
+
+        assert!(res.is_err(), "rename onto a distinct file was allowed");
+        assert_eq!(fs::read_to_string(&plain).unwrap(), "plain");
+        assert_eq!(fs::read_to_string(&kelvin).unwrap(), "kelvin");
     }
 }
