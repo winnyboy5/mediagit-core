@@ -82,6 +82,16 @@ test.describe('Welcome', () => {
     await expect(page).toHaveURL(/#\/welcome$/)
   })
 
+  test('New repository on a folder that already is one opens it', async ({ page }) => {
+    const commands = healthy({ repo_init: { __error: { code: 'error', message: 'Repository already initialized at /repos/new' } } })
+    await mockIpc(page, { commands, dialog: '/repos/new' })
+    await page.goto('/#/welcome')
+    await page.getByRole('button', { name: /New repository/ }).click()
+    await page.getByRole('dialog').getByRole('button', { name: 'Create', exact: true }).click()
+    await expect(page).toHaveURL(/#\/files\/all$/)
+    await expect(page.getByText('This folder was already a repository. Opened it.').first()).toBeVisible()
+  })
+
   test('New repository success opens it', async ({ page }) => {
     await mockIpc(page, { commands: healthy({ repo_init: { ok: true } }), dialog: '/repos/new' })
     await page.goto('/#/welcome')
@@ -104,7 +114,7 @@ test.describe('Startup gate', () => {
   test('missing engine blocks, Retry re-checks', async ({ page }) => {
     await mockIpc(page, { commands: healthy({ engine_info: fixture('engine_missing') }) })
     await page.goto('/#/welcome')
-    await expect(page.getByRole('alert')).toContainText('could not find its engine')
+    await expect(page.getByRole('alert')).toContainText('could not find its core files')
     await expect(page.getByRole('alert')).not.toContainText('cli_not_found')
     await page.getByRole('button', { name: 'Retry' }).click()
     await expect.poll(async () => (await ipcCalls(page, 'engine_info')).length).toBe(2)
@@ -143,7 +153,7 @@ test.describe('Clone dialog', () => {
     await expect(page.getByLabel('Save into')).toHaveValue('/picked/dir')
   })
 
-  test('progress: no length -> indeterminate; rate/ETA stay -- until samples are 1 s apart; completes into Changes', async ({ page }) => {
+  test('progress: no length -> indeterminate; rate/ETA stay -- until samples are 2 s apart; completes into Changes', async ({ page }) => {
     await mockIpc(page, { commands: healthy(), scripts: { repo_clone: fixture('clone_progress') } })
     await open(page)
     await fill(page)
@@ -155,8 +165,8 @@ test.describe('Clone dialog', () => {
     await ipcRelease(page)
     await expect(dlg.getByRole('progressbar', { name: 'Downloading media' })).toHaveAttribute('aria-valuenow', '100000')
     await expect(dlg.getByText('ETA --').last()).toBeVisible()
-    await page.waitForTimeout(1100)
-    await ipcRelease(page) // lump of progress 1.1 s later
+    await page.waitForTimeout(2100)
+    await ipcRelease(page) // lump of progress 2.1 s later
     await expect(dlg.getByText(/\/s$/).first()).toBeVisible()
     await expect(dlg.getByText('ETA --')).toHaveCount(0) // the finished first bar is hidden; the live one has a rate by now
     await expect(dlg.getByRole('progressbar', { name: 'Connecting to server' })).toHaveCount(0)

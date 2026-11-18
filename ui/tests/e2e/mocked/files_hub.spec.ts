@@ -48,18 +48,21 @@ test.describe('All files', () => {
     await page.getByRole('searchbox', { name: 'Find a file' }).fill('VO take3')
     await expect(files(page).getByRole('treeitem', { name: /vo_take3/ })).toBeVisible()
     await expect(files(page).getByRole('treeitem', { name: /hero/ })).toHaveCount(0)
+    await expect(page.getByTestId('files-summary')).toContainText('1 of 12 files')
     await expectNoAxeViolations(page)
     await page.getByRole('searchbox', { name: 'Find a file' }).fill('zzz')
     await expect(page.getByText('No match')).toBeVisible()
+    await expect(page.getByText('No file or folder path contains')).toBeVisible()
     await expectNoAxeViolations(page)
   })
 
-  test('Show ignored files asks for them and dims them', async ({ page }) => {
+  test('Show ignored files asks for them and labels them', async ({ page }) => {
     await boot(page)
     await page.getByRole('checkbox', { name: 'Show ignored files' }).click()
     await expect.poll(async () => (await ipcCalls(page, 'repo_ls_files')).length).toBe(2)
     expect((await ipcCalls(page, 'repo_ls_files'))[1]!.args).toMatchObject({ ignored: true })
     await expect(files(page).getByRole('treeitem', { name: /\.cache/ })).toBeVisible()
+    await expect(files(page).getByRole('treeitem', { name: /thumbs\.db/ })).toContainText('Ignored')
     await expectNoAxeViolations(page)
   })
 
@@ -108,7 +111,7 @@ test.describe('Changes: Include and live staging numbers', () => {
     await expect(page.getByTestId('staging-meter')).toHaveCount(0)
     const pill = page.locator('[data-activity-pill]')
     await expect(pill.getByTestId('pill-files')).toHaveText('3 of 6 files')
-    await expect(pill.getByTestId('pill-bytes')).toHaveText('1.9 GB of 3.7 GB')
+    await expect(pill.getByTestId('pill-bytes')).toHaveText('2.0 GB of 4.0 GB')
     await expect(pill.getByTestId('pill-rate')).toContainText('/s')
     await expect(pill.getByTestId('pill-eta')).toContainText('left')
     await expectNoAxeViolations(page)

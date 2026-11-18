@@ -117,7 +117,7 @@ describe('transfer summaries and lock filters', () => {
   const pushR = (result: string) => ({ result, objects_sent: 14, bytes_uploaded: 2048 }) as PushReport
 
   it('says what happened in plain words', () => {
-    expect(summarizeTransfer('fetch', fetchR)).toBe('Fetched 3 updates, 3.0 MB')
+    expect(summarizeTransfer('fetch', fetchR)).toBe('Fetched 3 updates, 3.1 MB')
     expect(summarizeTransfer('fetch', { ...fetchR, branches_updated: 0, tags_updated: 0 })).toBe('Already up to date')
     expect(summarizeTransfer('pull', pullR('fast_forward'))).toBe('Got latest: 5 objects, 2.0 KB')
     expect(summarizeTransfer('pull', pullR('up_to_date'))).toBe('Already up to date')

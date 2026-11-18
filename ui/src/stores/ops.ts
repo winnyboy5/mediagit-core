@@ -13,8 +13,8 @@ export const CANCELLABLE: ReadonlySet<OpKind> = new Set(['push', 'pull', 'fetch'
 export const BAR_DELAY_MS = 400
 /** Taskbar progress only for ops running longer than this. */
 export const TASKBAR_DELAY_MS = 2000
-/** Rate/ETA need two samples at least this far apart. */
-export const MIN_SAMPLE_SPAN_MS = 1000
+/** Rate/ETA need two samples at least this far apart, and 1% of the bytes done: a first guess is noise. */
+export const MIN_SAMPLE_SPAN_MS = 2000
 const SAMPLE_WINDOW_MS = 30_000
 const MIN_SAMPLE_GAP_MS = 250
 const HISTORY_KEEP = 20
@@ -66,13 +66,14 @@ export interface OpSpec {
   quiet?: boolean
 }
 
-/** Bytes/s over the sample window, or null until two samples >= 1 s apart exist. */
+/** Bytes/s over the sample window, or null until two samples >= 2 s apart and 1% of the bytes exist. */
 export function rateOf(bar: Bar): number | null {
   if (bar.unit !== 'bytes' || bar.samples.length < 2) return null
   const first = bar.samples[0]!
   const last = bar.samples[bar.samples.length - 1]!
   const span = last.t - first.t
   if (span < MIN_SAMPLE_SPAN_MS) return null
+  if (bar.len != null && bar.pos < bar.len * 0.01) return null
   const delta = last.pos - first.pos
   return delta < 0 ? null : (delta / span) * 1000
 }

@@ -166,6 +166,22 @@ pub async fn ensure_no_unsafe_paths(
     Ok(())
 }
 
+/// True when `dir` holds a `.mediagit` folder. An empty one is a half-deleted
+/// repository, not a new one, so it is an error (IMP-021).
+fn has_repo_dir(dir: &Path) -> Result<bool> {
+    let m = dir.join(".mediagit");
+    if !m.exists() {
+        return Ok(false);
+    }
+    if m.read_dir().is_ok_and(|mut d| d.next().is_none()) {
+        anyhow::bail!(
+            "The .mediagit folder in {} is empty. This repository is damaged or incomplete.",
+            dir.display()
+        );
+    }
+    Ok(true)
+}
+
 /// Find the root of the MediaGit repository by walking up from current directory.
 ///
 /// # Returns
@@ -185,12 +201,12 @@ pub fn find_repo_root() -> Result<PathBuf> {
     if let Ok(repo_path) = std::env::var("MEDIAGIT_REPO") {
         let path = PathBuf::from(&repo_path);
         // Try as-is first
-        if path.join(".mediagit").exists() {
+        if has_repo_dir(&path)? {
             return Ok(path);
         }
         // Try canonicalized
         if let Ok(canonical) = dunce::canonicalize(&path)
-            && canonical.join(".mediagit").exists()
+            && has_repo_dir(&canonical)?
         {
             return Ok(canonical);
         }
@@ -201,7 +217,7 @@ pub fn find_repo_root() -> Result<PathBuf> {
     let mut current = std::env::current_dir()?;
 
     loop {
-        if current.join(".mediagit").exists() {
+        if has_repo_dir(&current)? {
             return Ok(current);
         }
 
@@ -223,7 +239,7 @@ pub fn find_repo_root_from(start: &std::path::Path) -> Result<PathBuf> {
     let mut current = start.to_path_buf();
 
     loop {
-        if current.join(".mediagit").exists() {
+        if has_repo_dir(&current)? {
             return Ok(current);
         }
 
@@ -1006,6 +1022,8 @@ mod tests {
 
         // Create .mediagit directory
         std::fs::create_dir(repo_root.join(".mediagit")).unwrap();
+        // An empty one now counts as damaged (IMP-021), so give it a HEAD.
+        std::fs::write(repo_root.join(".mediagit").join("HEAD"), "").unwrap();
 
         // Create nested directory
         let nested = repo_root.join("src").join("commands");

@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { CircleDashed, Lock, Minus, Pencil, Plus, TriangleAlert } from 'lucide-vue-next'
+import { CircleDashed, EyeOff, Lock, Minus, Pencil, Plus, TriangleAlert } from 'lucide-vue-next'
 
-export type FileStatus = 'added' | 'modified' | 'deleted' | 'locked' | 'untracked' | 'conflict'
+export type FileStatus = 'added' | 'modified' | 'deleted' | 'locked' | 'untracked' | 'conflict' | 'ignored'
 
 // Icon + plain word + hue: status is never colour-only, and never a letter code.
 const META = {
@@ -11,6 +11,7 @@ const META = {
   locked: { word: 'Locked', icon: Lock },
   untracked: { word: 'New', icon: CircleDashed },
   conflict: { word: 'Conflict', icon: TriangleAlert },
+  ignored: { word: 'Ignored', icon: EyeOff },
 } as const
 
 defineProps<{ status: FileStatus }>()
@@ -58,5 +59,9 @@ defineProps<{ status: FileStatus }>()
 .conflict {
   background: var(--conflict-soft);
   color: var(--conflict);
+}
+.ignored {
+  background: var(--surface-3);
+  color: var(--text-muted);
 }
 </style>

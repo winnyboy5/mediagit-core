@@ -34,7 +34,7 @@ const ICON = { success: CircleCheck, warning: TriangleAlert, error: CircleAlert,
 .mg-viewport {
   position: fixed;
   right: var(--space-6);
-  bottom: calc(var(--space-6) + 56px); /* clear the activity bar */
+  top: calc(var(--space-6) + 48px); /* under the hub header, clear of the Save dock at the bottom */
   z-index: 80;
   display: flex;
   flex-direction: column;

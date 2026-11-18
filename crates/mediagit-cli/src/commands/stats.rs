@@ -234,7 +234,10 @@ impl StatsCmd {
                     let overhead_pct = ((total_stored - stats.original_bytes) as f64
                         / stats.original_bytes as f64)
                         * 100.0;
-                    println!("  Compression:   {:.1}% overhead", overhead_pct);
+                    println!(
+                        "  Compression:   none (stored size is {:.1}% above the original)",
+                        overhead_pct
+                    );
                 }
             } else {
                 println!("  Storage used: {}", HumanBytes(total_stored));

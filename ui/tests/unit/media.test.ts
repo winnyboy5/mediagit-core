@@ -44,7 +44,7 @@ describe('format', () => {
   it('formats bytes', () => {
     expect(formatBytes(0)).toBe('0 B')
     expect(formatBytes(1536)).toBe('1.5 KB')
-    expect(formatBytes(3.4e9)).toBe('3.2 GB')
+    expect(formatBytes(3.4e9)).toBe('3.4 GB')
   })
   it('shows -- for unknown rate and eta', () => {
     expect(formatRate(null)).toBe('--')

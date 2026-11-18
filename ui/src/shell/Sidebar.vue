@@ -113,10 +113,10 @@ const onHub = (h: Hub) => inHub(route.path, h)
         class="act"
         aria-haspopup="dialog"
         :aria-expanded="shell.activityOpen"
-        :aria-label="`Activity${failed ? `, ${failed} failed` : ''}${sync.last ? `. Got latest ${timeAgo(sync.last)}` : ''}`"
+        :aria-label="`Activity${failed ? `, ${failed} failed` : ''}${sync.last ? `. Synced ${timeAgo(sync.last)}` : ''}`"
         @click="shell.activityOpen = !shell.activityOpen"
       >
-        <template v-if="failed">{{ failed }} failed, </template>{{ sync.last ? `Got latest ${timeAgo(sync.last)}` : 'Activity' }}
+        <template v-if="failed">{{ failed }} failed, </template>{{ sync.last ? `Synced ${timeAgo(sync.last)}` : 'Activity' }}
       </button>
     </div>
     <CloneDialog v-model:open="cloneOpen" />

@@ -451,7 +451,8 @@ impl BisectCmd {
 
         for line in logfile_content.lines() {
             let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
+            // `bisect log` prints a "Bisect Log:" header; replaying its output must skip it (IMP-061).
+            if trimmed.is_empty() || trimmed.starts_with('#') || trimmed == "Bisect Log:" {
                 continue;
             }
 

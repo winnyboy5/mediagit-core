@@ -101,8 +101,8 @@ pub struct FsckCmd {
     #[arg(short, long)]
     pub verbose: bool,
 
-    /// Repository path (defaults to current directory)
-    #[arg(long, value_name = "PATH")]
+    /// Same as -C/--repository (kept for old scripts)
+    #[arg(long, value_name = "PATH", hide = true)]
     pub path: Option<String>,
 }
 

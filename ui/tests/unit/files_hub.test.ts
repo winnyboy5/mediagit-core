@@ -141,6 +141,8 @@ describe('explorer', () => {
     expect(filterEntries(e, 'ART psd').map((x) => x.path)).toEqual(['art/a.psd', 'art/b.psd'])
     expect(filterEntries(e, '  ')).toBe(e)
     expect(filterEntries(e, 'nope')).toEqual([])
+    expect(filterEntries(e, '*.psd').map((x) => x.path)).toEqual(['art/a.psd', 'art/b.psd']) // a star means "anything"
+    expect(filterEntries(e, '*')).toBe(e)
   })
 
   it('loads through ls-files with the ignored switch and reloads on toggle', async () => {

@@ -69,16 +69,26 @@ impl InitCmd {
         // Determine repository path
         let repo_path = self.get_repo_path()?;
 
+        // Check before any banner: a refused init must not look like it started.
+        if repo_path.join(".mediagit").exists() {
+            anyhow::bail!("Repository already initialized at {}", repo_path.display());
+        }
+
         if !self.quiet {
             output::header(&format!(
                 "Initializing MediaGit repository in {}",
                 repo_path.display()
             ));
-        }
-
-        // Check if already initialized
-        if repo_path.join(".mediagit").exists() {
-            anyhow::bail!("Repository already initialized at {}", repo_path.display());
+            // IMP-006: a repository inside a repository is rarely intended.
+            if let Some(outer) = repo_path
+                .parent()
+                .and_then(|p| crate::repo::find_repo_root_from(p).ok())
+            {
+                output::warning(&format!(
+                    "This folder is inside the repository at {}. A second repository will be created here.",
+                    outer.display()
+                ));
+            }
         }
 
         // Create repository structure

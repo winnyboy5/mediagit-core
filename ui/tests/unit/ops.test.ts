@@ -24,16 +24,26 @@ beforeEach(() => {
 const bar = (id: string, barId = 1) => ops.ops.find((o) => o.id === id)!.bars.get(barId)!
 
 describe('rate and ETA', () => {
-  it('shows nothing until two samples at least 1 s apart exist', () => {
+  it('shows nothing until two samples at least 2 s apart exist', () => {
     const id = ops.begin({ kind: 'push', label: 'Push' }, 0)
     ops.progress(id, P(100), 0)
     expect(rateOf(bar(id))).toBeNull()
-    ops.progress(id, P(200), 900) // second sample, but only 900 ms after the first
+    ops.progress(id, P(200), 1900) // second sample, but only 1.9 s after the first
     expect(rateOf(bar(id))).toBeNull()
     expect(etaOf(bar(id))).toBeNull()
-    ops.progress(id, P(300), 1000)
-    expect(rateOf(bar(id))).toBe(200) // 200 B over 1 s
-    expect(etaOf(bar(id))).toBe(3.5)
+    ops.progress(id, P(300), 2000)
+    expect(rateOf(bar(id))).toBe(100) // 200 B over 2 s
+    expect(etaOf(bar(id))).toBe(7)
+  })
+
+  it('waits for 1% of the bytes: a first slow sample is noise', () => {
+    const id = ops.begin({ kind: 'add', label: 'Add' }, 0)
+    ops.progress(id, P(0, 1e9), 0)
+    ops.progress(id, P(2e6, 1e9), 2100) // 0.2% after 2.1 s
+    expect(rateOf(bar(id))).toBeNull()
+    expect(etaOf(bar(id))).toBeNull()
+    ops.progress(id, P(2e7, 1e9), 3000) // 2%
+    expect(rateOf(bar(id))).not.toBeNull()
   })
 
   it('never invents an ETA without a length', () => {

@@ -52,12 +52,11 @@ struct Cli {
     #[arg(short = 'C', long, global = true, value_name = "PATH")]
     repository: Option<String>,
 
-    /// Log output format (pretty|full|compact|json)
-    ///
-    /// D4: this was hardcoded to `pretty`, so `mediagit-observability`'s JSON
-    /// renderer -- written, tested and shipped in this workspace -- could not be
-    /// selected by either binary. `MEDIAGIT_LOG_FORMAT` sets the same thing.
-    /// `MEDIAGIT_LOG` / `RUST_LOG` still control the filter, not the format.
+    /// Log output format (pretty|full|compact|json). Env: MEDIAGIT_LOG_FORMAT.
+    // D4: this was hardcoded to `pretty`, so `mediagit-observability`'s JSON
+    // renderer -- written, tested and shipped in this workspace -- could not be
+    // selected by either binary. `MEDIAGIT_LOG_FORMAT` sets the same thing.
+    // `MEDIAGIT_LOG` / `RUST_LOG` still control the filter, not the format.
     #[arg(long, global = true, value_name = "FORMAT")]
     log_format: Option<String>,
 

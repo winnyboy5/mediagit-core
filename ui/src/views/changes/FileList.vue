@@ -184,7 +184,7 @@ function onKey(e: KeyboardEvent) {
               </template>
             </div>
           </template>
-          <div v-else class="frow" :class="{ ignored: rows[v.index]!.node.ignored, ckd: checks }">
+          <div v-else class="frow" :class="{ ckd: checks }">
             <button
               v-if="hasCheck(rows[v.index]!)"
               type="button"
@@ -201,7 +201,7 @@ function onKey(e: KeyboardEvent) {
             <FileRow
               :path="rows[v.index]!.node.name"
               :size="explorer ? undefined : (rows[v.index]!.node.size ?? undefined)"
-              :status="plain ? undefined : (rows[v.index]!.node.status ?? undefined)"
+              :status="plain ? undefined : rows[v.index]!.node.ignored ? 'ignored' : (rows[v.index]!.node.status ?? undefined)"
               :selected="selected.has(key(rows[v.index]!))"
               :progress="progress && progress.path === rows[v.index]!.node.path ? progress.value : undefined"
               :class="{ nested: rows[v.index]!.node.depth > 0 && !checks }"
@@ -275,9 +275,6 @@ function onKey(e: KeyboardEvent) {
 .ck-gap {
   flex: none;
   width: 20px;
-}
-.frow.ignored {
-  opacity: 0.6;
 }
 .ck {
   display: inline-grid;

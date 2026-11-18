@@ -396,7 +396,7 @@ impl StatusCmd {
         // Display current branch (independent of --verbose, which instead
         // enriches the summary line below). Skipped for --json (single JSON
         // document, no interleaved human text).
-        if self.branch && !self.json {
+        if (self.branch || !(self.short || self.porcelain || self.quiet)) && !self.json {
             match &branch_state {
                 BranchState::OnBranch(name) => {
                     let mut line = format!("On branch: {}", name);

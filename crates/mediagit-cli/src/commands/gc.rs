@@ -1700,8 +1700,6 @@ async fn run_gc_stats(opts: &GcOptions) -> Result<GcStats> {
         );
     }
     let mut reachable = gc.build_reachability_set(&repo_root).await?;
-    stats.reachable_objects = reachable.len() as u64;
-
     // Steps 2-3: list all objects and identify everything unreachable
     if !opts.quiet {
         println!("{} Scanning object database...", style("→").cyan());
@@ -1717,6 +1715,8 @@ async fn run_gc_stats(opts: &GcOptions) -> Result<GcStats> {
     } = gc.scan(&mut reachable).await?;
     stats.objects_scanned = objects_scanned;
     stats.unreachable_objects = unreachable.len() as u64;
+    // Kept = scanned minus unreachable, so it can never exceed "scanned" (IMP-077).
+    stats.reachable_objects = objects_scanned.saturating_sub(stats.unreachable_objects);
 
     // Even if no unreachable loose objects, still check chunks/manifests
     let has_unreachable_objects = !unreachable.is_empty();

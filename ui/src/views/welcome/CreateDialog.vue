@@ -7,6 +7,7 @@ import MoreOptions from '@/components/MoreOptions.vue'
 import TextField from '@/components/TextField.vue'
 import { refNameError } from '@/lib/inspect'
 import { baseName } from '@/lib/persist'
+import { useToast } from '@/components/useToast'
 import { pickFolder, useOpenRepo } from '@/shell/useOpenRepo'
 import { useOpsStore } from '@/stores/ops'
 
@@ -15,6 +16,7 @@ import { useOpsStore } from '@/stores/ops'
 const emit = defineEmits<{ fail: [error: ApiError, retry: (() => void) | null] }>()
 const ops = useOpsStore()
 const { openPath } = useOpenRepo()
+const toast = useToast()
 
 const open = ref(false)
 const dir = ref('')
@@ -46,7 +48,16 @@ async function initIn(target: string, first?: string) {
   try {
     await ops.track({ kind: 'init', label: `Create repository ${baseName(target)}` }, () => api.init(target, first), () => target)
   } catch (e) {
-    emit('fail', toApiError(e), () => void initIn(target, first))
+    const err = toApiError(e)
+    // A folder that is already a repository: open it, as the person meant (Retry can never work).
+    if (/already initialized/i.test(`${err.message}
+${err.details ?? ''}`)) {
+      toast.push({ kind: 'info', title: 'This folder was already a repository. Opened it.' })
+      const failed = await openPath(target)
+      if (failed) emit('fail', failed, () => void openPath(target))
+      return
+    }
+    emit('fail', err, () => void initIn(target, first))
     return
   }
   const err = await openPath(target)

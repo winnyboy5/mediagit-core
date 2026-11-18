@@ -35,6 +35,7 @@ const noMatch = computed(() => files.loaded && !!files.entries.length && !files.
 const summary = computed(() => {
   const n = files.entries.length
   const c = files.changedCount
+  if (files.query.trim()) return `${files.matchCount.toLocaleString('en-US')} of ${n.toLocaleString('en-US')} ${n === 1 ? 'file' : 'files'}`
   return `${n.toLocaleString('en-US')} ${n === 1 ? 'file' : 'files'}${c ? `, ${c.toLocaleString('en-US')} changed` : ''}`
 })
 
@@ -78,7 +79,7 @@ function check(path: string) {
       </EmptyState>
     </div>
     <div v-else-if="noMatch" class="pad">
-      <EmptyState title="No match" :description="`No file name contains “${files.query.trim()}”.`">
+      <EmptyState title="No match" :description="`No file or folder path contains “${files.query.trim()}”.`">
         <template #icon><Search :size="24" /></template>
       </EmptyState>
     </div>

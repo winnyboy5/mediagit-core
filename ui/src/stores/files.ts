@@ -23,7 +23,8 @@ export function toEntries(files: LsFilesEntry[]): FileEntry[] {
 
 /** Entries whose path contains every word of the query (case-insensitive); all of them for a blank query. */
 export function filterEntries(entries: FileEntry[], query: string): FileEntry[] {
-  const words = query.toLowerCase().split(/\s+/).filter(Boolean)
+  // A star means "anything": artists type *.png from habit.
+  const words = query.toLowerCase().replace(/\*/g, ' ').split(/\s+/).filter(Boolean)
   if (!words.length) return entries
   return entries.filter((e) => {
     const p = e.path.toLowerCase()
@@ -86,6 +87,7 @@ export const useFilesStore = defineStore('files', () => {
   const rows = computed<Row[]>(() =>
     changes.mode === 'tree' ? flattenTree(buildTree(shown.value), query.value.trim() ? new Set() : collapsed.value) : flatRows(shown.value),
   )
+  const matchCount = computed(() => shown.value.length)
   const changedCount = computed(() => entries.value.filter((e) => e.status).length)
 
   const key = (p: string) => `files:${p}`
@@ -114,5 +116,5 @@ export const useFilesStore = defineStore('files', () => {
     return out
   })
 
-  return { entries, loading, loaded, error, query, showIgnored, collapsed, selected, rows, changedCount, selectedFiles, refresh, select, toggleFolder, clearSelection }
+  return { entries, loading, loaded, error, query, showIgnored, collapsed, selected, rows, matchCount, changedCount, selectedFiles, refresh, select, toggleFolder, clearSelection }
 })
