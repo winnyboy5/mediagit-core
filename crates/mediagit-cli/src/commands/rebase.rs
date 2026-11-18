@@ -724,14 +724,31 @@ impl RebaseCmd {
             );
         }
 
-        if !self.quiet() {
-            println!("{} Continuing rebase...", style("→").cyan());
-        }
-
         let storage_path = repo_root.join(".mediagit");
         let storage = create_storage_backend(repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);
         let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 1000));
+
+        // Y3: the stop left the new base on disk with the conflict resolution
+        // staged on top. An edit to any other tracked file is the user's, and
+        // the checkouts below would write over it: refuse, naming it.
+        let index = Index::load(repo_root)?;
+        let staged: HashSet<std::path::PathBuf> = index
+            .entries()
+            .map(|e| e.path.clone())
+            .chain(index.deleted_paths().cloned())
+            .collect();
+        let mut edited =
+            crate::worktree_guard::AtRisk::check(repo_root, &odb, Some(&state.new_parent), None)
+                .await?;
+        edited.modified.retain(|p| !staged.contains(p));
+        if !edited.is_empty() {
+            return Err(edited.bail("rebase --continue"));
+        }
+
+        if !self.quiet() {
+            println!("{} Continuing rebase...", style("→").cyan());
+        }
 
         // WT-1: bound what the checkouts below may delete to files tracked at
         // the pre-rebase HEAD (plus anything staged during conflict

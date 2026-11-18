@@ -722,3 +722,43 @@ fn test_rebase_abort_keeps_untracked_files() {
         "scratch\n"
     );
 }
+
+/// Y3: an edit to a tracked file the stop did not touch is the user's. `--continue`
+/// must refuse naming it (and keep the edit), not commit it or write over it.
+#[test]
+fn test_rebase_continue_refuses_unrelated_tracked_edit() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    stopped_rebase(d, false);
+    fs::write(d.join("up.txt"), "my edit\n").unwrap();
+    fs::write(d.join("notes.txt"), "resolved\n").unwrap();
+    mediagit()
+        .args(["add", "notes.txt"])
+        .current_dir(d)
+        .assert()
+        .success();
+    let out = mediagit()
+        .args(["rebase", "--continue"])
+        .current_dir(d)
+        .output()
+        .unwrap();
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "continue must refuse: {all}");
+    assert!(all.contains("up.txt"), "names the edited path: {all}");
+    assert_eq!(fs::read_to_string(d.join("up.txt")).unwrap(), "my edit\n");
+    // Rebase still resumable: put the file back and continue.
+    fs::write(d.join("up.txt"), "from main\n").unwrap();
+    mediagit()
+        .args(["rebase", "--continue"])
+        .current_dir(d)
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(d.join("notes.txt")).unwrap(),
+        "resolved\n"
+    );
+}
