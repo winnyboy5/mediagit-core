@@ -31,6 +31,11 @@ Two ways to invoke it:
 Either a full URL (`scheme://host[:port]/<repo>/<path...>`) or, when run
 inside a repository, a path relative to that repository's root.
 
+## Progress
+
+The download shows a bytes bar with speed and time left, sized from the server's
+`Content-Length`. With `--machine` the same bar is streamed as NDJSON on stderr.
+
 ## Options
 
 #### `--ref <REF>`

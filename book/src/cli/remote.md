@@ -45,6 +45,9 @@ mediagit remote remove <NAME>
 
 Alias: `rm`
 
+An access token saved for the remote (in the system keychain) is deleted too, unless
+another remote of this repository uses the same server.
+
 ### `list`
 
 List all configured remotes.
