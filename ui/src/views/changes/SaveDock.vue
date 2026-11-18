@@ -13,7 +13,7 @@ const changes = useChangesStore()
 const busy = computed(() => changes.busy !== null)
 const canCommit = computed(() => changes.canSave && (!changes.needsMessage || changes.message.trim().length > 0) && !busy.value)
 const hint = computed(() =>
-  !changes.canSave ? 'Include at least one change to save a version.' : changes.needsMessage && !changes.message.trim() ? 'Describe what changed to save.' : '',
+  changes.stopped ? 'Finish or cancel the step in progress first.' : !changes.canSave ? 'Include at least one change to save a version.' : changes.needsMessage && !changes.message.trim() ? 'Describe what changed to save.' : '',
 )
 </script>
 

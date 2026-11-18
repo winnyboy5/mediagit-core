@@ -2073,3 +2073,68 @@ fn stopped_rebase_writes_the_replayed_message() {
     setup_rebase_conflict(t.path());
     assert_eq!(merge_msg(t.path()).trim(), "feature edit");
 }
+
+// ============================================================================
+// Final review I1: plain `commit` during a stopped operation.
+// ============================================================================
+
+fn head_ref(dir: &Path) -> String {
+    fs::read_to_string(dir.join(".mediagit/refs/heads/main")).unwrap()
+}
+
+/// `commit` must refuse, name the operation's own `--continue`, and leave
+/// the branch where it was.
+fn assert_commit_refused(dir: &Path, command: &str) {
+    let before = head_ref(dir);
+    let out = run(dir, &["commit", "-m", "plain commit during a stop"]);
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(!out.status.success(), "commit must refuse; stderr: {err}");
+    assert!(
+        err.contains(&format!("{command} --continue")),
+        "must name the next command; stderr: {err}"
+    );
+    assert_eq!(head_ref(dir), before, "refused commit moved the branch");
+}
+
+#[test]
+fn commit_refuses_during_stopped_revert() {
+    let t = TempDir::new().unwrap();
+    revert_conflict(t.path());
+    resolve(t.path(), "shared.txt");
+    assert_commit_refused(t.path(), "revert");
+}
+
+#[test]
+fn commit_refuses_during_stopped_cherry_pick() {
+    let t = TempDir::new().unwrap();
+    setup_cherry_pick_conflict(t.path());
+    resolve(t.path(), "shared.txt");
+    assert_commit_refused(t.path(), "cherry-pick");
+}
+
+#[test]
+fn commit_refuses_during_stopped_merge() {
+    let t = TempDir::new().unwrap();
+    setup_conflicting_branches(t.path());
+    run(t.path(), &["branch", "switch", "main"]);
+    let out = run(t.path(), &["merge", "feature"]);
+    assert!(!out.status.success(), "merge should stop on a conflict");
+    resolve(t.path(), "shared.txt");
+    assert_commit_refused(t.path(), "merge");
+}
+
+#[test]
+fn commit_refuses_during_stopped_rebase() {
+    let t = TempDir::new().unwrap();
+    setup_conflicting_branches(t.path());
+    let out = run(t.path(), &["rebase", "main"]);
+    assert!(!out.status.success(), "rebase should stop on a conflict");
+    resolve(t.path(), "shared.txt");
+    let before = fs::read_to_string(t.path().join(".mediagit/refs/heads/feature")).unwrap();
+    let out = run(t.path(), &["commit", "-m", "plain commit during a stop"]);
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(!out.status.success(), "commit must refuse; stderr: {err}");
+    assert!(err.contains("rebase --continue"), "stderr: {err}");
+    let after = fs::read_to_string(t.path().join(".mediagit/refs/heads/feature")).unwrap();
+    assert_eq!(before, after);
+}

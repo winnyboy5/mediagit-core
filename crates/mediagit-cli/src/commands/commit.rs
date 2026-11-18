@@ -122,6 +122,23 @@ impl CommitCmd {
         // measurement covers the whole command, matching `add`'s.
         let bench_wall_start = std::time::Instant::now();
 
+        // I1: a stopped merge, rebase, cherry-pick or revert owns the index and
+        // HEAD until its own `--continue`/`--abort`. A plain commit here builds
+        // on the wrong parent and drops out on the next `--continue`.
+        // ponytail: one supported path; `merge --no-commit` also finishes
+        // through `merge --continue`.
+        if let Some(op) = find_repo_root()
+            .ok()
+            .and_then(|r| super::status::in_progress_operation(&r.join(".mediagit")))
+        {
+            anyhow::bail!(
+                "A {} is in progress. Finish it first: {} or {}.",
+                op.label.to_lowercase(),
+                op.hints[0].split(" to ").next().unwrap_or(op.hints[0]),
+                op.hints[1].split(" to ").next().unwrap_or(op.hints[1]),
+            );
+        }
+
         // Determine the commit message with git's precedence: -m wins, then
         // -F (read from file), then -e (or no source, if a tty) opens an
         // editor. If none of -m/-F/-e was given and stdin isn't a tty, there

@@ -152,6 +152,11 @@ describe('changes options', () => {
     await open()
     const c = useChangesStore()
     expect(c.canSave).toBe(true)
+    // I1: a stopped operation finishes through its own step, never a plain save.
+    useRepoStore().status = { ...useRepoStore().status, operation: { kind: 'merge', ours: 'main', ours_commit: null, theirs: 'x' } } as never
+    expect(c.canSave).toBe(false)
+    useRepoStore().status = { ...useRepoStore().status, operation: undefined } as never
+    expect(c.canSave).toBe(true)
     c.message = 'hello'
     c.commitForm.signoff = true
     c.commitForm.include = 'a.psd\r\n\nb.psd'

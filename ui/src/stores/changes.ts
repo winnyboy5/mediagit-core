@@ -254,8 +254,8 @@ export const useChangesStore = defineStore('changes', () => {
     return stagePaths(['.'], `Staging ${plural(counts.value.unstaged, 'file')}`)
   }
 
-  /** Something to save: staged files, or an option that stages or allows an empty version. */
-  const canSave = computed(() => counts.value.staged > 0 || commitForm.all || commitForm.allowEmpty || !!commitForm.include.trim())
+  /** Something to save: staged files, or an option that stages or allows an empty version. Never while an operation is stopped: it has its own way to finish. */
+  const canSave = computed(() => !stopped.value && (counts.value.staged > 0 || commitForm.all || commitForm.allowEmpty || !!commitForm.include.trim()))
   const needsMessage = computed(() => !commitForm.messageFile.trim())
 
   async function commit() {

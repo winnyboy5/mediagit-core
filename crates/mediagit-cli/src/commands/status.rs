@@ -989,10 +989,10 @@ impl StatusCmd {
 }
 
 /// An operation the repository is part-way through.
-struct InProgressOp {
+pub(crate) struct InProgressOp {
     kind: OperationKind,
-    label: &'static str,
-    hints: &'static [&'static str],
+    pub(crate) label: &'static str,
+    pub(crate) hints: &'static [&'static str],
 }
 
 /// Detect a mid-flight operation from its state file (WT-10).
@@ -1001,7 +1001,7 @@ struct InProgressOp {
 /// file is owned by a different command and they use four different formats,
 /// so presence — not content — is the signal; parsing them here would couple
 /// `status` to four schemas it has no other reason to know.
-fn in_progress_operation(mediagit_dir: &std::path::Path) -> Option<InProgressOp> {
+pub(crate) fn in_progress_operation(mediagit_dir: &std::path::Path) -> Option<InProgressOp> {
     let exists = |p: &str| mediagit_dir.join(p).exists();
 
     if exists("rebase-apply/state.json") {
