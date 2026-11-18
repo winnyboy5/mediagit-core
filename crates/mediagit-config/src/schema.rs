@@ -453,6 +453,10 @@ impl Config {
             f.write_all(toml_str.as_bytes())?;
             f.sync_all()?;
         }
+        // Windows: the temp file inherits the folder's ACL, and the rename
+        // would carry it over `config set`'s owner-only one.
+        #[cfg(windows)]
+        mediagit_security::fsperm::restrict_to_owner_or_warn(&tmp_path);
 
         if let Err(e) = std::fs::rename(&tmp_path, &config_path) {
             let _ = std::fs::remove_file(&tmp_path);
@@ -971,6 +975,29 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         Config::default().save(dir.path()).unwrap();
         assert_eq!(mode(&path), 0o600);
+    }
+
+    /// Windows twin of the test above: a new file inherits the folder's ACL, so
+    /// plant a wide grant on the folder and check it is gone from the file.
+    #[cfg(windows)]
+    #[test]
+    fn save_keeps_config_owner_only_windows() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mg = dir.path().join(".mediagit");
+        std::fs::create_dir_all(&mg).unwrap();
+        let grant = std::process::Command::new("icacls")
+            .arg(&mg)
+            .args(["/grant", "*S-1-1-0:(OI)(CI)R"])
+            .output()
+            .unwrap();
+        assert!(grant.status.success());
+        Config::default().save(dir.path()).unwrap();
+        let acl = std::process::Command::new("icacls")
+            .arg(mg.join("config.toml"))
+            .output()
+            .unwrap();
+        let acl = String::from_utf8_lossy(&acl.stdout);
+        assert!(!acl.contains("Everyone"), "wide ACL survived: {acl}");
     }
 
     #[test]

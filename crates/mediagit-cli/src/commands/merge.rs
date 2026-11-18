@@ -584,9 +584,12 @@ impl MergeCmd {
                 // WT-1: an abort restores the pre-merge state; it must not
                 // take untracked files with it. Tracked = pre-merge tree plus
                 // whatever apply_merge_to_workdir staged.
-                let tracked =
-                    crate::worktree_guard::tracked_paths(&repo_root, &odb, Some(&pre_merge_oid))
-                        .await?;
+                let tracked = crate::worktree_guard::tracked_paths_with_staged(
+                    &repo_root,
+                    &odb,
+                    Some(&pre_merge_oid),
+                )
+                .await?;
                 let checkout_mgr =
                     CheckoutManager::new(&odb, &repo_root).with_tracked_paths(tracked);
                 checkout_mgr

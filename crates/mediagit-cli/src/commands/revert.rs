@@ -517,9 +517,7 @@ impl RevertCmd {
             let merged_tree = Tree::read(odb, &new_tree_oid).await?;
             let real_head_tree =
                 Tree::read(odb, &Commit::read(odb, &real_head).await?.tree).await?;
-            let mut index = Index::new();
-            mediagit_versioning::stage_tree(&mut index, &real_head_tree, &merged_tree);
-            index.save(repo_root)?;
+            crate::worktree_guard::restage_no_commit(repo_root, &real_head_tree, &merged_tree)?;
 
             // Update working tree to match the reverted tree.
             // Create a temporary commit so CheckoutManager can traverse the tree.
@@ -745,9 +743,12 @@ impl RevertCmd {
         // fully populated on conflict, so without this `status` would show
         // everything staged after an abort.
         // WT-1: an abort must not take untracked files with it.
-        let tracked =
-            crate::worktree_guard::tracked_paths(repo_root, &odb, Some(&state.original_head))
-                .await?;
+        let tracked = crate::worktree_guard::tracked_paths_with_staged(
+            repo_root,
+            &odb,
+            Some(&state.original_head),
+        )
+        .await?;
         let checkout_mgr = CheckoutManager::new(&odb, repo_root).with_tracked_paths(tracked);
         checkout_mgr
             .checkout_commit(&state.original_head)

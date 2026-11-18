@@ -4446,6 +4446,7 @@ name = "mediagit-config"
 version = "0.8.0-rc.1"
 dependencies = [
  "anyhow",
+ "mediagit-security",
  "serde",
  "serde_json",
  "serde_yaml",

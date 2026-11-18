@@ -33,6 +33,9 @@ tokio = { workspace = true, features = ["fs", "io-util"] }
 # Observability
 tracing.workspace = true
 
+# Owner-only ACL for config.toml on Windows
+mediagit-security = { path = "../mediagit-security", default-features = false }
+
 # Utilities
 
 [dev-dependencies]

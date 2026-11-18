@@ -823,7 +823,7 @@ impl BranchCmd {
         // in-place dirty-check only iterated the top level of the HEAD tree,
         // so a modified file in any subdirectory was silently overwritten).
         if !opts.force {
-            crate::worktree_guard::AtRisk::check_checkout(
+            crate::worktree_guard::AtRisk::check(
                 &repo_root,
                 &odb,
                 current_commit_oid.as_ref(),
@@ -849,10 +849,11 @@ impl BranchCmd {
         // otherwise delete untracked files that merely happen not to be in the
         // target tree. `checkout_diff` deletes only files of the old tree, so this only binds the
         // initial-checkout path.
-        let tracked =
+        let old_tracked =
             crate::worktree_guard::tracked_paths(&repo_root, &odb, current_commit_oid.as_ref())
                 .await?;
-        let checkout_mgr = CheckoutManager::new(&odb, &repo_root).with_tracked_paths(tracked);
+        let checkout_mgr =
+            CheckoutManager::new(&odb, &repo_root).with_tracked_paths(old_tracked.clone());
 
         let checkout_pb = progress.spinner("Updating working directory");
 
@@ -909,8 +910,20 @@ impl BranchCmd {
 
         // Clear the index (staging area) when switching branches
         // This ensures a clean state on the new branch
+        // A staged new file (in neither tree) is carried over, like git.
+        let target_files = CheckoutManager::new(&odb, &repo_root)
+            .tracked_files_at(&target_commit_oid)
+            .await?;
         let mut index = Index::load(&repo_root)?;
+        let carried: Vec<_> = index
+            .entries()
+            .filter(|e| !old_tracked.contains(&e.path) && !target_files.contains_key(&e.path))
+            .cloned()
+            .collect();
         index.clear();
+        for e in carried {
+            index.add_entry(e);
+        }
         index.save(&repo_root)?;
 
         if !opts.quiet {

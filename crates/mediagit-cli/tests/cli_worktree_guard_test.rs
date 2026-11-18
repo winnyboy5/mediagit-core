@@ -884,52 +884,207 @@ fn stage_new(dir: &Path, name: &str, body: &str) {
         .success();
 }
 
-#[test]
-fn f3_switch_refuses_staged_new_file_the_target_lacks() {
+// ============================================================================
+// F4 — a staged new file the target lacks is CARRIED by every checkout (git
+// behaviour): bytes stay on disk and the index entry stays. The index used to
+// count as tracked, so merge/cherry-pick/revert deleted the file.
+// ============================================================================
+
+/// main: a.txt. feat: adds b.txt. main then commits c.txt and stages wip.psd.
+fn carry_setup() -> TempDir {
     let temp = TempDir::new().unwrap();
     init_repo(temp.path());
     commit_file(temp.path(), "a.txt", "base", "initial");
     branch_create(temp.path(), "feat");
+    branch_switch(temp.path(), "feat");
+    commit_file(temp.path(), "b.txt", "feat", "feat adds b.txt");
+    branch_switch(temp.path(), "main");
+    commit_file(temp.path(), "c.txt", "main", "main adds c.txt");
     stage_new(temp.path(), "wip.psd", "staged");
-    mediagit()
-        .args(["branch", "switch", "feat"])
-        .current_dir(temp.path())
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("wip.psd"));
+    temp
+}
+
+fn assert_carried(temp: &TempDir) {
     assert_eq!(
         fs::read_to_string(temp.path().join("wip.psd")).unwrap(),
-        "staged"
+        "staged",
+        "staged new file was deleted or changed"
     );
+    mediagit()
+        .args(["status", "--porcelain"])
+        .current_dir(temp.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("A  wip.psd"));
+}
+
+fn run_ok(temp: &TempDir, args: &[&str]) {
+    mediagit()
+        .args(args)
+        .current_dir(temp.path())
+        .assert()
+        .success();
 }
 
 #[test]
-fn f3_bisect_step_refuses_staged_new_file_the_target_lacks() {
+fn f4_switch_carries_staged_new_file_the_target_lacks() {
+    let temp = carry_setup();
+    run_ok(&temp, &["branch", "switch", "feat"]);
+    assert_carried(&temp);
+}
+
+#[test]
+fn f4_merge_true_merge_carries_staged_new_file() {
+    let temp = carry_setup();
+    run_ok(&temp, &["merge", "feat"]);
+    assert!(temp.path().join("b.txt").exists());
+    assert_carried(&temp);
+}
+
+#[test]
+fn f4_merge_fast_forward_carries_staged_new_file() {
+    let temp = TempDir::new().unwrap();
+    init_repo(temp.path());
+    commit_file(temp.path(), "a.txt", "base", "initial");
+    branch_create(temp.path(), "feat");
+    branch_switch(temp.path(), "feat");
+    commit_file(temp.path(), "b.txt", "feat", "feat adds b.txt");
+    branch_switch(temp.path(), "main");
+    stage_new(temp.path(), "wip.psd", "staged");
+    run_ok(&temp, &["merge", "feat"]);
+    assert!(temp.path().join("b.txt").exists());
+    assert_carried(&temp);
+}
+
+#[test]
+fn f4_cherry_pick_carries_staged_new_file() {
+    let temp = carry_setup();
+    run_ok(&temp, &["cherry-pick", "feat"]);
+    assert!(temp.path().join("b.txt").exists());
+    assert_carried(&temp);
+}
+
+#[test]
+fn f4_cherry_pick_no_commit_carries_staged_new_file() {
+    let temp = carry_setup();
+    run_ok(&temp, &["cherry-pick", "--no-commit", "feat"]);
+    assert!(temp.path().join("b.txt").exists());
+    assert_carried(&temp);
+}
+
+#[test]
+fn f4_revert_carries_staged_new_file() {
+    let temp = carry_setup();
+    run_ok(&temp, &["revert", "HEAD"]);
+    assert!(!temp.path().join("c.txt").exists());
+    assert_carried(&temp);
+}
+
+#[test]
+fn f4_revert_no_commit_carries_staged_new_file() {
+    let temp = carry_setup();
+    run_ok(&temp, &["revert", "--no-commit", "HEAD"]);
+    assert_carried(&temp);
+}
+
+/// `reset --hard` stays destructive, like git: it clears the index, so the
+/// staged new file goes. It must not refuse.
+#[test]
+fn f4_reset_hard_still_discards_staged_new_file() {
+    let temp = carry_setup();
+    run_ok(&temp, &["reset", "--hard", "HEAD"]);
+    assert!(!temp.path().join("wip.psd").exists());
+}
+
+#[test]
+fn f4_bisect_step_carries_staged_new_file() {
     let temp = TempDir::new().unwrap();
     init_repo(temp.path());
     commit_file(temp.path(), "src/app.txt", "v1", "good commit");
     commit_file(temp.path(), "src/app.txt", "v2", "second");
     commit_file(temp.path(), "src/app.txt", "v3", "bad commit");
     stage_new(temp.path(), "wip.psd", "staged");
-    mediagit()
-        .args(["bisect", "start"])
-        .current_dir(temp.path())
-        .assert()
-        .success();
-    mediagit()
-        .args(["bisect", "bad"])
-        .current_dir(temp.path())
-        .assert()
-        .success();
+    run_ok(&temp, &["bisect", "start"]);
+    run_ok(&temp, &["bisect", "bad"]);
     let oldest = commit_oid_back(temp.path(), 2);
-    mediagit()
-        .args(["bisect", "good", &oldest])
-        .current_dir(temp.path())
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("wip.psd"));
+    run_ok(&temp, &["bisect", "good", &oldest]);
     assert_eq!(
         fs::read_to_string(temp.path().join("wip.psd")).unwrap(),
         "staged"
     );
+}
+
+// ============================================================================
+// F4 / RI3 — bisect: commit refuses, a refused session has an exit, a
+// half-written step can be retried.
+// ============================================================================
+
+fn linear_history(dir: &Path) -> String {
+    init_repo(dir);
+    for i in 1..=6 {
+        commit_file(dir, "f.txt", &format!("v{i}"), &format!("c{i}"));
+    }
+    commit_oid_back(dir, 5)
+}
+
+#[test]
+fn f4_commit_refuses_during_bisect() {
+    let temp = TempDir::new().unwrap();
+    let oldest = linear_history(temp.path());
+    bisect(temp.path(), &["start", "HEAD", &oldest]).success();
+    fs::write(temp.path().join("f.txt"), "MY EDIT").unwrap();
+    mediagit()
+        .args(["add", "f.txt"])
+        .current_dir(temp.path())
+        .assert()
+        .success();
+    mediagit()
+        .args(["commit", "-m", "mid-bisect"])
+        .current_dir(temp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("bisect reset"));
+}
+
+#[test]
+fn f4_bisect_refusal_does_not_advise_commit() {
+    let temp = TempDir::new().unwrap();
+    let oldest = linear_history(temp.path());
+    bisect(temp.path(), &["start", "HEAD", &oldest]).success();
+    fs::write(temp.path().join("f.txt"), "MY EDIT").unwrap();
+    bisect(temp.path(), &["good"])
+        .failure()
+        .stderr(predicate::str::contains("bisect reset"))
+        .stderr(predicate::str::contains("commit your changes").not());
+}
+
+#[test]
+fn f4_stash_then_bisect_reset_works() {
+    let temp = TempDir::new().unwrap();
+    let oldest = linear_history(temp.path());
+    bisect(temp.path(), &["start", "HEAD", &oldest]).success();
+    fs::write(temp.path().join("f.txt"), "MY EDIT").unwrap();
+    run_ok(&temp, &["stash", "push"]);
+    bisect(temp.path(), &["reset"]).success();
+    assert_eq!(fs::read_to_string(temp.path().join("f.txt")).unwrap(), "v6");
+}
+
+/// A step that wrote some files and then failed leaves them at the step's
+/// target. Retrying the same step must not read them as the user's edits.
+#[test]
+fn f4_bisect_retry_after_partial_checkout() {
+    let learn = TempDir::new().unwrap();
+    let oldest = linear_history(learn.path());
+    bisect(learn.path(), &["start", "HEAD", &oldest]).success();
+    bisect(learn.path(), &["good"]).success();
+    let next = fs::read_to_string(learn.path().join("f.txt")).unwrap();
+
+    let temp = TempDir::new().unwrap();
+    let oldest = linear_history(temp.path());
+    bisect(temp.path(), &["start", "HEAD", &oldest]).success();
+    let before = fs::read_to_string(temp.path().join("f.txt")).unwrap();
+    assert_ne!(before, next, "history must give distinct midpoints");
+    fs::write(temp.path().join("f.txt"), &next).unwrap();
+    bisect(temp.path(), &["good"]).success();
+    assert_eq!(fs::read_to_string(temp.path().join("f.txt")).unwrap(), next);
 }

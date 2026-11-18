@@ -33,7 +33,7 @@ const TABLE: Record<string, Entry> = {
   file_in_use: { text: 'A file is in use by another program. Close that program, then try again.', retry: true, own: true },
   already_exists: { text: 'A file or folder with that name already exists. Choose another name or remove it first.', retry: false, own: true },
   disk_full: { text: 'The disk is full. Free some space, then try again.', retry: true, own: true },
-  would_overwrite: { text: 'Some of your files would be lost. Save them as a version, or stash them, then try again. Open Details to see which files.', retry: false },
+  would_overwrite: { text: 'Some of your files would be lost. Stash or move them, then try again. Open Details to see which files.', retry: false },
   needs_input: { text: 'This repository is locked. Unlock it with its passphrase to continue.', retry: false },
   input_required: { text: 'This step needs an answer the app cannot ask for. Run it from the command line instead.', retry: false },
   wrong_passphrase: { text: 'That passphrase did not unlock the repository. Check it and try again.', retry: false, own: true },

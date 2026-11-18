@@ -210,7 +210,7 @@ impl RebaseCmd {
         // any ref or working-tree write.
         // BUG-008: an unsafe path is the more useful thing to report first.
         crate::repo::ensure_no_unsafe_paths(&odb, &repo_root, &[current_oid, upstream_oid]).await?;
-        crate::worktree_guard::AtRisk::check_checkout(
+        crate::worktree_guard::AtRisk::check(
             &repo_root,
             &odb,
             Some(&current_oid),
@@ -788,9 +788,12 @@ impl RebaseCmd {
         // WT-1: bound what the checkouts below may delete to files tracked at
         // the pre-rebase HEAD (plus anything staged during conflict
         // resolution) — untracked work is not the rebase's to remove.
-        let tracked =
-            crate::worktree_guard::tracked_paths(repo_root, &odb, Some(&state.original_head))
-                .await?;
+        let tracked = crate::worktree_guard::tracked_paths_with_staged(
+            repo_root,
+            &odb,
+            Some(&state.original_head),
+        )
+        .await?;
 
         // WT-4: finish the commit that conflicted before moving on.
         //

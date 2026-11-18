@@ -178,6 +178,7 @@ impl SetOpts {
             return Err(crate::worktree_guard::AtRisk {
                 modified: doomed,
                 untracked_collisions: Vec::new(),
+                staged_collisions: Vec::new(),
             }
             .bail("sparse-checkout set"));
         }
@@ -303,6 +304,7 @@ impl DisableOpts {
                 return Err(crate::worktree_guard::AtRisk {
                     modified: doomed,
                     untracked_collisions: Vec::new(),
+                    staged_collisions: Vec::new(),
                 }
                 .bail("sparse-checkout disable"));
             }

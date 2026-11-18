@@ -459,9 +459,7 @@ impl CherryPickCmd {
             )
             .await?;
             let merged = Tree::read(odb.as_ref(), &tree_oid).await?;
-            let mut index = Index::new();
-            mediagit_versioning::stage_tree(&mut index, &head_tree, &merged);
-            index.save(repo_root)?;
+            crate::worktree_guard::restage_no_commit(repo_root, &head_tree, &merged)?;
         }
 
         Ok((tree_oid, temp_oid))
@@ -742,8 +740,12 @@ impl CherryPickCmd {
 
             // Restore working directory. WT-1: an abort must not take
             // untracked files with it.
-            let tracked =
-                crate::worktree_guard::tracked_paths(repo_root, &odb, Some(&original_oid)).await?;
+            let tracked = crate::worktree_guard::tracked_paths_with_staged(
+                repo_root,
+                &odb,
+                Some(&original_oid),
+            )
+            .await?;
             let checkout_mgr = mediagit_versioning::CheckoutManager::new(&odb, repo_root)
                 .with_tracked_paths(tracked);
             checkout_mgr.checkout_commit(&original_oid).await?;

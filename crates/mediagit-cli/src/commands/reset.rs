@@ -216,6 +216,7 @@ impl ResetCmd {
             )
             .await?;
             at_risk.modified.clear();
+            at_risk.staged_collisions.clear();
             at_risk.ensure_clean("reset --hard")?;
         }
 
@@ -441,7 +442,8 @@ impl ResetCmd {
         commit_oid: &Oid,
     ) -> Result<()> {
         // WT-1: only files tracked at the pre-reset HEAD may be deleted.
-        let tracked = crate::worktree_guard::tracked_paths(repo_root, odb, Some(old_oid)).await?;
+        let tracked =
+            crate::worktree_guard::tracked_paths_with_staged(repo_root, odb, Some(old_oid)).await?;
         let checkout_manager = CheckoutManager::new(odb, repo_root).with_tracked_paths(tracked);
         checkout_manager
             .checkout_commit(commit_oid)

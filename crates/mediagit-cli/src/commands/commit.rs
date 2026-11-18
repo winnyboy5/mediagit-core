@@ -127,15 +127,26 @@ impl CommitCmd {
         // on the wrong parent and drops out on the next `--continue`.
         // ponytail: one supported path; `merge --no-commit` also finishes
         // through `merge --continue`.
-        if let Some(op) = find_repo_root()
-            .ok()
-            .and_then(|r| super::status::in_progress_operation(&r.join(".mediagit")))
+        let repo_dir = find_repo_root().ok().map(|r| r.join(".mediagit"));
+        if let Some(op) = repo_dir
+            .as_deref()
+            .and_then(super::status::in_progress_operation)
         {
+            // Each hint opens with its command in backticks.
+            let cmd = |h: &str| h.split('`').nth(1).unwrap_or(h).to_string();
             anyhow::bail!(
-                "A {} is in progress. Finish it first: {} or {}.",
+                "A {} is in progress. Finish it first: `{}` or `{}`.",
                 op.label.to_lowercase(),
-                op.hints[0].split(" to ").next().unwrap_or(op.hints[0]),
-                op.hints[1].split(" to ").next().unwrap_or(op.hints[1]),
+                cmd(op.hints[0]),
+                cmd(op.hints[1]),
+            );
+        }
+        // Bisect keeps HEAD on the original branch while the tree holds an old
+        // version: a commit now would sit on the wrong files, and `bisect
+        // reset` would then move the branch back and drop it.
+        if repo_dir.is_some_and(|d| d.join("BISECT_STATE").exists()) {
+            anyhow::bail!(
+                "A bisect is in progress. Finish it first: `mediagit bisect reset`. Stash any edits you want to keep."
             );
         }
 
@@ -354,20 +365,16 @@ impl CommitCmd {
             match (name, email) {
                 (Some(n), Some(e)) => (n, e),
                 _ => anyhow::bail!(
-                    "cannot commit: author identity is not configured.
-
-                     Commit authorship cannot be changed afterwards, so MediaGit                      will not guess it.
-
-                     Set it once:
-                     
-    mediagit config set author.name \"Your Name\"
-    mediagit config set author.email you@example.com
-                     
-or for a single command:
-                     
-    MEDIAGIT_AUTHOR_NAME=\"Your Name\"                      MEDIAGIT_AUTHOR_EMAIL=\"you@example.com\" mediagit commit ...
-                     
-or pass --author \"Your Name <you@example.com>\"."
+                    "cannot commit: author identity is not configured.\n\n\
+                     Commit authorship cannot be changed afterwards, so MediaGit \
+                     will not guess it.\n\n\
+                     Set it once:\n\n\
+                     \x20\x20mediagit config set author.name \"Your Name\"\n\
+                     \x20\x20mediagit config set author.email you@example.com\n\n\
+                     or for a single command:\n\n\
+                     \x20\x20MEDIAGIT_AUTHOR_NAME=\"Your Name\" \
+                     MEDIAGIT_AUTHOR_EMAIL=\"you@example.com\" mediagit commit ...\n\n\
+                     or pass --author \"Your Name <you@example.com>\"."
                 ),
             }
         };
