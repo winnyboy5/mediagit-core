@@ -155,7 +155,7 @@ impl RebaseCmd {
             return self.abort_rebase(&repo_root).await;
         }
         if self.continue_rebase {
-            return self.continue_rebase_process(&repo_root).await;
+            return self.continue_rebase_process(&repo_root, true).await;
         }
         if self.skip {
             return self.skip_commit(&repo_root).await;
@@ -682,7 +682,13 @@ impl RebaseCmd {
         Ok(Outcome::new("aborted", Some(state.original_head), None))
     }
 
-    async fn continue_rebase_process(&self, repo_root: &std::path::Path) -> Result<Outcome> {
+    /// `check_edits` is false for `--skip`: it discards the stopped commit's
+    /// conflict files, which are not the user's edits.
+    async fn continue_rebase_process(
+        &self,
+        repo_root: &std::path::Path,
+        check_edits: bool,
+    ) -> Result<Outcome> {
         // Check if rebase is in progress
         if !RebaseState::in_progress(repo_root) {
             anyhow::bail!("No rebase in progress");
@@ -732,18 +738,24 @@ impl RebaseCmd {
         // Y3: the stop left the new base on disk with the conflict resolution
         // staged on top. An edit to any other tracked file is the user's, and
         // the checkouts below would write over it: refuse, naming it.
-        let index = Index::load(repo_root)?;
-        let staged: HashSet<std::path::PathBuf> = index
-            .entries()
-            .map(|e| e.path.clone())
-            .chain(index.deleted_paths().cloned())
-            .collect();
-        let mut edited =
-            crate::worktree_guard::AtRisk::check(repo_root, &odb, Some(&state.new_parent), None)
-                .await?;
-        edited.modified.retain(|p| !staged.contains(p));
-        if !edited.is_empty() {
-            return Err(edited.bail("rebase --continue"));
+        if check_edits {
+            let index = Index::load(repo_root)?;
+            let staged: HashSet<std::path::PathBuf> = index
+                .entries()
+                .map(|e| e.path.clone())
+                .chain(index.deleted_paths().cloned())
+                .collect();
+            let mut edited = crate::worktree_guard::AtRisk::check(
+                repo_root,
+                &odb,
+                Some(&state.new_parent),
+                None,
+            )
+            .await?;
+            edited.modified.retain(|p| !staged.contains(p));
+            if !edited.is_empty() {
+                return Err(edited.bail("rebase --continue"));
+            }
         }
 
         if !self.quiet() {
@@ -921,7 +933,7 @@ impl RebaseCmd {
         index.save(repo_root)?;
 
         // Continue with remaining
-        self.continue_rebase_process(repo_root).await
+        self.continue_rebase_process(repo_root, false).await
     }
 
     /// Load remaining commits from state
