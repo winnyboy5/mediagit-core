@@ -1431,9 +1431,14 @@ impl AddCmd {
                 &mut candidates,
                 &mut refused,
             )?;
+            // A tracked file outside the sparse selection is not ours to
+            // stage, even if its bytes on disk differ.
+            let sparse = mediagit_versioning::SparseFilter::load(repo_root)
+                .context("Failed to load sparse-checkout patterns")?;
             for path in candidates {
                 if let Ok(rel) = crate::repo::repo_relative(repo_root, &path)
                     && tracked_paths.contains(&rel)
+                    && sparse.is_included(&rel)
                 {
                     files.push(path);
                 }

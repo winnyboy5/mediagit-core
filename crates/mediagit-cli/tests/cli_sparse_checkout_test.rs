@@ -519,3 +519,33 @@ fn commit_all_stages_tracked_changes_only_and_is_sparse_safe() {
     let out = run(d, &["--machine", "commit", "-a", "-m", "v3"]);
     serde_json::from_str::<serde_json::Value>(out.trim()).unwrap_or_else(|e| panic!("{e}: {out}"));
 }
+
+// `add -u` and `commit -a` must not stage a tracked file outside the sparse
+// selection, even when it sits on disk with different content.
+fn excluded_file_edited_on_disk() -> TempDir {
+    let temp = keep_big_repo();
+    let d = temp.path();
+    run(d, &["sparse-checkout", "set", "keep"]);
+    fs::write(d.join("keep/k.txt"), "k2 edited").unwrap();
+    fs::write(d.join("big/b1.txt"), "edited outside the cone").unwrap();
+    temp
+}
+
+#[test]
+fn sparse_add_update_skips_excluded_file_edited_on_disk() {
+    let temp = excluded_file_edited_on_disk();
+    let d = temp.path();
+    run(d, &["add", "-u"]);
+    run(d, &["commit", "-m", "v2"]);
+    assert_eq!(run(d, &["show", "HEAD:keep/k.txt"]).trim_end(), "k2 edited");
+    assert_big_intact(d);
+}
+
+#[test]
+fn sparse_commit_all_skips_excluded_file_edited_on_disk() {
+    let temp = excluded_file_edited_on_disk();
+    let d = temp.path();
+    run(d, &["commit", "-a", "-m", "v2"]);
+    assert_eq!(run(d, &["show", "HEAD:keep/k.txt"]).trim_end(), "k2 edited");
+    assert_big_intact(d);
+}
