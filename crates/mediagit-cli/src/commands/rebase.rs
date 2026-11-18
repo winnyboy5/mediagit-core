@@ -94,6 +94,15 @@ impl Outcome {
     }
 }
 
+/// `e` stopped the rebase; `restored` is the attempt to put the state back.
+/// `e` comes first and is returned untouched when the restore worked.
+fn with_restore_error(e: anyhow::Error, restored: Result<()>) -> anyhow::Error {
+    match restored {
+        Ok(()) => e,
+        Err(re) => anyhow::anyhow!("{e:#}\nThe rebase state could not be put back either: {re:#}"),
+    }
+}
+
 impl RebaseCmd {
     fn quiet(&self) -> bool {
         self.quiet || output::machine_mode()
@@ -375,13 +384,16 @@ impl RebaseCmd {
             && !written
             && e.downcast_ref::<ConflictStop>().is_none()
         {
-            if on_disk == state.original_head {
+            let restored = if on_disk == state.original_head {
                 // First stop: nothing moved, so drop the state.
-                RebaseState::clear(repo_root)?;
+                RebaseState::clear(repo_root)
             } else {
                 *state = entry;
-                state.save(repo_root)?;
-            }
+                state.save(repo_root)
+            };
+            // The error that stopped the rebase is the one to show; a failed
+            // restore comes second, it must not replace it.
+            return Err(with_restore_error(res.unwrap_err(), restored));
         }
         res
     }
@@ -970,6 +982,22 @@ mod tests {
     use crate::commands::utils::test_support::{REPO_ENV_LOCK, init_repo_with_commit};
     use clap::Parser;
     use tempfile::TempDir;
+
+    #[test]
+    fn a_failed_restore_comes_after_the_original_error() {
+        let original = || anyhow::anyhow!("worktree check failed");
+        let shown = with_restore_error(original(), Err(anyhow::anyhow!("disk full")));
+        let text = format!("{shown:#}");
+        let (first, second) = (text.find("worktree check failed"), text.find("disk full"));
+        assert!(
+            first.is_some() && second.is_some() && first < second,
+            "{text}"
+        );
+        assert_eq!(
+            with_restore_error(original(), Ok(())).to_string(),
+            "worktree check failed"
+        );
+    }
 
     fn parse(args: &[&str]) -> Result<RebaseCmd, clap::Error> {
         let mut full = vec!["rebase"];
