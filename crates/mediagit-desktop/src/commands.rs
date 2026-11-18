@@ -95,7 +95,13 @@ fn rev_ok(rev: &str) -> Result<(), EngineError> {
 
 /// CON, PRN, AUX, NUL, COM1-9, LPT1-9: any case, with or without an extension.
 fn is_windows_device_name(part: &str) -> bool {
-    let stem = part.split('.').next().unwrap_or("").to_ascii_uppercase();
+    // Windows strips trailing spaces, so "CON " is CON.
+    let stem = part
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end()
+        .to_ascii_uppercase();
     matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
         || ["COM", "LPT"].iter().any(|p| {
             stem.strip_prefix(p)

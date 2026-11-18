@@ -80,7 +80,12 @@ fn admin_gate(state: &AppState, auth_user: Option<&AuthUser>) -> Result<String, 
 /// CON, PRN, AUX, NUL, COM1-9, LPT1-9, with or without an extension. Refused on
 /// every platform so a repo created on Linux stays portable.
 fn is_windows_device_name(name: &str) -> bool {
-    let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end()
+        .to_ascii_uppercase();
     matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
         || (stem.len() == 4
             && (stem.starts_with("COM") || stem.starts_with("LPT"))

@@ -78,7 +78,7 @@ export function refNameError(name: string): string | null {
 }
 
 /** CON, PRN, AUX, NUL, COM1-9, LPT1-9: any case, with or without an extension. */
-const WINDOWS_DEVICE = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i
+const WINDOWS_DEVICE = /^(con|prn|aux|nul|com[1-9]|lpt[1-9]) *(\.|$)/i
 
 /** What the inspector describes: a working-copy file (`rev` null) or a file at a version. */
 export interface InspectFile {

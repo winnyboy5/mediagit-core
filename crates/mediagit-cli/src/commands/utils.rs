@@ -47,7 +47,13 @@ pub fn categorize_extension(ext: &str) -> &'static str {
 /// Refs are files, and those names do not behave as files on Windows (BUG-022).
 pub fn reject_device_name(name: &str) -> Result<()> {
     for part in name.split('/') {
-        let stem = part.split('.').next().unwrap_or("").to_ascii_uppercase();
+        // Windows strips trailing spaces, so "CON " and "CON .txt" are CON.
+        let stem = part
+            .split('.')
+            .next()
+            .unwrap_or("")
+            .trim_end()
+            .to_ascii_uppercase();
         let is_numbered = |prefix: &str| {
             stem.strip_prefix(prefix)
                 .is_some_and(|n| matches!(n.as_bytes(), [b'1'..=b'9']))
@@ -180,6 +186,10 @@ mod device_name_tests {
             "lpt9.log",
             "feature/CON",
             "NUL/x",
+            "CON ",
+            "NUL.",
+            "com1 .txt",
+            "feature/AUX ",
         ] {
             assert!(reject_device_name(bad).is_err(), "{bad} must be refused");
         }
