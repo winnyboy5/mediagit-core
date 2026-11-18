@@ -26,7 +26,7 @@ const x = computed(() => inspector.extractions.get(fileKey(props.file)))
 const src = computed(() => (x.value?.status === 'ready' && x.value.path ? api.fileSrc(x.value.path) : undefined))
 const big = computed(() => (props.file.size ?? 0) > EXTRACT_PROGRESS_MIN)
 
-// A file the WebView cannot decode reports it on the element.
+// A file the WebView cannot decode reports it on the element. A video it plays as sound only (no error, 0 x 0 picture) counts too.
 const broken = ref(false)
 watch(() => [props.file.path, props.file.rev, src.value], () => (broken.value = false))
 </script>
@@ -64,7 +64,15 @@ watch(() => [props.file.path, props.file.rev, src.value], () => (broken.value = 
 
     <template v-else-if="src">
       <img v-if="kind === 'image'" :src="src" :alt="`Preview of ${name}`" @error="broken = true" />
-      <video v-else-if="kind === 'video'" :src="src" controls preload="metadata" :aria-label="`Preview of ${name}`" @error="broken = true">
+      <video
+        v-else-if="kind === 'video'"
+        :src="src"
+        controls
+        preload="metadata"
+        :aria-label="`Preview of ${name}`"
+        @error="broken = true"
+        @loadedmetadata="(e) => (e.target as HTMLVideoElement).videoWidth === 0 && (broken = true)"
+      >
         <track kind="captions" label="No captions available" />
       </video>
       <div v-else class="aud">

@@ -42,6 +42,16 @@ test.describe('Inspector', () => {
     await expect(insp(page).locator('video[aria-label="Preview of shot_010.mp4"], [data-testid=preview] .note')).toHaveCount(1)
   })
 
+  test('BUG-015: a video the WebView plays as sound only shows the fallback note, not an empty player', async ({ page }) => {
+    // A tiny silent WAV where the browser expects a video: metadata loads, the picture is 0 x 0.
+    const wav = Buffer.from('UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=', 'base64')
+    await page.route('**/*.ogv', (r) => r.fulfill({ status: 200, contentType: 'audio/wav', body: wav }))
+    await boot(page, { repo_status: { ...withImage, modified: [...withImage.modified, 'video/bite.ogv'] } })
+    await unstaged(page).getByRole('treeitem', { name: /bite\.ogv/ }).click()
+    await expect(insp(page).getByTestId('preview')).toContainText('This computer cannot display bite.ogv')
+    await expect(insp(page).locator('video')).toHaveCount(0)
+  })
+
   test('PSD and other types: icon + note, no player, details still offered', async ({ page }) => {
     await boot(page, { media_info: { layers: 12, color_mode: 'RGB' } })
     await staged(page).getByRole('treeitem', { name: /hero\.psd/ }).click()
