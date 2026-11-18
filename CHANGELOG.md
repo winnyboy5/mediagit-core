@@ -139,6 +139,13 @@ changes fix real bugs.
 
 ### Fixed
 
+- **Small leftovers.** `revert HEAD^` works like `reset` and `show`. A stopped
+  `revert`, `cherry-pick` or `rebase` saves its own message in `MERGE_MSG`, not
+  "Merge branch 'theirs'". `commit` with no message after `merge --squash` uses
+  the saved message, then removes it. `add -u` and `commit -a` skip tracked
+  files outside the sparse selection. Names like `CON ` (trailing space) are
+  refused as Windows device names. When a rebase fails and its state cannot be
+  put back, the first error is shown first.
 - **`merge` of a branch with nothing new made an empty merge version.** It now
   says "Already up to date." and changes nothing, also with `--ff-only`. `--machine`
   reports status `up_to_date`.
