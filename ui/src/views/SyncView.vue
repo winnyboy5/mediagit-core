@@ -168,14 +168,13 @@ function go(kind: TransferKind) {
     </header>
 
     <div v-if="sync.actionError" class="banner" role="alert">
-      <code class="mono">{{ sync.actionError.code }}</code>
       <span>{{ sync.actionError.message }}</span>
       <Button size="sm" variant="ghost" @click="sync.actionError = null">Dismiss</Button>
     </div>
 
     <div v-if="firstLoad" class="pad"><SkeletonRows :count="4" /></div>
     <div v-else-if="sync.error && !sync.loaded" class="pad">
-      <ErrorState :code="sync.error.code" :message="sync.error.message" @retry="sync.refresh()" />
+      <ErrorState :code="sync.error.code" :message="sync.error.message" :details="sync.error.details" @retry="sync.refresh()" />
     </div>
     <div v-else-if="!sync.remotes.length" class="pad">
       <EmptyState title="No remote yet" description="Add the address of your studio’s MediaGit server or bucket to share versions.">

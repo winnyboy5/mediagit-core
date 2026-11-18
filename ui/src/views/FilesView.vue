@@ -70,7 +70,7 @@ function check(path: string) {
 
     <div v-if="first" class="pad"><SkeletonRows :count="10" /></div>
     <div v-else-if="files.error && !files.loaded" class="pad">
-      <ErrorState :code="files.error.code" :message="files.error.message" @retry="files.refresh()" />
+      <ErrorState :code="files.error.code" :message="files.error.message" :details="files.error.details" @retry="files.refresh()" />
     </div>
     <div v-else-if="none" class="pad">
       <EmptyState title="No files yet" description="Add files to this folder and they show up here.">

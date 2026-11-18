@@ -19,6 +19,7 @@ import SkeletonRows from "@/components/SkeletonRows.vue";
 import TextField from "@/components/TextField.vue";
 import type { StorageOpts } from "@/api";
 import { useServerStore } from "@/stores/server";
+import { passwordError, storageMissing, usernameError } from "@/lib/errorText";
 import FolderRow from "./FolderRow.vue";
 import StorageFields from "./StorageFields.vue";
 import { levelLabel } from "./roles";
@@ -45,6 +46,9 @@ const canSetUp = computed(
     !!email.value &&
     !!pass.value &&
     pass.value === again.value &&
+    !usernameError(admin.value) &&
+    !passwordError(pass.value) &&
+    !storageMissing(storage.value) &&
     !server.busy,
 );
 async function setUp() {
@@ -102,7 +106,7 @@ const STATE = {
         v-if="server.localError"
         :code="server.localError.code"
         :message="server.localError.message"
-        @retry="server.refreshLocal()"
+        :details="server.localError.details"        @retry="server.refreshLocal()"
       />
       <SkeletonRows v-else-if="!l" :count="4" />
       <template v-else-if="l.state === 'not_set_up'">
@@ -243,7 +247,7 @@ const STATE = {
           v-if="server.meError"
           :code="server.meError.code"
           :message="server.meError.message"
-          @retry="server.refreshMe()"
+          :details="server.meError.details"          @retry="server.refreshMe()"
         />
         <Button
           v-else-if="server.access === 'signed_out'"
@@ -269,9 +273,9 @@ const STATE = {
         autocomplete="off"
         @submit.prevent="setUp"
       >
-        <TextField v-model="admin" label="Admin username" />
+        <TextField v-model="admin" label="Admin username" :error="usernameError(admin)" />
         <TextField v-model="email" label="Admin email" type="email" />
-        <TextField v-model="pass" label="Password" type="password" />
+        <TextField v-model="pass" label="Password" type="password" :error="passwordError(pass)" />
         <TextField
           v-model="again"
           label="Repeat password"

@@ -343,6 +343,7 @@ async fn repo_clone(
         () = cancel.notified() => Err(EngineError::Cli {
             code: "cancelled".into(),
             message: "Cancelled".into(),
+            details: None,
         }),
     };
     ops.finish(&op_id);

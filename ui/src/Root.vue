@@ -9,11 +9,6 @@ const route = useRoute()
 const state = ref<'checking' | 'ok' | 'blocked'>('checking')
 const blocker = ref<ApiError>({ code: '', message: '' })
 
-const PLAIN: Record<string, string> = {
-  cli_not_found: 'MediaGit could not find its engine next to the app. Reinstall MediaGit to restore it.',
-  contract_mismatch: 'This app and its engine were built for different versions. Reinstall MediaGit so they match.',
-}
-
 async function check() {
   state.value = 'checking'
   try {
@@ -24,7 +19,7 @@ async function check() {
     state.value = 'ok'
   } catch (e) {
     const err = toApiError(e)
-    blocker.value = { code: err.code, message: PLAIN[err.code] ?? err.message }
+    blocker.value = err
     state.value = 'blocked'
   }
 }
@@ -33,7 +28,7 @@ onMounted(check)
 
 <template>
   <RouterView v-if="route.meta.bare" />
-  <ErrorState v-else-if="state === 'blocked'" class="block" :code="blocker.code" :message="blocker.message" @retry="check" />
+  <ErrorState v-else-if="state === 'blocked'" class="block" :code="blocker.code" :message="blocker.message" :details="blocker.details" @retry="check" />
   <p v-else-if="state === 'checking'" class="boot" role="status">Starting MediaGit…</p>
   <App v-else />
 </template>

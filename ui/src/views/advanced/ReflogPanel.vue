@@ -49,7 +49,7 @@ const trimTarget = computed(() => (scopeAll.value === true || all.value ? null :
     <UndoDialogs />
 
     <div v-if="!reflog.loaded && !reflog.error"><SkeletonRows :count="6" /></div>
-    <ErrorState v-else-if="reflog.error && !reflog.loaded" :code="reflog.error.code" :message="reflog.error.message" @retry="reflog.refresh()" />
+    <ErrorState v-else-if="reflog.error && !reflog.loaded" :code="reflog.error.code" :message="reflog.error.message" :details="reflog.error.details" @retry="reflog.refresh()" />
     <div v-else-if="all" class="groups" data-testid="reflog-all">
       <section v-for="g in reflog.groups" :key="g.reference" class="group">
         <h3 class="mono">{{ g.reference }}</h3>

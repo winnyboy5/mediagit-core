@@ -79,7 +79,6 @@ const bar = computed(() => (undo.running ? primaryBar(undo.running) : undefined)
 <template>
   <div class="undo">
     <div v-if="undo.error" class="banner" role="alert">
-      <code class="mono">{{ undo.error.code }}</code>
       <span>{{ undo.error.message }}</span>
       <Button size="sm" variant="ghost" @click="undo.error = null">Dismiss</Button>
     </div>

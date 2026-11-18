@@ -90,7 +90,7 @@ pub fn http_friendly(h: &HttpError) -> (&'static str, String) {
             "not_signed_in",
             match reason {
                 // e.g. "Invalid credentials" from a login attempt.
-                Some(r) => r.to_owned(),
+                Some(r) => format!("{}. Sign in and try again (mediagit auth login <server>).", r.trim_end_matches('.')),
                 None => "You are not signed in, or your sign-in expired. Sign in and try again (mediagit auth login <server>).".into(),
             },
         ),
@@ -237,7 +237,10 @@ mod tests {
         .into();
         let f = friendly(&e).unwrap();
         assert_eq!(f.code, "not_signed_in");
-        assert_eq!(f.message, "Invalid credentials");
+        assert_eq!(
+            f.message,
+            "Invalid credentials. Sign in and try again (mediagit auth login <server>)."
+        );
     }
 
     #[test]

@@ -189,8 +189,8 @@ test.describe('Server: Overview, this computer', () => {
     const dlg = page.getByRole('dialog', { name: 'Set up local server' })
     await dlg.getByLabel('Admin username').fill('mira')
     await dlg.getByLabel('Admin email').fill('mira@studio.example')
-    await dlg.getByLabel('Password', { exact: true }).fill('abc')
-    await dlg.getByLabel('Repeat password').fill('abc')
+    await dlg.getByLabel('Password', { exact: true }).fill('abcdefgh1')
+    await dlg.getByLabel('Repeat password').fill('abcdefgh1')
     await dlg.getByRole('button', { name: 'Set up and start' }).click()
     await expect(dlg.getByRole('alert')).toContainText('password too weak')
     await expectNoAxeViolations(page)
@@ -249,7 +249,7 @@ test.describe('Server: Overview, this computer', () => {
 
   test('status failure is an error state with retry', async ({ page }) => {
     await boot(page, { server_local_status: { __error: { code: 'spawn_failed', message: 'could not read the server state' } } })
-    await expect(page.getByText('could not read the server state')).toBeVisible()
+    await expect(page.getByText('could not start its engine')).toBeVisible()
     await expectNoAxeViolations(page)
   })
 

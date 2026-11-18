@@ -59,7 +59,7 @@ test.describe('Activity bar and drawer', () => {
     await toggle(page).click()
     const drawer = page.getByTestId('activity-drawer')
     await expect(drawer.getByRole('heading', { name: 'Failed' })).toBeVisible()
-    await expect(drawer).toContainText('E_LOCKED')
+    await expect(drawer).not.toContainText('E_LOCKED')
     await expect(drawer).toContainText('Another save is running.')
     await expectNoAxeViolations(page)
     await drawer.getByRole('button', { name: 'Retry' }).click()

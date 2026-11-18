@@ -83,7 +83,7 @@ const MODES = [
     <div v-if="loadingFirst" class="pad"><SkeletonRows :count="8" /></div>
 
     <div v-else-if="repo.error && !repo.status" class="pad">
-      <ErrorState :code="repo.error.code" :message="repo.error.message" @retry="repo.refresh()" />
+      <ErrorState :code="repo.error.code" :message="repo.error.message" :details="repo.error.details" @retry="repo.refresh()" />
     </div>
 
     <div v-else-if="empty" class="pad">
@@ -94,7 +94,6 @@ const MODES = [
 
     <template v-else>
       <div v-if="changes.error" class="banner" role="alert">
-        <code class="mono">{{ changes.error.code }}</code>
         <span>{{ changes.error.message }}</span>
         <Button size="sm" variant="ghost" @click="changes.error = null">Dismiss</Button>
       </div>

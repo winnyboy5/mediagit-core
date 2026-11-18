@@ -75,7 +75,7 @@ async function submit() {
       <MoreOptions data-testid="clone-more">
         <TextField v-model="branch" label="Branch to check out" hint="Leave empty for main." flag="--branch" placeholder="main" :error="branchError" mono />
       </MoreOptions>
-      <ErrorState v-if="error" :code="error.code" :message="error.message" @retry="submit" />
+      <ErrorState v-if="error" :code="error.code" :message="error.message" :details="error.details" @retry="submit" />
       <div class="foot">
         <Button @click="open = false">Cancel</Button>
         <Button type="submit" variant="primary" :disabled="!url || !dest || !!urlError || !!branchError">Clone</Button>

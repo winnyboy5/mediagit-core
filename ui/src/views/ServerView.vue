@@ -64,7 +64,6 @@ function add() {
     </header>
 
     <div v-if="server.actionError" class="banner" role="alert">
-      <code class="mono">{{ server.actionError.code }}</code>
       <span>{{ server.actionError.message }}</span>
       <Button size="sm" variant="ghost" @click="server.actionError = null">Dismiss</Button>
     </div>

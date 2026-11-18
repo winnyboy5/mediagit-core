@@ -151,7 +151,7 @@ const busy = computed(() => history.loading || history.loadingMore)
 
     <div v-if="firstLoad" class="pad"><SkeletonRows :count="10" /></div>
     <div v-else-if="history.error && !history.loaded" class="pad">
-      <ErrorState :code="history.error.code" :message="history.error.message" @retry="history.reload()" />
+      <ErrorState :code="history.error.code" :message="history.error.message" :details="history.error.details" @retry="history.reload()" />
     </div>
     <div v-else-if="empty" class="pad">
       <EmptyState title="No saved versions yet" description="Save your first version from Changes and it appears here.">
@@ -162,7 +162,6 @@ const busy = computed(() => history.loading || history.loadingMore)
     <div v-else class="split">
       <div class="panel">
         <div v-if="history.error" class="banner" role="alert">
-          <code class="mono">{{ history.error.code }}</code>
           <span>{{ history.error.message }}</span>
           <Button size="sm" variant="ghost" @click="history.reload()">Retry</Button>
         </div>

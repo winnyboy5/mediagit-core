@@ -7,6 +7,7 @@ import Button from '@/components/Button.vue'
 import SegmentedControl from '@/components/SegmentedControl.vue'
 import TextField from '@/components/TextField.vue'
 import { useServerStore } from '@/stores/server'
+import { storageMissing } from '@/lib/errorText'
 
 /** Where the server keeps its data. The parent owns the object; secrets are never copied anywhere else. */
 const s = defineModel<StorageOpts>({ required: true })
@@ -54,6 +55,11 @@ const testing = ref(false)
 const result = ref<{ ok: boolean; error?: string } | null>(null)
 watch(s, () => (result.value = null), { deep: true })
 async function test() {
+  const missing = storageMissing(s.value)
+  if (missing) {
+    result.value = { ok: false, error: missing }
+    return
+  }
   testing.value = true
   result.value = null
   const r = await server.testStorage({ ...s.value })

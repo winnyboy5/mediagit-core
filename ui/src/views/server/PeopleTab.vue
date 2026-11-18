@@ -10,6 +10,7 @@ import Select from '@/components/Select.vue'
 import SkeletonRows from '@/components/SkeletonRows.vue'
 import TextField from '@/components/TextField.vue'
 import { useServerStore } from '@/stores/server'
+import { passwordError, usernameError } from '@/lib/errorText'
 import NeedAccess from './NeedAccess.vue'
 import { LEVELS, levelLabel } from './roles'
 
@@ -25,7 +26,9 @@ const name = ref('')
 const email = ref('')
 const role = ref('write')
 const pass = ref('')
-const canAdd = computed(() => !!name.value && !!email.value && !!pass.value && !server.busy)
+const nameProblem = computed(() => usernameError(name.value))
+const passProblem = computed(() => passwordError(pass.value))
+const canAdd = computed(() => !!name.value && !!email.value && !!pass.value && !nameProblem.value && !passProblem.value && !server.busy)
 async function add() {
   if (!canAdd.value) return
   const pw = pass.value
@@ -78,7 +81,7 @@ watch(resetOpen, (o) => !o && (resetPass.value = ''))
         <p>Everyone with an account on this server.</p>
         <Button variant="primary" @click="addOpen = true"><UserPlus :size="16" aria-hidden="true" /> Add person…</Button>
       </div>
-      <ErrorState v-if="u.error" :code="u.error.code" :message="u.error.message" @retry="server.loadUsers()" />
+      <ErrorState v-if="u.error" :code="u.error.code" :message="u.error.message" :details="u.error.details" @retry="server.loadUsers()" />
       <SkeletonRows v-else-if="u.loading && !u.data.length" :count="4" />
       <EmptyState v-else-if="!u.data.length" title="No one has an account yet" description="Add the first person to give them access." />
       <table v-else class="table" data-testid="people">
@@ -116,10 +119,10 @@ watch(resetOpen, (o) => !o && (resetPass.value = ''))
 
   <Dialog v-model:open="addOpen" title="Add person" description="They sign in with this username and password. Ask them to change the password afterwards.">
     <form id="add-person" class="form" autocomplete="off" @submit.prevent="add">
-      <TextField v-model="name" label="Username" />
+      <TextField v-model="name" label="Username" :error="nameProblem" />
       <TextField v-model="email" label="Email" type="email" />
       <Select v-model="role" label="What they can do" :options="LEVELS" />
-      <TextField v-model="pass" label="Starting password" type="password" />
+      <TextField v-model="pass" label="Starting password" type="password" :error="passProblem" />
       <p v-if="server.actionError" class="err" role="alert">{{ server.actionError.message }}</p>
     </form>
     <template #footer>
@@ -141,12 +144,12 @@ watch(resetOpen, (o) => !o && (resetPass.value = ''))
 
   <Dialog v-model:open="resetOpen" :title="`Reset password for ${resetFor}`" description="Their old password stops working at once. Tell them the new one in person or through a secure channel.">
     <form id="reset-pw" class="form" autocomplete="off" @submit.prevent="saveReset">
-      <TextField v-model="resetPass" label="New password" type="password" />
+      <TextField v-model="resetPass" label="New password" type="password" :error="passwordError(resetPass)" />
       <p v-if="server.actionError" class="err" role="alert">{{ server.actionError.message }}</p>
     </form>
     <template #footer>
       <Button @click="resetOpen = false">Cancel</Button>
-      <Button type="submit" form="reset-pw" variant="primary" :loading="server.busy" :disabled="!resetPass">Reset password</Button>
+      <Button type="submit" form="reset-pw" variant="primary" :loading="server.busy" :disabled="!resetPass || !!passwordError(resetPass)">Reset password</Button>
     </template>
   </Dialog>
 </template>

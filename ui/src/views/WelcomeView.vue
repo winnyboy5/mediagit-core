@@ -83,7 +83,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       <Button variant="ghost" @click="router.push('/team/server')"><Server :size="18" aria-hidden="true" />Host a server…</Button>
     </div>
 
-    <ErrorState v-if="error" class="fail" :code="error.code" :message="error.message" @retry="retry?.()" />
+    <ErrorState v-if="error" class="fail" :code="error.code" :message="error.message" :details="error.details" @retry="retry?.()" />
 
     <section class="recent" aria-labelledby="recent-h">
       <h2 id="recent-h">Recent repositories</h2>

@@ -77,7 +77,6 @@ const targetLabel = computed(() => options.value.find((o) => o.value === target.
     </p>
 
     <div v-if="seq.error" class="banner" role="alert">
-      <code class="mono">{{ seq.error.code }}</code>
       <span>{{ seq.error.message }}</span>
       <Button size="sm" variant="ghost" @click="seq.error = null">Dismiss</Button>
     </div>

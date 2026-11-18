@@ -160,7 +160,7 @@ describe('track', () => {
     }
     await expect(ops.track({ kind: 'add', label: 'Add' }, fn)).rejects.toMatchObject({ code: 'json_unsupported' })
     const failed = ops.finished[0]!
-    expect(failed).toMatchObject({ status: 'failed', error: { code: 'json_unsupported', message: 'not yet' } })
+    expect(failed).toMatchObject({ status: 'failed', error: { code: 'json_unsupported', details: 'not yet' } })
     failed.retry!()
     await vi.waitFor(() => expect(ops.ops.some((o) => o.status === 'done')).toBe(true))
     expect(calls).toBe(2)

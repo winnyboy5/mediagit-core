@@ -513,6 +513,7 @@ pub async fn unlock_repo(
             EngineError::Cli {
                 code: "wrong_passphrase".into(),
                 message: "That passphrase did not unlock the repository.".into(),
+                details: None,
             }
         } else {
             e

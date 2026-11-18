@@ -194,7 +194,7 @@ test.describe('Changes: include and save', () => {
     await boot(page, { repo_commit: { __error: { code: 'E_HOOK', message: 'Pre-commit check failed.' } } })
     await page.getByLabel('Message').fill('Try')
     await page.getByRole('button', { name: 'Save version' }).click()
-    await expect(page.getByRole('alert')).toContainText('E_HOOK')
+    await expect(page.getByRole('alert')).not.toContainText('E_HOOK')
     await expect(page.getByLabel('Message')).toHaveValue('Try')
   })
 })

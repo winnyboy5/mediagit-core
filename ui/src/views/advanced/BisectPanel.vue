@@ -52,7 +52,6 @@ const name = (oid: string | null) => (oid ? `${shortOid(oid)}${versions.summaryO
     <p class="muted">Find which version broke something. MediaGit checks out a version in the middle; you test it and say whether it is good or bad, and it narrows the range each time.</p>
 
     <div v-if="bisect.error" class="banner" role="alert">
-      <code class="mono">{{ bisect.error.code }}</code>
       <span>{{ bisect.error.message }}</span>
       <Button size="sm" variant="ghost" @click="bisect.error = null">Dismiss</Button>
     </div>

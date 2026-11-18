@@ -136,6 +136,12 @@ changes fix real bugs.
 - **`diff PATHS` is a real path filter** in every mode.
 - **`stash push` takes paths, as in git;** put the message in `-m`.
   `stash save MSG PATHS` is unchanged.
+- **The desktop app shows errors in plain words.** One map turns every engine error
+  code into a sentence with a next step; raw codes and HTTP status lines never show,
+  and the engine's own text sits under a collapsed "Details". A wrong password at
+  sign-in keeps the server's reason and now says to sign in again. New repository,
+  person and password names are checked in the form (BUG-031), and "Test connection"
+  asks for a missing bucket before calling the server (BUG-044).
 
 ### Fixed
 

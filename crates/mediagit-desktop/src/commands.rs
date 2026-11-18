@@ -639,7 +639,7 @@ async fn stream_with(
     let cancel = ops.register(op_id);
     let result = tokio::select! {
         r = run => r,
-        () = cancel.notified() => Err(EngineError::Cli { code: "cancelled".into(), message: "Cancelled".into() }),
+        () = cancel.notified() => Err(EngineError::Cli { code: "cancelled".into(), message: "Cancelled".into(), details: None }),
     };
     ops.finish(op_id);
     result

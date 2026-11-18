@@ -44,7 +44,6 @@ const STATE = { queued: 'Waiting', running: 'Running', done: 'Done', failed: 'Fa
     </ul>
 
     <div v-if="op.status === 'failed' || op.status === 'cancelled'" class="err">
-      <code v-if="op.error" class="code mono">{{ op.error.code }}</code>
       <span class="msg">{{ op.error?.message ?? 'Stopped' }}</span>
       <Button v-if="op.status === 'failed' && op.retry" size="sm" variant="secondary" @click="op.retry()">Retry</Button>
     </div>
@@ -112,13 +111,6 @@ const STATE = { queued: 'Waiting', running: 'Running', done: 'Done', failed: 'Fa
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
-}
-.code {
-  padding: 0 var(--space-2);
-  border: 1px solid var(--danger);
-  border-radius: var(--radius-pill);
-  color: var(--danger);
-  font-size: var(--fs-xs);
 }
 .msg {
   flex: 1;

@@ -97,14 +97,13 @@ function askForce(l: LockReport) {
     </header>
 
     <div v-if="locks.actionError" class="banner" role="alert">
-      <code class="mono">{{ locks.actionError.code }}</code>
       <span>{{ locks.actionError.message }}</span>
       <Button size="sm" variant="ghost" @click="locks.actionError = null">Dismiss</Button>
     </div>
 
     <div v-if="firstLoad" class="pad"><SkeletonRows :count="5" /></div>
     <div v-else-if="locks.error && !locks.loaded" class="pad">
-      <ErrorState :code="locks.error.code" :message="locks.error.message" @retry="locks.refresh()" />
+      <ErrorState :code="locks.error.code" :message="locks.error.message" :details="locks.error.details" @retry="locks.refresh()" />
     </div>
     <div v-else-if="!locks.locks.length" class="pad">
       <EmptyState title="Nothing is locked" description="Lock a file before you edit it so nobody else changes it at the same time.">

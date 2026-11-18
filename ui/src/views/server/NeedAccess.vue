@@ -35,7 +35,7 @@ const state = computed(() => {
   <div v-if="state === 'ok'"><slot /></div>
   <div v-else class="pane" :data-testid="`gate-${state}`">
     <SkeletonRows v-if="state === 'loading'" :count="4" />
-    <ErrorState v-else-if="state === 'error'" :code="server.meError!.code" :message="server.meError!.message" @retry="server.refreshMe()" />
+    <ErrorState v-else-if="state === 'error'" :code="server.meError!.code" :message="server.meError!.message" :details="server.meError!.details" @retry="server.refreshMe()" />
     <EmptyState v-else-if="state === 'down'" title="The local server is not running" :description="`Start it on the Overview tab to manage ${what}.`">
       <Button variant="primary" @click="emit('overview')">Go to Overview</Button>
     </EmptyState>

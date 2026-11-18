@@ -106,10 +106,10 @@ describe('states', () => {
     expect(w.text()).toContain('All saved')
     expect(w.find('button').exists()).toBe(true)
   })
-  it('ErrorState shows code + message and emits retry', async () => {
+  it('ErrorState shows the message, never the code, and emits retry', async () => {
     const w = mount(ErrorState, { props: { code: 'E_X', message: 'Nope' } })
     expect(w.attributes('role')).toBe('alert')
-    expect(w.text()).toContain('E_X')
+    expect(w.text()).not.toContain('E_X')
     expect(w.text()).toContain('Nope')
     await w.get('button').trigger('click')
     expect(w.emitted('retry')).toHaveLength(1)

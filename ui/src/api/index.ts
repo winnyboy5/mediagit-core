@@ -2,6 +2,7 @@
 // these wrappers, so a later HTTP transport (server web UI) swaps in here.
 import { Channel, convertFileSrc, invoke as rawInvoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { plainError } from '@/lib/errorText'
 import type {
   ApiError,
   AuthReport,
@@ -74,8 +75,12 @@ export function isApiError(e: unknown): e is ApiError {
   return typeof e === 'object' && e !== null && 'code' in e && 'message' in e
 }
 
+/** Every error the UI holds has plain `message` words; the raw text moves to `details`. */
 export function toApiError(e: unknown): ApiError {
-  return isApiError(e) ? e : { code: 'unknown', message: e instanceof Error ? e.message : String(e) }
+  const raw = isApiError(e) ? e : { code: 'unknown', message: e instanceof Error ? e.message : String(e) }
+  const v = plainError(raw.code, raw.message, (raw as ApiError).details)
+  if (isApiError(e) && v.text === raw.message && v.details === ((raw as ApiError).details ?? '')) return e
+  return { code: raw.code, message: v.text, ...(v.details ? { details: v.details } : {}) }
 }
 
 function channel(onProgress?: (p: Progress) => void): Channel<Progress> {

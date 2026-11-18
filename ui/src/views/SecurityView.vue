@@ -159,7 +159,6 @@ const sourceText = (s: string | null) => s ?? 'No key available on this machine'
     </header>
 
     <div v-if="sec.actionError" class="banner" role="alert">
-      <code class="mono">{{ sec.actionError.code }}</code>
       <span>{{ sec.actionError.message }}</span>
       <Button size="sm" variant="ghost" @click="sec.actionError = null">Dismiss</Button>
     </div>
@@ -168,7 +167,7 @@ const sourceText = (s: string | null) => s ?? 'No key available on this machine'
     <div v-else class="grid">
       <section class="card" aria-labelledby="acct-h" data-testid="account">
         <h2 id="acct-h">Account</h2>
-        <ErrorState v-if="sec.authError" :code="sec.authError.code" :message="sec.authError.message" @retry="sec.refresh()" />
+        <ErrorState v-if="sec.authError" :code="sec.authError.code" :message="sec.authError.message" :details="sec.authError.details" @retry="sec.refresh()" />
         <template v-else-if="a">
           <p v-if="!a.auth_enabled" class="muted">This server does not ask for sign-in.</p>
           <template v-else-if="a.logged_in && a.identity">
@@ -199,7 +198,7 @@ const sourceText = (s: string | null) => s ?? 'No key available on this machine'
 
       <section class="card" aria-labelledby="enc-h" data-testid="encryption">
         <h2 id="enc-h">Encryption</h2>
-        <ErrorState v-if="sec.keyError" :code="sec.keyError.code" :message="sec.keyError.message" @retry="sec.refresh()" />
+        <ErrorState v-if="sec.keyError" :code="sec.keyError.code" :message="sec.keyError.message" :details="sec.keyError.details" @retry="sec.refresh()" />
         <template v-else-if="k">
           <template v-if="k.enabled">
             <p class="who"><KeyRound :size="18" aria-hidden="true" /> This repository is encrypted.</p>

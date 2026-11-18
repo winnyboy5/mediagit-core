@@ -63,7 +63,10 @@ export type { DownloadReport } from './generated/DownloadReport'
 
 export interface ApiError {
   code: string
+  /** Plain words; the engine's raw text is in `details`. */
   message: string
+  /** Raw engine text for the collapsed "Details". */
+  details?: string
 }
 
 export interface EngineInfo {

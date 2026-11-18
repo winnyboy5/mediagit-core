@@ -40,6 +40,7 @@ fn err(code: &str, message: impl Into<String>) -> EngineError {
     EngineError::Cli {
         code: code.into(),
         message: message.into(),
+        details: None,
     }
 }
 

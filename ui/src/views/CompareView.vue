@@ -170,7 +170,7 @@ const size = (f: { old_size: number | null; new_size: number | null }) =>
       <ErrorState
         :code="compare.commitsError.code"
         :message="compare.commitsError.message"
-        @retry="compare.loadCommits()"
+        :details="compare.commitsError.details"        @retry="compare.loadCommits()"
       />
     </div>
     <div v-else-if="noVersions" class="pad">
@@ -185,7 +185,7 @@ const size = (f: { old_size: number | null; new_size: number | null }) =>
       <ErrorState
         :code="compare.error.code"
         :message="compare.error.message"
-        @retry="compare.compare()"
+        :details="compare.error.details"        @retry="compare.compare()"
       />
     </div>
     <div v-else-if="sameVersion" class="pad">

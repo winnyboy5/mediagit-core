@@ -76,7 +76,7 @@ function askRevoke(key: { id: string; name: string }) {
         <p>Keys let scripts and other tools sign in as you, without your password.</p>
         <Button variant="primary" @click="makeOpen = true"><KeyRound :size="16" aria-hidden="true" /> New key…</Button>
       </div>
-      <ErrorState v-if="k.error" :code="k.error.code" :message="k.error.message" @retry="server.loadKeys()" />
+      <ErrorState v-if="k.error" :code="k.error.code" :message="k.error.message" :details="k.error.details" @retry="server.loadKeys()" />
       <SkeletonRows v-else-if="k.loading && !k.data.length" :count="3" />
       <EmptyState v-else-if="!k.data.length" title="You have no API keys" description="Make one when a tool or a build machine needs to reach this server." />
       <table v-else class="table" data-testid="keys">

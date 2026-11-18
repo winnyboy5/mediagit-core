@@ -81,7 +81,7 @@ const open = (e: { kind: string; path: string }) => void (e.kind === 'dir' ? rb.
 
     <div v-if="firstLoad" class="pad"><SkeletonRows :count="8" /></div>
     <div v-else-if="sync.error && !sync.loaded" class="pad">
-      <ErrorState :code="sync.error.code" :message="sync.error.message" @retry="sync.refresh()" />
+      <ErrorState :code="sync.error.code" :message="sync.error.message" :details="sync.error.details" @retry="sync.refresh()" />
     </div>
     <div v-else-if="noRemote" class="pad">
       <EmptyState title="No remote configured" description="Add your studio server on the Sync page to browse its folders here.">
@@ -90,7 +90,7 @@ const open = (e: { kind: string; path: string }) => void (e.kind === 'dir' ? rb.
       </EmptyState>
     </div>
     <div v-else-if="rb.error && !rb.listing" class="pad">
-      <ErrorState :code="rb.error.code" :message="rb.error.message" @retry="rb.open(rb.path)" />
+      <ErrorState :code="rb.error.code" :message="rb.error.message" :details="rb.error.details" @retry="rb.open(rb.path)" />
     </div>
 
     <div v-else-if="rb.listing" class="split">

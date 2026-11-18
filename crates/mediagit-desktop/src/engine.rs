@@ -56,6 +56,8 @@ pub enum EngineError {
         code: String,
         /// Human-readable error chain.
         message: String,
+        /// The CLI's raw error chain, when it sent one (friendly codes only).
+        details: Option<String>,
     },
     /// The caller passed an argument the app refuses to forward.
     #[error("invalid argument: {0}")]
@@ -84,9 +86,16 @@ impl Serialize for EngineError {
             Self::Cli { message, .. } => message.clone(),
             other => other.to_string(),
         };
-        let mut st = s.serialize_struct("EngineError", 2)?;
+        let details = match self {
+            Self::Cli { details, .. } => details.as_deref(),
+            _ => None,
+        };
+        let mut st = s.serialize_struct("EngineError", 2 + usize::from(details.is_some()))?;
         st.serialize_field("code", self.code())?;
         st.serialize_field("message", &message)?;
+        if let Some(d) = details {
+            st.serialize_field("details", d)?;
+        }
         st.end()
     }
 }
@@ -121,6 +130,8 @@ struct Envelope {
 struct CliError {
     code: String,
     message: String,
+    #[serde(default)]
+    details: Option<String>,
 }
 
 /// Commands that must never be handed the session passphrase: they set up or change keys
@@ -417,6 +428,7 @@ impl Engine {
             return Err(EngineError::Cli {
                 code: "needs_input".into(),
                 message: "the saved passphrase no longer unlocks this repository".into(),
+                details: None,
             });
         }
         result
@@ -507,6 +519,7 @@ pub fn parse_envelope(stdout: &str) -> Result<Value, EngineError> {
             Err(EngineError::Cli {
                 code,
                 message: err.message,
+                details: err.details,
             })
         }
         (false, None) => Err(EngineError::Protocol("ok:false without error".into())),
@@ -561,8 +574,27 @@ mod tests {
             e,
             EngineError::Cli {
                 code: "needs_input".into(),
-                message: "input required: encryption passphrase".into()
+                message: "input required: encryption passphrase".into(),
+                details: None
             }
+        );
+    }
+
+    #[test]
+    fn envelope_error_forwards_details() {
+        let e = parse_envelope(
+            r#"{"v":1,"ok":false,"error":{"code":"server_unreachable","message":"Cannot reach the server.","details":"connect refused"}}"#,
+        )
+        .unwrap_err();
+        let json = serde_json::to_value(&e).unwrap();
+        assert_eq!(json["details"], "connect refused", "{json}");
+        let plain = parse_envelope(r#"{"v":1,"ok":false,"error":{"code":"error","message":"x"}}"#)
+            .unwrap_err();
+        assert!(
+            serde_json::to_value(&plain)
+                .unwrap()
+                .get("details")
+                .is_none()
         );
     }
 
@@ -688,11 +720,13 @@ mod tests {
         let hit = EngineError::Cli {
             code: "error".into(),
             message: "could not unlock this repository's encryption key; tried: passphrase".into(),
+            details: None,
         };
         assert!(is_unlock_failure(&hit));
         let other = EngineError::Cli {
             code: "error".into(),
             message: "not a repository".into(),
+            details: None,
         };
         assert!(!is_unlock_failure(&other));
         assert!(!is_unlock_failure(&EngineError::Spawn("x".into())));

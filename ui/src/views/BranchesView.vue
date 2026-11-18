@@ -191,7 +191,6 @@ function doDelete() {
     </header>
 
     <div v-if="branches.actionError" class="banner" role="alert">
-      <code class="mono">{{ branches.actionError.code }}</code>
       <span>{{ branches.actionError.message }}</span>
       <Button v-if="blocked" size="sm" variant="danger" :disabled="branches.busy" @click="forceOpen = true">Switch anyway…</Button>
       <Button size="sm" variant="ghost" @click="branches.actionError = null; blocked = null">Dismiss</Button>
@@ -199,7 +198,7 @@ function doDelete() {
 
     <div v-if="firstLoad" class="pad"><SkeletonRows :count="5" /></div>
     <div v-else-if="branches.error && !branches.loaded" class="pad">
-      <ErrorState :code="branches.error.code" :message="branches.error.message" @retry="branches.refresh()" />
+      <ErrorState :code="branches.error.code" :message="branches.error.message" :details="branches.error.details" @retry="branches.refresh()" />
     </div>
     <div v-else-if="!branches.list.length" class="pad">
       <EmptyState title="No branches yet" description="Save your first version and the main branch appears here.">

@@ -46,7 +46,7 @@ const n = (x: number) => x.toLocaleString('en-US')
 
     <div v-if="!s && !st.error" class="pad"><SkeletonRows :count="6" /></div>
     <div v-else-if="st.error && !s" class="pad">
-      <ErrorState :code="st.error.code" :message="st.error.message" @retry="st.refresh()" />
+      <ErrorState :code="st.error.code" :message="st.error.message" :details="st.error.details" @retry="st.refresh()" />
     </div>
     <div v-else-if="empty" class="pad">
       <EmptyState title="Nothing stored yet" description="Save your first version and its size shows up here.">

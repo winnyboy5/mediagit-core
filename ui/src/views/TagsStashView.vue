@@ -166,7 +166,6 @@ const when = (iso: string) => (Number.isNaN(Date.parse(iso)) ? '' : timeAgo(Date
     <h2 v-if="!props.only" class="pt">Tags &amp; Stash</h2>
 
     <div v-if="ts.actionError" class="banner" role="alert">
-      <code class="mono">{{ ts.actionError.code }}</code>
       <span>{{ ts.actionError.message }}</span>
       <Button size="sm" variant="ghost" @click="ts.actionError = null">Dismiss</Button>
     </div>
@@ -176,7 +175,7 @@ const when = (iso: string) => (Number.isNaN(Date.parse(iso)) ? '' : timeAgo(Date
         <h2 id="tags-h" class="sr-only">Tags</h2>
         <TextField v-if="ts.tags.length || ts.filter" v-model="ts.filter" label="Show only tags matching" placeholder="e.g. v1.*" hint="Use * for any letters, like v1.*" mono @update:model-value="onFilter" />
         <div v-if="!ts.tagsLoaded && !ts.tagsError"><SkeletonRows :count="3" /></div>
-        <ErrorState v-else-if="ts.tagsError" :code="ts.tagsError.code" :message="ts.tagsError.message" @retry="ts.refresh()" />
+        <ErrorState v-else-if="ts.tagsError" :code="ts.tagsError.code" :message="ts.tagsError.message" :details="ts.tagsError.details" @retry="ts.refresh()" />
         <EmptyState v-else-if="!ts.tags.length && ts.filter" title="No tag matches" description="Change the filter, or clear it to see every tag." />
         <EmptyState v-else-if="!ts.tags.length" title="No tags yet" description="A tag names a version, like v1.0 delivery. Tags made elsewhere show up here.">
           <template #icon><Tag :size="24" /></template>
@@ -235,7 +234,7 @@ const when = (iso: string) => (Number.isNaN(Date.parse(iso)) ? '' : timeAgo(Date
         </div>
 
         <div v-if="!ts.stashLoaded && !ts.stashError"><SkeletonRows :count="3" /></div>
-        <ErrorState v-else-if="ts.stashError" :code="ts.stashError.code" :message="ts.stashError.message" @retry="ts.refresh()" />
+        <ErrorState v-else-if="ts.stashError" :code="ts.stashError.code" :message="ts.stashError.message" :details="ts.stashError.details" @retry="ts.refresh()" />
         <EmptyState v-else-if="!ts.stashes.length" title="Nothing set aside" description="Stash parks your unsaved changes so you can switch tasks, then bring them back.">
           <template #icon><Archive :size="24" /></template>
         </EmptyState>

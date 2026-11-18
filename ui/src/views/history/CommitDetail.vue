@@ -136,7 +136,7 @@ function askSwitch(name: string) {
         <h3 id="ver-changes">Changes in this version <span v-if="history.detail" class="n">{{ history.detail.files.length }}</span></h3>
         <div v-if="history.detailLoading" class="pad"><SkeletonRows :count="3" /></div>
         <div v-else-if="history.detailError" class="pad">
-          <ErrorState :code="history.detailError.code" :message="history.detailError.message" @retry="history.select(history.selectedOid)" />
+          <ErrorState :code="history.detailError.code" :message="history.detailError.message" :details="history.detailError.details" @retry="history.select(history.selectedOid)" />
         </div>
         <p v-else-if="!changed.length" class="none">This version changed no files.</p>
         <ChangeTiles v-else :entries="changed" :rev="commit.oid" label="Files this version changed" @pick="pick" />
@@ -152,7 +152,7 @@ function askSwitch(name: string) {
       <MoreOptions label="Files at this version" class="all" @toggle="onToggle">
         <div v-if="history.treeLoading || (!history.tree && !history.treeError)" class="pad"><SkeletonRows :count="4" /></div>
         <div v-else-if="history.treeError" class="pad">
-          <ErrorState :code="history.treeError.code" :message="history.treeError.message" @retry="history.loadTree()" />
+          <ErrorState :code="history.treeError.code" :message="history.treeError.message" :details="history.treeError.details" @retry="history.loadTree()" />
         </div>
         <p v-else-if="!atVersion.length" class="none">This version has no files.</p>
         <VersionFiles v-else :entries="atVersion" group="tree" label="Files at this version" plain @pick="pick" />

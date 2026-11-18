@@ -11,6 +11,7 @@ import TextField from '@/components/TextField.vue'
 import { formatBytes } from '@/components/format'
 import { timeAgo } from '@/lib/persist'
 import { useServerStore } from '@/stores/server'
+import { repoNameError } from '@/lib/errorText'
 import NeedAccess from './NeedAccess.vue'
 
 defineEmits<{ overview: [] }>()
@@ -22,7 +23,7 @@ watch(() => [server.url, server.access], () => (server.access === 'admin' || ser
 // Create --------------------------------------------------------------------------
 const makeOpen = ref(false)
 const name = ref('')
-const nameError = computed(() => (name.value && !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name.value) ? 'Use letters, numbers, dots, dashes and underscores' : undefined))
+const nameError = computed(() => repoNameError(name.value))
 async function make() {
   if (!name.value || nameError.value || server.busy) return
   if (await server.createRepo(name.value)) {
@@ -58,7 +59,7 @@ async function remove() {
         </span>
         <Button size="sm" variant="ghost" @click="server.retainedNote = null">Dismiss</Button>
       </div>
-      <ErrorState v-if="r.error" :code="r.error.code" :message="r.error.message" @retry="server.loadRepos()" />
+      <ErrorState v-if="r.error" :code="r.error.code" :message="r.error.message" :details="r.error.details" @retry="server.loadRepos()" />
       <SkeletonRows v-else-if="r.loading && !r.data.length" :count="4" />
       <EmptyState v-else-if="!r.data.length" title="No repositories yet" description="Create one, then push a project to it from any computer that can reach this server." />
       <table v-else class="table" data-testid="repos">

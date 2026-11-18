@@ -112,7 +112,6 @@ const leaveGo = () => {
     </header>
 
     <div v-if="rs.actionError" class="banner" role="alert">
-      <code class="mono">{{ rs.actionError.code }}</code>
       <span>{{ rs.actionError.message }}</span>
       <Button size="sm" variant="ghost" @click="rs.actionError = null">Dismiss</Button>
     </div>
@@ -128,7 +127,7 @@ const leaveGo = () => {
       <section class="card" aria-labelledby="id-h" data-testid="identity">
         <h2 id="id-h">Your name on saved versions</h2>
         <div v-if="!rs.loaded && !rs.error"><SkeletonRows :count="2" /></div>
-        <ErrorState v-else-if="rs.error && !rs.loaded" :code="rs.error.code" :message="rs.error.message" @retry="rs.refresh()" />
+        <ErrorState v-else-if="rs.error && !rs.loaded" :code="rs.error.code" :message="rs.error.message" :details="rs.error.details" @retry="rs.refresh()" />
         <form v-else class="form" @submit.prevent="saveAuthor">
           <TextField v-model="name" label="Name" placeholder="Mira Okafor" />
           <TextField v-model="email" label="Email" placeholder="mira@studio.example" :error="emailError" />
@@ -140,7 +139,7 @@ const leaveGo = () => {
       <section class="card wide" aria-labelledby="cfg-h" data-testid="config">
         <h2 id="cfg-h">All settings</h2>
         <p class="muted">Every setting this repository understands. An empty box uses the default. Secret values are never shown.</p>
-        <ErrorState v-if="rs.error && !rs.loaded" :code="rs.error.code" :message="rs.error.message" @retry="rs.refresh()" />
+        <ErrorState v-if="rs.error && !rs.loaded" :code="rs.error.code" :message="rs.error.message" :details="rs.error.details" @retry="rs.refresh()" />
         <div v-else-if="!rs.loaded"><SkeletonRows :count="3" /></div>
         <p v-else-if="!groups.length" class="muted" data-testid="no-schema">The list of settings could not be read. Close and reopen the repository to try again.</p>
         <template v-else>
