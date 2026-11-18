@@ -179,6 +179,26 @@ changes fix real bugs.
   `default_storage` credentials.
 - **A multi-commit cherry-pick that hit an empty commit mid-way** now saves its
   state so `--skip` can continue.
+- **`reset` now takes every revision `log` and `checkout` take**, such as
+  `origin/main`, a tag, or `HEAD^`. `reset --hard origin/main` no longer says
+  "Unknown revision".
+- **`log <revision> <paths>` filtered only with `--machine`.** The plain, `--oneline`,
+  `--stat`, `--graph` and `--format` outputs now show only versions that changed
+  those paths.
+- **`add <missing path>` exited 0.** It now exits non-zero and names the path; the
+  other paths you named are still added. A tracked file you deleted is still staged
+  as a deletion.
+- **`commit --all` always failed.** It now stages every changed or deleted tracked
+  file (new files are not added; files outside a sparse checkout are left alone),
+  then commits.
+- **`status --ignored` and `ls-files --ignored` showed nothing for an ignored folder.**
+  They now list it once, with a trailing slash, like `Temp/`.
+- **`media info` reported MP4 and MOV width and height 65,536 times too large.**
+- **Branch, tag and remote names that Windows reserves (`CON`, `PRN`, `AUX`, `NUL`,
+  `COM1-9`, `LPT1-9`, any case, with or without an extension) are refused**, in the
+  CLI and in the app.
+- **`clone` into an existing empty folder works.** A folder with files in it is still
+  refused. A failed clone removes what it made and keeps the folder.
 
 ### Fixed — `fsck`, `verify`, `gc` and `tag` no longer invent a repository (BUG-003)
 
