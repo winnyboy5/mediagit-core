@@ -3,6 +3,11 @@ import { expectFocusRing, expectNoAxeViolations } from './helpers'
 import { fixture, healthy, ipcCalls, ipcRelease, mockIpc, RECENT } from './ipc-mock'
 
 const REPO = { 'mg.repo': JSON.stringify('/repos/hero-film'), 'mg.recent': RECENT }
+// Encryption can only be turned on before the first version exists.
+const UNBORN = (() => {
+  const s = fixture<{ branch: object }>('status_empty')
+  return { ...s, branch: { ...s.branch, has_commits: false } }
+})()
 const PW = 'S3cret-pw-Zebra!'
 const CODE = 'RC-7QK2-M9XD-4TVB-HE8A'
 
@@ -71,10 +76,16 @@ test.describe('Security: states', () => {
   })
 
   test('not encrypted: turn on offered', async ({ page }) => {
-    await boot(page, { key_status: fixture('key_off') })
+    await boot(page, { key_status: fixture('key_off'), repo_status: UNBORN })
     await expect(enc(page)).toContainText('stored as they are')
     await expect(enc(page).getByRole('button', { name: 'Turn on encryption…' })).toBeEnabled()
     await expectNoAxeViolations(page)
+  })
+
+  test('not encrypted, but versions exist: a plain sentence, no button', async ({ page }) => {
+    await boot(page, { key_status: fixture('key_off') })
+    await expect(enc(page)).toContainText('Encryption must be turned on before the first version is saved')
+    await expect(enc(page).getByRole('button', { name: 'Turn on encryption…' })).toHaveCount(0)
   })
 
   test('encrypted but no key on this machine: says so and offers recovery', async ({ page }) => {
@@ -140,7 +151,7 @@ test.describe('Security: sign in and out', () => {
 test.describe('Security: encryption', () => {
   test('turn on: shows the recovery code once, in a dialog that only "I saved it" closes', async ({ page, context }) => {
     await context.grantPermissions(['clipboard-read', 'clipboard-write'])
-    await boot(page, { key_status: fixture('key_off'), key_init: fixture('key_init') })
+    await boot(page, { key_status: fixture('key_off'), repo_status: UNBORN, key_init: fixture('key_init') })
     await enc(page).getByRole('button', { name: 'Turn on encryption…' }).click()
     const init = page.getByRole('dialog', { name: 'Turn on encryption' })
     await expect(init.getByLabel('Passphrase (optional)')).toHaveAttribute('type', 'password')
@@ -166,7 +177,7 @@ test.describe('Security: encryption', () => {
   })
 
   test('turn on with a passphrase passes it on and clears the field', async ({ page }) => {
-    await boot(page, { key_status: fixture('key_off'), key_init: fixture('key_init') })
+    await boot(page, { key_status: fixture('key_off'), repo_status: UNBORN, key_init: fixture('key_init') })
     await enc(page).getByRole('button', { name: 'Turn on encryption…' }).click()
     const init = page.getByRole('dialog', { name: 'Turn on encryption' })
     await init.getByLabel('Passphrase (optional)').fill(PW)
@@ -179,7 +190,7 @@ test.describe('Security: encryption', () => {
   })
 
   test('a failed turn on shows the reason and no recovery dialog', async ({ page }) => {
-    await boot(page, { key_status: fixture('key_off'), key_init: { __error: { code: 'error', message: 'Encryption is already set up.' } } })
+    await boot(page, { key_status: fixture('key_off'), repo_status: UNBORN, key_init: { __error: { code: 'error', message: 'Encryption is already set up.' } } })
     await enc(page).getByRole('button', { name: 'Turn on encryption…' }).click()
     await page.getByRole('dialog', { name: 'Turn on encryption' }).getByRole('button', { name: 'Turn on encryption' }).click()
     await expect(page.getByRole('alert')).toContainText('Encryption is already set up.')
@@ -215,7 +226,7 @@ test.describe('Security: encryption', () => {
   })
 
   test('buttons are keyboard reachable with a visible focus ring', async ({ page }) => {
-    await boot(page, { key_status: fixture('key_off') })
+    await boot(page, { key_status: fixture('key_off'), repo_status: UNBORN })
     await enc(page).getByRole('button', { name: 'Turn on encryption…' }).focus()
     await expectFocusRing(page)
   })

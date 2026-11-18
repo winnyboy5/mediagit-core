@@ -216,8 +216,14 @@ const sourceText = (s: string | null) => s ?? 'No key available on this machine'
             </div>
           </template>
           <template v-else>
-            <p class="muted">Files in this repository are stored as they are. Turn on encryption to protect new data at rest.</p>
-            <Button :disabled="sec.busy" @click="initOpen = true">Turn on encryption…</Button>
+            <template v-if="repo.status?.branch.has_commits">
+              <p class="muted">Files in this repository are stored as they are.</p>
+              <p class="muted">Encryption must be turned on before the first version is saved. Make a new project to use it.</p>
+            </template>
+            <template v-else>
+              <p class="muted">Files in this repository are stored as they are. Turn on encryption before you save the first version.</p>
+              <Button :disabled="sec.busy" @click="initOpen = true">Turn on encryption…</Button>
+            </template>
           </template>
         </template>
       </section>
