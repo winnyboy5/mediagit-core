@@ -497,6 +497,7 @@ impl BranchCmd {
         if opts.name.contains("..") || opts.name.starts_with('/') || opts.name.ends_with('/') {
             anyhow::bail!("Invalid branch name: {}", opts.name);
         }
+        super::utils::reject_device_name(&opts.name)?;
 
         let branch_ref_name = format!("refs/heads/{}", opts.name);
 
@@ -1263,6 +1264,7 @@ impl BranchCmd {
         if new_branch.contains("..") || new_branch.starts_with('/') || new_branch.ends_with('/') {
             anyhow::bail!("Invalid branch name: {}", new_branch);
         }
+        super::utils::reject_device_name(&new_branch)?;
 
         // Check if old branch exists
         let old_ref = refdb

@@ -73,8 +73,12 @@ export function refNameError(name: string): string | null {
   if (/[\x00-\x1f\x7f~^:?*[\\]/.test(name)) return 'Contains a character that is not allowed'
   if (name.startsWith('/') || name.endsWith('/') || name.includes('//')) return 'Slashes must separate names'
   if (name.includes('..') || name.includes('@{') || name.endsWith('.') || name.endsWith('.lock')) return 'That name is reserved'
+  if (name.split('/').some((p) => WINDOWS_DEVICE.test(p))) return 'Windows reserves that name'
   return null
 }
+
+/** CON, PRN, AUX, NUL, COM1-9, LPT1-9: any case, with or without an extension. */
+const WINDOWS_DEVICE = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i
 
 /** What the inspector describes: a working-copy file (`rev` null) or a file at a version. */
 export interface InspectFile {

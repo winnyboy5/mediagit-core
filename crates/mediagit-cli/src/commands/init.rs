@@ -249,6 +249,7 @@ fn validate_branch_name(name: &str) -> Result<()> {
             name
         );
     }
+    super::utils::reject_device_name(name)?;
     const FORBIDDEN: &[char] = &['~', '^', ':', '?', '*', '[', '`'];
     if name.chars().any(|c| FORBIDDEN.contains(&c)) {
         anyhow::bail!(

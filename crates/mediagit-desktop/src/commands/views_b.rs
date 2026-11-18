@@ -740,7 +740,7 @@ mod tests {
         );
         for n in [
             "--force", "-x", "a b", "a..b", "a~1", "a^", "a:b", "x/", "/x", "x.lock", "x.",
-            "a@{1}", "a\\b", "", "a//b", "a\u{7}b",
+            "a@{1}", "a\\b", "", "a//b", "a\u{7}b", "CON", "nul", "Aux.txt", "com1", "x/LPT9",
         ] {
             assert!(
                 bad(branch_create_argv(n, &BranchCreateOpts::default())),

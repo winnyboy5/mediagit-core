@@ -848,7 +848,7 @@ impl TagCmd {
             anyhow::bail!("Tag name cannot contain whitespace");
         }
 
-        Ok(())
+        super::utils::reject_device_name(name)
     }
 }
 

@@ -93,6 +93,16 @@ fn rev_ok(rev: &str) -> Result<(), EngineError> {
     }
 }
 
+/// CON, PRN, AUX, NUL, COM1-9, LPT1-9: any case, with or without an extension.
+fn is_windows_device_name(part: &str) -> bool {
+    let stem = part.split('.').next().unwrap_or("").to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ["COM", "LPT"].iter().any(|p| {
+            stem.strip_prefix(p)
+                .is_some_and(|n| matches!(n.as_bytes(), [b'1'..=b'9']))
+        })
+}
+
 /// Branch and remote names: no flags, spaces, control characters or git-reserved punctuation.
 fn ref_name_ok(what: &str, name: &str) -> Result<(), EngineError> {
     plain_arg(what, name)?;
@@ -104,6 +114,7 @@ fn ref_name_ok(what: &str, name: &str) -> Result<(), EngineError> {
         || name.contains("..")
         || name.contains("@{")
         || name.contains("//")
+        || name.split('/').any(is_windows_device_name)
         || name
             .chars()
             .any(|c| c.is_whitespace() || c.is_control() || "~^:?*[\\".contains(c));

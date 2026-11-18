@@ -604,3 +604,35 @@ fn test_branch_switch_ignored_collision_proceeds() {
     let content = fs::read_to_string(temp_dir.path().join("topic.txt")).unwrap();
     assert_eq!(content, "topic content");
 }
+
+/// BUG-022: a Windows device name is not a usable branch or tag name.
+#[test]
+fn bug022_branch_and_tag_refuse_windows_device_names() {
+    let temp_dir = TempDir::new().unwrap();
+    let d = temp_dir.path();
+    init_repo(d);
+    add_and_commit(d, "f.txt", "x", "one");
+    for args in [
+        ["branch", "create", "CON"],
+        ["branch", "create", "nul"],
+        ["tag", "create", "AUX"],
+    ] {
+        mediagit()
+            .args(args)
+            .current_dir(d)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("reserved Windows device name"));
+    }
+    mediagit()
+        .args(["branch", "create", "console"])
+        .current_dir(d)
+        .assert()
+        .success();
+    mediagit()
+        .args(["branch", "rename", "console", "COM1"])
+        .current_dir(d)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("reserved Windows device name"));
+}

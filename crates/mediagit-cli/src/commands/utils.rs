@@ -42,6 +42,26 @@ pub fn categorize_extension(ext: &str) -> &'static str {
     }
 }
 
+/// Refuse a name whose any `/`-separated part is a Windows device name (CON,
+/// PRN, AUX, NUL, COM1-9, LPT1-9), in any case, with or without an extension.
+/// Refs are files, and those names do not behave as files on Windows (BUG-022).
+pub fn reject_device_name(name: &str) -> Result<()> {
+    for part in name.split('/') {
+        let stem = part.split('.').next().unwrap_or("").to_ascii_uppercase();
+        let is_numbered = |prefix: &str| {
+            stem.strip_prefix(prefix)
+                .is_some_and(|n| matches!(n.as_bytes(), [b'1'..=b'9']))
+        };
+        if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+            || is_numbered("COM")
+            || is_numbered("LPT")
+        {
+            anyhow::bail!("'{name}' is a reserved Windows device name. Pick another name.");
+        }
+    }
+    Ok(())
+}
+
 /// Validate a ref name for safety.
 ///
 /// Ref names must not contain special characters that could cause filesystem issues.
@@ -77,7 +97,7 @@ pub fn validate_ref_name(name: &str) -> Result<()> {
         anyhow::bail!("Ref name '{}' cannot contain '@{{'", name);
     }
 
-    Ok(())
+    reject_device_name(name)
 }
 
 /// Shared test-only lock for `MEDIAGIT_REPO`, the process-global env var
@@ -138,5 +158,43 @@ pub(crate) mod test_support {
             .unwrap();
 
         commit_oid
+    }
+}
+
+#[cfg(test)]
+mod device_name_tests {
+    use super::reject_device_name;
+
+    #[test]
+    fn bug022_device_names_are_refused_in_any_case_and_part() {
+        for bad in [
+            "CON",
+            "con",
+            "Nul",
+            "PRN",
+            "aux",
+            "aux.txt",
+            "COM1",
+            "com9",
+            "LPT1",
+            "lpt9.log",
+            "feature/CON",
+            "NUL/x",
+        ] {
+            assert!(reject_device_name(bad).is_err(), "{bad} must be refused");
+        }
+        for ok in [
+            "main",
+            "console",
+            "com10",
+            "com0",
+            "comma",
+            "lpt",
+            "v1.0",
+            "release/con-art",
+            "nullable",
+        ] {
+            assert!(reject_device_name(ok).is_ok(), "{ok} must be accepted");
+        }
     }
 }

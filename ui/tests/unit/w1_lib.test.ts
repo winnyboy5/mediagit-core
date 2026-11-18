@@ -104,8 +104,8 @@ describe('inspector helpers', () => {
   })
 
   it('validates branch and remote names like the desktop crate does', () => {
-    for (const ok of ['main', 'feature/grade', 'v1.0-rc', 'a_b']) expect(refNameError(ok), ok).toBeNull()
-    for (const bad of ['', ' ', '-x', 'a b', 'a..b', 'a~1', 'a^', 'a:b', 'x/', '/x', 'a//b', 'x.lock', 'x.', 'a@{1}', 'a\\b', 'a?', 'a*', 'a[']) {
+    for (const ok of ['main', 'feature/grade', 'v1.0-rc', 'a_b', 'console', 'com10', 'nullable']) expect(refNameError(ok), ok).toBeNull()
+    for (const bad of ['', ' ', '-x', 'a b', 'a..b', 'a~1', 'a^', 'a:b', 'x/', '/x', 'a//b', 'x.lock', 'x.', 'a@{1}', 'a\\b', 'a?', 'a*', 'a[', 'CON', 'nul', 'Aux.txt', 'com1', 'feature/LPT9']) {
       expect(refNameError(bad), JSON.stringify(bad)).not.toBeNull()
     }
   })
