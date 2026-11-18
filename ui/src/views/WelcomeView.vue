@@ -1,27 +1,23 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRouter } from 'vue-router'
 import { FolderOpen, FolderPlus, GitFork, Server, X } from 'lucide-vue-next'
 import Wordmark from '@/components/Wordmark.vue'
-import { toApiError, type ApiError } from '@/api'
+import type { ApiError } from '@/api'
 import { api } from '@/api'
 import BranchPill from '@/components/BranchPill.vue'
 import Button from '@/components/Button.vue'
 import ErrorState from '@/components/ErrorState.vue'
-import Dialog from '@/components/Dialog.vue'
 import IconButton from '@/components/IconButton.vue'
-import MoreOptions from '@/components/MoreOptions.vue'
-import TextField from '@/components/TextField.vue'
-import { refNameError } from '@/lib/inspect'
 import Kbd from '@/components/Kbd.vue'
-import { baseName, timeAgo } from '@/lib/persist'
-import { pickFolder, useOpenRepo } from '@/shell/useOpenRepo'
+import { timeAgo } from '@/lib/persist'
+import { useOpenRepo } from '@/shell/useOpenRepo'
 import { useOpsStore } from '@/stores/ops'
 import { useRecentStore } from '@/stores/recent'
 import CloneDialog from './welcome/CloneDialog.vue'
+import CreateDialog from './welcome/CreateDialog.vue'
 
 const router = useRouter()
-const route = useRoute()
 const recent = useRecentStore()
 const ops = useOpsStore()
 const { openPath, pickAndOpen } = useOpenRepo()
@@ -29,6 +25,7 @@ const { openPath, pickAndOpen } = useOpenRepo()
 const error = ref<ApiError | null>(null)
 const retry = ref<(() => void) | null>(null)
 const cloneOpen = ref(false)
+const create = ref<InstanceType<typeof CreateDialog> | null>(null)
 const opening = ref(false)
 const version = ref('')
 
@@ -48,41 +45,9 @@ async function guarded(run: () => Promise<ApiError | null>, again: () => void) {
 const openFolder = () => guarded(pickAndOpen, openFolder)
 const openRecent = (p: string) => guarded(() => openPath(p), () => void openRecent(p))
 
-async function newRepo() {
-  error.value = null
-  let dir: string | null
-  try {
-    dir = await pickFolder('Choose a folder for the new repository')
-  } catch (e) {
-    error.value = toApiError(e)
-    return
-  }
-  if (dir) {
-    initDir.value = dir
-    initBranch.value = ''
-    initOpen.value = true
-  }
-}
-
-const initOpen = ref(false)
-const initDir = ref('')
-const initBranch = ref('')
-const initBranchError = computed(() => (initBranch.value ? (refNameError(initBranch.value) ?? undefined) : undefined))
-function createHere() {
-  if (initBranchError.value) return
-  initOpen.value = false
-  void initIn(initDir.value, initBranch.value.trim() || undefined)
-}
-
-async function initIn(dir: string, branch?: string) {
-  try {
-    await ops.track({ kind: 'init', label: `Create repository ${baseName(dir)}` }, () => api.init(dir, branch), () => dir)
-  } catch (e) {
-    error.value = toApiError(e)
-    retry.value = () => void initIn(dir, branch)
-    return
-  }
-  await guarded(() => openPath(dir), () => void openPath(dir))
+function onCreateFail(err: ApiError, again: (() => void) | null) {
+  error.value = err
+  retry.value = again
 }
 
 function onKey(e: KeyboardEvent) {
@@ -93,9 +58,6 @@ function onKey(e: KeyboardEvent) {
 }
 onMounted(async () => {
   window.addEventListener('keydown', onKey)
-  // The repository switcher sends people here to create or clone.
-  if (route.query.action === 'clone') cloneOpen.value = true
-  else if (route.query.action === 'create') void newRepo()
   try {
     const info = await api.engineInfo()
     version.value = `mediagit ${info.version} · engine contract v${info.contract}`
@@ -117,7 +79,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
     <div class="actions">
       <Button variant="primary" :loading="opening" @click="openFolder"><FolderOpen :size="18" aria-hidden="true" />Open folder…</Button>
       <Button @click="cloneOpen = true"><GitFork :size="18" aria-hidden="true" />Clone…</Button>
-      <Button :loading="initBusy" @click="newRepo"><FolderPlus :size="18" aria-hidden="true" />New repository (init)</Button>
+      <Button :loading="initBusy" @click="create?.start()"><FolderPlus :size="18" aria-hidden="true" />New repository (init)</Button>
       <Button variant="ghost" @click="router.push('/team/server')"><Server :size="18" aria-hidden="true" />Host a server…</Button>
     </div>
 
@@ -144,32 +106,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
     <p class="foot mono">{{ version }}<template v-if="version"> · </template><Kbd>Ctrl</Kbd>+<Kbd>O</Kbd> to open</p>
 
     <CloneDialog v-model:open="cloneOpen" />
-
-    <Dialog v-model:open="initOpen" title="Create repository" description="Start tracking this folder with MediaGit.">
-      <form id="init-form" class="initform" @submit.prevent="createHere">
-        <p class="mono initdir">{{ initDir }}</p>
-        <MoreOptions data-testid="init-more">
-          <TextField v-model="initBranch" label="First branch name" hint="Leave empty for main." flag="--initial-branch" placeholder="main" :error="initBranchError" mono />
-        </MoreOptions>
-      </form>
-      <template #footer>
-        <Button @click="initOpen = false">Cancel</Button>
-        <Button type="submit" form="init-form" variant="primary" :disabled="!!initBranchError">Create</Button>
-      </template>
-    </Dialog>
+    <CreateDialog ref="create" @fail="onCreateFail" />
   </div>
 </template>
 
 <style scoped>
-.initform {
-  display: grid;
-  gap: var(--space-3);
-}
-.initdir {
-  margin: 0;
-  overflow-wrap: anywhere;
-  color: var(--text-muted);
-}
 header {
   display: grid;
   justify-items: start;

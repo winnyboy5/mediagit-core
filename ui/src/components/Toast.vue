@@ -15,7 +15,7 @@ const ICON = { success: CircleCheck, warning: TriangleAlert, error: CircleAlert,
       class="mg-toast"
       :class="`mg-${t.kind}`"
       :type="t.kind === 'error' ? 'foreground' : 'background'"
-      :duration="t.kind === 'error' ? Number.MAX_SAFE_INTEGER : 5000"
+      :duration="t.kind === 'error' ? 2 ** 31 - 1 : 5000"
       @update:open="(o: boolean) => !o && dismiss(t.id)"
     >
       <component :is="ICON[t.kind]" class="mg-ico" :size="20" aria-hidden="true" />

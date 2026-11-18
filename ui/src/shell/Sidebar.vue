@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import { RouterLink, useRoute, useRouter } from 'vue-router'
+import { computed, ref } from 'vue'
+import { RouterLink, useRoute } from 'vue-router'
 import { ChevronsUpDown, GitBranch } from 'lucide-vue-next'
 import logo from '@/assets/logo-16.svg'
 import DropdownMenu, { type MenuItem } from '@/components/DropdownMenu.vue'
+import { useToast } from '@/components/useToast'
 import { timeAgo } from '@/lib/persist'
 import { useChangesStore } from '@/stores/changes'
 import { useLocksStore } from '@/stores/locks'
@@ -13,6 +14,8 @@ import { useOpsStore } from '@/stores/ops'
 import { useShellStore } from '@/stores/shell'
 import { useSyncStore } from '@/stores/sync'
 import { useUnlockStore } from '@/stores/unlock'
+import CloneDialog from '@/views/welcome/CloneDialog.vue'
+import CreateDialog from '@/views/welcome/CreateDialog.vue'
 import { useOpenRepo } from './useOpenRepo'
 import { HUBS, WORK_HUBS, hubHome, inHub, type Hub } from './hubs'
 
@@ -29,7 +32,9 @@ const isUnlocked = computed(() => !!repo.path && unlock.unlocked.has(repo.path))
 // A command found it locked and it has not been unlocked since.
 const isLocked = computed(() => !!repo.path && !isUnlocked.value && unlock.locked.has(repo.path))
 const { openPath, pickAndOpen } = useOpenRepo()
-const router = useRouter()
+const toast = useToast()
+const cloneOpen = ref(false)
+const create = ref<InstanceType<typeof CreateDialog> | null>(null)
 
 const repoName = computed(() => recent.list.find((r) => r.path === repo.path)?.name ?? repo.path ?? '')
 const branch = computed(() => repo.status?.branch)
@@ -50,11 +55,15 @@ const menu = computed<MenuItem[]>(() => [
   { id: '__clone', label: 'Clone a repository…' },
 ])
 
+function showOpenError(err: { message: string } | null) {
+  if (err) toast.push({ kind: 'error', title: 'Could not open this folder', description: err.message })
+}
+
 function onMenu(id: string) {
-  if (id === '__open') void pickAndOpen()
-  else if (id === '__create') void router.push({ path: '/welcome', query: { action: 'create' } })
-  else if (id === '__clone') void router.push({ path: '/welcome', query: { action: 'clone' } })
-  else if (id !== repo.path) void openPath(id)
+  if (id === '__open') void pickAndOpen().then(showOpenError)
+  else if (id === '__create') void create.value?.start()
+  else if (id === '__clone') cloneOpen.value = true
+  else if (id !== repo.path) void openPath(id).then(showOpenError)
 }
 
 const settings = HUBS.find((h) => h.id === 'settings')!
@@ -110,6 +119,8 @@ const onHub = (h: Hub) => inHub(route.path, h)
         <template v-if="failed">{{ failed }} failed, </template>{{ sync.last ? `Got latest ${timeAgo(sync.last)}` : 'Activity' }}
       </button>
     </div>
+    <CloneDialog v-model:open="cloneOpen" />
+    <CreateDialog ref="create" @fail="showOpenError" />
   </nav>
 </template>
 

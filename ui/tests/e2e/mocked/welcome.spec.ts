@@ -197,7 +197,7 @@ test.describe('Clone dialog', () => {
   })
 })
 
-test('with a repository open, the repo menu leads to create and to clone separately', async ({ page }) => {
+test('with a repository open, the repo menu opens the clone dialog in place', async ({ page }) => {
   await mockIpc(page, {
     commands: healthy({ branch_list: fixture('branches') }),
     storage: { 'mg.repo': JSON.stringify('/repos/hero-film'), 'mg.recent': RECENT },
@@ -205,6 +205,6 @@ test('with a repository open, the repo menu leads to create and to clone separat
   await page.goto('/#/changes', { waitUntil: 'domcontentloaded' })
   await page.getByTestId('repo-switcher').click()
   await page.getByRole('menuitem', { name: 'Clone a repository…' }).click()
-  await expect(page).toHaveURL(/#\/welcome\?action=clone$/)
+  await expect(page).toHaveURL(/#\/changes$|#\/files\/changes$/)
   await expect(page.getByRole('dialog', { name: /clone/i })).toBeVisible()
 })
