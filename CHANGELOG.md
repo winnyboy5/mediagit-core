@@ -163,6 +163,8 @@ changes fix real bugs.
 
 ### Fixed
 
+- **`reset` and revisions.** `reset` refuses `HEAD^^`, `HEAD^2` and a bare
+  `HEAD~`; the old `reset` silently took the first parent.
 - **Small leftovers.** `revert HEAD^` works like `reset` and `show`. A stopped
   `revert`, `cherry-pick` or `rebase` saves its own message in `MERGE_MSG`, not
   "Merge branch 'theirs'". `commit` with no message after `merge --squash` uses

@@ -27,9 +27,11 @@ than fetching to find out.
 To find modified files, `status` compares each tracked file's content hash with the committed one. It keeps
 a local stat cache (`.mediagit/stat-cache`) of each file's size, modification time, file id, change time and
 hash, and re-reads a file only when one of those changed, so a repeat `status` on a large media tree reads
-almost nothing. A file modified less than 2 seconds before it was last cached is always re-read. Set
+almost nothing. A file modified less than 2 seconds before it was last cached is always re-read, so a file changed within 2 seconds of a command is hashed again on the next run. Set
 `MEDIAGIT_STAT_CACHE=0` to re-hash every file; on Windows, an in-place rewrite that keeps both size and
 modification time is the known case the cache cannot see (the same limit as Git).
+
+Limits of the cache: FAT and exFAT drives keep no change time, so the cache has one less check there. On a network drive whose server clock is 2 seconds or more behind yours, the cache may trust an out-of-date entry (Git's "racy" rule has the same gap). Set `MEDIAGIT_STAT_CACHE=0` if you work on such a drive.
 
 ## Options
 

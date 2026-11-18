@@ -147,7 +147,7 @@ account `identity` to compare with lock owners), `key`, `stats`, `gc`, `fsck`,
 `deleted_count`, `deleted_bytes` and `unrestorable_files`;
 `fsck`/`verify`/`gc` that find errors print their report with
 `healthy:false` / non-empty `errors` and exit 1. `config get` of an unset key
-returns `value:null`. `rebase` drops a replayed commit that adds nothing unless
+returns `value:null`. `commit` with no message after `merge --squash` uses `MERGE_MSG` (no editor unless `-e`), and `MERGE_MSG` is removed after any commit when no merge is in progress. `reset` refuses `HEAD^^`, `HEAD^2` and a bare `HEAD~`. `remote remove` keeps the shared sign-in; `auth logout` removes it. `rebase --continue` commits a resolution equal to the new base, unlike `cherry-pick`/`revert`. The app shows sizes in decimal units (GB, MB); the CLI shows GiB and MiB. `rebase` drops a replayed commit that adds nothing unless
 `--keep-empty` is given. `key init` returns the one-time `recovery_code` in its
 envelope: show it once, it is not stored.
 

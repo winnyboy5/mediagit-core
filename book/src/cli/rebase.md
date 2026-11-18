@@ -45,7 +45,7 @@ argument.
 
 `--continue` resumes a rebase that stopped on conflict: it commits the
 resolution under the original commit's message and author, then keeps
-replaying the remaining commits.
+replaying the remaining commits. If your resolution leaves the files equal to the new base, `--continue` still commits it; `cherry-pick` and `revert` refuse an empty commit instead.
 
 While a rebase is stopped, your files show the new base with the clashing
 commit's changes on top, so what you see is what `--continue` will save.

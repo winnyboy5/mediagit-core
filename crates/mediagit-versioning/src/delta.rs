@@ -301,7 +301,7 @@ impl DeltaDecoder {
 }
 
 /// Deltas up to this size decode into a buffer sized from `result_size` up
-/// front (every chunk delta: chunks are at most 32 MiB). Larger claims decode
+/// front (every chunk delta: chunks over 64 MiB are stored whole and never get a delta). Larger claims decode
 /// into a buffer that grows with the bytes actually produced, so a forged
 /// `result_size` (or zstd frame header) cannot make the decoder reserve
 /// gigabytes for a few bytes of payload (FUTURE_TODOS #38).

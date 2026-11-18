@@ -20,6 +20,8 @@ MediaGit commits include:
 - Commit message
 - Compression and deduplication statistics
 
+After `merge --squash`, a plain `commit` (no `-m`, `-F`) uses the saved merge message without opening an editor; add `-e` to edit it. The saved message is removed after any commit once no merge is in progress.
+
 ## Options
 
 ### `-m, --message <MESSAGE>`

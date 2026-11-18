@@ -103,7 +103,7 @@ Both 404 when `[encryption]` is off server-side, so a server without the feature
 |--------|------|------|-------------|
 | POST | `/:repo/chunk-deltas/check` | `repo:read` | Check which chunk deltas are available |
 | GET | `/:repo/chunk-deltas/:chunk_id` | `repo:read` | Download a chunk delta sidecar |
-| PUT | `/:repo/chunk-deltas/:chunk_id` | `repo:write` | Upload a chunk delta sidecar |
+| PUT | `/:repo/chunk-deltas/:chunk_id` | `repo:write` | Upload a chunk delta sidecar. `424` if the base chunk is not stored yet (nothing is written; retry after the base lands). `422` if the server refuses the delta |
 
 ### Repository — Manifests
 

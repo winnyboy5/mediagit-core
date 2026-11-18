@@ -21,7 +21,7 @@ does not move the branch pointer).
 
 #### `[COMMIT]`
 Target commit (default: `HEAD`). Accepts full 64-char OIDs, short hashes (e.g.,
-`abc1234`), branch names, or `HEAD~N` notation.
+`abc1234`), branch names, tags, or `HEAD~N` / `HEAD^` notation. `HEAD^^`, `HEAD^2` and a bare `HEAD~` are refused with an error; older versions silently used the first parent.
 
 #### `[PATHS]`
 Specific files to reset. Cannot be combined with `--soft` or `--hard`.
