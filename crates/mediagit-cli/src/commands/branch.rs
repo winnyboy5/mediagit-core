@@ -1402,9 +1402,15 @@ impl RemoteBranch {
         let mut config = mediagit_config::Config::load(repo_root).await?;
         config.set_branch_upstream(name, &self.remote, format!("refs/heads/{name}"));
         config.save(repo_root)?;
-        refdb
+        if let Err(e) = refdb
             .write(&Ref::new_direct(format!("refs/heads/{name}"), self.tip))
-            .await?;
+            .await
+        {
+            // No branch was made, so no upstream entry may stay for it.
+            config.remove_branch_upstream(name);
+            let _ = config.save(repo_root);
+            return Err(e);
+        }
         if !quiet {
             crate::output::info(&format!(
                 "Downloaded branch '{name}' from '{}'",
@@ -1472,5 +1478,31 @@ mod connection_tests {
         assert!(!is_connection_error(&e("tls handshake eof")));
         assert!(!is_connection_error(&e("401 Unauthorized")));
         assert!(!is_connection_error(&e("Branch 'x' not found on remote")));
+    }
+}
+
+#[cfg(test)]
+mod remote_branch_create_tests {
+    use super::*;
+
+    /// SEC-4: a failed ref write must not leave an upstream entry behind for
+    /// a branch that does not exist.
+    #[tokio::test]
+    async fn failed_ref_write_leaves_no_upstream_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = tmp.path().join(".mediagit");
+        // A folder where the ref file belongs makes the write fail.
+        std::fs::create_dir_all(storage.join("refs/heads/feat")).unwrap();
+        let refdb = RefDatabase::new(&storage);
+        let rb = RemoteBranch {
+            remote: "origin".into(),
+            tip: Oid::hash(b"tip"),
+        };
+
+        let res = rb.create(tmp.path(), &refdb, "feat", true).await;
+
+        assert!(res.is_err(), "ref write should have failed");
+        let config = mediagit_config::Config::load(tmp.path()).await.unwrap();
+        assert!(config.get_branch_upstream("feat").is_none());
     }
 }
