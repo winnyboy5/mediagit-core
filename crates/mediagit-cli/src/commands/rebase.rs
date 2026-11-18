@@ -930,16 +930,14 @@ impl RebaseCmd {
             }
         }
 
-        // Skip current commit
+        // DL-7: the stop left the new base with the skipped commit's conflict
+        // on top. Put those paths back to the new base (other edits stay),
+        // clear the index and merge files; then drop the commit.
+        let storage = create_storage_backend(repo_root).await?;
+        let odb = ObjectDatabase::with_smart_compression(storage, 1000);
+        crate::worktree_guard::drop_skipped_step(repo_root, &odb, &state.new_parent).await?;
         state.skip_current();
         state.save(repo_root)?;
-
-        // The skipped commit's conflict is dropped: no merge files, and no
-        // staged conflict entries to block `continue`.
-        mediagit_versioning::clear_merge_state(&repo_root.join(".mediagit"))?;
-        let mut index = Index::load(repo_root)?;
-        index.clear();
-        index.save(repo_root)?;
 
         // Continue with remaining
         self.continue_rebase_process(repo_root, false).await

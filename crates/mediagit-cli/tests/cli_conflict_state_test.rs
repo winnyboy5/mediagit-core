@@ -1992,3 +1992,30 @@ fn r1_continue_refuses_stopped_commit_without_conflicts() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("rebase --abort"));
     assert!(sf.exists(), "state kept");
 }
+
+/// DL-7: `rebase --skip` must put the skipped commit's conflict markers
+/// away. The next stop used to find them still in the tree, where `add -A`
+/// would commit them.
+#[test]
+fn dl7_rebase_skip_removes_the_skipped_commits_markers() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    init_repo(d);
+    commit_file(d, "shared.txt", "base\n", "base");
+    commit_file(d, "other.txt", "base\n", "base other");
+    create_branch(d, "feature");
+    commit_file(d, "shared.txt", "main-change\n", "main edit");
+    commit_file(d, "other.txt", "main-other\n", "main edit other");
+    switch(d, "feature");
+    commit_file(d, "shared.txt", "feature-change\n", "feature edit");
+    commit_file(d, "other.txt", "feature-other\n", "feature edit other");
+    assert!(!run(d, &["rebase", "main"]).status.success());
+    // The first commit stopped; skip it. The second also conflicts and stops.
+    let skip = run(d, &["rebase", "--skip"]);
+    assert!(
+        !skip.status.success(),
+        "second commit should stop on its own conflict"
+    );
+    let shared = fs::read_to_string(d.join("shared.txt")).unwrap();
+    assert_eq!(shared, "main-change\n", "skipped commit's markers remain");
+}
