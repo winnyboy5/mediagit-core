@@ -179,7 +179,14 @@ impl BisectCmd {
             original_head
         };
 
+        // --reset over a live session: the tree still holds the old midpoint.
+        let on_disk = if state_path.exists() {
+            self.load_bisect_state(&mediagit_dir)?.on_disk
+        } else {
+            None
+        };
         let mut state = BisectState {
+            on_disk,
             original_head: original_head.to_hex(),
             bad: bad_oid.to_hex(),
             good: Vec::new(),
@@ -347,13 +354,15 @@ impl BisectCmd {
         let odb = ObjectDatabase::with_smart_compression(storage.clone(), 1000);
         let refdb = RefDatabase::new(&mediagit_dir);
 
-        // WT-1: bound deletions to tracked paths. Bisect deliberately does not
-        // *refuse* on a dirty tree the way `pull`/`merge` do — it re-checks-out
-        // on every step, so refusing would make the feature unusable — but it
-        // must never take untracked work with it.
-        let head_oid = refdb.resolve("HEAD").await.ok();
+        // The tree holds the last midpoint, not HEAD: refuse over edits (C2),
+        // and let the checkout remove midpoint-only files (I2). Untracked
+        // files that predate bisect are in neither tree, so they stay.
+        let on_disk = state.on_disk_oid()?;
+        crate::worktree_guard::AtRisk::check(&repo_root, &odb, Some(&on_disk), Some(&reset_oid))
+            .await?
+            .ensure_clean("bisect reset")?;
         let tracked =
-            crate::worktree_guard::tracked_paths(&repo_root, &odb, head_oid.as_ref()).await?;
+            crate::worktree_guard::tracked_paths(&repo_root, &odb, Some(&on_disk)).await?;
         let checkout_mgr = CheckoutManager::new(&odb, &repo_root).with_tracked_paths(tracked);
         checkout_mgr.checkout_commit(&reset_oid).await?;
 
@@ -537,13 +546,11 @@ impl BisectCmd {
         ));
         let lca = LcaFinder::new(odb.clone());
 
-        // WT-1: tracked set for this step, computed once — both checkouts below
-        // are bounded by it so untracked work survives every bisect hop.
-        let bisect_tracked = {
-            let refdb = RefDatabase::new(repo_root.join(".mediagit"));
-            let head_oid = refdb.resolve("HEAD").await.ok();
-            crate::worktree_guard::tracked_paths(repo_root, &odb, head_oid.as_ref()).await?
-        };
+        // The tree holds `on_disk`, not HEAD. Its tracked set bounds every
+        // checkout below, and the guard (C2) refuses before any write.
+        let on_disk = state.on_disk_oid()?;
+        let bisect_tracked =
+            crate::worktree_guard::tracked_paths(repo_root, &odb, Some(&on_disk)).await?;
 
         let bad_oid = Oid::from_hex(&state.bad)?;
         let good_oids: Vec<Oid> = state
@@ -574,11 +581,14 @@ impl BisectCmd {
 
         if candidates.is_empty() {
             // Range has collapsed: bad_oid is the first bad commit.
-            // WT-1: bounded — see `reset` for why bisect bounds but never refuses.
+            crate::worktree_guard::AtRisk::check(repo_root, &odb, Some(&on_disk), Some(&bad_oid))
+                .await?
+                .ensure_clean("bisect")?;
             let checkout_mgr =
                 CheckoutManager::new(&odb, repo_root).with_tracked_paths(bisect_tracked.clone());
             checkout_mgr.checkout_commit(&bad_oid).await?;
             state.current = None;
+            state.on_disk = Some(bad_oid.to_hex());
 
             println!();
             println!("{}", style("Bisect complete!").green().bold());
@@ -609,11 +619,14 @@ impl BisectCmd {
         let next_oid = candidates[midpoint];
 
         // Checkout next commit
-        // WT-1: bounded — see `reset` for why bisect bounds but never refuses.
+        crate::worktree_guard::AtRisk::check(repo_root, &odb, Some(&on_disk), Some(&next_oid))
+            .await?
+            .ensure_clean("bisect")?;
         let checkout_mgr = CheckoutManager::new(&odb, repo_root).with_tracked_paths(bisect_tracked);
         checkout_mgr.checkout_commit(&next_oid).await?;
 
         state.current = Some(next_oid.to_hex());
+        state.on_disk = state.current.clone();
 
         println!();
         println!(
@@ -806,10 +819,18 @@ struct BisectState {
     skip: Vec<String>,
     /// The commit currently checked out for the user/script to test.
     current: Option<String>,
+    /// Commit whose files the working tree holds; `None` = `original_head`.
+    /// Differs from `current` after the last step (first bad commit).
+    #[serde(default)]
+    on_disk: Option<String>,
     log: Vec<String>,
 }
 
 impl BisectState {
+    fn on_disk_oid(&self) -> Result<Oid> {
+        Oid::from_hex(self.on_disk.as_deref().unwrap_or(&self.original_head))
+    }
+
     fn log_entry(&mut self, entry: String) {
         self.log.push(format!(
             "{}: {}",

@@ -164,6 +164,7 @@ changes fix real bugs.
 ### Fixed
 
 - **A staged new file is no longer overwritten by a branch switch, merge, pull, cherry-pick, revert or rebase.** If the target version has a different file at a path you added but did not commit, the command now refuses and names the file. A refused branch switch also leaves HEAD where it was. The refusal carries the error code `would_overwrite`, and the app shows plain words with no Retry button.
+- **`bisect` no longer overwrites your edits, and `bisect reset` puts the folder back.** `start`, `good`, `bad`, `skip` and `reset` now refuse, and name the files, when you changed a tracked file or have an uncommitted new file the next step would replace. `bisect reset` also removes files that only existed in a version it tested, so the folder matches your original commit again. Your own untracked files are left alone.
 
 - **`reset` and revisions.** `reset` refuses `HEAD^^`, `HEAD^2` and a bare
   `HEAD~`; the old `reset` silently took the first parent.

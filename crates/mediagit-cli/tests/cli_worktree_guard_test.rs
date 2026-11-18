@@ -773,3 +773,99 @@ fn i6_refusal_has_would_overwrite_code() {
         .stdout(predicate::str::contains("\"code\":\"would_overwrite\""))
         .stdout(predicate::str::contains("new.psd"));
 }
+
+// ============================================================================
+// C2 / I2 — bisect must not overwrite edits, and reset must restore the tree
+// ============================================================================
+
+/// Five commits; `added.txt` exists only in the middle one (c3). Returns the
+/// oldest OID. Starting from HEAD the first midpoint is c3.
+fn bisect_history(dir: &Path) -> String {
+    init_repo(dir);
+    commit_file(dir, "f.txt", "v1", "c1");
+    commit_file(dir, "f.txt", "v2", "c2");
+    commit_file(dir, "added.txt", "mid only", "c3");
+    fs::remove_file(dir.join("added.txt")).unwrap();
+    mediagit()
+        .args(["add", "-A"])
+        .current_dir(dir)
+        .assert()
+        .success();
+    mediagit()
+        .args(["commit", "-m", "c4"])
+        .current_dir(dir)
+        .assert()
+        .success();
+    commit_file(dir, "f.txt", "v5", "c5");
+    commit_oid_back(dir, 4)
+}
+
+fn bisect(dir: &Path, args: &[&str]) -> assert_cmd::assert::Assert {
+    mediagit()
+        .arg("bisect")
+        .args(args)
+        .current_dir(dir)
+        .assert()
+}
+
+fn refused_keeps_edit(dir: &Path, args: &[&str]) {
+    let state_before = fs::read(dir.join(".mediagit/BISECT_STATE")).ok();
+    bisect(dir, args)
+        .failure()
+        .stderr(predicate::str::contains("would be overwritten"));
+    assert_eq!(fs::read_to_string(dir.join("f.txt")).unwrap(), "MY EDIT");
+    assert_eq!(
+        fs::read(dir.join(".mediagit/BISECT_STATE")).ok(),
+        state_before,
+        "refused step changed the session"
+    );
+}
+
+#[test]
+fn c2_bisect_start_refuses_edited_file() {
+    let temp = TempDir::new().unwrap();
+    let oldest = bisect_history(temp.path());
+    fs::write(temp.path().join("f.txt"), "MY EDIT").unwrap();
+    refused_keeps_edit(temp.path(), &["start", "HEAD", &oldest]);
+    assert!(!temp.path().join(".mediagit/BISECT_STATE").exists());
+}
+
+#[test]
+fn c2_bisect_good_bad_skip_refuse_edited_file() {
+    let temp = TempDir::new().unwrap();
+    let oldest = bisect_history(temp.path());
+    bisect(temp.path(), &["start", "HEAD", &oldest]).success();
+    fs::write(temp.path().join("f.txt"), "MY EDIT").unwrap();
+    refused_keeps_edit(temp.path(), &["good"]);
+    refused_keeps_edit(temp.path(), &["bad"]);
+    refused_keeps_edit(temp.path(), &["skip"]);
+}
+
+#[test]
+fn c2_bisect_reset_refuses_edited_file() {
+    let temp = TempDir::new().unwrap();
+    let oldest = bisect_history(temp.path());
+    bisect(temp.path(), &["start", "HEAD", &oldest]).success();
+    fs::write(temp.path().join("f.txt"), "MY EDIT").unwrap();
+    refused_keeps_edit(temp.path(), &["reset"]);
+}
+
+#[test]
+fn i2_bisect_reset_removes_midpoint_only_files_keeps_untracked() {
+    let temp = TempDir::new().unwrap();
+    let oldest = bisect_history(temp.path());
+    let notes = temp.path().join("notes.md");
+    fs::write(&notes, "UNTRACKED").unwrap();
+    bisect(temp.path(), &["start", "HEAD", &oldest]).success();
+    assert!(
+        temp.path().join("added.txt").exists(),
+        "midpoint should hold added.txt"
+    );
+    bisect(temp.path(), &["reset"]).success();
+    assert!(
+        !temp.path().join("added.txt").exists(),
+        "midpoint-only file left behind after reset"
+    );
+    assert_eq!(fs::read_to_string(temp.path().join("f.txt")).unwrap(), "v5");
+    assert_eq!(fs::read_to_string(&notes).unwrap(), "UNTRACKED");
+}

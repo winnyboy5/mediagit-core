@@ -170,7 +170,7 @@ impl AtRisk {
                 msg.push_str("\n\n");
             }
             msg.push_str(&format!(
-                "The following untracked working tree files would be overwritten by {operation}:\n{}\nPlease move or remove them before you {operation}.",
+                "These files are not committed (new or staged) and would be overwritten by {operation}:\n{}\nPlease move or remove them before you {operation}.",
                 indent(&self.untracked_collisions)
             ));
         }
