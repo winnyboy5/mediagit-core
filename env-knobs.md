@@ -69,6 +69,8 @@ Lifecycle: **experimental** → **stable** (2 clean deep-test releases) → **de
 | `MEDIAGIT_DELTA_LEVEL` | `19` | 0.3.0-rc.4 | add/commit | stable | zstd dictionary compression level for delta encoding. Valid `1`-`22`; anything outside that range is rejected with a warning and the default used. |
 | `MEDIAGIT_ODB_CACHE_MB` | `512` | 0.3.0-rc.4 | all | stable | Object-database in-memory cache size, in MiB. Unparseable values fall back to the default rather than to zero. |
 | `MEDIAGIT_S3_ATTEST` | unset (on for `*.amazonaws.com`, off elsewhere) | 0.4.0-rc.1 | storage/s3 | stable | Escape hatch for provider upload attestation on the S3-compatible driver. `off`/`0`/`false` forces it off; `on`/`1` forces CRC64NVME on a non-AWS endpoint that supports it; `crc32c` selects that algorithm. NOT tuning: with attestation off the post-push read-back stays, so correctness is unchanged either way. |
+| `MEDIAGIT_S3_ACCESS_KEY_ID` | unset | 0.8.0-rc.1 | server/storage/s3 | stable | Server S3 access key for served repositories and the default storage. Wins over `access_key_id` in the repo config. Missing from both places is an error that names both options. |
+| `MEDIAGIT_S3_SECRET_ACCESS_KEY` | unset | 0.8.0-rc.1 | server/storage/s3 | stable | Server S3 secret key. Wins over `secret_access_key` in the repo config, independently of the access key. Missing from both places is an error that names both options. |
 
 ## Cloud Packs (Track F)
 
