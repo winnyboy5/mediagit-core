@@ -869,3 +869,67 @@ fn i2_bisect_reset_removes_midpoint_only_files_keeps_untracked() {
     assert_eq!(fs::read_to_string(temp.path().join("f.txt")).unwrap(), "v5");
     assert_eq!(fs::read_to_string(&notes).unwrap(), "UNTRACKED");
 }
+
+// ============================================================================
+// F3 item 5 — a staged new file the target lacks is refused, not deleted.
+// The index counts as tracked, so a full checkout used to delete it.
+// ============================================================================
+
+fn stage_new(dir: &Path, name: &str, body: &str) {
+    fs::write(dir.join(name), body).unwrap();
+    mediagit()
+        .args(["add", name])
+        .current_dir(dir)
+        .assert()
+        .success();
+}
+
+#[test]
+fn f3_switch_refuses_staged_new_file_the_target_lacks() {
+    let temp = TempDir::new().unwrap();
+    init_repo(temp.path());
+    commit_file(temp.path(), "a.txt", "base", "initial");
+    branch_create(temp.path(), "feat");
+    stage_new(temp.path(), "wip.psd", "staged");
+    mediagit()
+        .args(["branch", "switch", "feat"])
+        .current_dir(temp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("wip.psd"));
+    assert_eq!(
+        fs::read_to_string(temp.path().join("wip.psd")).unwrap(),
+        "staged"
+    );
+}
+
+#[test]
+fn f3_bisect_step_refuses_staged_new_file_the_target_lacks() {
+    let temp = TempDir::new().unwrap();
+    init_repo(temp.path());
+    commit_file(temp.path(), "src/app.txt", "v1", "good commit");
+    commit_file(temp.path(), "src/app.txt", "v2", "second");
+    commit_file(temp.path(), "src/app.txt", "v3", "bad commit");
+    stage_new(temp.path(), "wip.psd", "staged");
+    mediagit()
+        .args(["bisect", "start"])
+        .current_dir(temp.path())
+        .assert()
+        .success();
+    mediagit()
+        .args(["bisect", "bad"])
+        .current_dir(temp.path())
+        .assert()
+        .success();
+    let oldest = commit_oid_back(temp.path(), 2);
+    mediagit()
+        .args(["bisect", "good", &oldest])
+        .current_dir(temp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("wip.psd"));
+    assert_eq!(
+        fs::read_to_string(temp.path().join("wip.psd")).unwrap(),
+        "staged"
+    );
+}

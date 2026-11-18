@@ -210,7 +210,7 @@ impl RebaseCmd {
         // any ref or working-tree write.
         // BUG-008: an unsafe path is the more useful thing to report first.
         crate::repo::ensure_no_unsafe_paths(&odb, &repo_root, &[current_oid, upstream_oid]).await?;
-        crate::worktree_guard::AtRisk::check(
+        crate::worktree_guard::AtRisk::check_checkout(
             &repo_root,
             &odb,
             Some(&current_oid),

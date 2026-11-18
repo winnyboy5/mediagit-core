@@ -50,7 +50,21 @@ impl AtRisk {
         head: Option<&Oid>,
         target: Option<&Oid>,
     ) -> Result<Self> {
-        Self::check_changed(repo_root, odb, head, target, None).await
+        Self::run(repo_root, odb, head, target, None, false).await
+    }
+
+    /// [`Self::check`] for a full checkout of `target` (branch switch, pull,
+    /// rebase start, bisect). The checkout deletes every tracked path the target
+    /// lacks, and the index counts as tracked, so a staged new file the target
+    /// does not have would be deleted with its blob left unreferenced. Such a
+    /// file is reported in `modified`: commit it or take it out of the index.
+    pub async fn check_checkout(
+        repo_root: &Path,
+        odb: &ObjectDatabase,
+        head: Option<&Oid>,
+        target: Option<&Oid>,
+    ) -> Result<Self> {
+        Self::run(repo_root, odb, head, target, None, true).await
     }
 
     /// Like [`Self::check`], but with `base` set only the paths `target`
@@ -63,6 +77,17 @@ impl AtRisk {
         head: Option<&Oid>,
         target: Option<&Oid>,
         base: Option<&Oid>,
+    ) -> Result<Self> {
+        Self::run(repo_root, odb, head, target, base, false).await
+    }
+
+    async fn run(
+        repo_root: &Path,
+        odb: &ObjectDatabase,
+        head: Option<&Oid>,
+        target: Option<&Oid>,
+        base: Option<&Oid>,
+        full_checkout: bool,
     ) -> Result<Self> {
         let head_files = match head {
             Some(oid) => {
@@ -134,6 +159,15 @@ impl AtRisk {
                         .into_iter()
                         .filter(|p| target_files.get(p).is_some_and(|(t, _)| changed(p, t)))
                         .collect();
+                    if full_checkout {
+                        modified.extend(
+                            staged_new
+                                .iter()
+                                .filter(|(p, _)| !target_files.contains_key(p))
+                                .map(|(p, _)| p.clone()),
+                        );
+                        modified.sort();
+                    }
                     hits.extend(staged_new.into_iter().filter_map(|(p, staged)| {
                         let (t, _) = target_files.get(&p)?;
                         (*t != staged && changed(&p, t)).then_some(p)

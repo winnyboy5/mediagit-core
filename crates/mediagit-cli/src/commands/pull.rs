@@ -780,7 +780,7 @@ async fn fast_forward_to(
     // outcome of a routine `pull` — so it was the most reachable path by which
     // uncommitted edits were overwritten and untracked files deleted.
     let head_oid = refdb.resolve("HEAD").await.ok();
-    crate::worktree_guard::AtRisk::check(repo_root, odb, head_oid.as_ref(), Some(oid))
+    crate::worktree_guard::AtRisk::check_checkout(repo_root, odb, head_oid.as_ref(), Some(oid))
         .await?
         .ensure_clean("pull")?;
 
