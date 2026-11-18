@@ -41,11 +41,11 @@ test.describe('Activity bar and drawer', () => {
     await boot(page, { repo_add: [{ hold: true }, { resolve: null }] })
     await page.getByRole('button', { name: 'Include all', exact: true }).click()
     await expect(pill(page)).toContainText('Staging 6 files')
-    // Local ops have no cancel; only push/pull/fetch/clone do.
+    // Staging can be stopped (BUG-038); saving a version cannot.
     await pill(page).click()
     const drawer = page.getByTestId('activity-drawer')
     await expect(drawer.getByRole('heading', { name: 'Running' })).toBeVisible()
-    await expect(drawer.getByRole('button', { name: /Cancel/ })).toHaveCount(0)
+    await expect(drawer.getByRole('button', { name: /Cancel/ })).toHaveCount(1)
     await expectNoAxeViolations(page)
     await ipcRelease(page)
     await expect(drawer.getByRole('heading', { name: 'Finished' })).toBeVisible()
