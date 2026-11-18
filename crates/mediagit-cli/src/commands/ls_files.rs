@@ -178,7 +178,12 @@ impl LsFilesCmd {
             tracing::debug!("stat cache not saved: {e}");
         }
 
-        let size = |p: &Path| std::fs::metadata(repo_root.join(p)).ok().map(|m| m.len());
+        let size = |p: &Path| {
+            std::fs::metadata(repo_root.join(p))
+                .ok()
+                .filter(|m| m.is_file())
+                .map(|m| m.len())
+        };
         let mut files: Vec<LsFilesEntry> = Vec::new();
         for path in &working_files {
             let s = key(path);

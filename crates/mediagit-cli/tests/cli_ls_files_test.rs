@@ -140,3 +140,33 @@ fn two_thousand_files() {
     let rows = ls(d.path(), &[]);
     assert_eq!(rows.iter().filter(|r| r.1 == "new").count(), 2000);
 }
+
+/// BUG-012: a folder named in .mediagitignore is listed (once, with a
+/// trailing slash) by `status --ignored` and `ls-files --ignored`.
+#[test]
+fn bug012_ignored_folder_is_listed_with_trailing_slash() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let d = dir.path();
+    let run = |args: &[&str]| {
+        let out = assert_cmd::Command::cargo_bin("mediagit")
+            .unwrap()
+            .args(args)
+            .current_dir(d)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    run(&["init", "-q"]);
+    std::fs::write(d.join(".mediagitignore"), "*.log\nTemp/\n").unwrap();
+    std::fs::create_dir_all(d.join("Temp/deep")).unwrap();
+    std::fs::write(d.join("Temp/deep/more.tmp"), "x").unwrap();
+    std::fs::write(d.join("debug.log"), "x").unwrap();
+
+    let porcelain = run(&["status", "--porcelain", "--ignored"]);
+    assert!(porcelain.lines().any(|l| l == "!! Temp/"), "{porcelain}");
+    assert!(porcelain.contains("!! debug.log"), "{porcelain}");
+    assert!(!porcelain.contains("more.tmp"), "{porcelain}");
+    let ls = run(&["ls-files", "--ignored"]);
+    assert!(ls.contains("Temp/"), "{ls}");
+}

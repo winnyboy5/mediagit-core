@@ -962,12 +962,15 @@ impl StatusCmd {
                 && let Ok(rel) = path.strip_prefix(repo_root)
                 && m.is_ignored(rel, is_dir)
             {
-                if is_file {
-                    // Track ignored files for --ignored output
-                    let normalized = PathBuf::from(rel.to_string_lossy().replace('\\', "/"));
-                    ignored_files.insert(normalized);
+                // Track ignored files for --ignored output. An ignored folder is
+                // listed once, with a trailing slash, and not walked (BUG-012).
+                if is_file || is_dir {
+                    let mut normalized = rel.to_string_lossy().replace('\\', "/");
+                    if is_dir {
+                        normalized.push('/');
+                    }
+                    ignored_files.insert(PathBuf::from(normalized));
                 }
-                // For dirs: prune entire subtree silently (don't enumerate children)
                 continue;
             }
 
