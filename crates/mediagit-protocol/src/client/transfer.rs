@@ -56,7 +56,7 @@ impl ProtocolClient {
             })
             .await?;
             if !resp.status().is_success() {
-                anyhow::bail!("POST /chunks/upload-urls returned {}", resp.status());
+                return Err(crate::http_error::fail("POST", "/chunks/upload-urls", resp).await);
             }
             resp.json::<std::collections::HashMap<String, Option<PresignedPutInfo>>>()
                 .await
@@ -119,7 +119,7 @@ impl ProtocolClient {
                     })
                     .await?;
                     if !resp.status().is_success() {
-                        anyhow::bail!("POST /chunks/download-urls returned {}", resp.status());
+                        return Err(crate::http_error::fail("POST", "/chunks/download-urls", resp).await);
                     }
                     resp.json::<std::collections::HashMap<String, Option<PresignedGetInfo>>>()
                         .await
@@ -162,7 +162,7 @@ impl ProtocolClient {
             send_with_rate_limit_retry(|| self.client.post(&url).json(&Req { chunk_ids }).send())
                 .await?;
         if !resp.status().is_success() {
-            anyhow::bail!("POST /chunks/complete returned {}", resp.status());
+            return Err(crate::http_error::fail("POST", "/chunks/complete", resp).await);
         }
         let r = resp
             .json::<Resp>()
@@ -212,7 +212,9 @@ impl ProtocolClient {
             })
             .await?;
             if !resp.status().is_success() {
-                anyhow::bail!("POST /chunks/verify-integrity returned {}", resp.status());
+                return Err(
+                    crate::http_error::fail("POST", "/chunks/verify-integrity", resp).await,
+                );
             }
             let r = resp
                 .json::<Resp>()
@@ -260,7 +262,9 @@ impl ProtocolClient {
             })
             .await?;
             if !resp.status().is_success() {
-                anyhow::bail!("POST /objects/verify-integrity returned {}", resp.status());
+                return Err(
+                    crate::http_error::fail("POST", "/objects/verify-integrity", resp).await,
+                );
             }
             let r = resp
                 .json::<Resp>()
@@ -356,5 +360,36 @@ impl ProtocolClient {
             }
         }
         empty
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::http_error::{HttpError, HttpErrorKind};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// M1: a 401 on a control-plane call is the typed error, so the CLI can
+    /// answer `not_signed_in` and drop the saved sign-in.
+    #[tokio::test]
+    async fn control_plane_status_failure_is_typed() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = s.read(&mut buf).await;
+            let _ = s
+                .write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await;
+        });
+        let client = crate::ProtocolClient::new(format!("http://{addr}/repo"));
+        let err = client
+            .verify_chunk_uploads(&["a".to_string()])
+            .await
+            .unwrap_err();
+        let typed = err.downcast_ref::<HttpError>().expect("typed error");
+        assert_eq!(typed.kind, HttpErrorKind::Unauthorized);
     }
 }

@@ -2593,7 +2593,7 @@ impl FsckRepair {
                 // rewrite, and its bytes are not safely kept.
                 warn!("Cannot quarantine damaged {kind} {oid}: {e}; left in place");
                 out.errors.push(format!(
-                    "{oid}: could not be moved to quarantine ({kind}): {e};                      it is partly or wholly still in the store"
+                    "{oid}: could not be moved to quarantine ({kind}): {e}; it is partly or wholly still in the store"
                 ));
                 out.lost
                     .extend(files.iter().map(|f| (*oid, f.path.clone())));

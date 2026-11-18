@@ -402,7 +402,7 @@ impl ProtocolClient {
         .await
         .context("POST /chunks/locate")?;
         if !resp.status().is_success() {
-            anyhow::bail!("POST /chunks/locate returned {}", resp.status());
+            return Err(crate::http_error::fail("POST", "/chunks/locate", resp).await);
         }
         let map: std::collections::HashMap<String, LocEntry> =
             resp.json().await.context("parse /chunks/locate")?;
@@ -440,9 +440,8 @@ impl ProtocolClient {
             })
             .await?;
             if !resp.status().is_success() {
-                anyhow::bail!(
-                    "POST /packs/presign-download-urls returned {}",
-                    resp.status()
+                return Err(
+                    crate::http_error::fail("POST", "/packs/presign-download-urls", resp).await,
                 );
             }
             resp.json::<std::collections::HashMap<String, Option<PresignedGetInfo>>>()
@@ -1154,7 +1153,7 @@ async fn fetch_pack_slices_batch(
         return Ok(());
     }
     if !resp.status().is_success() {
-        anyhow::bail!("batch-get returned {} for pack {}", resp.status(), pack_oid);
+        return Err(crate::http_error::fail("POST", "/packs/batch-get", resp).await);
     }
 
     let body = resp.bytes().await.context("read batch-get body")?;

@@ -414,7 +414,7 @@ impl Engine {
             .map_err(|e| EngineError::Spawn(e.to_string()))?;
         let result = parse_envelope(&out).map_err(|e| match e {
             EngineError::Protocol(m) if !tail.is_empty() => {
-                EngineError::Protocol(format!("{m}; stderr: {}", tail.join("\n")))
+                EngineError::Protocol(format!("{m}; stderr: {}", scrub(&tail.join("\n"))))
             }
             other => other,
         });
@@ -472,6 +472,31 @@ fn kill_and_reap(child: &mut tokio::process::Child) {
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+}
+
+/// Same rule as the CLI's `output::scrub` (this crate takes no mediagit-*
+/// dependency): the stderr tail can hold a presigned URL or `user:pass@host`
+/// when the CLI died without an envelope. Drop both, and control characters.
+fn scrub(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("://") {
+        let (head, tail) = rest.split_at(i + 3);
+        out.push_str(head);
+        let end = tail
+            .find(|c: char| c.is_whitespace() || matches!(c, ')' | '"' | '\'' | '>' | '<'))
+            .unwrap_or(tail.len());
+        let url = &tail[..end];
+        let (authority, path) = url.split_at(url.find('/').unwrap_or(url.len()));
+        let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+        out.push_str(host.split(['?', '#']).next().unwrap_or(host));
+        out.push_str(path.split(['?', '#']).next().unwrap_or(path));
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out.chars()
+        .filter(|c| !c.is_control() || *c == '\n')
+        .collect()
 }
 
 /// One stderr line as text: invalid UTF-8 is replaced, the line ending dropped.
@@ -626,6 +651,14 @@ mod tests {
             parse_envelope(r#"{"v":1,"ok":false}"#),
             Err(EngineError::Protocol(_))
         ));
+    }
+
+    #[test]
+    fn stderr_tail_drops_credentials_and_signatures() {
+        assert_eq!(
+            scrub("panic at https://bob:pw@h:9/k?X-Amz-Signature=abc now\nnext"),
+            "panic at https://h:9/k now\nnext"
+        );
     }
 
     #[test]

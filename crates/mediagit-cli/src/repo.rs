@@ -805,6 +805,15 @@ async fn create_inner_storage_backend(
             Ok(Arc::new(storage))
         }
         mediagit_config::StorageConfig::S3(s3_config) => {
+            // The CLI reads credentials from the config file only. Without this,
+            // empty keys surface later as a signature error from the server.
+            let has = |v: &Option<String>| v.as_ref().is_some_and(|s| !s.is_empty());
+            if !has(&s3_config.access_key_id) || !has(&s3_config.secret_access_key) {
+                anyhow::bail!(
+                    "S3 credentials are missing. Set storage.access_key_id and \
+                     storage.secret_access_key in .mediagit/config.toml."
+                );
+            }
             if let Some(endpoint) = &s3_config.endpoint {
                 // S3-compatible (MinIO, DigitalOcean Spaces, etc.)
                 let storage = mediagit_storage::MinIOBackend::new_with_prefix(
@@ -1044,6 +1053,25 @@ mod tests {
             std::fs::read_dir(temp.path()).unwrap().count(),
             0,
             "a failed open left files behind"
+        );
+    }
+
+    /// M6: an S3 config without keys says so, instead of a signature error later.
+    #[tokio::test]
+    async fn s3_without_credentials_names_the_missing_config() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path().join(".mediagit");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(
+            dir.join("config.toml"),
+            "[storage]\nbackend = \"s3\"\nbucket = \"my-bucket\"\nregion = \"us-east-1\"\n",
+        )
+        .unwrap();
+        let err = create_storage_backend(temp.path()).await.err().unwrap();
+        assert!(
+            format!("{err:#}").contains("S3 credentials are missing"),
+            "{err:#}"
         );
     }
 

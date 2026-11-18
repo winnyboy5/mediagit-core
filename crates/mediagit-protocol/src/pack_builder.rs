@@ -328,7 +328,7 @@ pub async fn upload_and_register(
     .context("POST /packs/upload-urls")?;
 
     if !presign_resp.status().is_success() {
-        anyhow::bail!("POST /packs/upload-urls returned {}", presign_resp.status());
+        return Err(crate::http_error::fail("POST", "/packs/upload-urls", presign_resp).await);
     }
 
     let presign_map: std::collections::HashMap<String, Option<serde_json::Value>> = presign_resp
@@ -650,7 +650,7 @@ pub async fn upload_and_register(
         .await
         .context("proxy PUT of pack")?;
         if !resp.status().is_success() {
-            anyhow::bail!("proxy PUT returned {}", resp.status());
+            return Err(crate::http_error::fail("PUT", "/packs (proxy)", resp).await);
         }
         tracing::debug!(pack = %pack_oid_hex, bytes = byte_len, "Pack uploaded via proxy");
     }
@@ -686,7 +686,7 @@ pub async fn upload_and_register(
     .context("POST /packs/complete")?;
 
     if !complete_resp.status().is_success() {
-        anyhow::bail!("POST /packs/complete returned {}", complete_resp.status());
+        return Err(crate::http_error::fail("POST", "/packs/complete", complete_resp).await);
     }
 
     // 4. Clean up temp file

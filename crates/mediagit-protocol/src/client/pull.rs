@@ -1497,15 +1497,15 @@ fn deferred_failure_message(
     let local_io = e.chain().any(|c| c.is::<std::io::Error>());
     if local_io {
         format!(
-            "could not save downloaded data on this computer: {e:#}.              Check free disk space and folder permissions, then try again"
+            "could not save downloaded data on this computer: {e:#}. Check free disk space and folder permissions, then try again"
         )
     } else if !base_local {
         format!(
-            "{count} chunk(s) need data (for example chunk {base_id}) that this download did not include.              Fetch all branches, then try again"
+            "{count} chunk(s) need data (for example chunk {base_id}) that this download did not include. Fetch all branches, then try again"
         )
     } else {
         format!(
-            "the server sent a bad delta: chunk {chunk_id} (base {base_id}): {e:#}.              {count} chunk(s) could not be rebuilt; nothing was stored for them"
+            "the server sent a bad delta: chunk {chunk_id} (base {base_id}): {e:#}. {count} chunk(s) could not be rebuilt; nothing was stored for them"
         )
     }
 }
