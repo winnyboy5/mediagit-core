@@ -490,3 +490,32 @@ fn sparse_disable_keeps_untracked_file_at_returning_path() {
         .assert()
         .stdout(predicate::str::contains("Mode"));
 }
+
+// ---- BUG-014: `commit --all` is `add -u` then commit ----
+
+#[test]
+fn commit_all_stages_tracked_changes_only_and_is_sparse_safe() {
+    let temp = keep_big_repo();
+    let d = temp.path();
+    commit_file(d, "keep/gone.txt", "bye", "gone");
+    run(d, &["sparse-checkout", "set", "keep"]);
+    fs::write(d.join("keep/k.txt"), "k2 edited").unwrap();
+    fs::remove_file(d.join("keep/gone.txt")).unwrap();
+    fs::write(d.join("keep/new.txt"), "untracked").unwrap();
+
+    run(d, &["commit", "-a", "-m", "v2"]);
+
+    let tree = run(d, &["show", "--tree", "HEAD"]);
+    assert!(!tree.contains("gone.txt"), "deletion committed: {tree}");
+    assert!(
+        !tree.contains("new.txt"),
+        "untracked file committed: {tree}"
+    );
+    assert_eq!(run(d, &["show", "HEAD:keep/k.txt"]).trim_end(), "k2 edited");
+    assert_big_intact(d);
+
+    // --machine prints one document, not an add report followed by a commit report.
+    fs::write(d.join("keep/k.txt"), "k3").unwrap();
+    let out = run(d, &["--machine", "commit", "-a", "-m", "v3"]);
+    serde_json::from_str::<serde_json::Value>(out.trim()).unwrap_or_else(|e| panic!("{e}: {out}"));
+}

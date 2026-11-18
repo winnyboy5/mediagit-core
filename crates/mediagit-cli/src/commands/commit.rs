@@ -76,7 +76,7 @@ pub struct CommitCmd {
     #[arg(short = 'F', long, value_name = "FILE")]
     pub file: Option<String>,
 
-    /// Stage modified and deleted files before committing
+    /// Stage changed and deleted tracked files before committing (new files are not added)
     #[arg(short = 'a', long)]
     pub all: bool,
 
@@ -122,17 +122,6 @@ impl CommitCmd {
         // measurement covers the whole command, matching `add`'s.
         let bench_wall_start = std::time::Instant::now();
 
-        // The -a (--all) flag is not supported in MediaGit.
-        // MediaGit uses an explicit `add` → `commit` workflow by design,
-        // because `add` performs heavy processing (chunking, delta encoding,
-        // compression) that is inappropriate to silently trigger from commit.
-        if self.all {
-            return Err(anyhow::anyhow!(
-                "commit -a is not supported in MediaGit.\n\
-                 Use 'mediagit add .' followed by 'mediagit commit -m \"...\"' instead."
-            ));
-        }
-
         // Determine the commit message with git's precedence: -m wins, then
         // -F (read from file), then -e (or no source, if a tty) opens an
         // editor. If none of -m/-F/-e was given and stdin isn't a tty, there
@@ -160,6 +149,14 @@ impl CommitCmd {
 
         // Find repository root (needed for config loading, signoff identity resolution)
         let repo_root = find_repo_root()?;
+
+        // `-a` is `add -u`: tracked files only, changed and deleted, and
+        // never a sparse-excluded file (BUG-014).
+        if self.all {
+            let mut add = <super::add::AddCmd as clap::Parser>::parse_from(["add", "-u"]);
+            add.quiet = self.quiet;
+            add.stage().await?;
+        }
 
         // Stage paths if --include is used
         if !self.include.is_empty() {

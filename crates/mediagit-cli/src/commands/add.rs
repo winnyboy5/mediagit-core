@@ -398,6 +398,16 @@ pub struct FileResult {
 
 impl AddCmd {
     pub async fn execute(&self) -> Result<()> {
+        let report = self.stage().await?;
+        if crate::output::machine_mode() {
+            return crate::output::emit_ok(&report);
+        }
+        Ok(())
+    }
+
+    /// Stage the files and report what happened, without printing the
+    /// `--machine` document (`commit --all` runs this, then commits).
+    pub async fn stage(&self) -> Result<AddReport> {
         use crate::output;
 
         // Validate: either --all, --update, or paths must be provided
@@ -1029,17 +1039,13 @@ impl AddCmd {
 
         mediagit_protocol::bench::emit_add_summary(_add_wall, total_bytes, added_count);
 
-        if output::machine_mode() {
-            return output::emit_ok(&AddReport {
-                added: added_count - modified_count,
-                modified: modified_count,
-                deleted: deleted_count,
-                bytes: staged_bytes,
-                repaired_unsafe_paths: repaired.values().cloned().collect(),
-            });
-        }
-
-        Ok(())
+        Ok(AddReport {
+            added: added_count - modified_count,
+            modified: modified_count,
+            deleted: deleted_count,
+            bytes: staged_bytes,
+            repaired_unsafe_paths: repaired.values().cloned().collect(),
+        })
     }
 
     /// Process a single file: hash, check HEAD, write to ODB

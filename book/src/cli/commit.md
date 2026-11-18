@@ -38,10 +38,9 @@ Allow creating a commit with no changes.
 Stage the listed paths before committing. Useful for including files in a single step instead of separate `add` and `commit` commands.
 
 ### `-a, --all`
-Present in `--help` (clap describes it as staging modified and deleted files before committing),
-but MediaGit's `commit` always rejects it: `commit -a is not supported in MediaGit`. `add` performs
-chunking, delta encoding, and compression, which is too heavy to trigger silently from `commit`.
-Use `mediagit add .` followed by `mediagit commit -m "..."` instead.
+Stage every changed or deleted file that is already tracked, then commit. Same as
+`mediagit add -u` followed by `mediagit commit`. New files are not added, and files
+outside a sparse checkout are left alone.
 
 ### `-s, --signoff`
 Add a `Signed-off-by` trailer to the commit message. If the trailer is already present, it will not be duplicated.
