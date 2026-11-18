@@ -1102,51 +1102,36 @@ pub async fn upload_chunk_delta(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    let storage = get_or_init_storage(&state, &repo_path).await?;
-
-    let delta_key = format!("chunk-deltas/{}", chunk_id);
-    storage.put(&delta_key, &body).await.map_err(|e| {
-        tracing::error!(chunk = %chunk_id, error = %e, "Failed to persist chunk-delta payload");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    // Register the edge in the shared per-repo delta graph BEFORE the sidecar
-    // reaches disk. The ODB's cycle/depth guard re-checks against that graph
-    // instead of storage, which is sound only while in-memory edges are a
-    // superset of on-disk ones — and this handler is a second, independent
-    // writer of `.meta` inside the same process. Skipping it let a chain reach
-    // depth 11 against a cap of 10 (campaign 20260805-repro-a9, A11), leaving
-    // a repository that failed fsck, push and clone.
-    if let (Ok(chunk_oid), Ok(base_oid)) = (Oid::from_hex(&chunk_id), Oid::from_hex(&base_hex)) {
-        // Loud, but not fatal: the chunk payload above is already stored, and
-        // failing the request over bookkeeping would throw that away. The
-        // sidecar below still lands, so the invariant is broken only until
-        // something re-learns this edge from storage — which the miss path
-        // does on its own. That self-healing is exactly what makes this easy
-        // to never notice, hence `error!`.
-        match get_or_init_odb(&state, &repo_path).await {
-            Ok(odb) => odb.register_external_delta_edge(chunk_oid, base_oid).await,
-            Err(status) => tracing::error!(
-                repo = %repo,
-                chunk_id = %chunk_id,
-                base = %base_hex,
-                status = %status,
-                "Chunk-delta edge not registered in the in-memory graph: the ODB \
-                 could not be opened. The cycle/depth guard will re-read this edge \
-                 from storage instead."
-            ),
-        }
+    // SEC-5: rebuild the chunk from the delta and check its id BEFORE anything
+    // is stored, through the same `write_chunk_delta` every other writer uses
+    // (it also registers the edge in the depth/cycle graph and writes `.meta`
+    // first). A bad delta that went live failed fsck and every later clone.
+    let (Ok(chunk_oid), Ok(base_oid)) = (Oid::from_hex(&chunk_id), Oid::from_hex(&base_hex)) else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let odb = get_or_init_odb(&state, &repo_path).await?;
+    // The client sends a chain's deltas in no fixed order. A base that is not
+    // stored yet cannot be verified against: answer "failed dependency" and
+    // store nothing, and the client retries after the base has landed.
+    if !odb.chunk_exists(&base_oid).await.unwrap_or(false) {
+        tracing::debug!(
+            repo = %repo,
+            chunk_id = %chunk_id,
+            base = %base_hex,
+            "Chunk-delta upload deferred: base chunk not stored yet"
+        );
+        return Err(StatusCode::FAILED_DEPENDENCY);
     }
-
-    let meta_key = format!("chunk-deltas/{}.meta", chunk_id);
-    let meta_body = format!("base:{}", base_hex);
-    storage
-        .put(&meta_key, meta_body.as_bytes())
-        .await
-        .map_err(|e| {
-            tracing::error!(chunk = %chunk_id, error = %e, "Failed to persist chunk-delta meta");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    if let Err(e) = odb.write_chunk_delta(&chunk_oid, &base_oid, &body).await {
+        tracing::warn!(
+            repo = %repo,
+            chunk_id = %chunk_id,
+            base = %base_hex,
+            error = %e,
+            "Refusing chunk-delta upload"
+        );
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
 
     tracing::debug!(
         repo = %repo,

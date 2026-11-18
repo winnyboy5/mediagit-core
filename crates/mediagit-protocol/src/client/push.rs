@@ -666,12 +666,11 @@ impl ProtocolClient {
         &self,
         chunk_id: &Oid,
         base_id: &Oid,
-        compressed_delta_bytes: Vec<u8>,
-    ) -> Result<()> {
+        compressed_delta_bytes: bytes::Bytes,
+    ) -> Result<bool> {
         let url = format!("{}/chunk-deltas/{}", self.base_url, chunk_id.to_hex());
-        // Bytes outside the closure, .clone() inside — send_with_rate_limit_retry
-        // re-invokes `make` per attempt, and `Fn` cannot move an owned Vec out.
-        let compressed_delta_bytes: bytes::Bytes = compressed_delta_bytes.into();
+        // `Bytes` is cheap to clone per attempt: send_with_rate_limit_retry
+        // re-invokes `make`, and `Fn` cannot move an owned body out.
         let response = crate::client::send_with_rate_limit_retry(|| {
             self.client
                 .put(&url)
@@ -682,15 +681,60 @@ impl ProtocolClient {
         .await
         .context(format!("Failed to PUT /chunk-deltas/{}", chunk_id))?;
 
-        if !response.status().is_success() {
+        let status = response.status();
+        if status.is_success() {
+            return Ok(true);
+        }
+        // The server rebuilds a delta before it stores it. 424: its base is
+        // not stored there yet (a chain sent out of order), so send it again
+        // later. 422: the delta does not rebuild the chunk.
+        if status == reqwest::StatusCode::FAILED_DEPENDENCY {
+            return Ok(false);
+        }
+        if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
             anyhow::bail!(
-                "PUT /chunk-deltas/{} failed with status: {}",
-                chunk_id,
-                response.status()
+                "the server refused chunk delta {chunk_id}: it does not rebuild the chunk"
             );
         }
+        anyhow::bail!(
+            "PUT /chunk-deltas/{} failed with status: {}",
+            chunk_id,
+            status
+        );
+    }
 
-        Ok(())
+    /// Send deltas the server could not take yet (their base was not stored
+    /// when they arrived), in rounds, until all are in. A round that places
+    /// none means a base is never going to arrive: fail with a plain message.
+    /// Returns `(chunk, payload size)` for each delta placed.
+    async fn upload_waiting_deltas(
+        &self,
+        mut waiting: Vec<(Oid, Oid, bytes::Bytes)>,
+    ) -> Result<Vec<(Oid, u64)>> {
+        let mut placed = Vec::new();
+        while !waiting.is_empty() {
+            let before = waiting.len();
+            let mut still = Vec::new();
+            for (chunk_id, base_id, bytes) in waiting {
+                if self
+                    .upload_chunk_delta(&chunk_id, &base_id, bytes.clone())
+                    .await?
+                {
+                    placed.push((chunk_id, bytes.len() as u64));
+                } else {
+                    still.push((chunk_id, base_id, bytes));
+                }
+            }
+            if still.len() == before {
+                anyhow::bail!(
+                    "the server is missing the base chunk for {before} chunk delta(s), \
+                     for example {}; nothing was stored for them",
+                    still[0].0
+                );
+            }
+            waiting = still;
+        }
+        Ok(placed)
     }
 
     /// Check which chunks exist on the remote server
@@ -1537,39 +1581,29 @@ impl ProtocolClient {
                 let _pass_c_t = std::time::Instant::now();
                 let mut _pass_c_n = 0u64;
                 let mut _pass_c_bytes = 0u64;
+                let mut waiting: Vec<(Oid, Oid, bytes::Bytes)> = Vec::new();
                 let mut stream = futures::stream::iter(uploadable_deltas)
-                    .map(|(chunk_id, base_id, delta_bytes)| {
-                        let client = self.client.clone();
-                        let base_url = self.base_url.clone();
-                        async move {
-                            let delta_bytes: bytes::Bytes = delta_bytes.into();
-                            let delta_size = delta_bytes.len() as u64;
-                            let url = format!("{}/chunk-deltas/{}", base_url, chunk_id.to_hex());
-                            let resp = crate::client::send_with_rate_limit_retry(|| {
-                                client
-                                    .put(&url)
-                                    .header("x-mediagit-delta-base", base_id.to_hex())
-                                    .body(delta_bytes.clone())
-                                    .send()
-                            })
-                            .await
-                            .map_err(|e| {
-                                anyhow::anyhow!("Failed to upload chunk-delta {}: {}", chunk_id, e)
-                            })?;
-                            if !resp.status().is_success() {
-                                anyhow::bail!(
-                                    "PUT /chunk-deltas/{} failed with status: {}",
-                                    chunk_id,
-                                    resp.status()
-                                );
-                            }
-                            Ok::<(Oid, u64), anyhow::Error>((chunk_id, delta_size))
-                        }
+                    .map(|(chunk_id, base_id, delta_bytes)| async move {
+                        let delta_bytes: bytes::Bytes = delta_bytes.into();
+                        let stored = self
+                            .upload_chunk_delta(&chunk_id, &base_id, delta_bytes.clone())
+                            .await?;
+                        Ok::<_, anyhow::Error>((chunk_id, base_id, delta_bytes, stored))
                     })
                     .buffer_unordered(concurrent_uploads);
 
+                let mut placed: Vec<(Oid, u64)> = Vec::new();
                 while let Some(result) = stream.next().await {
-                    let (chunk_id, chunk_bytes) = result?;
+                    let (chunk_id, base_id, bytes, stored) = result?;
+                    if stored {
+                        placed.push((chunk_id, bytes.len() as u64));
+                    } else {
+                        waiting.push((chunk_id, base_id, bytes));
+                    }
+                }
+                drop(stream);
+                placed.extend(self.upload_waiting_deltas(waiting).await?);
+                for (chunk_id, chunk_bytes) in placed {
                     _pass_c_n += 1;
                     _pass_c_bytes += chunk_bytes;
                     chunks_uploaded += 1;
@@ -2410,44 +2444,29 @@ impl ProtocolClient {
                     let _pass_c_t = std::time::Instant::now();
                     let mut _pass_c_n = 0u64;
                     let mut _pass_c_bytes = 0u64;
+                    let mut waiting: Vec<(Oid, Oid, bytes::Bytes)> = Vec::new();
                     let mut stream = futures::stream::iter(uploadable_deltas)
-                        .map(|(chunk_id, base_id, delta_bytes)| {
-                            let client = self.client.clone();
-                            let base_url = self.base_url.clone();
-                            async move {
-                                let delta_bytes: bytes::Bytes = delta_bytes.into();
-                                let delta_size = delta_bytes.len() as u64;
-                                let url =
-                                    format!("{}/chunk-deltas/{}", base_url, chunk_id.to_hex());
-                                let resp = crate::client::send_with_rate_limit_retry(|| {
-                                    client
-                                        .put(&url)
-                                        .header("x-mediagit-delta-base", base_id.to_hex())
-                                        .body(delta_bytes.clone())
-                                        .send()
-                                })
-                                .await
-                                .map_err(|e| {
-                                    anyhow::anyhow!(
-                                        "Failed to upload chunk-delta {}: {}",
-                                        chunk_id,
-                                        e
-                                    )
-                                })?;
-                                if !resp.status().is_success() {
-                                    anyhow::bail!(
-                                        "PUT /chunk-deltas/{} failed with status: {}",
-                                        chunk_id,
-                                        resp.status()
-                                    );
-                                }
-                                Ok::<u64, anyhow::Error>(delta_size)
-                            }
+                        .map(|(chunk_id, base_id, delta_bytes)| async move {
+                            let delta_bytes: bytes::Bytes = delta_bytes.into();
+                            let stored = self
+                                .upload_chunk_delta(&chunk_id, &base_id, delta_bytes.clone())
+                                .await?;
+                            Ok::<_, anyhow::Error>((chunk_id, base_id, delta_bytes, stored))
                         })
                         .buffer_unordered(concurrent_uploads);
 
+                    let mut placed: Vec<(Oid, u64)> = Vec::new();
                     while let Some(result) = stream.next().await {
-                        let chunk_bytes = result?;
+                        let (chunk_id, base_id, bytes, stored) = result?;
+                        if stored {
+                            placed.push((chunk_id, bytes.len() as u64));
+                        } else {
+                            waiting.push((chunk_id, base_id, bytes));
+                        }
+                    }
+                    drop(stream);
+                    placed.extend(self.upload_waiting_deltas(waiting).await?);
+                    for (_, chunk_bytes) in placed {
                         _pass_c_n += 1;
                         _pass_c_bytes += chunk_bytes;
                         total_chunks_uploaded += 1;
