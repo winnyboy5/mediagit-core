@@ -179,3 +179,28 @@ fn dl4_checkout_removes_emptied_folders_and_keeps_user_folders() {
     assert!(!d.join("art").exists(), "emptied art/ left behind");
     assert!(d.join("mine").is_dir(), "user's empty folder was removed");
 }
+
+// DL-4 (full checkout): `stash push` rewinds the tree with a whole-tree
+// checkout. A folder that rewind emptied is removed; the user's empty folder
+// is kept.
+#[test]
+fn dl4_stash_push_removes_emptied_folders_and_keeps_user_folders() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    init_repo(d);
+    commit_file(d, "keep.txt", "k\n", "base");
+    fs::create_dir_all(d.join("art/sub")).unwrap();
+    fs::write(d.join("art/sub/a.txt"), "a\n").unwrap();
+    ok(d, &["add", "art/sub/a.txt"]);
+    fs::create_dir(d.join("mine")).unwrap();
+
+    ok(d, &["stash", "push", "-m", "wip"]);
+
+    assert!(
+        !d.join("art/sub/a.txt").exists(),
+        "stashed file still there"
+    );
+    assert!(!d.join("art/sub").exists(), "emptied art/sub left behind");
+    assert!(!d.join("art").exists(), "emptied art/ left behind");
+    assert!(d.join("mine").is_dir(), "user's empty folder was removed");
+}
