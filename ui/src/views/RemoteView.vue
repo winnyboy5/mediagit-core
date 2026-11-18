@@ -5,6 +5,7 @@ import { ChevronRight, Cloud, File, Folder } from 'lucide-vue-next'
 import { useFocusRefresh } from '@/lib/focusRefresh'
 import { api, toApiError } from '@/api'
 import { formatBytes } from '@/components/format'
+import TransferStats from '@/components/TransferStats.vue'
 import Button from '@/components/Button.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import ErrorState from '@/components/ErrorState.vue'
@@ -15,7 +16,7 @@ import { previewKind } from '@/lib/inspect'
 import { breadcrumbs } from '@/lib/remoteBrowse'
 import { pickFolder } from '@/shell/useOpenRepo'
 import { useBranchesStore } from '@/stores/branches'
-import { primaryBar, useOpsStore } from '@/stores/ops'
+import { etaOf, primaryBar, rateOf, useOpsStore } from '@/stores/ops'
 import { DEFAULT_REF, useRemoteBrowserStore } from '@/stores/remoteBrowser'
 import { useSyncStore } from '@/stores/sync'
 import { useTagsStashStore } from '@/stores/tagsStash'
@@ -147,7 +148,8 @@ const open = (e: { kind: string; path: string }) => void (e.kind === 'dir' ? rb.
           <p v-else-if="kind === 'none'" class="muted">No preview for this kind of file. You can still save a copy.</p>
 
           <div v-if="rb.active" class="bars" role="status" data-testid="download-progress">
-            <span>{{ rb.active.label }}<template v-if="bar && bar.len"> · {{ formatBytes(bar.pos) }} of {{ formatBytes(bar.len) }}</template></span>
+            <span>{{ rb.active.label }}</span>
+            <TransferStats v-if="bar && bar.unit === 'bytes'" :done="bar.pos" :total="bar.len" :rate="rateOf(bar)" :eta="etaOf(bar)" />
             <ProgressBar :label="rb.active.label" :value="bar && bar.len ? bar.pos : null" :max="bar?.len ?? 100" />
             <Button size="sm" variant="danger" @click="ops.cancel(rb.active.id)">Cancel</Button>
           </div>

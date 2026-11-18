@@ -89,6 +89,20 @@ impl ProtocolClient {
         ref_name: &str,
         out: &mut (impl tokio::io::AsyncWrite + Unpin),
     ) -> Result<u64> {
+        self.download_file_by_path_with_progress(file_path, ref_name, out, &|_, _| {})
+            .await
+    }
+
+    /// [`Self::download_file_by_path`], calling `progress(bytes_so_far, total)`
+    /// after every chunk written. `total` is the response's Content-Length
+    /// (the server always sends it), `None` when the peer gives none.
+    pub async fn download_file_by_path_with_progress(
+        &self,
+        file_path: &str,
+        ref_name: &str,
+        out: &mut (impl tokio::io::AsyncWrite + Unpin),
+        progress: &(dyn Fn(u64, Option<u64>) + Sync),
+    ) -> Result<u64> {
         use futures::StreamExt;
         use tokio::io::AsyncWriteExt;
 
@@ -146,7 +160,9 @@ impl ProtocolClient {
                 );
             }
 
+            let expected = response.content_length();
             let mut total: u64 = 0;
+            progress(0, expected);
             let mut stream = response.bytes_stream();
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.context("Error while streaming file download")?;
@@ -154,6 +170,7 @@ impl ProtocolClient {
                     .await
                     .context("Failed to write downloaded file to disk")?;
                 total += chunk.len() as u64;
+                progress(total, expected);
             }
             out.flush().await.ok();
             Ok(total)

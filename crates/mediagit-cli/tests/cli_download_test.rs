@@ -152,6 +152,46 @@ async fn download_by_full_url_matches_committed_file_exactly() {
     assert_eq!(downloaded, content);
 }
 
+/// BUG-036: `download --machine` streams a bytes bar with the real size, so the app
+/// can show a determinate bar instead of an endless one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_machine_streams_a_bytes_bar_with_the_real_size() {
+    let repos_root = TempDir::new().unwrap();
+    let (base_url, _handle) = start_test_server(repos_root.path().to_path_buf()).await;
+    let repo_dir = TempDir::new().unwrap();
+    let content = "x".repeat(5000);
+    push_repo_with_file(
+        repos_root.path(),
+        repo_dir.path(),
+        &base_url,
+        "dl-repo",
+        "big.txt",
+        &content,
+    );
+
+    let out_dir = TempDir::new().unwrap();
+    let out = mediagit()
+        .args(["--machine", "download"])
+        .arg(format!("{}/dl-repo/big.txt", base_url))
+        .current_dir(out_dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let bars: Vec<serde_json::Value> = String::from_utf8_lossy(&out.stderr)
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .filter(|v: &serde_json::Value| v["type"] == "progress" && v["unit"] == "bytes")
+        .collect();
+    let last = bars.last().expect("a bytes progress line on stderr");
+    assert_eq!(last["pos"], 5000);
+    assert_eq!(last["len"], 5000);
+    assert_eq!(last["done"], true);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn download_honors_ref_flag() {
     let repos_root = TempDir::new().unwrap();

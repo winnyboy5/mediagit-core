@@ -169,8 +169,19 @@ impl DownloadCmd {
             .await
             .with_context(|| format!("Failed to create output file '{}'", out_path.display()))?;
 
+        // Real bytes and the server's Content-Length drive the bar (and the app's
+        // progress under --machine).
+        let progress = crate::progress::ProgressTracker::new(self.quiet);
+        let bar = progress.download_bar("Downloading", 0);
+        let on_progress = |pos: u64, total: Option<u64>| {
+            if let Some(t) = total {
+                bar.set_length(t);
+            }
+            bar.set_position(pos);
+        };
+
         let download_result = client
-            .download_file_by_path(&file_path, &ref_name, &mut file)
+            .download_file_by_path_with_progress(&file_path, &ref_name, &mut file, &on_progress)
             .await
             .context("Download failed");
         let bytes = match download_result {
@@ -195,7 +206,12 @@ impl DownloadCmd {
                     format!("Failed to recreate output file '{}'", out_path.display())
                 })?;
                 match client
-                    .download_file_by_path(&file_path, &ref_name, &mut file)
+                    .download_file_by_path_with_progress(
+                        &file_path,
+                        &ref_name,
+                        &mut file,
+                        &on_progress,
+                    )
                     .await
                     .context("Download failed")
                 {
@@ -214,6 +230,7 @@ impl DownloadCmd {
                 return Err(e);
             }
         };
+        bar.finish_and_clear();
         if attach_credentials {
             crate::repo::remember_credentials(&config, "origin", &credentials);
         }
