@@ -727,7 +727,8 @@ impl RebaseCmd {
         // stopped commit's change.
         if state.current_commit.is_some() && state.conflict_files.is_empty() {
             anyhow::bail!(
-                "The last rebase stop did not finish writing.                  Run `mediagit rebase --abort` and start again."
+                "The last rebase stop did not finish writing. \
+                 Run `mediagit rebase --abort` and start again."
             );
         }
 

@@ -2008,7 +2008,12 @@ fn r1_continue_refuses_stopped_commit_without_conflicts() {
     assert!(run(d, &["add", "shared.txt"]).status.success());
     let out = run(d, &["rebase", "--continue"]);
     assert!(!out.status.success(), "continue must refuse");
-    assert!(String::from_utf8_lossy(&out.stderr).contains("rebase --abort"));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("rebase --abort"));
+    assert!(
+        !err.contains("      "),
+        "message has a run of spaces: {err}"
+    );
     assert!(sf.exists(), "state kept");
 }
 
