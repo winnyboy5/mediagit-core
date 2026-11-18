@@ -205,21 +205,31 @@ async fn pull_side_delta_writes_respect_the_depth_cap() {
 
     // A root chunk, then a chain hung off it one `write_chunk_delta` at a time
     // -- what a clone does when the server reports each chunk as a delta.
-    let root_payload = vec![0xABu8; 64 * 1024];
-    let root = odb
-        .write(ObjectType::Blob, &root_payload)
+    // Each link is a real delta: the write verifies it rebuilds the chunk id.
+    let smart = mediagit_compression::SmartCompressor::new();
+    let mut prev_data = vec![0xABu8; 64 * 1024];
+    let root = Oid::hash(&prev_data);
+    odb.write_full_chunk(&root, &prev_data)
         .await
         .expect("root write");
 
     let mut prev = root;
     let mut accepted = 0usize;
     for i in 0..40u32 {
-        // The payload is irrelevant to the guard; the base pointer is the point.
-        let child = Oid::hash(&[&i.to_le_bytes()[..], b"child"].concat());
-        match odb.write_chunk_delta(&child, &prev, b"delta-bytes").await {
+        let mut data = prev_data.clone();
+        data.extend_from_slice(&i.to_le_bytes());
+        let child = Oid::hash(&data);
+        let payload = mediagit_compression::TypeAwareCompressor::compress_typed(
+            &smart,
+            &mediagit_versioning::DeltaEncoder::encode(&prev_data, &data).to_bytes(),
+            mediagit_compression::ObjectType::Unknown,
+        )
+        .unwrap();
+        match odb.write_chunk_delta(&child, &prev, &payload).await {
             Ok(()) => {
                 accepted += 1;
                 prev = child;
+                prev_data = data;
             }
             // Refusing is the correct outcome once the cap is reached.
             Err(_) => break,

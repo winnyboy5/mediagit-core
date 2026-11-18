@@ -17,6 +17,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 
+use mediagit_compression::Compressor;
 use mediagit_protocol::ProtocolClient;
 use mediagit_storage::{LocalBackend, StorageBackend};
 use mediagit_versioning::chunking::{ChunkManifest, ChunkRef, ChunkType};
@@ -43,9 +44,8 @@ async fn open_odb(mediagit_dir: &std::path::Path) -> ObjectDatabase {
 }
 
 /// Construct a client-side repo whose manifest references one full chunk
-/// (the base) and one delta chunk (targeting that base). No actual delta
-/// encoding is performed — the test only checks how bytes travel, not how
-/// they decode.
+/// (the base) and one delta chunk (targeting that base).
+/// The test only checks how bytes travel, not how they decode.
 async fn seed_client_with_delta(
     client_mediagit: &std::path::Path,
 ) -> (Oid, Oid, Oid, Vec<u8>, Vec<u8>) {
@@ -53,11 +53,14 @@ async fn seed_client_with_delta(
 
     // Use deterministic payloads so the OIDs are reproducible.
     let base_payload = b"BASE-CHUNK: the quick brown fox jumps over the lazy dog".to_vec();
-    let delta_payload =
-        b"DELTA-AGAINST-BASE: small diff against the base chunk (opaque to the server)".to_vec();
+    // A real delta: `write_chunk_delta` rebuilds the chunk and checks its id.
+    let target = [base_payload.as_slice(), b" plus a changed tail".as_slice()].concat();
+    let delta_payload = mediagit_compression::ZlibCompressor::default_level()
+        .compress(&mediagit_versioning::DeltaEncoder::encode(&base_payload, &target).to_bytes())
+        .unwrap();
 
     let base_id = Oid::hash(&base_payload);
-    let delta_id = Oid::hash(&delta_payload);
+    let delta_id = Oid::hash(&target);
 
     odb.put_compressed_chunk(&base_id, &base_payload)
         .await
@@ -78,12 +81,12 @@ async fn seed_client_with_delta(
             ChunkRef {
                 id: delta_id,
                 offset: base_payload.len() as u64,
-                size: delta_payload.len(),
+                size: target.len(),
                 chunk_type: ChunkType::Generic,
                 codec_hint: Default::default(),
             },
         ],
-        total_size: (base_payload.len() + delta_payload.len()) as u64,
+        total_size: (base_payload.len() + target.len()) as u64,
         filename: Some("fixture.bin".to_string()),
     };
 

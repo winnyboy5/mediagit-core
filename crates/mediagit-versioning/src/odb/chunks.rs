@@ -51,6 +51,25 @@ fn compress_permits() -> &'static tokio::sync::Semaphore {
     })
 }
 
+/// Decompress a stored chunk-delta payload and apply it to `base`.
+fn apply_stored_delta(
+    smart: &Option<Arc<SmartCompressor>>,
+    compressor: &Arc<dyn Compressor>,
+    base: &[u8],
+    payload: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+    let delta_bytes = if let Some(smart) = smart {
+        smart.decompress_typed(payload)
+    } else {
+        compressor.decompress(payload)
+    }
+    .map_err(|e| anyhow::anyhow!("Failed to decompress chunk delta: {}", e))?;
+    let delta = Delta::from_bytes(&delta_bytes)
+        .map_err(|e| anyhow::anyhow!("Failed to parse chunk delta: {}", e))?;
+    DeltaDecoder::apply(base, &delta)
+        .map_err(|e| anyhow::anyhow!("Failed to apply chunk delta: {}", e))
+}
+
 /// Delta-encode `target` against `base` on a blocking thread.
 ///
 /// The CLI runs `add` on a current-thread runtime, so encoding inline (zstd
@@ -3356,17 +3375,8 @@ impl ObjectDatabase {
             // hop per chain link so prefetched chunks overlap.
             let smart_comp = self.smart_compressor.clone();
             let compressor = self.compressor.clone();
-            current = run_cpu(current.len(), move || -> anyhow::Result<Vec<u8>> {
-                let delta_bytes = if let Some(smart_comp) = &smart_comp {
-                    smart_comp.decompress_typed(&compressed_delta)
-                } else {
-                    compressor.decompress(&compressed_delta)
-                }
-                .map_err(|e| anyhow::anyhow!("Failed to decompress chunk delta: {}", e))?;
-                let delta = Delta::from_bytes(&delta_bytes)
-                    .map_err(|e| anyhow::anyhow!("Failed to parse chunk delta: {}", e))?;
-                DeltaDecoder::apply(&current, &delta)
-                    .map_err(|e| anyhow::anyhow!("Failed to apply chunk delta: {}", e))
+            current = run_cpu(current.len(), move || {
+                apply_stored_delta(&smart_comp, &compressor, &current, &compressed_delta)
             })
             .await??;
             if current.len() as u64 > MAX_OBJECT_SIZE {
@@ -3766,6 +3776,27 @@ impl ObjectDatabase {
         // bound to the exact base it was encoded against. Refusing with an
         // error is correct here: callers (pull.rs) already fall back to
         // fetching the full chunk when this returns Err.
+        //
+        // SEC-5: the payload comes from a remote, so rebuild the chunk from it
+        // and check the id BEFORE anything is stored. A bad delta that went
+        // live made fsck red and blocked "restored" health checks, and was
+        // served on to other clients. A base that is not readable yet cannot
+        // be verified against; refuse, and the caller fetches the full chunk.
+        let base = self.get_chunk(base_id).await.map_err(|e| {
+            anyhow::anyhow!("cannot verify chunk delta {chunk_id}: base {base_id} unreadable: {e}")
+        })?;
+        let smart = self.smart_compressor.clone();
+        let compressor = self.compressor.clone();
+        let payload = compressed_delta_bytes.to_vec();
+        let rebuilt = run_cpu(base.len(), move || {
+            apply_stored_delta(&smart, &compressor, &base, &payload).map(|d| Oid::hash(&d))
+        })
+        .await??;
+        if rebuilt != *chunk_id {
+            anyhow::bail!(
+                "refusing chunk delta: it rebuilds chunk {rebuilt}, not {chunk_id} (base {base_id})"
+            );
+        }
         // Through `commit_delta_pair`, like every other chunk-delta writer.
         //
         // This used to call `resolve_delta_base` against storage and then write,
