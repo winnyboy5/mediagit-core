@@ -4613,6 +4613,41 @@ mod add_memory_tests {
         ));
     }
 
+    /// SEC-5: the in-memory writer stores a chunk over the remote cap whole.
+    /// Two near-identical 65 MiB single-chunk versions would otherwise be a
+    /// delta whose result a remote refuses.
+    #[tokio::test]
+    async fn in_memory_chunk_over_the_delta_cap_is_stored_whole() {
+        let storage = StdArc::new(MockBackend::new());
+        let odb = ObjectDatabase::with_optimizations(
+            storage.clone(),
+            10_000_000,
+            Some(ChunkStrategy::Fixed {
+                size: 66 * 1024 * 1024,
+            }),
+            true,
+            0,
+        );
+        let mut content: Vec<u8> = (0..65 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        assert!(content.len() > crate::delta::PREALLOC_LIMIT);
+        let first = odb
+            .write_chunked(ObjectType::Blob, &content, "big.bin")
+            .await
+            .unwrap();
+        content[100] ^= 0xFF;
+        let second = odb
+            .write_chunked(ObjectType::Blob, &content, "big.bin")
+            .await
+            .unwrap();
+        assert_ne!(first, second);
+        let deltas = storage.list_objects("chunk-deltas/").await.unwrap();
+        assert!(
+            deltas.is_empty(),
+            "over-cap chunk stored as delta: {deltas:?}"
+        );
+        assert_eq!(odb.read(&second).await.unwrap(), content);
+    }
+
     #[tokio::test]
     async fn only_delta_candidates_enter_base_chunk_cache() {
         let (data, _) = crate::chunking::mp4_stream::tests::make_mp4(&[300_000; 3], 3000);
