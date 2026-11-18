@@ -163,8 +163,11 @@ changes fix real bugs.
 
 ### Fixed
 
-- **A staged new file is no longer overwritten by a branch switch, merge, pull, cherry-pick, revert or rebase.** If the target version has a different file at a path you added but did not commit, the command now refuses and names the file. A refused branch switch also leaves HEAD where it was. The refusal carries the error code `would_overwrite`, and the app shows plain words with no Retry button.
-- **`bisect` no longer overwrites your edits, and `bisect reset` puts the folder back.** `start`, `good`, `bad`, `skip` and `reset` now refuse, and name the files, when you changed a tracked file or have an uncommitted new file the next step would replace. `bisect reset` also removes files that only existed in a version it tested, so the folder matches your original commit again. Your own untracked files are left alone.
+- **Staged new files are carried, not deleted or overwritten, by every checkout.** Branch switch, merge, pull, rebase, cherry-pick, revert and bisect keep a file you added but did not commit, also when the target version lacks it. The only refusal is when the target has a *different* file at that path: the command then stops with the error code `would_overwrite`, names the files and writes nothing. The app shows plain words with no Retry button. `reset --hard` stays destructive and discards such a file. A refused branch switch also leaves HEAD where it was.
+- **`commit` no longer builds on the wrong parent during a stopped operation.** While a merge, rebase, cherry-pick or revert waits on a conflict, or a bisect is running, `commit` refuses and names the next command (`--continue` / `--abort`, or `bisect reset`). After `merge --no-commit`, finish with `merge --continue`. The app disables Save while a step is stopped.
+- **`bisect` no longer overwrites your edits, and `bisect reset` puts the folder back.** `start`, `good`, `bad`, `skip` and `reset` refuse, and name the files, when you edited a tracked file or the next version would replace a staged file. `bisect reset` removes files that only existed in a version it tested and keeps your untracked files. Stash your edits, then `bisect reset`, works.
+- **`config.toml` stays owner-only.** Every save keeps it private: mode 0600 on Unix, an owner-only ACL on Windows.
+- **`add` no longer skips a changed file on size and mtime alone.** A same-size edit with a restored modification time within the same second used to be missed; the stat cache now decides.
 
 - **`reset` and revisions.** `reset` refuses `HEAD^^`, `HEAD^2` and a bare
   `HEAD~`; the old `reset` silently took the first parent.

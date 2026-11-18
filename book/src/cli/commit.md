@@ -22,6 +22,8 @@ MediaGit commits include:
 
 After `merge --squash`, a plain `commit` (no `-m`, `-F`) uses the saved merge message without opening an editor; add `-e` to edit it. The saved message is removed after any commit once no merge is in progress.
 
+`commit` refuses while a merge, rebase, cherry-pick or revert is stopped, or a bisect is running, and names the next command: the command's own continue or abort step for the first four, `bisect reset` for a bisect. A merge started without committing is finished with the merge command's continue step, not with `commit`.
+
 ## Options
 
 ### `-m, --message <MESSAGE>`
@@ -226,6 +228,7 @@ Closes #456"
 
 - **0**: Commit created successfully
 - **1**: Nothing to commit (no staged changes)
+- **1**: also when a merge, rebase, cherry-pick or revert is stopped, or a bisect is running
 - **2**: Invalid options or commit message
 
 ## Notes

@@ -23,6 +23,8 @@ After O(log N) iterations, it identifies the first bad commit.
 
 Short commit hashes (from `mediagit log --oneline`) are supported.
 
+`start`, `good`, `bad` and `skip` refuse, naming the files, when you edited a tracked file or the next version has a different file than a staged new file. `commit` refuses during a bisect; run `bisect reset` first.
+
 ## Subcommands
 
 ### `start`
@@ -67,6 +69,8 @@ End the bisect session and return to the original branch.
 ```bash
 mediagit bisect reset [<COMMIT>]
 ```
+
+Refuses, naming the files, when you edited a tracked file (stash first). Removes files that only existed in a tested version and keeps your untracked files.
 
 ### `log`
 

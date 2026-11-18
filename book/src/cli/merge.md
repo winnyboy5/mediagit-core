@@ -43,7 +43,9 @@ from the staged (resolved) index and the pending `MERGE_HEAD`, with both the
 pre-merge HEAD and `MERGE_HEAD` as parents.
 
 `merge` refuses with an error before writing anything if the working tree has
-uncommitted changes.
+uncommitted changes, including a staged new file that the other branch has a different file for. A staged new file the other branch lacks is kept.
+
+Finish a conflicted or `--no-commit` merge with `merge --continue`; a plain `commit` refuses.
 
 ## Examples
 

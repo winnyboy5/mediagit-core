@@ -95,6 +95,7 @@ error chain with URL credentials and query strings removed.
 | `keychain_unavailable` | `remote add --token` or `--token-stdin` was refused because no OS keychain can be used (none present, or `MEDIAGIT_NO_KEYRING` is set) | 1 |
 | `needs_input` | A prompt (passphrase, confirmation) was reached; collect the input and re-run with it supplied | 1 |
 | `invalid_args` | Flags combined wrongly (currently `show`: `--output` without `<rev>:<path>`, `--tree` with `<rev>:<path>`) | 1 |
+| `would_overwrite` | A checkout, merge, pull, rebase, cherry-pick, revert or bisect step would overwrite or delete uncommitted work (a different file at the same path as one you added); nothing is written; `message` lists the paths. `reset --hard` discards instead | 1 |
 | `empty_commit` | `cherry-pick` (including `--continue`) or `revert` would create a commit whose tree equals HEAD's; nothing is committed (`revert --no-commit` skips the check) | 1 |
 | `server_unreachable` | Nothing answered at the server address (refused, unknown host, no route) | 1 |
 | `server_timeout` | The server did not answer in time | 1 |

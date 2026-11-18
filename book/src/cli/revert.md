@@ -52,6 +52,8 @@ If the rest is refused after `--continue` or `--skip` (for example a file you
 edited would be overwritten), the versions not yet undone stay listed. Fix
 the cause, then run `--continue` again, or `--skip` to drop the next one.
 
+After a conflict, finish with `--continue`; a plain `commit` refuses while the revert is stopped.
+
 #### `-q`, `--quiet`
 Suppress output.
 

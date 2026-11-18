@@ -66,6 +66,8 @@ and sets its upstream. Without a connection it stops and changes nothing:
 | `-f`, `--force` | Switch even with local changes |
 | `-q`, `--quiet` | Quiet mode |
 
+`switch` carries a staged new file over to the target. It refuses, naming the file, only when the target has a different file at that path; `-f` overrides. A refused switch leaves HEAD where it was.
+
 ### `delete <branches>...`
 
 Delete one or more branches.
