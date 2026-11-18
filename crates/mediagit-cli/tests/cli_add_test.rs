@@ -901,3 +901,47 @@ fn bug042_add_missing_path_exits_non_zero_and_adds_the_rest() {
     std::fs::remove_file(d.join("real.txt")).unwrap();
     assert!(run(&["add", "real.txt"]).status.success());
 }
+
+/// I4: `add` once trusted the index's size and whole-second mtime. A same-size
+/// edit in the same second (or one whose mtime was restored) was then never
+/// staged, and the commit recorded the stale bytes.
+#[test]
+fn add_stages_a_same_size_edit_with_the_old_mtime() {
+    let t = TempDir::new().unwrap();
+    let dir = t.path();
+    init_repo(dir);
+    let f = dir.join("f.txt");
+    fs::write(&f, "AAAA").unwrap();
+    mediagit()
+        .args(["add", "f.txt"])
+        .current_dir(dir)
+        .assert()
+        .success();
+    let mtime = fs::metadata(&f).unwrap().modified().unwrap();
+
+    fs::write(&f, "BBBB").unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&f)
+        .unwrap()
+        .set_modified(mtime)
+        .unwrap();
+    mediagit()
+        .args(["add", "f.txt"])
+        .current_dir(dir)
+        .assert()
+        .success();
+    mediagit()
+        .args(["commit", "-m", "edit"])
+        .current_dir(dir)
+        .assert()
+        .success();
+
+    fs::remove_file(&f).unwrap();
+    mediagit()
+        .args(["reset", "--hard"])
+        .current_dir(dir)
+        .assert()
+        .success();
+    assert_eq!(fs::read_to_string(&f).unwrap(), "BBBB");
+}

@@ -1100,18 +1100,8 @@ impl AddCmd {
         // bytes equal HEAD's, so it never takes the "unchanged" exits below.
         let conflicted = unresolved.contains(&relative_path);
 
-        if !conflicted
-            && let Some(&(idx_size, Some(idx_mtime), _)) = index_files.get(&relative_path)
-            && idx_size == file_size
-            && let Some(current_mtime) = file_mtime
-            && idx_mtime == current_mtime
-        {
-            if let Some(ref cb) = on_bytes {
-                cb(file_size);
-            }
-            return Ok((None, file_size)); // Unchanged since last staging
-        }
-
+        // I4: no size+mtime shortcut here: whole-second mtime has no racy margin or
+        // file identity. The stat cache below is the only "unchanged" exit.
         // BUG-039: the stat cache answers "what does this file hash to" without
         // reading it (size, mtime, file id, change time and the racy margin all
         // have to match). Equal to what the next commit holds = unchanged.
