@@ -253,12 +253,13 @@ impl ResetCmd {
             let old_commit = Commit::read(&odb, &old_oid)
                 .await
                 .with_context(|| "Failed to read old HEAD commit for soft reset")?;
-            self.reset_index(repo_root, &odb, &old_commit).await?;
+            self.reset_index(repo_root, &odb, &old_commit, true).await?;
         }
 
         // Step 2: Reset index (mixed populates it from the target tree)
         if mode == ResetMode::Mixed {
-            self.reset_index(repo_root, &odb, &target_commit).await?;
+            self.reset_index(repo_root, &odb, &target_commit, false)
+                .await?;
         }
 
         // Step 3: Reset working tree (hard only), then leave an EMPTY index.
@@ -393,12 +394,19 @@ impl ResetCmd {
         repo_root: &Path,
         odb: &ObjectDatabase,
         commit: &Commit,
+        keep_existing: bool,
     ) -> Result<()> {
         let tree = Tree::read(odb, &commit.tree)
             .await
             .with_context(|| "Failed to read commit tree")?;
 
-        let mut index = Index::new();
+        // --soft keeps what is already staged (entries and deletions); the
+        // tree only fills the paths the index does not mention.
+        let mut index = if keep_existing {
+            Index::load(repo_root)?
+        } else {
+            Index::new()
+        };
         self.add_tree_to_index(odb, &tree, PathBuf::new(), &mut index)
             .await?;
 
@@ -425,7 +433,7 @@ impl ResetCmd {
                 if entry.is_tree() {
                     let subtree = Tree::read(odb, &entry.oid).await?;
                     self.add_tree_to_index(odb, &subtree, path, index).await?;
-                } else {
+                } else if !index.contains(&path) && !index.is_deleted(&path) {
                     let idx_entry = IndexEntry::new(path, entry.oid, entry.mode.as_u32(), 0, None);
                     index.add_entry(idx_entry);
                 }

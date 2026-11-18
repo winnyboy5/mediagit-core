@@ -57,7 +57,7 @@ impl AtRisk {
     }
 
     /// [`Self::check`] for a command that writes exactly `target`'s tree
-    /// (branch switch, bisect, fast-forward, `reset`). A file already holding
+    /// (branch switch, bisect, fast-forward). A file already holding
     /// the target's bytes is then not at risk: the write is identical (a
     /// `stash push` before `bisect reset`, or a half-written bisect step). A
     /// merge, revert or rebase writes a different tree, so it must not use this.

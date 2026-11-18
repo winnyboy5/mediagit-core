@@ -1200,3 +1200,75 @@ fn f6_undo_edit_then_bisect_reset_works() {
     bisect(temp.path(), &["reset"]).success();
     assert_eq!(fs::read_to_string(temp.path().join("f.txt")).unwrap(), "v6");
 }
+
+#[test]
+fn f6_merge_refuses_with_staged_deletion() {
+    let temp = carry_setup();
+    run_ok(&temp, &["reset", "wip.psd"]);
+    fs::remove_file(temp.path().join("wip.psd")).unwrap();
+    fs::remove_file(temp.path().join("a.txt")).unwrap();
+    run_ok(&temp, &["add", "a.txt"]);
+    mediagit()
+        .args(["merge", "feat"])
+        .current_dir(temp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("a.txt"))
+        .stderr(predicate::str::contains("staged"));
+}
+
+// ============================================================================
+// F7 — `reset --soft` leaves the index alone: what was staged stays staged.
+// ============================================================================
+
+/// c1 {a.txt, b.txt}, c2 adds c.txt.
+fn soft_setup() -> TempDir {
+    let temp = TempDir::new().unwrap();
+    init_repo(temp.path());
+    commit_file(temp.path(), "a.txt", "A0", "one");
+    commit_file(temp.path(), "b.txt", "B0", "two");
+    commit_file(temp.path(), "c.txt", "C0", "three");
+    temp
+}
+
+/// Soft-reset one commit, commit the index, then land the working tree on it.
+fn soft_commit_checkout(temp: &TempDir) {
+    run_ok(temp, &["reset", "--soft", "HEAD~1"]);
+    run_ok(temp, &["commit", "-m", "from index"]);
+    run_ok(temp, &["reset", "--hard", "HEAD"]);
+}
+
+#[test]
+fn f7_reset_soft_keeps_staged_edit() {
+    let temp = soft_setup();
+    stage_new(temp.path(), "a.txt", "STAGEDS");
+    fs::write(temp.path().join("a.txt"), "WORK").unwrap();
+    soft_commit_checkout(&temp);
+    assert_eq!(
+        fs::read_to_string(temp.path().join("a.txt")).unwrap(),
+        "STAGEDS"
+    );
+}
+
+#[test]
+fn f7_reset_soft_keeps_staged_new_file() {
+    let temp = soft_setup();
+    stage_new(temp.path(), "w.psd", "staged");
+    run_ok(&temp, &["reset", "--soft", "HEAD~1"]);
+    mediagit()
+        .args(["status", "--porcelain"])
+        .current_dir(temp.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("A  w.psd"));
+}
+
+#[test]
+fn f7_reset_soft_keeps_staged_deletion() {
+    let temp = soft_setup();
+    fs::remove_file(temp.path().join("b.txt")).unwrap();
+    run_ok(&temp, &["add", "b.txt"]);
+    soft_commit_checkout(&temp);
+    assert!(!temp.path().join("b.txt").exists());
+    assert!(temp.path().join("c.txt").exists());
+}
