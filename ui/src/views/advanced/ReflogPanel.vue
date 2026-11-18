@@ -77,14 +77,24 @@ const trimTarget = computed(() => (scopeAll.value === true || all.value ? null :
           <span class="muted mono">{{ shortOid(e.old_oid) }} → {{ shortOid(e.new_oid) }}</span>
         </div>
         <time class="muted" :datetime="new Date(e.time * 1000).toISOString()">{{ formatWhen(e.time) }}</time>
-        <Button
-          size="sm"
-          :disabled="undo.busy || e.index === first"
-          :aria-label="`Restore to @${e.index}`"
-          @click="undo.ask({ kind: 'reset', mode: 'soft', rev: e.new_oid })"
-        >
-          Restore to here…
-        </Button>
+        <span class="acts">
+          <Button
+            size="sm"
+            :disabled="undo.busy || e.index === first"
+            :aria-label="`Restore to @${e.index}`"
+            @click="undo.ask({ kind: 'reset', mode: 'soft', rev: e.new_oid })"
+          >
+            Restore to here…
+          </Button>
+          <Button
+            size="sm"
+            :disabled="undo.busy || e.index === first"
+            :aria-label="`Put files back to @${e.index}`"
+            @click="undo.ask({ kind: 'reset', mode: 'hard', rev: e.new_oid })"
+          >
+            Put files back…
+          </Button>
+        </span>
       </li>
     </ol>
 
@@ -166,6 +176,10 @@ const trimTarget = computed(() => (scopeAll.value === true || all.value ? null :
   min-height: calc(var(--row-h) + var(--space-4));
   padding: var(--space-2) var(--space-5);
   border-bottom: 1px solid var(--border);
+}
+.acts {
+  display: flex;
+  gap: var(--space-2);
 }
 .row:last-child {
   border-bottom: 0;

@@ -549,7 +549,7 @@ test.describe('Server: Repositories', () => {
     await boot(page, admin(), {}, 'Repositories')
     const t = page.getByTestId('repos')
     await expect(t).toContainText('hero-film')
-    await expect(t).toContainText('4.5 GB')
+    await expect(t).toContainText('4.8 GB')
     await expect(t).toContainText('2h ago')
     await expect(t).toContainText('Nothing pushed yet')
     await expectNoAxeViolations(page)
@@ -581,6 +581,14 @@ test.describe('Server: Repositories', () => {
     expect(c!.args).toEqual({ server: LOCAL_URL, name: 'new-film' })
   })
 
+  test('an empty repository has no "even though it holds versions" box (IMP-065)', async ({ page }) => {
+    const fresh = { server: LOCAL_URL, repos: [{ name: 'trailer-cut', size_bytes: 291, object_count: 0, last_modified: 0 }] }
+    await boot(page, admin({ server_repos_list: fresh, server_repo_delete: { action: 'delete', server: LOCAL_URL, name: 'trailer-cut', repo: null, deleted: true, storage_retained: false, backend: 'local' } }), {}, 'Repositories')
+    await page.getByRole('button', { name: 'Delete trailer-cut' }).click()
+    const dlg = page.getByRole('dialog', { name: 'Delete trailer-cut?' })
+    await expect(dlg.getByRole('checkbox')).toHaveCount(0)
+  })
+
   test('delete needs the name typed back', async ({ page }) => {
     await boot(page, admin({ server_repo_delete: { action: 'delete', server: LOCAL_URL, name: 'hero-film', repo: null, deleted: true, storage_retained: false, backend: 'local' } }), {}, 'Repositories')
     await page.getByRole('button', { name: 'Delete hero-film' }).click()
@@ -592,7 +600,7 @@ test.describe('Server: Repositories', () => {
     await expect(go).toBeDisabled()
     await expectNoAxeViolations(page)
     await dlg.getByLabel('Type hero-film to confirm').fill('hero-film')
-    await dlg.getByRole('checkbox', { name: 'Delete even though it holds 4.5 GB of versions' }).click()
+    await dlg.getByRole('checkbox', { name: 'Delete even though it holds 4.8 GB of versions' }).click()
     await go.click()
     const [c] = await ipcCalls(page, 'server_repo_delete')
     expect(c!.args).toEqual({ server: LOCAL_URL, name: 'hero-film', typedName: 'hero-film', force: true, confirm: true })

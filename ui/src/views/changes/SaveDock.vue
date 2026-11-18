@@ -52,7 +52,7 @@ const hint = computed(() =>
     <p v-if="changes.preview" class="preview" role="status" data-testid="preview-note">{{ changes.preview }}</p>
     <div class="row">
       <p class="hint"><template v-if="hint">{{ hint }}</template><template v-else><Kbd>Ctrl</Kbd> + <Kbd>Enter</Kbd> to save</template></p>
-      <Button type="submit" variant="primary" :disabled="!canCommit" :loading="changes.busy === 'commit'">Save version</Button>
+      <Button type="submit" variant="primary" :disabled="!canCommit" :loading="changes.busy === 'commit'">{{ changes.commitForm.dryRun ? 'Preview' : 'Save version' }}</Button>
     </div>
   </form>
 </template>

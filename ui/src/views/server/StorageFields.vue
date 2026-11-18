@@ -81,7 +81,7 @@ async function test() {
         <TextField v-model="endpoint" label="Endpoint" hint="Only for MinIO or other S3-compatible storage." placeholder="http://localhost:9000" />
         <TextField v-model="prefix" label="Folder inside the bucket" hint="Optional." />
         <TextField v-model="akid" label="Access key ID" />
-        <TextField v-model="secret" label="Secret key" type="password" />
+        <TextField v-model="secret" label="Secret key" type="password" hint="Saved as plain text in the server settings file in the server folder. Keep that folder private." />
       </div>
       <div v-else-if="kind === 'gcs'" class="grid">
         <TextField v-model="bucket" label="Bucket" />

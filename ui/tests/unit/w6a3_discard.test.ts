@@ -36,6 +36,22 @@ describe('BUG-017: the Discard dialog names the files', () => {
     expect(text).toContain('edited.psd')
     expect(text).toContain('gone.psd')
     expect(text).not.toContain('new-untracked.txt')
+    expect(text).toContain('1 new file you have not included is kept as it is')
     w.unmount()
+  })
+})
+
+describe('IMP-031: discard speaks of the latest version, not HEAD', () => {
+  it('names the operation and the result in plain words', async () => {
+    const { api } = await import('@/api')
+    ;(api as Record<string, unknown>).resetHard = vi.fn().mockResolvedValue({})
+    useRepoStore().path = '/repos/hero'
+    const undo = useUndoStore()
+    undo.ask({ kind: 'reset', mode: 'hard', rev: 'HEAD' })
+    await undo.confirm()
+    const { useToast } = await import('@/components/useToast')
+    const text = JSON.stringify(useToast().items)
+    expect(text).toContain('Discarded unsaved changes. Files match the latest version.')
+    expect(text).not.toContain('HEAD')
   })
 })

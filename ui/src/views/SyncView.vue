@@ -278,6 +278,7 @@ function go(kind: TransferKind) {
           </ul>
           <ProgressBar v-else :label="active.label" :value="lead?.len != null ? lead.pos : null" />
         </div>
+        <p v-else-if="sync.stopped" class="phase" role="status" data-testid="transfer-stopped">{{ sync.stopped }}</p>
       </section>
 
       <section class="remotes" aria-labelledby="sync-remotes">
@@ -354,8 +355,8 @@ function go(kind: TransferKind) {
         <dt>Fetch address</dt><dd class="mono">{{ sync.detail.fetch_url }}</dd>
         <dt>Send address</dt><dd class="mono">{{ sync.detail.push_url }}</dd>
         <dt>Reachable</dt><dd>{{ sync.detail.reachable ? 'Yes' : 'No' }}<template v-if="sync.detail.error"> · {{ sync.detail.error }}</template></dd>
-        <dt>Default branch</dt><dd class="mono">{{ sync.detail.head_branch ?? 'unknown' }}</dd>
-        <dt>Branches</dt><dd class="mono">{{ sync.detail.branches.join(', ') || 'none' }}</dd>
+        <dt>Default branch</dt><dd class="mono">{{ sync.detail.head_branch ?? (sync.detail.reachable ? 'not set yet' : 'unknown') }}</dd>
+        <dt>Branches</dt><dd class="mono">{{ sync.detail.branches.join(', ') || (sync.detail.reachable ? 'none yet' : 'unknown') }}</dd>
       </dl>
       <template #footer><Button @click="detailOpen = false">Close</Button></template>
     </Dialog>

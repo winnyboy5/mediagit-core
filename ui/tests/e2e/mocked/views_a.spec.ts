@@ -171,6 +171,14 @@ test.describe('Sync: remote actions', () => {
     expect(await last(page, 'remote_show')).toEqual({ repo: '/repos/hero-film', name: 'origin' })
   })
 
+  test('details of a server with nothing sent yet say so, not "unknown" (IMP-074)', async ({ page }) => {
+    await sync(page, 'light', { remote_show: { name: 'origin', fetch_url: 'https://a.example/r', push_url: 'https://a.example/r', reachable: true, error: null, head_branch: null, branches: [] } })
+    await act(page, 'Details…')
+    const d = page.getByTestId('remote-detail')
+    await expect(d).toContainText('not set yet')
+    await expect(d).toContainText('none yet')
+  })
+
   test('rename validates and sends old and new', async ({ page }) => {
     await sync(page, 'light', { remote_rename: null })
     await act(page, 'Rename…')
@@ -318,8 +326,9 @@ test.describe('Changes: staging, saving and unstaging options', () => {
     await expect(page.getByRole('button', { name: 'Save version' })).toBeDisabled()
     await page.getByLabel('Take the description from a file').fill('C:\\msgs\\release.txt')
     await check(page, 'Preview only').last().click()
-    await page.getByRole('button', { name: 'Save version' }).click()
-    await expect(page.getByTestId('preview-note')).toContainText('would save 3 files')
+    await expect(page.getByRole('button', { name: 'Save version' })).toHaveCount(0) // IMP-026: the button says what it does
+    await page.getByRole('button', { name: 'Preview', exact: true }).click()
+    await expect(page.getByTestId('preview-note')).toContainText('would save 3 files, 0 deletions')
     expect(((await last(page, 'repo_commit')).opts as Record<string, unknown>).messageFile).toBe('C:\\msgs\\release.txt')
   })
 

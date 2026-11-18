@@ -314,7 +314,7 @@ function doDelete() {
     <AlertDialog
       v-model:open="forceOpen"
       :title="`Switch to ${blocked ?? ''} anyway?`"
-      description="Unsaved changes that stand in the way are thrown away and cannot be brought back."
+      description="Unsaved changes to files that differ between the two branches are thrown away and cannot be brought back. Your other unsaved files stay as they are."
       confirm-label="Discard changes and switch"
       destructive
       @confirm="forceSwitch"

@@ -272,7 +272,7 @@ export const useChangesStore = defineStore('changes', () => {
           const r = await api.commit(root, text, commitOpts())
           if (commitForm.dryRun) {
             preview.value = r.would_commit
-              ? `Preview only: would save ${r.staged} files, ${r.deleted} deletions. Nothing changed.`
+              ? `Preview only: would save ${plural(r.staged ?? 0, 'file')}, ${plural(r.deleted ?? 0, 'deletion')}. Nothing changed.`
               : 'Preview only: nothing to save yet.'
           }
         },

@@ -317,4 +317,10 @@ test.describe('Advanced: reflog', () => {
     await expect.poll(async () => (await ipcCalls(page, 'repo_reset')).map((c) => c.args)).toMatchObject([{ repo: '/repos/hero-film', rev: '0001'.repeat(10), mode: 'soft' }])
     await expect.poll(async () => (await ipcCalls(page, 'reflog_list')).length).toBeGreaterThan(before)
   })
+
+  test('Put files back asks about the files as well (IMP-043)', async ({ page }) => {
+    await boot(page, 'Reflog')
+    await page.getByRole('button', { name: 'Put files back to @1' }).click()
+    await expect(page.getByRole('dialog', { name: /Discard everything back to/ })).toBeVisible()
+  })
 })

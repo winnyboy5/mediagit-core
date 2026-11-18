@@ -26,6 +26,8 @@ export const useSyncStore = defineStore('sync', () => {
   const loading = ref(false)
   const error = ref<ApiError | null>(null)
   const actionError = ref<ApiError | null>(null)
+  /** Said after a Cancel, so the panel does not just vanish. Cleared by the next run. */
+  const stopped = ref<string | null>(null)
   const chosen = ref<string | null>(null)
   const lastSync = ref<Record<string, number>>(load<Record<string, number>>(KEY, {}))
   const editing = ref(false)
@@ -120,6 +122,7 @@ export const useSyncStore = defineStore('sync', () => {
     // Frozen now: the form may change while the transfer runs, and a retry repeats what was asked.
     const opts = transferOpts(kind as 'push', form, confirmed)
     actionError.value = null
+    stopped.value = null
     let id = ''
     const cancel = () => api.cancelOp(id)
     try {
@@ -147,6 +150,7 @@ export const useSyncStore = defineStore('sync', () => {
     } catch (e) {
       const err = toApiError(e)
       if (err.code !== 'cancelled') actionError.value = err
+      else stopped.value = `${LABEL[kind]} cancelled. Nothing is lost; run it again to continue.`
       return false
     } finally {
       await repo.refresh()
@@ -161,9 +165,10 @@ export const useSyncStore = defineStore('sync', () => {
       loaded.value = false
       error.value = null
       actionError.value = null
+      stopped.value = null
       chosen.value = null
     },
   )
 
-  return { remotes, remote, chosen, loaded, loading, error, actionError, active, busy, last, refresh, form, detail, pushNeedsConfirm, confirmPushOpen, pushDeleteNeedsName, addRemote, removeRemote, renameRemote, setRemoteUrl, showRemote, run }
+  return { remotes, remote, chosen, loaded, loading, error, actionError, stopped, active, busy, last, refresh, form, detail, pushNeedsConfirm, confirmPushOpen, pushDeleteNeedsName, addRemote, removeRemote, renameRemote, setRemoteUrl, showRemote, run }
 })

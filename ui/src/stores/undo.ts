@@ -37,7 +37,13 @@ export const useUndoStore = defineStore('undo', () => {
     if (p.kind === 'reset') {
       const { mode } = p
       if (mode === 'hard') {
-        const r = await run(`Go back to ${shortOid(p.rev)} and replace files`, (root, report) => api.resetHard(root, p.rev, true, report), () => 'Files now match that version')
+        // HEAD is git jargon: the Changes view's "Discard" goes back to the latest version.
+        const latest = p.rev === 'HEAD'
+        const r = await run(
+          latest ? 'Discard unsaved changes' : `Go back to ${shortOid(p.rev)} and replace files`,
+          (root, report) => api.resetHard(root, p.rev, true, report),
+          () => (latest ? 'Discarded unsaved changes. Files match the latest version.' : 'Files now match that version'),
+        )
         return !!r
       }
       const r = await run(`Move branch back to ${shortOid(p.rev)}`, (root) => api.reset(root, p.rev, mode), () => 'Branch moved; your files were not touched')

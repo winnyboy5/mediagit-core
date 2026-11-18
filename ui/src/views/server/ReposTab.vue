@@ -37,6 +37,9 @@ const doomed = ref<string | null>(null)
 const typed = ref('')
 const force = ref<boolean | 'indeterminate'>(false)
 const doomedSize = computed(() => r.value.data.find((x) => x.name === doomed.value)?.size_bytes ?? 0)
+// A repository nobody has sent to is only its empty skeleton (a few hundred bytes): nothing to confirm.
+// If the server still says it holds versions or locks, the box appears.
+const holdsVersions = computed(() => doomedSize.value >= 4096 || ['repo_not_empty', 'conflict'].includes(server.actionError?.code ?? ''))
 const delOpen = computed({ get: () => doomed.value !== null, set: (v) => !v && (doomed.value = null) })
 watch(doomed, () => ((typed.value = ''), (force.value = false)))
 async function remove() {
@@ -93,7 +96,7 @@ async function remove() {
   <Dialog v-model:open="delOpen" :title="`Delete ${doomed}?`" description="The server stops hosting it and people can no longer fetch or push to it. This cannot be undone. Files already in the storage bucket stay there until you remove them.">
     <form id="del-repo" class="form" autocomplete="off" @submit.prevent="remove">
       <TextField v-model="typed" :label="`Type ${doomed} to confirm`" />
-      <Checkbox v-if="doomedSize > 0" v-model="force" :label="`Delete even though it holds ${formatBytes(doomedSize)} of versions`" />
+      <Checkbox v-if="holdsVersions" v-model="force" :label="`Delete even though it holds ${formatBytes(doomedSize)} of versions`" />
       <p v-if="server.actionError" class="err" role="alert">{{ server.actionError.message }}</p>
     </form>
     <template #footer>

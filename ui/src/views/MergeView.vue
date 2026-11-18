@@ -15,7 +15,7 @@ import TextField from '@/components/TextField.vue'
 import SkeletonRows from '@/components/SkeletonRows.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import type { MergeStrategy } from '@/api'
-import { conflictReason, missingSide } from '@/lib/merge'
+import { conflictReason, mergeResult, missingSide } from '@/lib/merge'
 import { useBranchesStore } from '@/stores/branches'
 import { useMergeStore } from '@/stores/merge'
 import { primaryBar } from '@/stores/ops'
@@ -149,7 +149,7 @@ const theirsMissing = computed(() => !merge.theirsOid)
 
     <div v-else class="pad">
       <p v-if="merge.last" class="done-note" role="status" data-testid="merge-result">
-        <GitMerge :size="16" aria-hidden="true" /> {{ merge.last.status === 'aborted' ? 'Merge cancelled. Nothing was changed.' : `Done: ${merge.last.status.replace(/_/g, ' ')}.` }}
+        <GitMerge :size="16" aria-hidden="true" /> {{ mergeResult(merge.last.status) }}
       </p>
       <EmptyState title="No merge in progress" description="Pick a branch to merge into the one you are on.">
         <template #icon><GitMerge :size="24" /></template>

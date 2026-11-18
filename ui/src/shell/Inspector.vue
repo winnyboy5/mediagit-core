@@ -29,7 +29,7 @@ const KIND_LABEL: Record<MediaKind, string> = {
   vfx: 'VFX and compositing',
   other: 'File',
 }
-const STATUS_LABEL = { added: 'Added', modified: 'Modified', deleted: 'Deleted', locked: 'Locked', untracked: 'New, not staged', conflict: 'Conflict' } as const
+const STATUS_LABEL = { added: 'Added', modified: 'Modified', deleted: 'Deleted', locked: 'Locked', untracked: 'New, not staged', conflict: 'Conflict', ignored: 'Ignored' } as const
 
 // History describes one file of the selected version; Changes describes the working copy.
 const files = useInspectedFiles()

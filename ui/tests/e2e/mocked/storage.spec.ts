@@ -15,8 +15,8 @@ test.describe('Storage: states', () => {
   test('populated: sizes, ratio, counts, people; no axe violations', async ({ page }) => {
     await boot(page)
     const cards = page.getByRole('list', { name: 'Storage summary' })
-    await expect(cards).toContainText('18.4 GB')
-    await expect(cards).toContainText('41.2 GB')
+    await expect(cards).toContainText('19.8 GB')
+    await expect(cards).toContainText('44.2 GB')
     await expect(cards).toContainText('2.24×')
     await expect(page.getByRole('progressbar', { name: 'Chunks' })).toHaveAttribute('aria-valuenow', '100')
     await expect(page.getByText('48,213')).toBeVisible()

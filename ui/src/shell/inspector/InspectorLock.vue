@@ -23,6 +23,9 @@ const held = computed(() => locks.byPath.get(props.file.path))
 // and let the server refuse if it is not ours.
 const mine = computed(() => !!held.value && (!locks.names.length || locks.isMine(held.value)))
 const here = computed(() => locks.busy === `lock:${props.file.path}` || (!!held.value && locks.busy === `unlock:${held.value.lock_id}`))
+// A project with no server cannot lock anything; that is not a failure.
+const noServer = computed(() => /remote .*not found|no such remote|no 'origin' remote/i.test(`${locks.error?.message}
+${locks.error?.details ?? ''}`))
 const gone = computed(() => props.file.deleted || props.file.status === 'deleted')
 </script>
 
@@ -30,6 +33,7 @@ const gone = computed(() => props.file.deleted || props.file.status === 'deleted
   <section v-if="!gone" aria-labelledby="insp-lock" data-testid="lock-state">
     <h3 id="insp-lock">Lock</h3>
     <p v-if="!locks.loaded && locks.loading" class="note" role="status">Checking lock status…</p>
+    <p v-else-if="!locks.loaded && locks.error && noServer" class="note">Locks need a shared server. Add one under Sync.</p>
     <p v-else-if="!locks.loaded && locks.error" class="note">Lock status is unavailable: {{ locks.error.message }}</p>
     <template v-else-if="held">
       <p class="state"><Lock :size="16" aria-hidden="true" /> Locked by <strong>{{ held.owner }}</strong> · {{ timeAgo(held.created_at * 1000) }}</p>

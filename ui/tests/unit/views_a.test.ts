@@ -160,7 +160,7 @@ describe('changes options', () => {
     await c.commit()
     expect(api.commit).toHaveBeenCalledWith('/repos/hero', 'hello', { include: ['a.psd', 'b.psd'], signoff: true, dryRun: true })
     expect(c.message).toBe('hello')
-    expect(c.preview).toContain('would save 1 files')
+    expect(c.preview).toContain('would save 1 file, 0 deletions')
     c.message = ''
     expect(c.needsMessage).toBe(true)
     c.commitForm.messageFile = 'C:\\m.txt'

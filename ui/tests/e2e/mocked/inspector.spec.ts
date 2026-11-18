@@ -26,7 +26,7 @@ test.describe('Inspector', () => {
     await expect(meta).toContainText('Width')
     await expect(meta).toContainText('1920')
     await expect(meta).toContainText('Has alpha')
-    await expect(meta).toContainText('1.3 MB')
+    await expect(meta).toContainText('1.4 MB')
     await expect(i.getByTestId('lock-state')).toContainText('Not locked')
     await expect(i.getByTestId('file-history').getByRole('button')).toHaveCount(11)
     expect((await ipcCalls(page, 'media_info'))[0]!.args).toMatchObject({ repo: '/repos/hero-film', path: 'art/hero_preview.png' })
@@ -98,6 +98,14 @@ test.describe('Inspector', () => {
     await boot(page, { lock_list: { __error: { code: 'error', message: 'No remote configured' } } })
     await staged(page).getByRole('treeitem', { name: /hero\.psd/ }).click()
     await expect(insp(page).getByTestId('lock-state')).toContainText('Lock status is unavailable: No remote configured')
+  })
+
+  test('no remote: locks need a shared server, no raw config text (IMP-030)', async ({ page }) => {
+    await boot(page, { lock_list: { __error: { code: 'error', message: "Remote 'origin' not found in configuration" } } })
+    await staged(page).getByRole('treeitem', { name: /hero\.psd/ }).click()
+    const lock = insp(page).getByTestId('lock-state')
+    await expect(lock).toContainText('Locks need a shared server')
+    await expect(lock).not.toContainText('not found in configuration')
   })
 
   test('a deleted file has nothing to preview, lock or inspect further', async ({ page }) => {

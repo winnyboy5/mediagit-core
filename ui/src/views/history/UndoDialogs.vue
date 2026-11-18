@@ -40,6 +40,7 @@ const changedFiles = computed(() => {
   const gone = new Set(newFiles.value)
   return [...new Set([...st.staged.map((f) => f.path), ...st.modified, ...st.deleted])].filter((f) => !gone.has(f))
 })
+const kept = computed(() => repo.status?.untracked.length ?? 0)
 const names = (l: string[]) => l.slice(0, SHOWN).join(', ') + (l.length > SHOWN ? ` and ${l.length - SHOWN} more` : '')
 const understood = ref<boolean | 'indeterminate'>(false)
 watch(hardOpen, (o) => o && (understood.value = false))
@@ -136,6 +137,7 @@ const bar = computed(() => (undo.running ? primaryBar(undo.running) : undefined)
         <li v-if="newFiles.length" data-testid="discard-new">
           <strong>{{ newFiles.length }} new {{ newFiles.length === 1 ? 'file' : 'files' }} will be deleted:</strong> {{ names(newFiles) }}. They were never saved, so they cannot be brought back.
         </li>
+        <li v-if="kept" data-testid="discard-kept">{{ kept }} new {{ kept === 1 ? 'file' : 'files' }} you have not included {{ kept === 1 ? 'is' : 'are' }} kept as {{ kept === 1 ? 'it is' : 'they are' }}.</li>
         <li v-if="changedFiles.length" data-testid="discard-changed">These go back to how they were: {{ names(changedFiles) }}.</li>
         <li v-if="p?.rev !== 'HEAD'">Versions after it leave this branch. They stay in the project until it is cleaned up.</li>
       </ul>

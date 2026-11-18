@@ -43,6 +43,17 @@ const SUMMARY: Record<string, string> = {
   aborted: 'Merge cancelled',
 }
 
+/** What a finished merge means for the person, and what to do next. */
+const RESULT: Record<string, string> = {
+  fast_forward: 'Fast-forwarded: your branch now matches the other one.',
+  merged: 'Merged: the two branches are joined.',
+  squashed: 'Squashed: the changes are in your files. Save a version to keep them.',
+  not_committed: 'Merged, but not saved yet. Look over the files, then save a version.',
+  up_to_date: 'Already up to date. There was nothing to merge.',
+  aborted: 'Merge cancelled. Nothing was changed.',
+}
+export const mergeResult = (status: string): string => RESULT[status] ?? 'Merge finished.'
+
 export function mergeSummary(r: MergeReport): string {
   if (r.status === 'conflict') {
     const n = r.conflicts.length

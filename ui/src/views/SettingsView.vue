@@ -131,7 +131,7 @@ const leaveGo = () => {
         <form v-else class="form" @submit.prevent="saveAuthor">
           <TextField v-model="name" label="Name" placeholder="Mira Okafor" />
           <TextField v-model="email" label="Email" placeholder="mira@studio.example" :error="emailError" />
-          <p class="muted">Also used to recognise your file locks.</p>
+          <p class="muted">Also used to recognise your file locks. If this computer sets MEDIAGIT_AUTHOR_NAME or MEDIAGIT_AUTHOR_EMAIL, those are used instead.</p>
           <Button type="submit" variant="primary" :disabled="!canSave" :loading="rs.busy && !rs.running">Save</Button>
         </form>
       </section>

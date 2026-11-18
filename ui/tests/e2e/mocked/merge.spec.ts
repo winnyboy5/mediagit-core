@@ -133,7 +133,7 @@ test.describe('Merge: conflicts', () => {
     ])
     await page.getByRole('button', { name: 'Finish merge' }).click()
     await expect.poll(async () => (await ipcCalls(page, 'repo_merge_control')).map((c) => c.args.action)).toEqual(['continue'])
-    await expect(page.getByTestId('merge-result')).toContainText('Done: merged')
+    await expect(page.getByTestId('merge-result')).toContainText('Merged: the two branches are joined.')
     await expect(page.getByText('No merge in progress')).toBeVisible()
   })
 
@@ -176,7 +176,7 @@ test.describe('Merge: conflicts', () => {
     await ipcRelease(page)
     await expect(bar.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '18')
     await ipcRelease(page)
-    await expect(page.getByTestId('merge-result')).toContainText('Done: merged')
+    await expect(page.getByTestId('merge-result')).toContainText('Merged: the two branches are joined.')
   })
 
   test('a merge started elsewhere: Finish is offered on the empty state', async ({ page }) => {

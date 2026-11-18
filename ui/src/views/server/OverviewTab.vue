@@ -276,7 +276,7 @@ const STATE = {
       >
         <TextField v-model="admin" label="Admin username" :error="usernameError(admin)" />
         <TextField v-model="email" label="Admin email" type="email" />
-        <TextField v-model="pass" label="Password" type="password" :error="passwordError(pass)" />
+        <TextField v-model="pass" label="Password" type="password" hint="At least 8 characters." :error="passwordError(pass)" />
         <TextField
           v-model="again"
           label="Repeat password"

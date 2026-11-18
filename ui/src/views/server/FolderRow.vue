@@ -9,6 +9,8 @@ import { useServerStore } from '@/stores/server'
 const server = useServerStore()
 const path = computed(() => server.local?.data_dir ?? '')
 const running = computed(() => server.local?.state === 'running' || server.local?.state === 'elsewhere')
+// The folder is set from outside for this session (a test or kiosk setup): not an error, just fixed.
+const pinned = computed(() => server.folderError?.code === 'pinned')
 
 async function choose() {
   try {
@@ -25,11 +27,12 @@ async function choose() {
     <p class="label">Server folder</p>
     <p class="mono path" data-testid="folder-path">{{ path }}</p>
     <div class="btns">
-      <Button size="sm" :disabled="running || server.busy" @click="choose"><FolderOpen :size="14" aria-hidden="true" /> Choose folder…</Button>
-      <Button size="sm" :disabled="running || server.busy" @click="server.setFolder()">Use default</Button>
+      <Button size="sm" :disabled="running || pinned || server.busy" @click="choose"><FolderOpen :size="14" aria-hidden="true" /> Choose folder…</Button>
+      <Button size="sm" :disabled="running || pinned || server.busy" @click="server.setFolder()">Use default</Button>
     </div>
     <p v-if="running" class="note">Stop the server to change its folder.</p>
-    <p v-if="server.folderError" class="err" role="alert" data-testid="folder-error">{{ server.folderError.message }}</p>
+    <p v-if="pinned" class="note" data-testid="folder-pinned">This folder is set outside the app for this session, so it cannot be changed here.</p>
+    <p v-else-if="server.folderError" class="err" role="alert" data-testid="folder-error">{{ server.folderError.message }}</p>
     <p class="note">
       A server and your own projects can live on the same computer, but not inside each other. Pick a folder that is empty or already holds a server.
     </p>
