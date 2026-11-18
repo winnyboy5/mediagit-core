@@ -390,7 +390,24 @@ fn init_status(e: &anyhow::Error) -> StatusCode {
 pub async fn probe_storage(storage: &mediagit_config::StorageConfig) -> anyhow::Result<()> {
     let nonce = uuid::Uuid::new_v4();
     let dir = std::env::temp_dir().join(format!("mediagit-probe-{nonce}"));
-    let result = async {
+    // The config holds the secret. Make the folder owner-only before the file
+    // exists (Unix), and delete it on every exit, including a dropped future.
+    // Windows has no modes; the temp folder is already per-user there.
+    struct RemoveOnDrop(std::path::PathBuf);
+    impl Drop for RemoveOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = RemoveOnDrop(dir.clone());
+    {
+        let mut b = std::fs::DirBuilder::new();
+        b.recursive(true);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+        b.create(&dir)?;
+    }
+    async {
         let cfg = mediagit_config::Config {
             storage: storage.clone(),
             ..Default::default()
@@ -414,9 +431,7 @@ pub async fn probe_storage(storage: &mediagit_config::StorageConfig) -> anyhow::
         anyhow::ensure!(got == body, "probe object read back different bytes");
         Ok(())
     }
-    .await;
-    let _ = std::fs::remove_dir_all(&dir);
-    result
+    .await
 }
 
 /// Helper function to create storage backend based on repository configuration.
@@ -1561,6 +1576,27 @@ mod tests {
             Some(StatusCode::UNPROCESSABLE_ENTITY),
             "env not read on the real build path"
         );
+    }
+
+    /// Same guard for the AWS path (`endpoint: None`): a credential-less repo
+    /// must be refused with 422 before any network call. A builder that skips
+    /// `resolve_s3_credentials` gets past this step and the assert fails. Only
+    /// the refusal half runs here: the accepting half would call real AWS.
+    #[tokio::test]
+    async fn s3_aws_path_refuses_without_credentials() {
+        let dir = std::env::temp_dir().join(format!("mg-s3aws-{}", uuid::Uuid::new_v4()));
+        let mut aws = s3(None, None);
+        aws.endpoint = None;
+        let cfg = mediagit_config::Config {
+            storage: mediagit_config::StorageConfig::S3(aws),
+            ..Default::default()
+        };
+        cfg.save(&dir).unwrap();
+        let got = build_storage_backend_with_env(&dir, &env_of(None, None))
+            .await
+            .err();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(got, Some(StatusCode::UNPROCESSABLE_ENTITY));
     }
 
     /// `MEDIAGIT_GRANTS_ENFORCE` is a process-wide env var (like
