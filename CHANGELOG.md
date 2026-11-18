@@ -119,6 +119,14 @@ changes fix real bugs.
 
 ### Changed
 
+- **Desktop app wording and labels** (IMP-009 to 105): sizes use decimal units (1 GB =
+  1,000,000,000 bytes; the command line keeps GiB); rate and time left appear only after
+  2 seconds and 1% of the bytes; New repository on a folder that already is one opens it;
+  toasts sit under the header; Ctrl+F finds files and `*.png` works; ignored files carry an
+  "Ignored" label; the Save button says Preview in preview mode; Discard speaks of the
+  latest version, not HEAD; merge results say what to do next; Reflog offers "Put files
+  back"; a cancelled send says so; the Files list says when a project is a partial copy.
+
 - **`remote add --token` now stores the token in the OS keychain**, keyed by the
   server address, and `config.toml` keeps no copy. If no keychain can be used
   (none available, or `MEDIAGIT_NO_KEYRING` is set) the command is refused with
