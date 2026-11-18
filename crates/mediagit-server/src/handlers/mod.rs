@@ -402,7 +402,7 @@ pub async fn probe_storage(storage: &mediagit_config::StorageConfig) -> anyhow::
     let _cleanup = RemoveOnDrop(dir.clone());
     {
         let mut b = std::fs::DirBuilder::new();
-        b.recursive(true);
+        b.recursive(false);
         #[cfg(unix)]
         std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
         b.create(&dir)?;
