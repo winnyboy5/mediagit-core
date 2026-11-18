@@ -20,7 +20,7 @@ MediaGit commits include:
 - Commit message
 - Compression and deduplication statistics
 
-After `merge --squash`, a plain `commit` (no `-m`, `-F`) uses the saved merge message without opening an editor; add `-e` to edit it. The saved message is removed after any commit once no merge is in progress.
+After a squash merge, a plain `commit` (no `-m`, `-F`) uses the saved merge message without opening an editor; add `-e` to edit it. The saved message is removed after any commit once no merge is in progress.
 
 `commit` refuses while a merge, rebase, cherry-pick or revert is stopped, or a bisect is running, and names the next command: the command's own continue or abort step for the first four, `bisect reset` for a bisect. A merge started without committing is finished with the merge command's continue step, not with `commit`.
 
