@@ -460,6 +460,7 @@ impl<'a> CheckoutManager<'a> {
         // Get all files in working directory (excluding .mediagit)
         let existing_files = self.list_working_directory_files()?;
 
+        let mut removed: Vec<PathBuf> = Vec::new();
         for file in existing_files {
             // Normalize existing file path for comparison
             let file_normalized = file.to_string_lossy().replace('\\', "/");
@@ -490,12 +491,12 @@ impl<'a> CheckoutManager<'a> {
                     fs::remove_file(&file_path).with_context(|| {
                         format!("Failed to remove file: {}", file_path.display())
                     })?;
+                    removed.push(file_path);
                 }
             }
         }
 
-        // Remove empty directories
-        self.remove_empty_directories()?;
+        self.remove_emptied_parents(&removed);
 
         Ok(())
     }
@@ -536,111 +537,19 @@ impl<'a> CheckoutManager<'a> {
 
         Ok(())
     }
-
-    /// Remove empty directories in working tree
-    ///
-    /// Recursively removes all empty directories to match Git behavior.
-    /// Directories are only removed if they contain no files and no non-empty subdirectories.
-    fn remove_empty_directories(&self) -> Result<()> {
-        // Improved: Recursively clean until no more empty dirs
-        // Multiple passes handle nested empty directories
-        loop {
-            let mut removed_any = false;
-            self.try_remove_empty_dirs(&self.repo_root, &mut removed_any)?;
-
-            if !removed_any {
-                break; // No more empty dirs to remove
-            }
-        }
-        Ok(())
-    }
-
-    /// Try to remove empty directories recursively
-    ///
-    /// Returns true if directory still exists (has contents or couldn't be removed)
-    fn try_remove_empty_dirs(&self, dir: &Path, removed_any: &mut bool) -> Result<bool> {
-        if !dir.exists() || !dir.is_dir() {
-            return Ok(false); // Directory doesn't exist
-        }
-
-        // Don't try to remove the repo root
-        if dir == self.repo_root {
-            // But still process its contents
-            // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- local worktree walk
-            for entry in fs::read_dir(dir)? {
-                let entry = entry?;
-                let path = entry.path();
-
-                // Skip .mediagit directory
-                if path.file_name().and_then(|n| n.to_str()) == Some(".mediagit") {
-                    continue;
+    /// Remove the folders a checkout emptied: walk up from each removed file
+    /// and stop at the first folder that still holds anything. Folders that
+    /// were already empty (made by the user) are never touched.
+    fn remove_emptied_parents(&self, removed: &[PathBuf]) {
+        for file in removed {
+            let mut dir = file.parent();
+            while let Some(d) = dir {
+                if d == self.repo_root || fs::remove_dir(d).is_err() {
+                    break;
                 }
-
-                if path.is_dir() {
-                    self.try_remove_empty_dirs(&path, removed_any)?;
-                }
+                debug!("Removed emptied directory: {}", d.display());
+                dir = d.parent();
             }
-            return Ok(true); // Repo root always "has contents"
-        }
-
-        let mut has_contents = false;
-
-        // First pass: recursively process subdirectories
-        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- local worktree walk
-        let entries: Vec<_> = fs::read_dir(dir)?.filter_map(|e| e.ok()).collect();
-
-        for entry in &entries {
-            let path = entry.path();
-
-            // Skip .mediagit directory
-            if path.file_name().and_then(|n| n.to_str()) == Some(".mediagit") {
-                continue;
-            }
-
-            if path.is_dir() {
-                // Recursively try to remove subdirectories
-                if self.try_remove_empty_dirs(&path, removed_any)? {
-                    has_contents = true;
-                }
-            } else {
-                // Directory contains files
-                has_contents = true;
-            }
-        }
-
-        // Remove directory if empty (re-check after subdirectory processing)
-        if !has_contents {
-            // On Windows, there can be timing issues with file handles
-            // Retry a few times with small delays
-            let mut attempts = 0;
-            const MAX_ATTEMPTS: u32 = 3;
-
-            loop {
-                match fs::remove_dir(dir) {
-                    Ok(_) => {
-                        debug!("Removed empty directory: {}", dir.display());
-                        *removed_any = true;
-                        return Ok(false); // Successfully removed
-                    }
-                    Err(e) => {
-                        attempts += 1;
-                        if attempts >= MAX_ATTEMPTS {
-                            // Log but don't fail (might be permission issue or file locks)
-                            debug!(
-                                "Failed to remove empty directory {} after {} attempts: {}",
-                                dir.display(),
-                                attempts,
-                                e
-                            );
-                            return Ok(true); // Still has directory (couldn't remove)
-                        }
-                        // Small delay before retry (Windows file handle release)
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                    }
-                }
-            }
-        } else {
-            Ok(true) // Has contents
         }
     }
 
@@ -1058,7 +967,7 @@ impl<'a> CheckoutManager<'a> {
         // fails the whole checkout.
         let files_added = self.run_parallel_writes(to_add, false).await?;
         let files_modified = self.run_parallel_writes(to_modify, false).await?;
-        let files_deleted = self.run_parallel_deletes(to_delete).await?;
+        let files_deleted = self.run_parallel_deletes(to_delete.clone()).await?;
 
         let mut stats = CheckoutStats {
             files_added,
@@ -1068,8 +977,7 @@ impl<'a> CheckoutManager<'a> {
             elapsed_ms: 0,
         };
 
-        // Clean up empty directories
-        self.remove_empty_directories()?;
+        self.remove_emptied_parents(&to_delete);
 
         stats.elapsed_ms = start.elapsed().as_millis() as u64;
 
