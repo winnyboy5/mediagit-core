@@ -212,12 +212,12 @@ impl VideoParser {
                 })
                 .unwrap_or_else(|| "unknown".to_string());
 
-            // Extract width/height from track header for video tracks
+            // Extract width/height from track header for video tracks (16.16 fixed point)
             let (width, height) = if track.track_type == TrackType::Video {
                 track
                     .tkhd
                     .as_ref()
-                    .map(|tkhd| (Some(tkhd.width), Some(tkhd.height)))
+                    .map(|tkhd| (Some(tkhd.width >> 16), Some(tkhd.height >> 16)))
                     .unwrap_or((None, None))
             } else {
                 (None, None)
@@ -525,5 +525,60 @@ mod tests {
 
         // Different tracks don't conflict
         assert!(!seg1.overlaps(&seg2));
+    }
+
+    /// A box: size, four-character type, payload.
+    fn mp4_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut b = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
+        b.extend_from_slice(kind);
+        b.extend_from_slice(payload);
+        b
+    }
+
+    /// BUG-016: the track header stores width and height as 16.16 fixed
+    /// point; 1280 x 720 must read back as 1280 and 720, not 1280 << 16.
+    #[tokio::test]
+    async fn test_track_header_size_is_not_fixed_point() {
+        let mut mvhd = vec![0u8; 100];
+        mvhd[12..16].copy_from_slice(&1000u32.to_be_bytes()); // timescale
+        mvhd[20..24].copy_from_slice(&0x0001_0000u32.to_be_bytes()); // rate
+        mvhd[26..28].copy_from_slice(&0x0100u16.to_be_bytes()); // volume
+        mvhd[36..40].copy_from_slice(&0x0001_0000u32.to_be_bytes()); // matrix a
+        mvhd[52..56].copy_from_slice(&0x0001_0000u32.to_be_bytes()); // matrix d
+        mvhd[68..72].copy_from_slice(&0x4000_0000u32.to_be_bytes()); // matrix w
+        mvhd[96..100].copy_from_slice(&2u32.to_be_bytes()); // next track id
+
+        let mut tkhd = vec![0u8; 84];
+        tkhd[3] = 3; // enabled | in movie
+        tkhd[12..16].copy_from_slice(&1u32.to_be_bytes()); // track id
+        tkhd[40..44].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+        tkhd[56..60].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+        tkhd[72..76].copy_from_slice(&0x4000_0000u32.to_be_bytes());
+        tkhd[76..80].copy_from_slice(&(1280u32 << 16).to_be_bytes());
+        tkhd[80..84].copy_from_slice(&(720u32 << 16).to_be_bytes());
+
+        let mut mdhd = vec![0u8; 24];
+        mdhd[12..16].copy_from_slice(&1000u32.to_be_bytes());
+        let mut hdlr = vec![0u8; 25];
+        hdlr[8..12].copy_from_slice(b"vide");
+        let minf = mp4_box(b"minf", &[]);
+        let mdia = mp4_box(
+            b"mdia",
+            &[mp4_box(b"mdhd", &mdhd), mp4_box(b"hdlr", &hdlr), minf].concat(),
+        );
+        let trak = mp4_box(b"trak", &[mp4_box(b"tkhd", &tkhd), mdia].concat());
+        let moov = mp4_box(b"moov", &[mp4_box(b"mvhd", &mvhd), trak].concat());
+        let mut ftyp = b"isom".to_vec();
+        ftyp.extend_from_slice(&[0; 4]);
+        ftyp.extend_from_slice(b"isom");
+        let file = [mp4_box(b"ftyp", &ftyp), moov].concat();
+
+        let info = VideoParser::new().parse(&file).await.unwrap();
+        let video = info
+            .tracks
+            .iter()
+            .find(|t| t.track_type == "video")
+            .unwrap();
+        assert_eq!((video.width, video.height), (Some(1280), Some(720)));
     }
 }
