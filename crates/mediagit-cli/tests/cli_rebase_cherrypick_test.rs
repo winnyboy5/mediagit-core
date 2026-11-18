@@ -762,3 +762,89 @@ fn test_rebase_continue_refuses_unrelated_tracked_edit() {
         "resolved\n"
     );
 }
+
+fn object_paths(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+    for e in fs::read_dir(dir).unwrap().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            object_paths(&p, out);
+        } else {
+            out.push(p);
+        }
+    }
+}
+
+fn tip(d: &Path, branch: &str) -> String {
+    fs::read_to_string(d.join(".mediagit/refs/heads").join(branch))
+        .unwrap()
+        .trim()
+        .to_string()
+}
+
+/// Y2: a version applied during `--continue` must leave the list when it is
+/// saved, so a later failure in the same run cannot make `--continue` apply it again.
+#[test]
+fn test_cherrypick_continue_lists_only_unapplied_after_a_failure() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    init_repo(d);
+    add_and_commit(d, "n.txt", "base\n", "Base");
+    create_and_switch_branch(d, "side");
+    add_and_commit(d, "n.txt", "theirs\n", "X1 clash");
+    let x1 = tip(d, "side");
+    add_and_commit(d, "a.txt", "two\n", "X2 adds a");
+    let x2 = tip(d, "side");
+    // X3's file: find its blob so it can be removed after the commit.
+    let mut before = Vec::new();
+    object_paths(&d.join(".mediagit/objects"), &mut before);
+    fs::write(d.join("b.txt"), "three, unique content\n").unwrap();
+    mediagit()
+        .args(["add", "b.txt"])
+        .current_dir(d)
+        .assert()
+        .success();
+    let mut after = Vec::new();
+    object_paths(&d.join(".mediagit/objects"), &mut after);
+    let blob: Vec<_> = after
+        .iter()
+        .filter(|p| !before.contains(p))
+        .cloned()
+        .collect();
+    assert_eq!(blob.len(), 1, "fixture: add wrote one object");
+    mediagit()
+        .args(["commit", "-m", "X3 adds b"])
+        .current_dir(d)
+        .assert()
+        .success();
+    let x3 = tip(d, "side");
+    switch_main(d);
+    add_and_commit(d, "n.txt", "ours\n", "Main edit");
+
+    mediagit()
+        .args(["cherry-pick", &x1, &x2, &x3])
+        .current_dir(d)
+        .assert()
+        .failure();
+    fs::write(d.join("n.txt"), "resolved\n").unwrap();
+    mediagit()
+        .args(["add", "n.txt"])
+        .current_dir(d)
+        .assert()
+        .success();
+    fs::remove_file(&blob[0]).unwrap();
+    mediagit()
+        .args(["cherry-pick", "--continue"])
+        .current_dir(d)
+        .assert()
+        .failure();
+    assert!(
+        d.join("a.txt").exists(),
+        "X2 was applied before the failure"
+    );
+    let state = fs::read_to_string(d.join(".mediagit/CHERRY_PICK_STATE")).unwrap();
+    assert!(
+        !state.contains(&x2),
+        "X2 already applied, must not be listed: {state}"
+    );
+    assert!(state.contains(&x3), "X3 still to do: {state}");
+}

@@ -213,6 +213,8 @@ impl CherryPickCmd {
         let mut created = Vec::new();
         // J2: under `--no-commit` each pick goes on top of the previous result.
         let mut onto = None;
+        // Y2: a run resumed by `--continue` / `--skip` has its rest on file.
+        let resuming = repo_root.join(".mediagit/CHERRY_PICK_STATE").exists();
         for (idx, &commit_oid) in listed[1..].iter().enumerate() {
             if !self.quiet() {
                 println!(
@@ -263,6 +265,11 @@ impl CherryPickCmd {
                             }
                         };
                         created.push(new_oid.to_hex());
+                        // Y2: this pick is done, so it leaves the list now; a
+                        // failure in the next one must not make it run twice.
+                        if resuming {
+                            write_rest_state(repo_root, new_oid, &resolved[idx + 1..])?;
+                        }
                     }
                 }
                 Err(e) => {
