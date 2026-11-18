@@ -154,6 +154,8 @@ test.describe('Sync: remote actions', () => {
     await dlg.getByRole('checkbox', { name: 'Fetch right after adding' }).click()
     await dlg.getByLabel('Access token').fill('s3cret')
     await expect(dlg.getByLabel('Access token')).toHaveAttribute('type', 'password')
+    await expect(dlg).toContainText('Saved in your system keychain')
+    await expect(dlg).not.toContainText('settings file')
     await dlg.getByRole('button', { name: 'Add remote' }).click()
     await expect.poll(async () => (await ipcCalls(page, 'remote_add')).length).toBe(1)
     expect(await last(page, 'remote_add')).toEqual({ repo: '/repos/hero-film', name: 'backup', url: 'https://backup.example/hero', fetch: true, token: 's3cret' })

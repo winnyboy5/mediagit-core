@@ -565,6 +565,23 @@ pub fn forget_credentials(config: &mediagit_config::Config, remote_name: &str) -
     origin_removed || legacy_removed
 }
 
+/// True if a remote other than `removed` stores its credential under the same
+/// keychain entry (same server origin).
+fn other_remote_shares_account(config: &mediagit_config::Config, removed: &str) -> bool {
+    let account = keyring_account(config, removed);
+    config
+        .remotes
+        .keys()
+        .any(|n| n != removed && keyring_account(config, n) == account)
+}
+
+/// `remote remove`: forget the keychain entry the remote used, unless another
+/// remote of this repository still talks to the same server. Call before the
+/// remote is taken out of `config`. Returns `true` if an entry was removed.
+pub fn forget_credentials_if_unused(config: &mediagit_config::Config, removed: &str) -> bool {
+    !other_remote_shares_account(config, removed) && forget_credentials(config, removed)
+}
+
 /// True if `err`'s full display chain indicates the server responded 401
 /// Unauthorized. `mediagit_protocol`'s control-plane client methods
 /// (`get_refs`, `update_refs`, `create_lock`, ...) return bare
@@ -1022,6 +1039,25 @@ mod tests {
         // Should find root from nested path
         let found = find_repo_root_from(&nested).unwrap();
         assert_eq!(found, repo_root);
+    }
+
+    /// BUG-034: removing a remote forgets its keychain entry only when no other
+    /// remote of this repository uses the same server.
+    #[test]
+    fn another_remote_on_the_same_server_keeps_the_credential() {
+        let mut config = mediagit_config::Config::default();
+        for (name, url) in [
+            ("origin", "http://127.0.0.1:8080/hero"),
+            ("backup", "http://127.0.0.1:8080/hero-copy"),
+            ("other", "http://127.0.0.1:9090/hero"),
+        ] {
+            config
+                .remotes
+                .insert(name.into(), mediagit_config::RemoteConfig::new(url));
+        }
+        assert!(other_remote_shares_account(&config, "origin"));
+        assert!(other_remote_shares_account(&config, "backup"));
+        assert!(!other_remote_shares_account(&config, "other"));
     }
 
     /// BUG-003: opening storage outside a repository must fail and write nothing.
