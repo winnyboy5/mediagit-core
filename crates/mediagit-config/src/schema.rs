@@ -992,12 +992,24 @@ mod tests {
             .unwrap();
         assert!(grant.status.success());
         Config::default().save(dir.path()).unwrap();
-        let acl = std::process::Command::new("icacls")
+        // `/save` writes the ACL as SDDL (UTF-16), so the check does not depend
+        // on the localized name of the Everyone account: `WD` is its alias.
+        let saved = dir.path().join("acl.sddl");
+        let out = std::process::Command::new("icacls")
             .arg(mg.join("config.toml"))
+            .arg("/save")
+            .arg(&saved)
             .output()
             .unwrap();
-        let acl = String::from_utf8_lossy(&acl.stdout);
-        assert!(!acl.contains("Everyone"), "wide ACL survived: {acl}");
+        assert!(out.status.success());
+        let units: Vec<u16> = std::fs::read(&saved)
+            .unwrap()
+            .chunks_exact(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        let acl = String::from_utf16_lossy(&units);
+        assert!(acl.contains("D:"), "no ACL read: {acl}");
+        assert!(!acl.contains(";;;WD)"), "wide ACL survived: {acl}");
     }
 
     #[test]

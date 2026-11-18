@@ -823,7 +823,7 @@ impl BranchCmd {
         // in-place dirty-check only iterated the top level of the HEAD tree,
         // so a modified file in any subdirectory was silently overwritten).
         if !opts.force {
-            crate::worktree_guard::AtRisk::check(
+            crate::worktree_guard::AtRisk::check_exact(
                 &repo_root,
                 &odb,
                 current_commit_oid.as_ref(),

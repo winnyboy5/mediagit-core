@@ -48,6 +48,8 @@ the cause, then run `--continue` again, or `--skip` to drop the next one.
 
 After a conflict, finish with `--continue`; a plain `commit` refuses while the cherry-pick is stopped.
 
+`cherry-pick` refuses to start while any change is staged. Commit it, or unstage it with `mediagit reset <path>`.
+
 #### `-q`, `--quiet`
 Suppress output.
 

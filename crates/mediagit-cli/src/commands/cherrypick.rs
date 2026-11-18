@@ -180,6 +180,13 @@ impl CherryPickCmd {
         crate::worktree_guard::AtRisk::check(repo_root, &odb, Some(&current_oid), None)
             .await?
             .ensure_clean("cherry-pick")?;
+        crate::worktree_guard::ensure_index_clean(
+            repo_root,
+            &odb,
+            Some(&current_oid),
+            "cherry-pick",
+        )
+        .await?;
 
         if !self.quiet() {
             println!(

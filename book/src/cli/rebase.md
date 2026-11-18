@@ -52,7 +52,7 @@ commit's changes on top, so what you see is what `--continue` will save.
 `--abort` puts every tracked file back to how it was before the rebase.
 
 `rebase` refuses with an error before writing anything if the working tree
-has uncommitted changes (including a staged new file the new base has a different file for), and refuses to start a second rebase while one is
+has uncommitted changes (and also if any change is staged: commit it or run `mediagit reset <path>` first), and refuses to start a second rebase while one is
 already in progress.
 
 ## Examples

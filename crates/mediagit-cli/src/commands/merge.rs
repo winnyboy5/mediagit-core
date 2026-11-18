@@ -219,9 +219,24 @@ impl MergeCmd {
         // ref or working-tree write, so a refusal leaves nothing half done.
         // BUG-008: an unsafe path is the more useful thing to report first.
         crate::repo::ensure_no_unsafe_paths(&odb, &repo_root, &[our_oid, their_oid]).await?;
-        crate::worktree_guard::AtRisk::check(&repo_root, &odb, Some(&our_oid), Some(&their_oid))
+        // A fast-forward writes exactly their tree; a true merge writes a
+        // merged one, so only the first may treat equal bytes as safe.
+        let ff = mediagit_versioning::LcaFinder::new(odb.clone())
+            .is_ancestor(&our_oid, &their_oid)
+            .await?;
+        let at_risk = if ff {
+            crate::worktree_guard::AtRisk::check_exact(
+                &repo_root,
+                &odb,
+                Some(&our_oid),
+                Some(&their_oid),
+            )
             .await?
-            .ensure_clean("merge")?;
+        } else {
+            crate::worktree_guard::AtRisk::check(&repo_root, &odb, Some(&our_oid), Some(&their_oid))
+                .await?
+        };
+        at_risk.ensure_clean("merge")?;
 
         // WT-1: bound what the post-merge checkouts below may delete.
         let tracked =
@@ -277,6 +292,12 @@ impl MergeCmd {
             anyhow::bail!(
                 "Not possible to fast-forward: the branches have diverged. Merge without --ff-only, or rebase first."
             );
+        }
+
+        // A true merge can stop on a conflict: the index must match HEAD first.
+        if result.fast_forward.is_none() {
+            crate::worktree_guard::ensure_index_clean(&repo_root, &odb, Some(&our_oid), "merge")
+                .await?;
         }
 
         // Handle merge result

@@ -200,6 +200,8 @@ impl RevertCmd {
             involved.extend(c.parents.first().copied());
         }
         crate::repo::ensure_no_unsafe_paths(&odb, &repo_root, &involved).await?;
+        crate::worktree_guard::ensure_index_clean(&repo_root, &odb, Some(&original_head), "revert")
+            .await?;
 
         let commits: Vec<String> = resolved_commits.iter().map(|o| o.to_hex()).collect();
         self.run_reverts(

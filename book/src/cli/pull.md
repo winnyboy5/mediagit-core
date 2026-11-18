@@ -42,7 +42,7 @@ state matches the remote's and refuses if they disagree.
 | `-V`, `--version` | Print version |
 
 `pull` refuses with an error before touching anything if the working tree has
-uncommitted changes that the fast-forward, merge, or rebase would overwrite, including a staged new file the incoming version has a different file for.
+uncommitted changes that the fast-forward, merge, or rebase would overwrite, including a staged new file the incoming version has a different file for. A pull that has to merge also refuses while any change is staged (commit it or run `mediagit reset <path>`); a fast-forward keeps it.
 
 ## Examples
 

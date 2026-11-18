@@ -146,7 +146,7 @@ impl CommitCmd {
         // reset` would then move the branch back and drop it.
         if repo_dir.is_some_and(|d| d.join("BISECT_STATE").exists()) {
             anyhow::bail!(
-                "A bisect is in progress. Finish it first: `mediagit bisect reset`. Stash any edits you want to keep."
+                "A bisect is in progress. Finish it first: `mediagit bisect reset`. Undo or copy elsewhere any edits you want to keep first."
             );
         }
 

@@ -632,6 +632,13 @@ impl PullCmd {
                     )
                     .await?
                     .ensure_clean("merge")?;
+                    crate::worktree_guard::ensure_index_clean(
+                        &repo_root,
+                        &odb,
+                        Some(&head_oid),
+                        "merge",
+                    )
+                    .await?;
 
                     let merge_engine = mediagit_versioning::MergeEngine::new(Arc::clone(&odb));
 
@@ -780,7 +787,7 @@ async fn fast_forward_to(
     // outcome of a routine `pull` — so it was the most reachable path by which
     // uncommitted edits were overwritten and untracked files deleted.
     let head_oid = refdb.resolve("HEAD").await.ok();
-    crate::worktree_guard::AtRisk::check(repo_root, odb, head_oid.as_ref(), Some(oid))
+    crate::worktree_guard::AtRisk::check_exact(repo_root, odb, head_oid.as_ref(), Some(oid))
         .await?
         .ensure_clean("pull")?;
 

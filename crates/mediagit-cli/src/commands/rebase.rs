@@ -218,6 +218,8 @@ impl RebaseCmd {
         )
         .await?
         .ensure_clean("rebase")?;
+        crate::worktree_guard::ensure_index_clean(&repo_root, &odb, Some(&current_oid), "rebase")
+            .await?;
 
         // WT-1: bound what the checkouts below may delete.
         let tracked =

@@ -53,7 +53,21 @@ impl AtRisk {
         head: Option<&Oid>,
         target: Option<&Oid>,
     ) -> Result<Self> {
-        Self::run(repo_root, odb, head, target, None).await
+        Self::run(repo_root, odb, head, target, None, false).await
+    }
+
+    /// [`Self::check`] for a command that writes exactly `target`'s tree
+    /// (branch switch, bisect, fast-forward, `reset`). A file already holding
+    /// the target's bytes is then not at risk: the write is identical (a
+    /// `stash push` before `bisect reset`, or a half-written bisect step). A
+    /// merge, revert or rebase writes a different tree, so it must not use this.
+    pub async fn check_exact(
+        repo_root: &Path,
+        odb: &ObjectDatabase,
+        head: Option<&Oid>,
+        target: Option<&Oid>,
+    ) -> Result<Self> {
+        Self::run(repo_root, odb, head, target, None, true).await
     }
 
     /// Like [`Self::check`], but with `base` set only the paths `target`
@@ -67,7 +81,7 @@ impl AtRisk {
         target: Option<&Oid>,
         base: Option<&Oid>,
     ) -> Result<Self> {
-        Self::run(repo_root, odb, head, target, base).await
+        Self::run(repo_root, odb, head, target, base, false).await
     }
 
     async fn run(
@@ -76,6 +90,7 @@ impl AtRisk {
         head: Option<&Oid>,
         target: Option<&Oid>,
         base: Option<&Oid>,
+        exact: bool,
     ) -> Result<Self> {
         let head_files = match head {
             Some(oid) => {
@@ -111,14 +126,21 @@ impl AtRisk {
             }
         }
         let _ = stat.save();
-        // A file already holding the target's bytes is not at risk: the
-        // checkout would rewrite identical content (a `stash push` before
-        // `bisect reset`, or a step that failed after writing some files).
-        if let (Some(target_oid), false) = (target, modified.is_empty()) {
+        // `exact` only: a file already holding the target's bytes is not at
+        // risk, unless a staged blob of its own (neither HEAD's nor the
+        // target's) would be orphaned by the index reset.
+        if let (Some(target_oid), true, false) = (target, exact, modified.is_empty()) {
             let target_files = CheckoutManager::new(odb, repo_root)
                 .tracked_files_at(target_oid)
                 .await?;
-            modified.retain(|p| target_files.get(p).map(|(t, _)| t) != working.get(p));
+            let index = Index::load(repo_root)?;
+            modified.retain(|p| {
+                let t = target_files.get(p).map(|(t, _)| t);
+                let staged_only = index.get_entry(p).is_some_and(|e| {
+                    Some(&e.oid) != t && Some(&e.oid) != head_files.get(p).map(|(h, _)| h)
+                });
+                t != working.get(p) || staged_only
+            });
         }
         modified.sort();
 
@@ -234,8 +256,11 @@ impl AtRisk {
         if self.is_empty() {
             return Ok(());
         }
-        let fix = "stash or undo them, then run `mediagit bisect reset`";
-        Err(self.bail_with(operation, fix, fix))
+        Err(self.bail_with(
+            operation,
+            "undo the edits (restore the files) or copy them elsewhere, then run `mediagit bisect reset`",
+            "move or remove them, then run `mediagit bisect reset`",
+        ))
     }
 
     /// Refuse unless clean.
@@ -246,6 +271,54 @@ impl AtRisk {
             Err(self.bail(operation))
         }
     }
+}
+
+/// Refuse to START an operation that can stop part-way (non-fast-forward
+/// merge, rebase, cherry-pick, revert) while the index differs from `head`.
+/// Abort, skip and continue rebuild or clear the index, so a staged change
+/// that predates the operation would be deleted or committed into it. Like
+/// git, the user commits or unstages first.
+pub async fn ensure_index_clean(
+    repo_root: &Path,
+    odb: &ObjectDatabase,
+    head: Option<&Oid>,
+    operation: &str,
+) -> Result<()> {
+    let head_files = match head {
+        Some(oid) => {
+            CheckoutManager::new(odb, repo_root)
+                .tracked_files_at(oid)
+                .await?
+        }
+        None => Default::default(),
+    };
+    let index = Index::load(repo_root)?;
+    let mut staged: Vec<PathBuf> = index
+        .entries()
+        .filter(|e| head_files.get(&e.path).map(|(o, _)| o) != Some(&e.oid))
+        .map(|e| e.path.clone())
+        .chain(
+            index
+                .deleted_paths()
+                .filter(|p| head_files.contains_key(*p))
+                .cloned(),
+        )
+        .collect();
+    if staged.is_empty() {
+        return Ok(());
+    }
+    staged.sort();
+    staged.dedup();
+    Err(crate::output::CodedError::new(
+        "staged_changes",
+        format!(
+            "These files have staged changes that are not committed:
+{}
+Please commit them, or unstage them with `mediagit reset <path>`, before you {operation}.",
+            indent(&staged)
+        ),
+    )
+    .into())
 }
 
 /// Paths a checkout is entitled to delete: tracked at `head`.

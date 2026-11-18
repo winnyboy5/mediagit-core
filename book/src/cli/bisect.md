@@ -70,7 +70,7 @@ End the bisect session and return to the original branch.
 mediagit bisect reset [<COMMIT>]
 ```
 
-Refuses, naming the files, when you edited a tracked file (stash first). Removes files that only existed in a tested version and keeps your untracked files.
+Refuses, naming the files, when you edited a tracked file (undo the edits or copy them elsewhere, then `bisect reset`). Removes files that only existed in a tested version and keeps your untracked files.
 
 ### `log`
 

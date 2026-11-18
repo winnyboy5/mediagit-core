@@ -358,9 +358,14 @@ impl BisectCmd {
         // and let the checkout remove midpoint-only files (I2). Untracked
         // files that predate bisect are in neither tree, so they stay.
         let on_disk = state.on_disk_oid()?;
-        crate::worktree_guard::AtRisk::check(&repo_root, &odb, Some(&on_disk), Some(&reset_oid))
-            .await?
-            .ensure_clean_bisect("bisect reset")?;
+        crate::worktree_guard::AtRisk::check_exact(
+            &repo_root,
+            &odb,
+            Some(&on_disk),
+            Some(&reset_oid),
+        )
+        .await?
+        .ensure_clean_bisect("bisect reset")?;
         let tracked =
             crate::worktree_guard::tracked_paths(&repo_root, &odb, Some(&on_disk)).await?;
         let checkout_mgr = CheckoutManager::new(&odb, &repo_root).with_tracked_paths(tracked);
@@ -581,9 +586,14 @@ impl BisectCmd {
 
         if candidates.is_empty() {
             // Range has collapsed: bad_oid is the first bad commit.
-            crate::worktree_guard::AtRisk::check(repo_root, &odb, Some(&on_disk), Some(&bad_oid))
-                .await?
-                .ensure_clean_bisect("bisect")?;
+            crate::worktree_guard::AtRisk::check_exact(
+                repo_root,
+                &odb,
+                Some(&on_disk),
+                Some(&bad_oid),
+            )
+            .await?
+            .ensure_clean_bisect("bisect")?;
             let checkout_mgr =
                 CheckoutManager::new(&odb, repo_root).with_tracked_paths(bisect_tracked.clone());
             checkout_mgr.checkout_commit(&bad_oid).await?;
@@ -619,9 +629,14 @@ impl BisectCmd {
         let next_oid = candidates[midpoint];
 
         // Checkout next commit
-        crate::worktree_guard::AtRisk::check(repo_root, &odb, Some(&on_disk), Some(&next_oid))
-            .await?
-            .ensure_clean_bisect("bisect")?;
+        crate::worktree_guard::AtRisk::check_exact(
+            repo_root,
+            &odb,
+            Some(&on_disk),
+            Some(&next_oid),
+        )
+        .await?
+        .ensure_clean_bisect("bisect")?;
         let checkout_mgr = CheckoutManager::new(&odb, repo_root).with_tracked_paths(bisect_tracked);
         checkout_mgr.checkout_commit(&next_oid).await?;
 

@@ -934,14 +934,6 @@ fn f4_switch_carries_staged_new_file_the_target_lacks() {
 }
 
 #[test]
-fn f4_merge_true_merge_carries_staged_new_file() {
-    let temp = carry_setup();
-    run_ok(&temp, &["merge", "feat"]);
-    assert!(temp.path().join("b.txt").exists());
-    assert_carried(&temp);
-}
-
-#[test]
 fn f4_merge_fast_forward_carries_staged_new_file() {
     let temp = TempDir::new().unwrap();
     init_repo(temp.path());
@@ -953,37 +945,6 @@ fn f4_merge_fast_forward_carries_staged_new_file() {
     stage_new(temp.path(), "wip.psd", "staged");
     run_ok(&temp, &["merge", "feat"]);
     assert!(temp.path().join("b.txt").exists());
-    assert_carried(&temp);
-}
-
-#[test]
-fn f4_cherry_pick_carries_staged_new_file() {
-    let temp = carry_setup();
-    run_ok(&temp, &["cherry-pick", "feat"]);
-    assert!(temp.path().join("b.txt").exists());
-    assert_carried(&temp);
-}
-
-#[test]
-fn f4_cherry_pick_no_commit_carries_staged_new_file() {
-    let temp = carry_setup();
-    run_ok(&temp, &["cherry-pick", "--no-commit", "feat"]);
-    assert!(temp.path().join("b.txt").exists());
-    assert_carried(&temp);
-}
-
-#[test]
-fn f4_revert_carries_staged_new_file() {
-    let temp = carry_setup();
-    run_ok(&temp, &["revert", "HEAD"]);
-    assert!(!temp.path().join("c.txt").exists());
-    assert_carried(&temp);
-}
-
-#[test]
-fn f4_revert_no_commit_carries_staged_new_file() {
-    let temp = carry_setup();
-    run_ok(&temp, &["revert", "--no-commit", "HEAD"]);
     assert_carried(&temp);
 }
 
@@ -1055,7 +1016,8 @@ fn f4_bisect_refusal_does_not_advise_commit() {
     bisect(temp.path(), &["good"])
         .failure()
         .stderr(predicate::str::contains("bisect reset"))
-        .stderr(predicate::str::contains("commit your changes").not());
+        .stderr(predicate::str::contains("commit your changes").not())
+        .stderr(predicate::str::contains("stash").not());
 }
 
 #[test]
@@ -1087,4 +1049,154 @@ fn f4_bisect_retry_after_partial_checkout() {
     fs::write(temp.path().join("f.txt"), &next).unwrap();
     bisect(temp.path(), &["good"]).success();
     assert_eq!(fs::read_to_string(temp.path().join("f.txt")).unwrap(), next);
+}
+
+// ============================================================================
+// F6 — an operation that can stop part-way refuses to START while the index
+// differs from HEAD, so abort/skip/continue never meet a foreign staged file.
+// ============================================================================
+
+fn assert_start_refused_staged_kept(temp: &TempDir, args: &[&str]) {
+    mediagit()
+        .args(args)
+        .current_dir(temp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("wip.psd"))
+        .stderr(predicate::str::contains("staged"));
+    assert_carried(temp);
+}
+
+#[test]
+fn f6_merge_refuses_to_start_with_staged_file() {
+    let temp = carry_setup();
+    assert_start_refused_staged_kept(&temp, &["merge", "feat"]);
+    assert!(!temp.path().join("b.txt").exists());
+}
+
+#[test]
+fn f6_rebase_refuses_to_start_with_staged_file() {
+    let temp = carry_setup();
+    assert_start_refused_staged_kept(&temp, &["rebase", "feat"]);
+}
+
+#[test]
+fn f6_cherry_pick_refuses_to_start_with_staged_file() {
+    let temp = carry_setup();
+    assert_start_refused_staged_kept(&temp, &["cherry-pick", "feat"]);
+    assert_start_refused_staged_kept(&temp, &["cherry-pick", "--no-commit", "feat"]);
+}
+
+#[test]
+fn f6_revert_refuses_to_start_with_staged_file() {
+    let temp = carry_setup();
+    assert_start_refused_staged_kept(&temp, &["revert", "HEAD"]);
+    assert_start_refused_staged_kept(&temp, &["revert", "--no-commit", "HEAD"]);
+    assert!(temp.path().join("c.txt").exists());
+}
+
+#[test]
+fn f6_merge_refuses_with_staged_change_to_tracked_file() {
+    let temp = carry_setup();
+    fs::write(temp.path().join("a.txt"), "staged edit").unwrap();
+    run_ok(&temp, &["add", "a.txt"]);
+    fs::write(temp.path().join("a.txt"), "base").unwrap();
+    mediagit()
+        .args(["merge", "feat"])
+        .current_dir(temp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("a.txt"));
+}
+
+/// main edits p.txt; feat leaves it alone. The user's uncommitted p.txt equals
+/// feat's bytes, but the merge writes main's merged tree, not feat's.
+fn equal_to_other_side_setup() -> TempDir {
+    let temp = TempDir::new().unwrap();
+    init_repo(temp.path());
+    commit_file(temp.path(), "p.txt", "base", "p base");
+    commit_file(temp.path(), "q.txt", "q0", "q base");
+    branch_create(temp.path(), "feat");
+    branch_switch(temp.path(), "feat");
+    commit_file(temp.path(), "q.txt", "q1", "feat edits q");
+    branch_switch(temp.path(), "main");
+    commit_file(temp.path(), "p.txt", "MAINP", "main edits p");
+    fs::write(temp.path().join("p.txt"), "base").unwrap();
+    temp
+}
+
+#[test]
+fn f6_merge_refuses_edit_equal_to_other_side() {
+    let temp = equal_to_other_side_setup();
+    mediagit()
+        .args(["merge", "feat"])
+        .current_dir(temp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("p.txt"));
+    assert_eq!(
+        fs::read_to_string(temp.path().join("p.txt")).unwrap(),
+        "base"
+    );
+}
+
+#[test]
+fn f6_revert_refuses_edit_equal_to_target_parent() {
+    let temp = TempDir::new().unwrap();
+    init_repo(temp.path());
+    commit_file(temp.path(), "p.txt", "base", "p base");
+    commit_file(temp.path(), "q.txt", "q1", "adds q");
+    commit_file(temp.path(), "p.txt", "MAINP", "main edits p");
+    fs::write(temp.path().join("p.txt"), "base").unwrap();
+    mediagit()
+        .args(["revert", "HEAD~1"])
+        .current_dir(temp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("p.txt"));
+    assert_eq!(
+        fs::read_to_string(temp.path().join("p.txt")).unwrap(),
+        "base"
+    );
+}
+
+/// The working file equals the target, but the staged blob is a different
+/// copy that nothing else references.
+#[test]
+fn f6_switch_refuses_when_staged_blob_differs_from_target() {
+    let temp = TempDir::new().unwrap();
+    init_repo(temp.path());
+    commit_file(temp.path(), "p.txt", "base", "p base");
+    branch_create(temp.path(), "feat");
+    branch_switch(temp.path(), "feat");
+    commit_file(temp.path(), "p.txt", "FEAT", "feat edits p");
+    branch_switch(temp.path(), "main");
+    fs::write(temp.path().join("p.txt"), "STAGED-ONLY-COPY").unwrap();
+    run_ok(&temp, &["add", "p.txt"]);
+    fs::write(temp.path().join("p.txt"), "FEAT").unwrap();
+    mediagit()
+        .args(["branch", "switch", "feat"])
+        .current_dir(temp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("p.txt"));
+    assert_eq!(
+        fs::read_to_string(temp.path().join(".mediagit/HEAD"))
+            .unwrap()
+            .trim(),
+        "ref: refs/heads/main"
+    );
+}
+
+#[test]
+fn f6_undo_edit_then_bisect_reset_works() {
+    let temp = TempDir::new().unwrap();
+    let oldest = linear_history(temp.path());
+    bisect(temp.path(), &["start", "HEAD", &oldest]).success();
+    let mid = fs::read_to_string(temp.path().join("f.txt")).unwrap();
+    fs::write(temp.path().join("f.txt"), "MY EDIT").unwrap();
+    bisect(temp.path(), &["reset"]).failure();
+    fs::write(temp.path().join("f.txt"), mid).unwrap();
+    bisect(temp.path(), &["reset"]).success();
+    assert_eq!(fs::read_to_string(temp.path().join("f.txt")).unwrap(), "v6");
 }

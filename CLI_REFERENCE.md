@@ -96,6 +96,7 @@ error chain with URL credentials and query strings removed.
 | `needs_input` | A prompt (passphrase, confirmation) was reached; collect the input and re-run with it supplied | 1 |
 | `invalid_args` | Flags combined wrongly (currently `show`: `--output` without `<rev>:<path>`, `--tree` with `<rev>:<path>`) | 1 |
 | `would_overwrite` | A checkout, merge, pull, rebase, cherry-pick, revert or bisect step would overwrite or delete uncommitted work (a different file at the same path as one you added); nothing is written; `message` lists the paths. `reset --hard` discards instead | 1 |
+| `staged_changes` | A non-fast-forward merge, pull merge, rebase, cherry-pick or revert was asked to start while the index differs from HEAD; nothing is written; `message` lists the staged paths; commit them or run `mediagit reset <path>` | 1 |
 | `empty_commit` | `cherry-pick` (including `--continue`) or `revert` would create a commit whose tree equals HEAD's; nothing is committed (`revert --no-commit` skips the check) | 1 |
 | `server_unreachable` | Nothing answered at the server address (refused, unknown host, no route) | 1 |
 | `server_timeout` | The server did not answer in time | 1 |
