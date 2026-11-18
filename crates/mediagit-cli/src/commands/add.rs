@@ -91,10 +91,14 @@ pub async fn stage_files_for_commit(paths: &[String], repo_root: &std::path::Pat
                     added_count += 1;
                 }
                 Ok((None, _)) => {} // unchanged, skip
-                Err(e) => return Err(e),
+                Err(e) => {
+                    crate::phash_index::flush(&repo_root).await;
+                    return Err(e);
+                }
             }
         }
     }
+    crate::phash_index::flush(&repo_root).await;
 
     // Save index
     index.save(&repo_root).context("Failed to save index")?;

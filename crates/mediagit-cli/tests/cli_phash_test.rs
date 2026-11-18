@@ -335,3 +335,53 @@ fn test_phash_saved_when_add_fails_midway() {
         .failure();
     assert_eq!(read_index_entries(tmp.path()).len(), 1);
 }
+
+/// F2: `commit --include` stages images through the same worker as add, so it
+/// saves their pHash entries too.
+#[test]
+fn test_phash_saved_by_commit_include() {
+    let img =
+        image::RgbImage::from_fn(64, 48, |x, y| image::Rgb([(x * 4) as u8, (y * 5) as u8, 7]));
+    let tmp = TempDir::new().unwrap();
+    init_repo(tmp.path());
+    img.save(tmp.path().join("a.png")).unwrap();
+    mediagit()
+        .args(["commit", "-m", "img", "--include", "a.png"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    assert_eq!(read_index_entries(tmp.path()).len(), 1);
+}
+
+/// F2, error path: a failed `commit --include` still saves the entries of the
+/// images it stored.
+#[cfg(windows)]
+#[test]
+fn test_phash_saved_when_commit_include_fails_midway() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let img =
+        image::RgbImage::from_fn(64, 48, |x, y| image::Rgb([(x * 4) as u8, (y * 5) as u8, 7]));
+    let tmp = TempDir::new().unwrap();
+    init_repo(tmp.path());
+    img.save(tmp.path().join("a.png")).unwrap();
+    fs::write(tmp.path().join("z.bin"), "locked").unwrap();
+    let _lock = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(tmp.path().join("z.bin"))
+        .unwrap();
+    mediagit()
+        .args([
+            "commit",
+            "-m",
+            "img",
+            "--include",
+            "a.png",
+            "--include",
+            "z.bin",
+        ])
+        .current_dir(tmp.path())
+        .assert()
+        .failure();
+    assert_eq!(read_index_entries(tmp.path()).len(), 1);
+}
