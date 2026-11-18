@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // All files: the whole working folder, with a status chip only on the files that changed.
-import { computed, onMounted } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { FolderOpen, PanelRight, Search } from 'lucide-vue-next'
 import { useFocusRefresh } from '@/lib/focusRefresh'
 import Checkbox from '@/components/Checkbox.vue'
@@ -9,8 +9,10 @@ import ErrorState from '@/components/ErrorState.vue'
 import IconButton from '@/components/IconButton.vue'
 import SegmentedControl from '@/components/SegmentedControl.vue'
 import SkeletonRows from '@/components/SkeletonRows.vue'
+import { api } from '@/api'
 import { useChangesStore } from '@/stores/changes'
 import { useFilesStore } from '@/stores/files'
+import { useRepoStore } from '@/stores/repo'
 import { useShellStore } from '@/stores/shell'
 import FileList from './changes/FileList.vue'
 import SaveDock from './changes/SaveDock.vue'
@@ -18,10 +20,25 @@ import SaveDock from './changes/SaveDock.vue'
 const files = useFilesStore()
 const changes = useChangesStore()
 const shell = useShellStore()
+const repo = useRepoStore()
+// A sparse checkout leaves folders out on purpose; the list must not look like the whole project.
+const partial = ref(false)
 
+const find = ref<HTMLInputElement | null>(null)
+// Ctrl+F is where people expect the search box.
+function onFindKey(e: KeyboardEvent) {
+  if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f') {
+    e.preventDefault()
+    find.value?.focus()
+    find.value?.select()
+  }
+}
 onMounted(() => {
   if (!files.loaded) void files.refresh()
+  if (repo.path) void api.sparseList(repo.path).then((r) => (partial.value = !!r?.enabled), () => {})
+  window.addEventListener('keydown', onFindKey)
 })
+onBeforeUnmount(() => window.removeEventListener('keydown', onFindKey))
 
 useFocusRefresh(() => files.refresh())
 
@@ -52,10 +69,11 @@ function check(path: string) {
     <header class="head">
       <label class="find">
         <Search :size="18" aria-hidden="true" />
-        <input v-model="files.query" type="search" class="q" placeholder="Find a file" aria-label="Find a file" autocomplete="off" spellcheck="false" />
+        <input ref="find" v-model="files.query" type="search" class="q" placeholder="Find a file" aria-label="Find a file" autocomplete="off" spellcheck="false" />
       </label>
       <Checkbox v-model="files.showIgnored" label="Show ignored files" />
       <p class="sum" data-testid="files-summary">{{ summary }}</p>
+      <p v-if="partial" class="sum" data-testid="partial-note">Partial copy: only some folders are on this computer. Change this in Settings.</p>
       <span class="grow" />
       <SegmentedControl v-model="changes.mode" label="Folder view" :options="MODES" />
       <IconButton

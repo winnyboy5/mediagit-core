@@ -20,6 +20,7 @@ const pct = computed(() =>
     aria-valuemin="0"
     :aria-valuemax="max"
     :aria-valuenow="pct === null ? undefined : value!"
+    :aria-valuetext="pct === null ? undefined : `${Math.floor(pct)}%`"
   >
     <div class="fill" :style="pct === null ? undefined : { width: pct + '%' }" />
   </div>

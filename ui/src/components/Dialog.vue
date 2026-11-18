@@ -12,6 +12,15 @@ import {
 import { X } from 'lucide-vue-next'
 
 const open = defineModel<boolean>('open', { default: false })
+
+// Land on the first box to type in, not on the Close button that comes first in the page.
+function focusFirstField(e: Event) {
+  const box = (e.currentTarget as HTMLElement | null)?.querySelector<HTMLElement>('input:not([type=hidden]):not([disabled]), textarea:not([disabled])')
+  if (box) {
+    e.preventDefault()
+    box.focus()
+  }
+}
 withDefaults(defineProps<{ title: string; description?: string; dismissable?: boolean }>(), { dismissable: true })
 </script>
 
@@ -22,6 +31,7 @@ withDefaults(defineProps<{ title: string; description?: string; dismissable?: bo
       <DialogOverlay class="scrim" />
       <DialogContent
         class="panel"
+        @open-auto-focus="focusFirstField"
         @escape-key-down="(e: Event) => !dismissable && e.preventDefault()"
         @pointer-down-outside="(e: Event) => !dismissable && e.preventDefault()"
         @interact-outside="(e: Event) => !dismissable && e.preventDefault()"

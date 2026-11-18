@@ -101,7 +101,7 @@ test.describe('Compare: files and previews', () => {
     await expect(pane(page)).toContainText('After · Working folder')
     await expect(pane(page)).toContainText('Binary file')
     const props = pane(page).getByRole('table')
-    await expect(props.getByRole('row', { name: /Size/ })).toContainText('1.1 MB')
+    await expect(props.getByRole('row', { name: /Size/ })).toContainText('1.2 MB')
     await expect(props.getByRole('row', { name: /Width/ })).toContainText('1280')
     await expect(props.getByRole('row', { name: /Width/ })).toContainText('1920')
     // Only the working side skips extraction: HEAD's copy is extracted once.

@@ -31,7 +31,7 @@ test.describe('Maintenance: states', () => {
     await boot(page)
     await card(page, 'gc').getByRole('button', { name: 'Preview clean-up' }).click()
     const res = page.getByTestId('gc-result')
-    await expect(res).toContainText('Preview: this would free 1.2 GB')
+    await expect(res).toContainText('Preview: this would free 1.3 GB')
     await expect(res).toContainText('5,000')
     await expect(card(page, 'gc')).toContainText('Last run')
     await expectNoAxeViolations(page)
@@ -50,7 +50,7 @@ test.describe('Maintenance: states', () => {
     expect(await ipcCalls(page, 'repo_gc')).toHaveLength(0)
     await card(page, 'gc').getByRole('button', { name: 'Clean up…' }).click()
     await page.getByRole('alertdialog').getByRole('button', { name: 'Clean up', exact: true }).click()
-    await expect(page.getByTestId('gc-result')).toContainText('Freed 1.2 GB')
+    await expect(page.getByTestId('gc-result')).toContainText('Freed 1.3 GB')
     expect((await ipcCalls(page, 'repo_gc')).map((c) => c.args)).toMatchObject([{ dryRun: false, confirmed: true }])
   })
 

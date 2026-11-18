@@ -19,6 +19,7 @@ describe('ProgressBar', () => {
     const el = w.get('[role=progressbar]')
     expect(el.attributes('aria-valuenow')).toBe('25')
     expect(el.attributes('aria-valuemax')).toBe('50')
+    expect(el.attributes('aria-valuetext')).toBe('50%') // not a raw byte count
     expect(el.attributes('aria-label')).toBe('Upload')
     expect(w.get('.fill').attributes('style')).toContain('width: 50%')
     expect(w.classes()).not.toContain('indeterminate')

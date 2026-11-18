@@ -56,6 +56,18 @@ test.describe('All files', () => {
     await expectNoAxeViolations(page)
   })
 
+  test('a sparse checkout says the copy is partial (IMP-105)', async ({ page }) => {
+    await mockIpc(page, { commands: healthy({ sparse_list: fixture('sparse_on') }), storage: REPO, handlers: { repo_ls_files: lsHandler(fixture<{ files: unknown[] }>('lsfiles_populated').files) } })
+    await page.goto('/#/files/all')
+    await expect(page.getByTestId('partial-note')).toContainText('Partial copy')
+  })
+
+  test('Ctrl+F focuses the find box (IMP-090)', async ({ page }) => {
+    await boot(page)
+    await page.keyboard.press('Control+f')
+    await expect(page.getByRole('searchbox', { name: 'Find a file' })).toBeFocused()
+  })
+
   test('Show ignored files asks for them and labels them', async ({ page }) => {
     await boot(page)
     await page.getByRole('checkbox', { name: 'Show ignored files' }).click()

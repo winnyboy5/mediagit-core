@@ -95,6 +95,7 @@ test.describe('Branches: actions', () => {
     await boot(page)
     await page.getByRole('button', { name: 'New branch' }).click()
     const dlg = page.getByRole('dialog', { name: 'New branch' })
+    await expect(dlg.getByLabel('Branch name')).toBeFocused() // IMP-091: not the Close button
     const name = dlg.getByLabel('Branch name')
     const create = dlg.getByRole('button', { name: 'Create', exact: true })
     await expect(create).toBeDisabled()
