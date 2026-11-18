@@ -40,6 +40,7 @@ const last = (t: Task) => {
 }
 const n = (x: number) => x.toLocaleString('en-US')
 const warn = (sev: string) => /^warn/i.test(sev)
+const note = (sev: string) => /^info/i.test(sev)
 const running = (t: Task) => m.task === t && !!m.running
 const copies = (c: number) => `${n(c)} ${c === 1 ? 'copy' : 'copies'}`
 
@@ -224,7 +225,7 @@ function runGc() {
             </ul>
           </template>
           <ul v-if="m[t[0]]!.report.issues.length" class="issues" :aria-label="`${t[1]} findings`">
-            <li v-for="(i, k) in m[t[0]]!.report.issues.slice(0, 50)" :key="k"><span class="chip" :class="warn(i.severity) ? 'warn' : 'bad'">{{ warn(i.severity) ? 'Warning' : 'Error' }}</span> {{ i.message }}</li>
+            <li v-for="(i, k) in m[t[0]]!.report.issues.slice(0, 50)" :key="k"><span class="chip" :class="warn(i.severity) || note(i.severity) ? 'warn' : 'bad'">{{ note(i.severity) ? 'Note' : warn(i.severity) ? 'Warning' : 'Error' }}</span> {{ i.message }}</li>
           </ul>
         </div>
         <div v-if="t[0] === 'fsck' && !running('fsck') && (m.quarantine || m.purged)" class="quar" data-testid="quarantine">
