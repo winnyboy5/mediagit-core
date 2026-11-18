@@ -254,7 +254,18 @@ impl LogCmd {
                 continue;
             }
 
-            commits_to_show.push((oid, commit.clone()));
+            let parent_tree = match commit.parents.first() {
+                Some(p) if !self.paths.is_empty() => {
+                    Some(Commit::deserialize(&odb.read(p).await?)?.tree)
+                }
+                _ => None,
+            };
+            if self
+                .touches_paths(&odb, &commit.tree, parent_tree.as_ref())
+                .await?
+            {
+                commits_to_show.push((oid, commit.clone()));
+            }
 
             // Add parents to stack
             for parent in &commit.parents {
@@ -579,6 +590,31 @@ fn path_matches(file: &Path, p: &str) -> bool {
 }
 
 impl LogCmd {
+    /// True when no paths were given, or the commit changed one of them
+    /// (added, modified or removed, versus its first parent).
+    async fn touches_paths(
+        &self,
+        odb: &ObjectDatabase,
+        tree: &Oid,
+        parent_tree: Option<&Oid>,
+    ) -> Result<bool> {
+        if self.paths.is_empty() {
+            return Ok(true);
+        }
+        let cur = Self::get_tree_file_list(odb, tree).await?;
+        let prev = match parent_tree {
+            Some(t) => Self::get_tree_file_list(odb, t).await?,
+            None => HashMap::new(),
+        };
+        Ok(self.paths.iter().any(|p| {
+            cur.iter()
+                .any(|(f, o)| path_matches(f, p) && prev.get(f) != Some(o))
+                || prev
+                    .keys()
+                    .any(|f| path_matches(f, p) && !cur.contains_key(f))
+        }))
+    }
+
     // ponytail: loads every reachable commit to order it; stream/paginate if histories reach millions.
     async fn execute_machine(&self) -> Result<()> {
         let repo_root = find_repo_root()?;
@@ -676,22 +712,12 @@ impl LogCmd {
             if since_bound.is_some_and(|b| ts < b) || until_bound.is_some_and(|b| ts > b) {
                 continue;
             }
-            if !self.paths.is_empty() {
-                let cur = Self::get_tree_file_list(&odb, &c.tree).await?;
-                let prev = match c.parents.first() {
-                    Some(p) => Self::get_tree_file_list(&odb, &commits[p].tree).await?,
-                    None => HashMap::new(),
-                };
-                let touched = self.paths.iter().any(|p| {
-                    cur.iter()
-                        .any(|(f, o)| path_matches(f, p) && prev.get(f) != Some(o))
-                        || prev
-                            .keys()
-                            .any(|f| path_matches(f, p) && !cur.contains_key(f))
-                });
-                if !touched {
-                    continue;
-                }
+            let parent_tree = c.parents.first().map(|p| commits[p].tree);
+            if !self
+                .touches_paths(&odb, &c.tree, parent_tree.as_ref())
+                .await?
+            {
+                continue;
             }
             out.push(LogCommitReport {
                 oid: oid.to_hex(),

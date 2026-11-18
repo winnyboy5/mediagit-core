@@ -548,3 +548,45 @@ fn test_show_help() {
         .success()
         .stdout(predicate::str::contains("show"));
 }
+
+/// BUG-019: `log <paths>` filtered only with --machine; every human mode
+/// returned the whole history.
+#[test]
+fn bug019_log_paths_filter_applies_in_human_modes() {
+    let temp_dir = TempDir::new().unwrap();
+    let d = temp_dir.path();
+    init_repo(d);
+    fs::create_dir(d.join("video")).unwrap();
+    fs::write(d.join("notes.txt"), "n").unwrap();
+    add_and_commit(d, "notes.txt", "n1", "notes one");
+    add_and_commit(d, "video/a.txt", "v1", "video one");
+    add_and_commit(d, "notes.txt", "n2", "notes two");
+    add_and_commit(d, "video/a.txt", "v2", "video two");
+
+    let lines = |args: &[&str]| -> String {
+        let out = mediagit()
+            .arg("log")
+            .args(args)
+            .args(["main", "video"])
+            .current_dir(d)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        String::from_utf8(out).unwrap()
+    };
+    for args in [
+        &["--oneline"][..],
+        &[][..],
+        &["--stat"][..],
+        &["--graph"][..],
+    ] {
+        let o = lines(args);
+        assert!(
+            o.contains("video one") && o.contains("video two"),
+            "{args:?}: {o}"
+        );
+        assert!(!o.contains("notes"), "{args:?} leaked other paths: {o}");
+    }
+}
