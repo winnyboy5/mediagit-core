@@ -52,7 +52,8 @@ export function buildTree(entries: FileEntry[]): TreeNode[] {
     let cur = root
     parts.forEach((name, i) => {
       const path = parts.slice(0, i + 1).join('/')
-      if (i === parts.length - 1) {
+      // A trailing slash names a folder (`status --ignored` lists an ignored folder as `Temp/`).
+      if (i === parts.length - 1 && !e.path.endsWith('/')) {
         const leaf = mk(path, name, false, i, e.status)
         leaf.count = 1
         leaf.changed = e.status ? 1 : 0
@@ -68,6 +69,7 @@ export function buildTree(entries: FileEntry[]): TreeNode[] {
         cur.kids.set(name, next)
       }
       cur = next
+      if (i === parts.length - 1) next.node.ignored = !!e.ignored
     })
   }
   return finish(root).children

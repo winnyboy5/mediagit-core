@@ -11,6 +11,15 @@ describe('buildTree', () => {
     expect(t[0]!.children[0]!.children[0]!.depth).toBe(2)
   })
 
+  it('a path ending in a slash is a folder row (an ignored folder), not a file named after it', () => {
+    const t = buildTree([{ path: 'Temp/', status: null, ignored: true }, E('art/a.psd')])
+    const temp = t.find((n) => n.name === 'Temp')!
+    expect(temp.isDir).toBe(true)
+    expect(temp.path).toBe('Temp')
+    expect(temp.ignored).toBe(true)
+    expect(t.map((n) => n.name)).toEqual(['art', 'Temp'])
+  })
+
   it('is stable regardless of input order', () => {
     const a = [E('d/2'), E('d/1'), E('c'), E('e/f/g')]
     const names = (xs: FileEntry[]) => flattenTree(buildTree(xs), new Set()).map((r) => r.node.path)
