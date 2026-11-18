@@ -175,3 +175,28 @@ fn root_in_a_different_case_is_the_root_or_an_error() {
         "silent no-op for a different-case root (ok={ok}, staged={staged:?}):\n{text}"
     );
 }
+
+/// A staged deletion is never "unchanged": restoring the file with HEAD's exact
+/// bytes and adding it again must cancel the deletion, so the commit keeps it.
+#[test]
+fn restored_file_cancels_staged_deletion() {
+    let t = repo_with_two_deletions();
+    let r = t.path();
+    run(r, &["add", "top.txt"]);
+    assert!(staged_deletions(r).iter().any(|l| l.ends_with("top.txt")));
+    fs::write(r.join("top.txt"), "t").unwrap();
+    run(r, &["add", "top.txt"]);
+    assert!(
+        !staged_deletions(r).iter().any(|l| l.ends_with("top.txt")),
+        "deletion survived re-add"
+    );
+    run(r, &["add", "dir/x.txt"]);
+    run(r, &["commit", "-m", "second"]);
+    let left = run(r, &["status", "--porcelain"]);
+    assert!(
+        !left.contains("top.txt"),
+        "top.txt dropped by commit: {left}"
+    );
+    let tree = run(r, &["ls-files"]);
+    assert!(tree.contains("top.txt"), "top.txt not tracked: {tree}");
+}

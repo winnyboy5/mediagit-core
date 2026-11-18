@@ -146,6 +146,7 @@ impl Index {
     /// accepted the side the resolver checked out for a binary one.
     pub fn add_entry(&mut self, entry: IndexEntry) {
         self.unresolved.remove(&entry.path);
+        self.deleted_entries.remove(&entry.path);
         self.entries.insert(entry.path.clone(), entry);
     }
 

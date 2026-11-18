@@ -49,7 +49,12 @@ pub async fn stage_files_for_commit(paths: &[String], repo_root: &std::path::Pat
         Arc::new(map)
     };
 
-    let unresolved: HashSet<PathBuf> = index.unresolved_paths().into_iter().collect();
+    // A staged deletion is never "unchanged": a present file there is re-staged.
+    let unresolved: HashSet<PathBuf> = index
+        .unresolved_paths()
+        .into_iter()
+        .chain(index.deleted_paths().cloned())
+        .collect();
     let stat = std::sync::Mutex::new(mediagit_versioning::StatCache::load(&repo_root));
 
     // Stage each path sequentially
@@ -501,6 +506,9 @@ impl AddCmd {
                 .filter_map(|p| dunce::canonicalize(p).ok())
                 .filter_map(|p| crate::repo::repo_relative(&repo_root, &p).ok())
                 .filter(|p| all_unresolved.contains(p))
+                // A staged deletion is never "unchanged": a present file there
+                // is re-staged, however it was named.
+                .chain(index.deleted_paths().cloned())
                 .collect(),
         );
 
