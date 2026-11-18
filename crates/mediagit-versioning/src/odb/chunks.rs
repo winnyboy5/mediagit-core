@@ -128,7 +128,10 @@ fn is_delta_candidate(
     comp_type: CompressionObjectType,
 ) -> bool {
     use crate::chunking::{ChunkType, CodecHint};
-    if !delta_enabled || chunk.data.len() < 4096 {
+    // A remote refuses a chunk delta whose result is over PREALLOC_LIMIT
+    // (SEC-5), and unsplit atoms/elements can be bigger: store those whole.
+    if !delta_enabled || chunk.data.len() < 4096 || chunk.data.len() > crate::delta::PREALLOC_LIMIT
+    {
         return false;
     }
     let is_store_video_chunk = if chunk.codec_hint == CodecHint::Unknown {
@@ -408,7 +411,10 @@ impl ObjectDatabase {
         min_similarity: f64,
         size_ratio_threshold: f64,
     ) -> anyhow::Result<bool> {
-        if !self.delta_enabled || chunk.data.len() < 4096 {
+        if !self.delta_enabled
+            || chunk.data.len() < 4096
+            || chunk.data.len() > crate::delta::PREALLOC_LIMIT
+        {
             return Ok(false);
         }
 
@@ -4583,6 +4589,30 @@ mod add_memory_tests {
 
     /// Chunks that can never be a delta base (H.264 frames, tiny chunks) must not
     /// occupy `base_chunk_cache`; eligible chunks (audio runs here) still must.
+    #[test]
+    fn chunk_over_the_remote_delta_cap_is_not_a_delta_candidate() {
+        let mk = |n: usize| crate::chunking::ContentChunk {
+            id: Oid::hash(b"x"),
+            data: vec![7u8; n],
+            offset: 0,
+            size: n,
+            chunk_type: crate::chunking::ChunkType::Generic,
+            perceptual_hash: None,
+            codec_hint: crate::chunking::CodecHint::Unknown,
+        };
+        let cap = crate::delta::PREALLOC_LIMIT;
+        assert!(is_delta_candidate(
+            true,
+            &mk(cap),
+            CompressionObjectType::Mp4
+        ));
+        assert!(!is_delta_candidate(
+            true,
+            &mk(cap + 1),
+            CompressionObjectType::Mp4
+        ));
+    }
+
     #[tokio::test]
     async fn only_delta_candidates_enter_base_chunk_cache() {
         let (data, _) = crate::chunking::mp4_stream::tests::make_mp4(&[300_000; 3], 3000);
