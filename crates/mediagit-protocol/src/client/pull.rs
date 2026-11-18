@@ -1018,6 +1018,10 @@ impl ProtocolClient {
         // the push side and to keep any derived rate under link capacity.
         let mut total_net_bytes = 0u64;
         let mut bytes_done: u64 = 0;
+        // Deltas whose base was not readable when they arrived. Written by
+        // `write_deferred_deltas` once every object is in.
+        let deferred_deltas: std::sync::Arc<std::sync::Mutex<Vec<DeferredDelta>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
         for (
             obj_idx,
@@ -1048,9 +1052,12 @@ impl ProtocolClient {
                 // server actually stores. A chunk that the server reports as a
                 // delta MUST be downloaded via `/chunk-deltas/<id>` — hitting
                 // `/chunks/<id>` for it would 404 because no full copy exists.
-                // Delta chains (depth ≥ 2) are fine: all chunks in the chain
-                // land locally as deltas in this single pass; reads later
-                // follow the chain via the .meta sidecars.
+                // A delta is verified before it is stored, which needs its base
+                // readable. Bases and deltas arrive in no fixed order (across
+                // objects, and unordered inside a pass), so a delta whose base
+                // is not there yet is set aside in `deferred_deltas` and
+                // written after every object has arrived. It is never fetched
+                // as a full chunk: the server holds it only as a delta.
                 //
                 // Cycle pre-filter still applies: if writing a chunk as a delta
                 // would create a cycle with the LOCAL on-disk chain (e.g. a
@@ -1205,6 +1212,7 @@ impl ProtocolClient {
                             let download_urls = std::sync::Arc::clone(&download_urls);
                             let chunk_size_map = std::sync::Arc::clone(&chunk_size_map);
                             let odb = odb.clone();
+                            let deferred_deltas = std::sync::Arc::clone(&deferred_deltas);
                             async move {
                                 let hex = chunk_id.to_hex();
                                 let size_hint = chunk_size_map.get(&hex).copied().unwrap_or(0);
@@ -1257,12 +1265,20 @@ impl ProtocolClient {
                                             Ok(dr) if dr.status().is_success() => {
                                                 let delta_bytes = dr.bytes().await?.to_vec();
                                                 let net = delta_bytes.len() as u64;
-                                                odb.write_chunk_delta(
-                                                    &chunk_id,
-                                                    &base_id,
-                                                    &delta_bytes,
-                                                )
-                                                .await?;
+                                                if odb
+                                                    .write_chunk_delta(
+                                                        &chunk_id,
+                                                        &base_id,
+                                                        &delta_bytes,
+                                                    )
+                                                    .await
+                                                    .is_err()
+                                                {
+                                                    deferred_deltas
+                                                        .lock()
+                                                        .unwrap_or_else(|e| e.into_inner())
+                                                        .push((chunk_id, base_id, delta_bytes));
+                                                }
                                                 return Ok::<_, anyhow::Error>((chunk_id, net));
                                             }
                                             _ => {}
@@ -1393,14 +1409,16 @@ impl ProtocolClient {
                             .write_chunk_delta(&chunk_id, &base_id, &delta_bytes)
                             .await
                         {
-                            tracing::warn!(
+                            tracing::debug!(
                                 chunk = %chunk_id,
                                 base = %base_id,
                                 error = %e,
-                                "Delta write failed (cycle?), falling back to full chunk"
+                                "Delta not written yet (base not local?); setting it aside"
                             );
-                            let full = self.download_chunk(&chunk_id).await?;
-                            odb.put_compressed_chunk(&chunk_id, &full).await?;
+                            deferred_deltas
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .push((chunk_id, base_id, delta_bytes));
                         }
                         total_chunks_downloaded += 1;
                         bytes_done += chunk_size_map.get(&chunk_id.to_hex()).copied().unwrap_or(0);
@@ -1438,11 +1456,49 @@ impl ProtocolClient {
             tracing::debug!(oid = %oid, "Chunked object downloaded");
         }
 
+        let pending =
+            std::mem::take(&mut *deferred_deltas.lock().unwrap_or_else(|e| e.into_inner()));
+        write_deferred_deltas(odb, pending).await?;
+
         if let Some(b) = &_download_bench {
             b.summary();
         }
         Ok((total_chunks_downloaded, total_net_bytes))
     }
+}
+
+/// A chunk delta set aside until its base is local: (chunk, base, payload).
+type DeferredDelta = (Oid, Oid, Vec<u8>);
+
+/// Write deltas that arrived before their base, in rounds. Every write goes
+/// through the verifying `write_chunk_delta`, so nothing unverified becomes
+/// visible. A round writes whatever has its base by now; the next round picks
+/// up deltas that were waiting on those. Stops when all are written, or when
+/// a round writes nothing: the rest are bad deltas (or have a base the server
+/// never sent), and the pull fails.
+async fn write_deferred_deltas(
+    odb: &ObjectDatabase,
+    mut pending: Vec<DeferredDelta>,
+) -> Result<()> {
+    while !pending.is_empty() {
+        let before = pending.len();
+        let mut still = Vec::new();
+        let mut last_err = String::new();
+        for (chunk_id, base_id, bytes) in pending {
+            if let Err(e) = odb.write_chunk_delta(&chunk_id, &base_id, &bytes).await {
+                last_err = format!("chunk {chunk_id} (base {base_id}): {e:#}");
+                still.push((chunk_id, base_id, bytes));
+            }
+        }
+        if still.len() == before {
+            anyhow::bail!(
+                "the server sent a bad delta, or one with a missing base: {last_err}. \
+                 {before} chunk(s) could not be rebuilt; nothing was stored for them"
+            );
+        }
+        pending = still;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
