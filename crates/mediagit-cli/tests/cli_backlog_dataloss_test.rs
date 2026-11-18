@@ -159,3 +159,23 @@ fn dl9_cherry_pick_still_refuses_untracked_file_the_pick_writes() {
     assert!(!o.status.success());
     assert_eq!(fs::read_to_string(d.join("picked.txt")).unwrap(), "mine\n");
 }
+
+// DL-4 (other half): a folder the checkout emptied is removed; a folder the
+// user made empty is kept.
+#[test]
+fn dl4_checkout_removes_emptied_folders_and_keeps_user_folders() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    init_repo(d);
+    commit_file(d, "keep.txt", "k\n", "base");
+    ok(d, &["branch", "create", "b"]);
+    commit_file(d, "art/sub/a.txt", "a\n", "add art");
+    assert!(d.join("art/sub/a.txt").exists());
+    fs::create_dir(d.join("mine")).unwrap();
+
+    ok(d, &["branch", "switch", "b"]);
+
+    assert!(!d.join("art/sub").exists(), "emptied art/sub left behind");
+    assert!(!d.join("art").exists(), "emptied art/ left behind");
+    assert!(d.join("mine").is_dir(), "user's empty folder was removed");
+}
