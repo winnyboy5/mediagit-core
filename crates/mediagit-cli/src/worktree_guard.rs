@@ -50,6 +50,20 @@ impl AtRisk {
         head: Option<&Oid>,
         target: Option<&Oid>,
     ) -> Result<Self> {
+        Self::check_changed(repo_root, odb, head, target, None).await
+    }
+
+    /// Like [`Self::check`], but with `base` set only the paths `target`
+    /// changes relative to `base` count as collisions. A cherry-pick writes
+    /// just the picked version's own change, so an untracked file at any other
+    /// path of its tree is not at risk.
+    pub async fn check_changed(
+        repo_root: &Path,
+        odb: &ObjectDatabase,
+        head: Option<&Oid>,
+        target: Option<&Oid>,
+        base: Option<&Oid>,
+    ) -> Result<Self> {
         let head_files = match head {
             Some(oid) => {
                 CheckoutManager::new(odb, repo_root)
@@ -93,9 +107,23 @@ impl AtRisk {
                     let target_files = CheckoutManager::new(odb, repo_root)
                         .tracked_files_at(target_oid)
                         .await?;
+                    let base_files = match base {
+                        Some(b) => Some(
+                            CheckoutManager::new(odb, repo_root)
+                                .tracked_files_at(b)
+                                .await?,
+                        ),
+                        None => None,
+                    };
                     let mut hits: Vec<PathBuf> = untracked
                         .into_iter()
-                        .filter(|p| target_files.contains_key(p))
+                        .filter(|p| {
+                            target_files.get(p).is_some_and(|(t, _)| {
+                                base_files
+                                    .as_ref()
+                                    .is_none_or(|b| b.get(p).map(|(o, _)| o) != Some(t))
+                            })
+                        })
                         .collect();
                     hits.sort();
                     hits

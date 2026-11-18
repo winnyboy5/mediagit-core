@@ -199,16 +199,23 @@ impl CherryPickCmd {
                 .context(format!("Failed to resolve commit: {}", commit_ref))?;
             // J3: refusals are found here, before any pick, so they never
             // leave a "stopped" state behind.
-            if Commit::read(odb.as_ref(), &oid).await?.parents.is_empty() {
+            let picked = Commit::read(odb.as_ref(), &oid).await?;
+            if picked.parents.is_empty() {
                 anyhow::bail!(
                     "Cannot cherry-pick {}: it is the first version, with nothing \
                      before it to compare. Nothing was changed.",
                     &oid.to_hex()[..7]
                 );
             }
-            crate::worktree_guard::AtRisk::check(repo_root, &odb, Some(&current_oid), Some(&oid))
-                .await?
-                .ensure_clean("cherry-pick")?;
+            crate::worktree_guard::AtRisk::check_changed(
+                repo_root,
+                &odb,
+                Some(&current_oid),
+                Some(&oid),
+                Some(&picked.parents[0]),
+            )
+            .await?
+            .ensure_clean("cherry-pick")?;
             listed.push(oid);
         }
         // The state file stores full ids: a branch name or short id would not
@@ -358,11 +365,17 @@ impl CherryPickCmd {
         let current_oid = onto.unwrap_or(head_oid);
 
         // WT-1: the merge result can only materialize paths from ours (all
-        // tracked) or theirs, so checking collisions against the picked commit
-        // is exact. Done before any write.
-        crate::worktree_guard::AtRisk::check(repo_root, odb, Some(&current_oid), Some(commit_oid))
-            .await?
-            .ensure_clean("cherry-pick")?;
+        // tracked) or the ones the picked version changed, so those are the
+        // only possible collisions. Done before any write.
+        crate::worktree_guard::AtRisk::check_changed(
+            repo_root,
+            odb,
+            Some(&current_oid),
+            Some(commit_oid),
+            Some(&commit.parents[0]),
+        )
+        .await?
+        .ensure_clean("cherry-pick")?;
         crate::repo::ensure_no_unsafe_paths(odb, repo_root, &[*commit_oid]).await?;
 
         // BUG-028: base = the picked version's parent, so only that version's

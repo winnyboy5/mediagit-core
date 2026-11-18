@@ -116,3 +116,46 @@ fn dl5_revert_no_commit_nested_matches_normal_revert() {
     };
     assert_eq!(build(true), build(false));
 }
+
+// DL-9: an untracked file at a path the picked commit does not change must
+// not stop the pick, and must survive it.
+#[test]
+fn dl9_cherry_pick_ignores_untracked_file_outside_the_pick() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    init_repo(d);
+    commit_file(d, "base.txt", "base\n", "base");
+    ok(d, &["branch", "create", "feature"]);
+    ok(d, &["branch", "switch", "feature"]);
+    commit_file(d, "early.txt", "early\n", "early");
+    commit_file(d, "picked.txt", "picked\n", "picked");
+    ok(d, &["branch", "switch", "refs/heads/main"]);
+
+    // Untracked on main; feature tracks it, but only the first commit adds it.
+    fs::write(d.join("early.txt"), "mine\n").unwrap();
+    ok(d, &["cherry-pick", "feature"]);
+
+    assert_eq!(fs::read_to_string(d.join("early.txt")).unwrap(), "mine\n");
+    assert_eq!(
+        fs::read_to_string(d.join("picked.txt")).unwrap(),
+        "picked\n"
+    );
+}
+
+// Control: an untracked file at a path the pick writes is still refused.
+#[test]
+fn dl9_cherry_pick_still_refuses_untracked_file_the_pick_writes() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    init_repo(d);
+    commit_file(d, "base.txt", "base\n", "base");
+    ok(d, &["branch", "create", "feature"]);
+    ok(d, &["branch", "switch", "feature"]);
+    commit_file(d, "picked.txt", "picked\n", "picked");
+    ok(d, &["branch", "switch", "refs/heads/main"]);
+
+    fs::write(d.join("picked.txt"), "mine\n").unwrap();
+    let o = run(d, &["cherry-pick", "feature"]);
+    assert!(!o.status.success());
+    assert_eq!(fs::read_to_string(d.join("picked.txt")).unwrap(), "mine\n");
+}
