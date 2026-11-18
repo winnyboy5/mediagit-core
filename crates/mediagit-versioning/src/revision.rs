@@ -94,6 +94,12 @@ async fn resolve_name(name: &str, refdb: &RefDatabase, odb: &ObjectDatabase) -> 
 ///
 /// Returns Some((base, count)) if notation is found, None otherwise
 fn parse_parent_notation(revision: &str) -> Result<Option<(String, usize)>> {
+    // `X^` is first parent, same as `X~1`.
+    if let Some(base) = revision.strip_suffix('^')
+        && !base.is_empty()
+    {
+        return Ok(Some((base.to_string(), 1)));
+    }
     if let Some(tilde_pos) = revision.rfind('~') {
         let base = &revision[..tilde_pos];
         let count_str = &revision[tilde_pos + 1..];
@@ -170,6 +176,10 @@ mod tests {
             Some(("refs/heads/feature".to_string(), 3))
         );
 
+        assert_eq!(
+            parse_parent_notation("HEAD^").unwrap(),
+            Some(("HEAD".to_string(), 1))
+        );
         // No notation
         assert_eq!(parse_parent_notation("HEAD").unwrap(), None);
         assert_eq!(parse_parent_notation("main").unwrap(), None);

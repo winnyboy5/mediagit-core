@@ -13,7 +13,7 @@ use tokio::fs;
 use super::super::repo::create_storage_backend;
 use mediagit_versioning::{
     CheckoutManager, Commit, Index, IndexEntry, ObjectDatabase, Oid, RefDatabase, Reflog,
-    ReflogEntry, Tree,
+    ReflogEntry, Tree, resolve_revision,
 };
 
 use super::super::output;
@@ -126,7 +126,7 @@ impl ResetCmd {
             let refs = RefDatabase::new(&storage_path);
 
             // Try resolving as a commit
-            if self.resolve_target(&odb, &refs, spec).await.is_err() {
+            if resolve_revision(spec, &refs, &odb).await.is_err() {
                 // Resolution failed — check if this looks like a file path
                 let candidate = repo_root.join(spec);
                 let index = Index::load(&repo_root)?;
@@ -181,7 +181,7 @@ impl ResetCmd {
 
         // Resolve target commit
         let target_spec = self.commit.as_deref().unwrap_or("HEAD");
-        let target_oid = self.resolve_target(&odb, &refs, target_spec).await?;
+        let target_oid = resolve_revision(target_spec, &refs, &odb).await?;
 
         // Verify commit exists
         let target_commit = Commit::read(&odb, &target_oid)
@@ -467,77 +467,5 @@ impl ResetCmd {
         }
 
         Ok(None)
-    }
-
-    async fn resolve_target(
-        &self,
-        odb: &ObjectDatabase,
-        refs: &RefDatabase,
-        spec: &str,
-    ) -> Result<Oid> {
-        // Handle HEAD~N
-        if spec.contains('~') {
-            let parts: Vec<&str> = spec.splitn(2, '~').collect();
-            let base_ref = parts[0];
-            let count: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
-
-            let base_oid = if base_ref == "HEAD" {
-                refs.resolve("HEAD").await?
-            } else {
-                refs.resolve(base_ref).await?
-            };
-
-            let mut current = base_oid;
-            for _ in 0..count {
-                let commit = Commit::read(odb, &current).await?;
-                current = commit
-                    .parents
-                    .first()
-                    .cloned()
-                    .context("No parent commit")?;
-            }
-            return Ok(current);
-        }
-
-        // Handle HEAD^
-        if spec.contains('^') {
-            let parts: Vec<&str> = spec.splitn(2, '^').collect();
-            let base_ref = parts[0];
-
-            let base_oid = if base_ref == "HEAD" {
-                refs.resolve("HEAD").await?
-            } else {
-                refs.resolve(base_ref).await?
-            };
-
-            let commit = Commit::read(odb, &base_oid).await?;
-            return commit.parents.first().cloned().context("No parent commit");
-        }
-
-        // Try as ref
-        if let Ok(oid) = refs.resolve(spec).await {
-            return Ok(oid);
-        }
-
-        // Try as branch
-        if let Ok(oid) = refs.resolve(&format!("refs/heads/{}", spec)).await {
-            return Ok(oid);
-        }
-
-        // Try full OID
-        if let Ok(oid) = Oid::from_hex(spec) {
-            return Ok(oid);
-        }
-
-        // Try abbreviated OID (prefix scan through ODB)
-        if spec.len() >= 4
-            && spec.len() < 64
-            && spec.chars().all(|c| c.is_ascii_hexdigit())
-            && let Ok(oid) = odb.resolve_abbreviated_oid(spec).await
-        {
-            return Ok(oid);
-        }
-
-        anyhow::bail!("Unknown revision: {}", spec)
     }
 }

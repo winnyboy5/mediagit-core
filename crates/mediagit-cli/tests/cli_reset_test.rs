@@ -305,3 +305,44 @@ fn test_reset_quiet() {
         .success()
         .stdout(predicate::str::is_empty());
 }
+
+// ============================================================================
+// BUG-035: every revision form that log/checkout accept works for reset
+// ============================================================================
+
+fn tip(dir: &Path) -> String {
+    fs::read_to_string(dir.join(".mediagit/refs/heads/main"))
+        .unwrap()
+        .trim()
+        .to_string()
+}
+
+#[test]
+fn bug035_reset_accepts_remote_tracking_tag_and_caret() {
+    let temp_dir = TempDir::new().unwrap();
+    let d = temp_dir.path();
+    init_repo(d);
+    add_and_commit(d, "f.txt", "v1", "One");
+    let first = tip(d);
+    fs::create_dir_all(d.join(".mediagit/refs/remotes/origin")).unwrap();
+    fs::create_dir_all(d.join(".mediagit/refs/tags")).unwrap();
+    fs::write(d.join(".mediagit/refs/remotes/origin/main"), &first).unwrap();
+    fs::write(d.join(".mediagit/refs/tags/v1"), &first).unwrap();
+    add_and_commit(d, "f.txt", "v2", "Two");
+
+    for spec in ["origin/main", "v1", "HEAD^"] {
+        add_and_commit(d, "f.txt", &format!("again-{spec}"), "More");
+        mediagit()
+            .args(["reset", "--hard", spec])
+            .current_dir(d)
+            .assert()
+            .success();
+    }
+    mediagit()
+        .args(["reset", "--hard", "origin/main"])
+        .current_dir(d)
+        .assert()
+        .success();
+    assert_eq!(fs::read_to_string(d.join("f.txt")).unwrap(), "v1");
+    assert_eq!(tip(d), first);
+}
