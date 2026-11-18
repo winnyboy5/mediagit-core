@@ -1484,8 +1484,20 @@ impl AddCmd {
             }
 
             if !path.exists() {
-                if !self.force && !self.quiet {
-                    output::warning(&format!("Path does not exist: {}", path_str));
+                // A tracked path that is gone is a deletion, staged further
+                // down. Anything else the user named is a mistake (BUG-042):
+                // the other paths still get added, the exit status says no.
+                let scope = crate::repo::repo_scope(
+                    repo_root,
+                    &std::env::current_dir().unwrap_or_default().join(path),
+                )
+                .unwrap_or_else(|| path_str.replace('\\', "/"));
+                let was_tracked = tracked_paths.iter().any(|t| {
+                    let t = t.to_string_lossy().replace('\\', "/");
+                    t == scope || t.starts_with(&format!("{}/", scope.trim_end_matches('/')))
+                });
+                if !was_tracked {
+                    refused.push(format!("{path_str}: path does not exist"));
                 }
                 continue;
             }

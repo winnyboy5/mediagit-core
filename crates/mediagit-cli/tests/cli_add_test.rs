@@ -864,3 +864,40 @@ fn test_add_odd_paths_round_trip_repo_relative() {
         );
     }
 }
+
+/// BUG-042: a named path that does not exist fails the command, but the
+/// other named paths are still staged and the message names the bad one.
+#[test]
+fn bug042_add_missing_path_exits_non_zero_and_adds_the_rest() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let d = dir.path();
+    let run = |args: &[&str]| {
+        assert_cmd::Command::cargo_bin("mediagit")
+            .unwrap()
+            .env("MEDIAGIT_AUTHOR_NAME", "T")
+            .env("MEDIAGIT_AUTHOR_EMAIL", "t@example.com")
+            .args(args)
+            .current_dir(d)
+            .output()
+            .unwrap()
+    };
+    assert!(run(&["init", "-q"]).status.success());
+    std::fs::write(d.join("real.txt"), "x").unwrap();
+    let out = run(&["add", "missing.psd", "real.txt"]);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "must exit non-zero: {text}");
+    assert!(text.contains("missing.psd"), "must name the path: {text}");
+    let status = run(&["status", "--porcelain"]);
+    assert!(
+        String::from_utf8_lossy(&status.stdout).contains("real.txt"),
+        "real.txt must still be staged"
+    );
+    // Removing a tracked file and naming it is a deletion, not an error.
+    assert!(run(&["commit", "-m", "one"]).status.success());
+    std::fs::remove_file(d.join("real.txt")).unwrap();
+    assert!(run(&["add", "real.txt"]).status.success());
+}
