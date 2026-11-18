@@ -15,7 +15,7 @@ mod setup;
 
 /// MediaGit Server - HTTP(S) server for MediaGit repositories
 #[derive(Parser, Debug)]
-#[command(name = "mediagit-server")]
+#[command(name = "mediagit-server", version)]
 #[command(about = "MediaGit repository server", long_about = None)]
 struct Args {
     /// Setup subcommands (init / admin). Bare `mediagit-server` (no
