@@ -89,7 +89,8 @@ export const useChangesStore = defineStore('changes', () => {
   const busy = ref<'add' | 'commit' | 'unstage' | null>(null)
   /** More options for the next stage and the next save (the person's ticks, kept until changed). */
   const addOpts = reactive({ all: false, dryRun: false, force: false, update: false, ignoreRemoval: false })
-  const commitForm = reactive({ messageFile: '', all: false, include: '', author: '', date: '', allowEmpty: false, signoff: false, dryRun: false })
+  const NO_COMMIT_OPTS = { messageFile: '', all: false, include: '', author: '', date: '', allowEmpty: false, signoff: false, dryRun: false }
+  const commitForm = reactive({ ...NO_COMMIT_OPTS })
   /** What the last preview said; cleared by the next real action. */
   const preview = ref<string | null>(null)
   const error = ref<ApiError | null>(null)
@@ -270,6 +271,8 @@ export const useChangesStore = defineStore('changes', () => {
         () => (commitForm.dryRun ? 'Previewed the version' : plural(counts.value.staged, 'file') + ' saved'),
       )
       if (!commitForm.dryRun) {
+        // These apply to one version; the next one starts from the person's own identity and date.
+        Object.assign(commitForm, NO_COMMIT_OPTS)
         message.value = ''
         clearSelection()
       }

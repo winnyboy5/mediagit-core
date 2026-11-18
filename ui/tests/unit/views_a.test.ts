@@ -165,6 +165,24 @@ describe('changes options', () => {
     expect(c.needsMessage).toBe(false)
   })
 
+  it('BUG-013: one-time save options reset after a real save, and stay after a preview', async () => {
+    await open()
+    const c = useChangesStore()
+    c.message = 'one'
+    Object.assign(c.commitForm, { author: 'Ana <a@x.io>', date: '2026-01-15T10:30:00Z', signoff: true, allowEmpty: true, all: true, include: 'a.psd', messageFile: 'C:\m.txt' })
+    c.commitForm.dryRun = true
+    api.commit.mockResolvedValue({ would_commit: true, staged: 1, deleted: 0, staged_paths: [], summary: 'one' })
+    await c.commit()
+    expect(c.commitForm.author).toBe('Ana <a@x.io>')
+    c.commitForm.dryRun = false
+    await c.commit()
+    expect(c.commitForm).toEqual({ messageFile: '', all: false, include: '', author: '', date: '', allowEmpty: false, signoff: false, dryRun: false })
+    c.message = 'two'
+    api.commit.mockClear()
+    await c.commit()
+    expect(api.commit).toHaveBeenCalledWith('/repos/hero', 'two', {})
+  })
+
   it('unstage sends paths; Unstage all sends a dot', async () => {
     await open()
     const c = useChangesStore()
