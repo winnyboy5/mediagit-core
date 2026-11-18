@@ -650,6 +650,18 @@ impl RevertCmd {
         let head_tree = Commit::read(odb, &head_oid).await?.tree;
         let tree_oid = mediagit_versioning::tree_with_index(odb, &head_tree, &index).await?;
 
+        // DL-8: a resolution equal to HEAD changes nothing; no empty commit.
+        if tree_oid == head_tree {
+            return Err(output::CodedError::new(
+                "empty_commit",
+                format!(
+                    "nothing to commit - the resolution leaves the branch as it is (reverting {})",
+                    &revert_oid.to_hex()[..7]
+                ),
+            )
+            .into());
+        }
+
         let message = self.message.clone().unwrap_or_else(|| {
             format!(
                 "Revert \"{}\"\n\nThis reverts commit {}.",

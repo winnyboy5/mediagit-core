@@ -1479,8 +1479,32 @@ fn bug029_cherry_pick_keeping_head_bytes_resolves() {
 #[test]
 fn bug029_revert_keeping_head_bytes_resolves() {
     let t = TempDir::new().unwrap();
-    revert_conflict(t.path());
-    keep_and_continue(t.path(), "revert", "v3\n");
+    let d = t.path();
+    revert_conflict(d);
+    let head_before = tip(d, "main");
+    fs::write(
+        d.join("shared.txt"),
+        "v3
+",
+    )
+    .unwrap();
+    assert!(run(d, &["add", "--", "shared.txt"]).status.success());
+    // DL-8: the resolution equals HEAD, so there is nothing to commit.
+    let out = run(d, &["revert", "--continue"]);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !text.contains("unresolved"),
+        "path still unresolved: {text}"
+    );
+    assert!(!out.status.success(), "an empty revert must stop: {text}");
+    assert!(text.contains("nothing to commit"), "{text}");
+    assert_eq!(head_before, tip(d, "main"), "the branch moved");
+    assert!(run(d, &["revert", "--skip"]).status.success());
+    assert_no_operation(d, "revert");
 }
 
 /// The side that is "ours" in a rebase is the commit being built on, not HEAD.
