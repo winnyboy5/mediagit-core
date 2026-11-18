@@ -76,3 +76,21 @@ async fn delta_against_an_unreadable_base_is_refused_and_not_stored() {
     );
     assert!(nothing_stored(&storage, &id).await);
 }
+
+/// A delta that declares a result far larger than any chunk must be refused
+/// before it is applied (and so before the output buffer is allocated).
+#[tokio::test]
+async fn delta_declaring_an_oversized_result_is_refused_and_not_stored() {
+    let (odb, storage, base, base_id) = setup().await;
+    let huge = vec![0u8; 80 * 1024 * 1024];
+    let id = Oid::hash(&huge);
+    let err = odb
+        .write_chunk_delta(&id, &base_id, &payload(&base, &huge))
+        .await
+        .expect_err("an oversized delta must be refused");
+    assert!(err.to_string().contains("larger than a chunk"), "{err}");
+    assert!(
+        nothing_stored(&storage, &id).await,
+        "oversized delta went live"
+    );
+}

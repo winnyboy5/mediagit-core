@@ -305,7 +305,7 @@ impl DeltaDecoder {
 /// into a buffer that grows with the bytes actually produced, so a forged
 /// `result_size` (or zstd frame header) cannot make the decoder reserve
 /// gigabytes for a few bytes of payload (FUTURE_TODOS #38).
-const PREALLOC_LIMIT: usize = 64 * 1024 * 1024;
+pub(crate) const PREALLOC_LIMIT: usize = 64 * 1024 * 1024;
 
 /// Decompress `data` (with `dict`, empty for none) to exactly `result_size` bytes.
 fn decompress_exact(data: &[u8], dict: &[u8], result_size: usize) -> anyhow::Result<Vec<u8>> {

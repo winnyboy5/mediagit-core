@@ -52,11 +52,15 @@ fn compress_permits() -> &'static tokio::sync::Semaphore {
 }
 
 /// Decompress a stored chunk-delta payload and apply it to `base`.
+///
+/// `max_result` refuses a delta that declares a bigger result BEFORE any output
+/// buffer is allocated. Pass a chunk-sized bound for a payload from a remote.
 fn apply_stored_delta(
     smart: &Option<Arc<SmartCompressor>>,
     compressor: &Arc<dyn Compressor>,
     base: &[u8],
     payload: &[u8],
+    max_result: usize,
 ) -> anyhow::Result<Vec<u8>> {
     let delta_bytes = if let Some(smart) = smart {
         smart.decompress_typed(payload)
@@ -66,6 +70,13 @@ fn apply_stored_delta(
     .map_err(|e| anyhow::anyhow!("Failed to decompress chunk delta: {}", e))?;
     let delta = Delta::from_bytes(&delta_bytes)
         .map_err(|e| anyhow::anyhow!("Failed to parse chunk delta: {}", e))?;
+    if delta.result_size > max_result {
+        anyhow::bail!(
+            "chunk delta declares a {} byte result, larger than a chunk ({} bytes)",
+            delta.result_size,
+            max_result
+        );
+    }
     DeltaDecoder::apply(base, &delta)
         .map_err(|e| anyhow::anyhow!("Failed to apply chunk delta: {}", e))
 }
@@ -3376,7 +3387,13 @@ impl ObjectDatabase {
             let smart_comp = self.smart_compressor.clone();
             let compressor = self.compressor.clone();
             current = run_cpu(current.len(), move || {
-                apply_stored_delta(&smart_comp, &compressor, &current, &compressed_delta)
+                apply_stored_delta(
+                    &smart_comp,
+                    &compressor,
+                    &current,
+                    &compressed_delta,
+                    usize::MAX,
+                )
             })
             .await??;
             if current.len() as u64 > MAX_OBJECT_SIZE {
@@ -3759,8 +3776,9 @@ impl ObjectDatabase {
     /// stored — otherwise reads will fail until the base arrives.
     ///
     /// Refuses self-loops and writes that would create a cycle in the local
-    /// chunk-delta chain — caller should fall back to fetching the full
-    /// chunk via `chunks/<id>` in that case.
+    /// chunk-delta chain. Also refuses a delta whose base is not readable yet
+    /// or that does not rebuild `chunk_id`; the caller may set the first kind
+    /// aside and write it once the base is there.
     ///
     /// Stores the payload at `chunk-deltas/<chunk_id>` and the metadata
     /// (`base:<hex>`) at `chunk-deltas/<chunk_id>.meta`. Tolerates concurrent
@@ -3774,14 +3792,14 @@ impl ObjectDatabase {
         // Unlike the add-side writers, this path takes its base entirely on
         // trust from a remote, so it must not re-target — a delta payload is
         // bound to the exact base it was encoded against. Refusing with an
-        // error is correct here: callers (pull.rs) already fall back to
-        // fetching the full chunk when this returns Err.
+        // error is correct here: pull.rs sets such a delta aside and retries it
+        // once the base has arrived.
         //
         // SEC-5: the payload comes from a remote, so rebuild the chunk from it
         // and check the id BEFORE anything is stored. A bad delta that went
         // live made fsck red and blocked "restored" health checks, and was
         // served on to other clients. A base that is not readable yet cannot
-        // be verified against; refuse, and the caller fetches the full chunk.
+        // be verified against; refuse (the caller may retry after the base lands).
         let base = self.get_chunk(base_id).await.map_err(|e| {
             anyhow::anyhow!("cannot verify chunk delta {chunk_id}: base {base_id} unreadable: {e}")
         })?;
@@ -3789,7 +3807,14 @@ impl ObjectDatabase {
         let compressor = self.compressor.clone();
         let payload = compressed_delta_bytes.to_vec();
         let rebuilt = run_cpu(base.len(), move || {
-            apply_stored_delta(&smart, &compressor, &base, &payload).map(|d| Oid::hash(&d))
+            apply_stored_delta(
+                &smart,
+                &compressor,
+                &base,
+                &payload,
+                crate::delta::PREALLOC_LIMIT,
+            )
+            .map(|d| Oid::hash(&d))
         })
         .await??;
         if rebuilt != *chunk_id {
