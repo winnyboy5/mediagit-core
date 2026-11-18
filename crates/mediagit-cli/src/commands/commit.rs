@@ -126,11 +126,26 @@ impl CommitCmd {
         // -F (read from file), then -e (or no source, if a tty) opens an
         // editor. If none of -m/-F/-e was given and stdin isn't a tty, there
         // is no way to obtain a message non-interactively.
+        // A staged squash leaves its message in MERGE_MSG (no MERGE_HEAD: that
+        // is the merge still waiting for `merge --continue`).
+        let merge_msg_path = find_repo_root()
+            .ok()
+            .map(|r| r.join(".mediagit"))
+            .filter(|d| !d.join("MERGE_HEAD").exists())
+            .map(|d| d.join("MERGE_MSG"))
+            .filter(|p| p.is_file());
+        let mut used_merge_msg = false;
         let message: String = if let Some(m) = &self.message {
             m.clone()
         } else if let Some(file_path) = &self.file {
             std::fs::read_to_string(file_path)
                 .with_context(|| format!("Failed to read commit message file: {}", file_path))?
+                .trim_end_matches(['\n', '\r'])
+                .to_string()
+        } else if let Some(path) = merge_msg_path.as_ref().filter(|_| !self.edit) {
+            used_merge_msg = true;
+            std::fs::read_to_string(path)
+                .context("Failed to read MERGE_MSG")?
                 .trim_end_matches(['\n', '\r'])
                 .to_string()
         } else if self.edit || std::io::IsTerminal::is_terminal(&std::io::stdin()) {
@@ -437,6 +452,10 @@ or pass --author \"Your Name <you@example.com>\"."
         // Ref write failed: the index was never touched, so the staged state
         // is intact and the user can simply retry. No restore needed.
         ref_update_result?;
+
+        if used_merge_msg && let Some(path) = &merge_msg_path {
+            let _ = std::fs::remove_file(path);
+        }
 
         // The commit is now durable and reachable. Clearing the index is
         // bookkeeping — if it fails, warn but do not fail the commit, which

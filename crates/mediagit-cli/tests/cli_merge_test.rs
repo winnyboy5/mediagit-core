@@ -784,6 +784,30 @@ fn test_merge_squash_no_commit_points_to_commit() {
     assert!(dir.join("other.txt").exists());
 }
 
+// A staged squash is saved with a plain `commit`: the saved text is the
+// default message, and it is gone once the version exists.
+#[test]
+fn test_squash_then_plain_commit_uses_merge_msg() {
+    let temp_dir = TempDir::new().unwrap();
+    let dir = temp_dir.path();
+    diverged_clean(dir);
+    mediagit()
+        .args(["merge", "--squash", "--no-commit", "other"])
+        .current_dir(dir)
+        .assert()
+        .success();
+    assert!(dir.join(".mediagit/MERGE_MSG").exists());
+
+    mediagit().arg("commit").current_dir(dir).assert().success();
+
+    let log = log_text(dir);
+    assert!(
+        log.contains("Squash merge branch 'other' into main"),
+        "{log}"
+    );
+    assert!(!dir.join(".mediagit/MERGE_MSG").exists(), "MERGE_MSG left");
+}
+
 // BUG-023: the merge version is named after the branches and has the real author.
 #[test]
 fn test_merge_commit_message_and_author() {
