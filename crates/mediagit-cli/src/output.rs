@@ -172,6 +172,9 @@ struct OkEnvelope<'a, T: Serialize> {
 struct ErrBody<'a> {
     code: &'a str,
     message: &'a str,
+    /// The raw error chain, only when `message` is a rewritten plain sentence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -194,10 +197,19 @@ pub fn emit_ok<T: Serialize>(data: &T) -> anyhow::Result<()> {
 
 /// Print the failure envelope as one stdout line.
 pub fn emit_err(code: &str, message: &str) {
+    emit_err_details(code, message, None);
+}
+
+/// [`emit_err`] plus the raw chain under `details`.
+pub fn emit_err_details(code: &str, message: &str, details: Option<&str>) {
     let line = serde_json::to_string(&ErrEnvelope {
         v: MACHINE_CONTRACT_VERSION,
         ok: false,
-        error: ErrBody { code, message },
+        error: ErrBody {
+            code,
+            message,
+            details,
+        },
     })
     .expect("error envelope serializes");
     println!("{line}");

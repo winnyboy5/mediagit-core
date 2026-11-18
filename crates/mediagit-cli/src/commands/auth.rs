@@ -651,19 +651,10 @@ fn attach_credentials(
     }
 }
 
-#[derive(Deserialize)]
-struct ErrorBody {
-    error: String,
-}
-
-/// Extract a clean error message from a non-2xx JSON error body, falling
-/// back to the bare status code if the body isn't the expected shape.
-async fn error_message(resp: reqwest::Response) -> String {
-    let status = resp.status();
-    match resp.json::<ErrorBody>().await {
-        Ok(body) => body.error,
-        Err(_) => format!("request failed with status {status}"),
-    }
+/// A non-2xx answer as a typed error (see `friendly`).
+async fn http_fail(resp: reqwest::Response) -> anyhow::Error {
+    let path = resp.url().path().to_owned();
+    mediagit_protocol::http_error::fail("request", &path, resp).await
 }
 
 fn format_duration_secs(secs: i64) -> String {
@@ -759,7 +750,7 @@ async fn fetch_and_print_whoami(
         anyhow::bail!("credential was rejected (401 Unauthorized)");
     }
     if !resp.status().is_success() {
-        anyhow::bail!("{}", error_message(resp).await);
+        return Err(http_fail(resp).await);
     }
     let who: WhoAmI = resp
         .json()
@@ -943,7 +934,7 @@ async fn login(opts: &LoginOpts) -> Result<()> {
         return Ok(());
     }
     if !resp.status().is_success() {
-        anyhow::bail!("login failed: {}", error_message(resp).await);
+        return Err(http_fail(resp).await.context("login failed"));
     }
     let auth: AuthResponse = resp
         .json()
@@ -1035,7 +1026,7 @@ async fn register(opts: &RegisterOpts) -> Result<()> {
         return Ok(());
     }
     if !resp.status().is_success() {
-        anyhow::bail!("registration failed: {}", error_message(resp).await);
+        return Err(http_fail(resp).await.context("registration failed"));
     }
     let auth: AuthResponse = resp
         .json()
@@ -1119,7 +1110,7 @@ async fn status(opts: &ServerOpts) -> Result<()> {
         return Ok(());
     }
     if !resp.status().is_success() {
-        anyhow::bail!("{}", error_message(resp).await);
+        return Err(http_fail(resp).await);
     }
     let who: WhoAmI = resp
         .json()
@@ -1246,7 +1237,7 @@ async fn passwd(opts: &ServerOpts) -> Result<()> {
         anyhow::bail!("current password was rejected");
     }
     if !resp.status().is_success() {
-        anyhow::bail!("password change failed: {}", error_message(resp).await);
+        return Err(http_fail(resp).await.context("password change failed"));
     }
     let body: Resp = resp
         .json()
@@ -1305,7 +1296,7 @@ async fn key_create(opts: &KeyCreateOpts) -> Result<()> {
         anyhow::bail!(AUTH_DISABLED_MSG);
     }
     if !resp.status().is_success() {
-        anyhow::bail!("key creation failed: {}", error_message(resp).await);
+        return Err(http_fail(resp).await.context("key creation failed"));
     }
     let body: Resp = resp
         .json()
@@ -1350,7 +1341,7 @@ async fn key_list(opts: &ServerOpts) -> Result<()> {
         anyhow::bail!(AUTH_DISABLED_MSG);
     }
     if !resp.status().is_success() {
-        anyhow::bail!("{}", error_message(resp).await);
+        return Err(http_fail(resp).await);
     }
     let keys: Vec<KeyInfo> = resp
         .json()
@@ -1404,7 +1395,7 @@ async fn key_revoke(opts: &KeyRevokeOpts) -> Result<()> {
         anyhow::bail!("you can only revoke your own API keys (or be an admin)");
     }
     if !resp.status().is_success() {
-        anyhow::bail!("key revocation failed: {}", error_message(resp).await);
+        return Err(http_fail(resp).await.context("key revocation failed"));
     }
     if output::machine_mode() {
         return output::emit_ok(&AuthOpReport {
@@ -1468,7 +1459,7 @@ async fn fetch_users(
         anyhow::bail!("administrator access required (user:manage permission)");
     }
     if !resp.status().is_success() {
-        anyhow::bail!("{}", error_message(resp).await);
+        return Err(http_fail(resp).await);
     }
     resp.json()
         .await
@@ -1536,7 +1527,7 @@ async fn admin_set_role(opts: &SetRoleOpts) -> Result<()> {
         anyhow::bail!("administrator access required (user:manage permission)");
     }
     if !resp.status().is_success() {
-        anyhow::bail!("role change failed: {}", error_message(resp).await);
+        return Err(http_fail(resp).await.context("role change failed"));
     }
     let body: Resp = resp
         .json()
@@ -1605,7 +1596,7 @@ async fn admin_create_user(opts: &CreateUserOpts) -> Result<()> {
         anyhow::bail!("administrator access required (user:manage permission)");
     }
     if !resp.status().is_success() {
-        anyhow::bail!("user creation failed: {}", error_message(resp).await);
+        return Err(http_fail(resp).await.context("user creation failed"));
     }
     let body: Resp = resp
         .json()
@@ -1660,7 +1651,7 @@ async fn admin_reset_password(opts: &UserOpts) -> Result<()> {
         anyhow::bail!("administrator access required (user:manage permission)");
     }
     if !resp.status().is_success() {
-        anyhow::bail!("password reset failed: {}", error_message(resp).await);
+        return Err(http_fail(resp).await.context("password reset failed"));
     }
     const RESET_NOTE: &str = "This does not invalidate the user's existing sessions - any active \
          token remains valid until it expires (up to 24h).";
@@ -1705,7 +1696,7 @@ async fn admin_list_grants(opts: &UserOpts) -> Result<()> {
         anyhow::bail!("administrator access required (user:manage permission)");
     }
     if !resp.status().is_success() {
-        anyhow::bail!("listing grants failed: {}", error_message(resp).await);
+        return Err(http_fail(resp).await.context("listing grants failed"));
     }
     let grants: Vec<Grant> = resp
         .json()
@@ -1755,7 +1746,7 @@ async fn admin_repo_access(opts: &RepoAccessOpts) -> Result<()> {
         anyhow::bail!("administrator access required (user:manage permission)");
     }
     if !resp.status().is_success() {
-        anyhow::bail!("listing repo access failed: {}", error_message(resp).await);
+        return Err(http_fail(resp).await.context("listing repo access failed"));
     }
     let access: Vec<Access> = resp
         .json()
@@ -1815,7 +1806,7 @@ async fn admin_set_disabled(server: &Option<String>, user: &str, disabled: bool)
         anyhow::bail!("administrator access required (user:manage permission)");
     }
     if !resp.status().is_success() {
-        anyhow::bail!("account change failed: {}", error_message(resp).await);
+        return Err(http_fail(resp).await.context("account change failed"));
     }
     let body: Resp = resp
         .json()
@@ -1877,7 +1868,7 @@ async fn admin_grant(opts: &GrantOpts) -> Result<()> {
         anyhow::bail!("administrator access required (user:manage permission)");
     }
     if !resp.status().is_success() {
-        anyhow::bail!("grant failed: {}", error_message(resp).await);
+        return Err(http_fail(resp).await.context("grant failed"));
     }
     if output::machine_mode() {
         return output::emit_ok(&AuthOpReport {
@@ -1924,7 +1915,7 @@ async fn admin_revoke_grant(opts: &RevokeGrantOpts) -> Result<()> {
         anyhow::bail!("administrator access required (user:manage permission)");
     }
     if !resp.status().is_success() {
-        anyhow::bail!("grant revocation failed: {}", error_message(resp).await);
+        return Err(http_fail(resp).await.context("grant revocation failed"));
     }
     if output::machine_mode() {
         return output::emit_ok(&AuthOpReport {

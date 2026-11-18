@@ -6,6 +6,7 @@
 // Exposes internal modules for testing
 
 pub mod encryption;
+pub mod friendly;
 pub mod output;
 pub mod progress;
 pub mod repo;

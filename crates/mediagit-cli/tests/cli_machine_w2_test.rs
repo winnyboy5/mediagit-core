@@ -489,8 +489,17 @@ async fn remote_ls_tree_machine_auth_required_is_a_clean_error() {
     assert_eq!(stdout.lines().count(), 1, "{stdout:?}");
     let v: Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(v["ok"], false);
+    assert_eq!(v["error"]["code"], "not_signed_in", "{v}");
     assert!(
-        v["error"]["message"].as_str().unwrap().contains("401"),
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not signed in"),
+        "{v}"
+    );
+    // The raw chain stays available for a "Details" fold.
+    assert!(
+        v["error"]["details"].as_str().unwrap().contains("401"),
         "{v}"
     );
 }

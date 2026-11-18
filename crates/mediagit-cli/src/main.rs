@@ -536,6 +536,15 @@ fn main() {
     match handler.join() {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
+            if let Some(f) = mediagit_cli::friendly::friendly(&e) {
+                if output::machine_mode() {
+                    output::emit_err_details(f.code, &f.message, Some(&f.details));
+                    std::process::exit(1);
+                }
+                output::error(&format!("Error: {}", f.message));
+                eprintln!("  Details: {}", f.details);
+                std::process::exit(1);
+            }
             if output::machine_mode() {
                 let code = output::error_code(&e);
                 output::emit_err(code, &format!("{:#}", e));

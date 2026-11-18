@@ -610,10 +610,10 @@ async fn auth_machine_status_whoami_logout_with_auth_disabled() {
     assert_eq!(d["action"], "logout");
     assert_eq!(d["removed"], 0);
 
-    // Unreachable server: a clean error envelope.
+    // Unreachable server: a clean error envelope with its own code.
     assert_eq!(
         err(dir, &["auth", "status", "--server", "http://127.0.0.1:1"]),
-        "error"
+        "server_unreachable"
     );
 }
 
