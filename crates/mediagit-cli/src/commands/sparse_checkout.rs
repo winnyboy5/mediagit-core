@@ -169,7 +169,9 @@ impl SetOpts {
         let doomed: Vec<std::path::PathBuf> = at_risk
             .modified
             .iter()
-            .filter(|p| old_filter.is_included(p) && !new_filter.is_included(p))
+            // Files leaving the cone are deleted; files entering it are
+            // overwritten. A file already at an entering path is the user's.
+            .filter(|p| old_filter.is_included(p) != new_filter.is_included(p))
             .cloned()
             .collect();
         if !doomed.is_empty() {
@@ -285,6 +287,25 @@ impl DisableOpts {
                 return output::emit_ok(&disabled_report());
             }
             return Ok(());
+        }
+        // Restoring the hidden files must not overwrite an untracked file the
+        // user made at one of their paths. Refuse before the filter is removed.
+        if let Ok(head_oid) = refdb.resolve("HEAD").await {
+            let at_risk =
+                crate::worktree_guard::AtRisk::check(&repo_root, &odb, Some(&head_oid), None)
+                    .await?;
+            let doomed: Vec<std::path::PathBuf> = at_risk
+                .modified
+                .into_iter()
+                .filter(|p| !old_filter.is_included(p))
+                .collect();
+            if !doomed.is_empty() {
+                return Err(crate::worktree_guard::AtRisk {
+                    modified: doomed,
+                    untracked_collisions: Vec::new(),
+                }
+                .bail("sparse-checkout disable"));
+            }
         }
         SparseFilter::remove(&repo_root)?;
 

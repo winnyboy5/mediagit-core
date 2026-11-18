@@ -437,3 +437,56 @@ fn sparse_add_excluded_dir_keeps_excluded() {
 fn sparse_add_excluded_file_by_name_keeps_excluded() {
     add_form_keeps_excluded("big/b1.txt");
 }
+
+/// Bringing a folder back must not overwrite an untracked file the user made
+/// at a path the sparse filter had hidden.
+fn hidden_path_with_untracked_file() -> TempDir {
+    let temp = two_dir_repo();
+    mediagit()
+        .args(["sparse-checkout", "set", "included"])
+        .current_dir(temp.path())
+        .assert()
+        .success();
+    assert!(!temp.path().join("excluded/drop.txt").exists());
+    fs::create_dir_all(temp.path().join("excluded")).unwrap();
+    fs::write(temp.path().join("excluded/drop.txt"), "my own work").unwrap();
+    temp
+}
+
+#[test]
+fn sparse_widen_keeps_untracked_file_at_returning_path() {
+    let temp = hidden_path_with_untracked_file();
+    mediagit()
+        .args(["sparse-checkout", "set", "included", "excluded"])
+        .current_dir(temp.path())
+        .assert()
+        .failure();
+    assert_eq!(
+        fs::read_to_string(temp.path().join("excluded/drop.txt")).unwrap(),
+        "my own work"
+    );
+    mediagit()
+        .args(["sparse-checkout", "list"])
+        .current_dir(temp.path())
+        .assert()
+        .stdout(predicate::str::contains("excluded").not());
+}
+
+#[test]
+fn sparse_disable_keeps_untracked_file_at_returning_path() {
+    let temp = hidden_path_with_untracked_file();
+    mediagit()
+        .args(["sparse-checkout", "disable"])
+        .current_dir(temp.path())
+        .assert()
+        .failure();
+    assert_eq!(
+        fs::read_to_string(temp.path().join("excluded/drop.txt")).unwrap(),
+        "my own work"
+    );
+    mediagit()
+        .args(["sparse-checkout", "list"])
+        .current_dir(temp.path())
+        .assert()
+        .stdout(predicate::str::contains("Mode"));
+}
