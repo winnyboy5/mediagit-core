@@ -137,11 +137,8 @@ fn target(e: &reqwest::Error) -> Option<String> {
 }
 
 /// Map `err` to a friendly code and sentence, or `None` when nothing in the
-/// chain is recognised or the error already has its own code.
+/// chain is recognised (errors that carry their own code have nothing mappable in them).
 pub fn friendly(err: &anyhow::Error) -> Option<Friendly> {
-    if crate::output::error_code(err) != "error" {
-        return None;
-    }
     let (code, message) = err.chain().find_map(|c| {
         if let Some(h) = c.downcast_ref::<HttpError>() {
             return Some(http_friendly(h));
@@ -255,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_and_already_coded_errors_are_left_alone() {
+    fn unknown_and_explicitly_coded_errors_are_left_alone() {
         assert_eq!(code_of(anyhow::anyhow!("something odd")), None);
         let coded = anyhow::Error::new(crate::output::CodedError::new("invalid_args", "bad"));
         assert_eq!(code_of(coded), None);

@@ -436,6 +436,31 @@ place (`mediagit_versioning::scan_hex_oids`) rather than in a private copy
 each. The two having drifted apart on which objects count as rooted is what
 caused this.
 
+### Changed — errors say what went wrong, with a code (BUG-031, BUG-044)
+
+Every failed request now becomes a typed error, and the CLI turns the common ones
+into a short plain sentence with one next action and a stable code. Before, people
+saw lines like `POST /admin/repos failed with status: 400 Bad Request` or
+`request failed with status 409`.
+
+- **New `--machine` error codes:** `server_unreachable`, `server_timeout`,
+  `not_signed_in`, `no_access`, `remote_not_found`, `conflict`, `request_rejected`,
+  `server_error`, `request_failed`, `permission_denied`, `file_in_use`,
+  `already_exists`, `disk_full`. The envelope keeps `{code, message}` and adds an
+  optional `details` with the raw error chain (URL credentials and query strings
+  removed). Errors that already had a code keep it.
+- **The server says why it refused.** Creating a repository or person, changing a
+  password or role, and deleting a repository answer 400 and 409 with
+  `{"code","message"}` (for example `repo_name_invalid`, `repo_exists`,
+  `repo_not_empty`, `registration_invalid`, `user_exists`, `last_admin`).
+- **"Test connection" names the cause.** A wrong address, nothing listening, a host
+  that does not answer within 3 seconds, and refused keys each get their own
+  sentence, and a dead endpoint no longer takes 38 seconds. The test also stops
+  leaving a `LAYOUT` object in the bucket (IMP-101).
+- **A pull no longer blames the server for a local problem.** A full disk, a
+  permission error, or a chunk whose base this download never included is reported
+  as that, not as "the server sent a bad delta".
+
 ### Fixed — an S3 refusal was reported as a missing file
 
 On S3 and S3-compatible storage, `get`, `exists` and `head` read any server error

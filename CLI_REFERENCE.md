@@ -81,7 +81,11 @@ mediagit -C <repo> --machine status
 ```json
 {"v":1,"ok":true,"data":{ }}
 {"v":1,"ok":false,"error":{"code":"error","message":"..."}}
+{"v":1,"ok":false,"error":{"code":"not_signed_in","message":"...","details":"..."}}
 ```
+
+`details` appears only when `message` is a rewritten plain sentence; it holds the raw
+error chain with URL credentials and query strings removed.
 
 **Error codes and exit codes**
 
@@ -92,6 +96,19 @@ mediagit -C <repo> --machine status
 | `needs_input` | A prompt (passphrase, confirmation) was reached; collect the input and re-run with it supplied | 1 |
 | `invalid_args` | Flags combined wrongly (currently `show`: `--output` without `<rev>:<path>`, `--tree` with `<rev>:<path>`) | 1 |
 | `empty_commit` | `cherry-pick` (including `--continue`) or `revert` would create a commit whose tree equals HEAD's; nothing is committed (`revert --no-commit` skips the check) | 1 |
+| `server_unreachable` | Nothing answered at the server address (refused, unknown host, no route) | 1 |
+| `server_timeout` | The server did not answer in time | 1 |
+| `not_signed_in` | The server answered 401: no sign-in, or it expired | 1 |
+| `no_access` | The server answered 403: this account may not do that | 1 |
+| `remote_not_found` | The server answered 404 for the repository or path | 1 |
+| `conflict` | The server answered 409; `message` is the server's reason when it gave one | 1 |
+| `request_rejected` | The server answered 400 or 422; `message` is the server's reason when it gave one | 1 |
+| `server_error` | The server answered 5xx | 1 |
+| `request_failed` | Any other HTTP status | 1 |
+| `permission_denied` | The operating system refused access to a file or folder | 1 |
+| `file_in_use` | Another program holds the file (Windows sharing or lock violation, Unix busy) | 1 |
+| `already_exists` | A file or folder with that name exists | 1 |
+| `disk_full` | No space left on the disk | 1 |
 | `error` | Any other failure; `message` is the full error chain | 1 |
 
 Success exits 0. A panic exits 2 with no envelope.
