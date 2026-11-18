@@ -88,7 +88,11 @@ pub fn http_friendly(h: &HttpError) -> (&'static str, String) {
     match h.kind {
         HttpErrorKind::Unauthorized => (
             "not_signed_in",
-            "You are not signed in, or your sign-in expired. Sign in and try again (mediagit auth login <server>).".into(),
+            match reason {
+                // e.g. "Invalid credentials" from a login attempt.
+                Some(r) => r.to_owned(),
+                None => "You are not signed in, or your sign-in expired. Sign in and try again (mediagit auth login <server>).".into(),
+            },
         ),
         HttpErrorKind::Forbidden => (
             "no_access",
@@ -139,6 +143,10 @@ fn target(e: &reqwest::Error) -> Option<String> {
 /// Map `err` to a friendly code and sentence, or `None` when nothing in the
 /// chain is recognised (errors that carry their own code have nothing mappable in them).
 pub fn friendly(err: &anyhow::Error) -> Option<Friendly> {
+    // Errors that carry their own code (needs-input, CodedError) keep it.
+    if crate::output::error_code(err) != "error" {
+        return None;
+    }
     let (code, message) = err.chain().find_map(|c| {
         if let Some(h) = c.downcast_ref::<HttpError>() {
             return Some(http_friendly(h));
@@ -168,8 +176,13 @@ pub fn friendly(err: &anyhow::Error) -> Option<Friendly> {
     Some(Friendly {
         code,
         message: crate::output::scrub(&message),
-        details: crate::output::scrub(&format!("{err:#}")),
+        details: scrubbed_chain(err),
     })
+}
+
+/// The full `{:#}` chain with URL credentials, query strings and fragments removed.
+pub fn scrubbed_chain(err: &anyhow::Error) -> String {
+    crate::output::scrub(&format!("{err:#}"))
 }
 
 #[cfg(test)]
@@ -211,6 +224,45 @@ mod tests {
                 "Passwords need at least 8 characters."
             );
         }
+    }
+
+    #[test]
+    fn a_401_with_a_server_reason_shows_the_reason() {
+        let e: anyhow::Error = http_error(
+            "POST",
+            "/auth/login",
+            401,
+            r#"{"error":"Invalid credentials"}"#,
+        )
+        .into();
+        let f = friendly(&e).unwrap();
+        assert_eq!(f.code, "not_signed_in");
+        assert_eq!(f.message, "Invalid credentials");
+    }
+
+    #[test]
+    fn a_coded_error_with_an_io_source_keeps_its_code() {
+        // io::Error::source() is its inner error's source, so hang the CodedError there.
+        #[derive(Debug)]
+        struct Inner(crate::output::CodedError);
+        impl std::fmt::Display for Inner {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "inner")
+            }
+        }
+        impl std::error::Error for Inner {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+        let io = std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            Inner(crate::output::CodedError::new("invalid_args", "bad")),
+        );
+        let e = anyhow::Error::new(io);
+        assert!(e.chain().any(|c| c.is::<std::io::Error>()));
+        assert_eq!(crate::output::error_code(&e), "invalid_args");
+        assert!(friendly(&e).is_none());
     }
 
     #[cfg(windows)]
@@ -274,6 +326,13 @@ mod tests {
                 assert!(!text.contains(secret), "{secret} leaked in {text}");
             }
         }
+    }
+
+    #[test]
+    fn unfriendly_chain_text_drops_the_query() {
+        let e = anyhow::anyhow!("PUT https://b.example/k?X-Amz-Signature=abc123 failed");
+        let t = scrubbed_chain(&e);
+        assert!(t.contains("b.example/k") && !t.contains("abc123"), "{t}");
     }
 
     #[test]

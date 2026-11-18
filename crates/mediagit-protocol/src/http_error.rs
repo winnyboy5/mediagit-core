@@ -56,7 +56,7 @@ pub fn classify_transport(e: &reqwest::Error) -> TransportKind {
 }
 
 /// A non-success HTTP answer. `reason`/`code` come from the server's JSON
-/// error body (`{"code": "...", "message": "..."}`) when it sent one.
+/// error body (`{"code": "...", "message": "..."}`, or `{"error": "..."}` from the auth endpoints) when it sent one.
 #[derive(Debug, Clone)]
 pub struct HttpError {
     pub method: String,
@@ -110,7 +110,9 @@ pub fn http_error(method: &str, path: &str, status: u16, body: &str) -> HttpErro
         status,
         kind: HttpErrorKind::from_status(status),
         code: field("code"),
-        reason: field("message").or_else(|| plain_text(body)),
+        reason: field("message")
+            .or_else(|| field("error"))
+            .or_else(|| plain_text(body)),
     }
 }
 
@@ -175,6 +177,21 @@ mod tests {
                 e.to_string(),
                 "GET /info/refs failed with status: 401 Unauthorized"
             );
+        }
+    }
+
+    #[test]
+    fn reason_is_read_from_every_body_shape() {
+        let table = [
+            (r#"{"message":"from message"}"#, Some("from message")),
+            (r#"{"error":"from error"}"#, Some("from error")),
+            (r#"{"message":"m","error":"e"}"#, Some("m")),
+            (r#"{"error":""}"#, None),
+            ("plain words", Some("plain words")),
+        ];
+        for (body, want) in table {
+            let e = http_error("POST", "/auth/login", 401, body);
+            assert_eq!(e.reason.as_deref(), want, "{body}");
         }
     }
 

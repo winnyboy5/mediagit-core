@@ -297,10 +297,7 @@ async fn probe_names_the_cause_of_a_dead_endpoint() {
         .await
         .unwrap_err()
         .to_string();
-    assert!(
-        e.contains("Cannot find or reach no-such-host.invalid:9000"),
-        "{e}"
-    );
+    assert!(e.contains("Cannot find no-such-host.invalid:9000"), "{e}");
     assert!(!e.contains(SECRET) && !e.contains(ACCESS), "{e}");
 }
 

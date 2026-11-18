@@ -459,9 +459,15 @@ pub(crate) fn storage_cause(e: &anyhow::Error) -> String {
     }) {
         return "The storage server refused the access key or secret key. Check both and test again.".into();
     }
-    let text = format!("{e:#} {e:?}").to_lowercase();
+    // Typed OS errors first, then the message text. Only the Display chain is
+    // read: Debug output of an SDK error can hold response headers.
+    let io_kind = e
+        .chain()
+        .find_map(|c| c.downcast_ref::<std::io::Error>())
+        .map(|io| io.kind());
+    let text = format!("{e:#}").to_lowercase();
     let has = |words: &[&str]| words.iter().any(|w| text.contains(w));
-    if has(&["timed out", "timeout"]) {
+    if io_kind == Some(std::io::ErrorKind::TimedOut) || has(&["timed out", "timeout"]) {
         "The storage server did not answer in time. Check the endpoint address and your network."
     } else if has(&[
         "dns error",
@@ -473,7 +479,9 @@ pub(crate) fn storage_cause(e: &anyhow::Error) -> String {
         "temporary failure in name resolution",
     ]) {
         "The storage address could not be found. Check the endpoint for typos."
-    } else if has(&["connection refused", "actively refused", "connection reset"]) {
+    } else if io_kind == Some(std::io::ErrorKind::ConnectionRefused)
+        || has(&["connection refused", "actively refused", "connection reset"])
+    {
         "Nothing is listening at the storage address. Check the endpoint and port, and that the storage server is running."
     } else if has(&[
         "invalidaccesskeyid",
@@ -494,12 +502,19 @@ pub(crate) fn storage_cause(e: &anyhow::Error) -> String {
     .to_owned()
 }
 
+/// How long the setup probe waits to resolve the endpoint name.
+const PROBE_DNS_SECS: u64 = 5;
 /// How long the setup probe waits to open a TCP connection to the endpoint.
 const PROBE_CONNECT_SECS: u64 = 3;
 
-/// Open one TCP connection to the endpoint, so a typo, a dead port and a
-/// firewalled host each get their own sentence in seconds instead of after the
-/// SDK's retries.
+/// `Uri::host` keeps the brackets of an IPv6 literal; resolvers want it bare.
+fn unbracket(host: &str) -> &str {
+    host.trim_start_matches('[').trim_end_matches(']')
+}
+
+/// Resolve, then open one TCP connection to the endpoint, so a typo, a dead
+/// port and a firewalled host each get their own sentence in seconds instead of
+/// after the SDK's retries. DNS and connect each have their own bound.
 async fn preflight_endpoint(endpoint: &str) -> anyhow::Result<()> {
     const BAD: &str =
         "The storage endpoint is not a valid address. It should look like http://host:9000.";
@@ -514,10 +529,28 @@ async fn preflight_endpoint(endpoint: &str) -> anyhow::Result<()> {
     let (Some(host), Some(port)) = (uri.host(), port) else {
         anyhow::bail!(BAD);
     };
+    let bare = unbracket(host);
     let at = format!("{host}:{port}");
+    let cannot_find =
+        || anyhow::anyhow!("Cannot find {at}. Check the endpoint for typos and your network.");
+    let addrs: Vec<_> = match tokio::time::timeout(
+        std::time::Duration::from_secs(PROBE_DNS_SECS),
+        tokio::net::lookup_host((bare, port)),
+    )
+    .await
+    {
+        Ok(Ok(it)) => it.collect(),
+        Ok(Err(_)) => return Err(cannot_find()),
+        Err(_) => anyhow::bail!(
+            "The name in {at} did not resolve within {PROBE_DNS_SECS} seconds. Check the endpoint and your network."
+        ),
+    };
+    let Some(addr) = addrs.first() else {
+        return Err(cannot_find());
+    };
     match tokio::time::timeout(
         std::time::Duration::from_secs(PROBE_CONNECT_SECS),
-        tokio::net::TcpStream::connect((host, port)),
+        tokio::net::TcpStream::connect(addr),
     )
     .await
     {
@@ -526,7 +559,7 @@ async fn preflight_endpoint(endpoint: &str) -> anyhow::Result<()> {
             "Nothing is listening at {at}. Check the port and that the storage server is running."
         ),
         Ok(Err(_)) => anyhow::bail!(
-            "Cannot find or reach {at}. Check the endpoint for typos and your network."
+            "Cannot reach {at}. Check the endpoint for typos, your network and any firewall."
         ),
         Err(_) => anyhow::bail!(
             "{at} did not answer within {PROBE_CONNECT_SECS} seconds. Check the address and any firewall."
@@ -2071,7 +2104,7 @@ mod storage_cause_tests {
 
     #[test]
     fn each_failure_has_its_own_sentence() {
-        let table: [(anyhow::Error, &str); 6] = [
+        let table: [(anyhow::Error, &str); 7] = [
             (
                 mediagit_storage::StorageError::PermissionDenied("x".into()).into(),
                 "refused the access key",
@@ -2092,11 +2125,40 @@ mod storage_cause_tests {
             ),
             (anyhow::anyhow!("dispatch failure"), "Cannot reach"),
             (anyhow::anyhow!("something else"), "gave an error"),
+            // Typed OS error whose text names nothing.
+            (
+                anyhow::Error::new(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    "x",
+                ))
+                .context("put failed"),
+                "Nothing is listening",
+            ),
         ];
         for (e, want) in table {
             let got = storage_cause(&e);
             assert!(got.contains(want), "{e:?} -> {got}");
             assert!(got.ends_with('.'), "{got}");
         }
+    }
+
+    #[test]
+    fn ipv6_literal_loses_its_brackets() {
+        assert_eq!(super::unbracket("[::1]"), "::1");
+        assert_eq!(super::unbracket("host.example"), "host.example");
+    }
+
+    #[tokio::test]
+    async fn bracketed_ipv6_endpoint_is_resolved_not_misread() {
+        // Port 1 on loopback: refused, which proves the literal was parsed.
+        let e = super::preflight_endpoint("http://[::1]:1")
+            .await
+            .unwrap_err();
+        let t = e.to_string();
+        assert!(
+            t.contains("Nothing is listening") || t.contains("Cannot reach"),
+            "{t}"
+        );
+        assert!(!t.contains("Cannot find"), "{t}");
     }
 }

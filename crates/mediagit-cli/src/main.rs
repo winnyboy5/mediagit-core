@@ -547,10 +547,13 @@ fn main() {
             }
             if output::machine_mode() {
                 let code = output::error_code(&e);
-                output::emit_err(code, &format!("{:#}", e));
+                output::emit_err(code, &mediagit_cli::friendly::scrubbed_chain(&e));
                 std::process::exit(if code == "json_unsupported" { 2 } else { 1 });
             }
-            output::error(&format!("Error: {:#}", e));
+            output::error(&format!(
+                "Error: {}",
+                mediagit_cli::friendly::scrubbed_chain(&e)
+            ));
             std::process::exit(1);
         }
         Err(_) => {

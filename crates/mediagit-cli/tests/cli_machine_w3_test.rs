@@ -682,6 +682,30 @@ async fn auth_machine_login_reads_password_from_stdin_only() {
     assert_ne!(r.code, 0);
     assert_eq!(r.json["ok"], false);
     assert_no_leak(&r, "wrong-Password-1!");
+    // The server's reason is shown, not "You are not signed in".
+    let msg = r.json["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("Invalid credentials"), "{msg}");
+    assert!(!msg.contains("not signed in"), "{msg}");
+
+    // Registering the same name again shows the server's text, not the generic 409 sentence.
+    let r = run_full(
+        dir,
+        &["--secret-stdin"],
+        &[
+            "auth",
+            "register",
+            "--server",
+            &base,
+            "--username",
+            "alice",
+            "--email",
+            "alice@example.com",
+        ],
+        Some(&format!("{password}\n{password}\n")),
+    );
+    assert_ne!(r.code, 0, "{}", r.stdout);
+    let msg = r.json["error"]["message"].as_str().unwrap();
+    assert!(!msg.contains("Refresh and try again"), "{msg}");
 }
 
 // ---------------------------------------------------------------------------
