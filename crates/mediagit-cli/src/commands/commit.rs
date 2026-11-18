@@ -134,7 +134,6 @@ impl CommitCmd {
             .filter(|d| !d.join("MERGE_HEAD").exists())
             .map(|d| d.join("MERGE_MSG"))
             .filter(|p| p.is_file());
-        let mut used_merge_msg = false;
         let message: String = if let Some(m) = &self.message {
             m.clone()
         } else if let Some(file_path) = &self.file {
@@ -143,7 +142,6 @@ impl CommitCmd {
                 .trim_end_matches(['\n', '\r'])
                 .to_string()
         } else if let Some(path) = merge_msg_path.as_ref().filter(|_| !self.edit) {
-            used_merge_msg = true;
             std::fs::read_to_string(path)
                 .context("Failed to read MERGE_MSG")?
                 .trim_end_matches(['\n', '\r'])
@@ -453,7 +451,8 @@ or pass --author \"Your Name <you@example.com>\"."
         // is intact and the user can simply retry. No restore needed.
         ref_update_result?;
 
-        if used_merge_msg && let Some(path) = &merge_msg_path {
+        // Any commit ends a staged squash, whether or not it used the text.
+        if let Some(path) = &merge_msg_path {
             let _ = std::fs::remove_file(path);
         }
 

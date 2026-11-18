@@ -808,6 +808,34 @@ fn test_squash_then_plain_commit_uses_merge_msg() {
     assert!(!dir.join(".mediagit/MERGE_MSG").exists(), "MERGE_MSG left");
 }
 
+// A squash saved with `commit -m` still ends its saved text: a later plain
+// `commit` must ask for a message, not reuse the old squash text.
+#[test]
+fn test_squash_then_commit_m_clears_merge_msg() {
+    let temp_dir = TempDir::new().unwrap();
+    let dir = temp_dir.path();
+    diverged_clean(dir);
+    mediagit()
+        .args(["merge", "--squash", "--no-commit", "other"])
+        .current_dir(dir)
+        .assert()
+        .success();
+    mediagit()
+        .args(["commit", "-m", "x"])
+        .current_dir(dir)
+        .assert()
+        .success();
+    assert!(!dir.join(".mediagit/MERGE_MSG").exists(), "MERGE_MSG left");
+
+    fs::write(dir.join("later.txt"), "later").unwrap();
+    mediagit()
+        .args(["add", "later.txt"])
+        .current_dir(dir)
+        .assert()
+        .success();
+    mediagit().arg("commit").current_dir(dir).assert().failure();
+}
+
 // BUG-023: the merge version is named after the branches and has the real author.
 #[test]
 fn test_merge_commit_message_and_author() {

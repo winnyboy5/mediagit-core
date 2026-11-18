@@ -364,6 +364,22 @@ fn sparse_add_update_does_not_stage_excluded_as_deleted() {
 }
 
 #[test]
+fn sparse_add_update_still_stages_real_deletion_inside_cone() {
+    let temp = keep_big_repo();
+    let d = temp.path();
+    commit_file(d, "keep/gone.txt", "bye", "gone");
+    run(d, &["sparse-checkout", "set", "keep"]);
+    fs::remove_file(d.join("keep/gone.txt")).unwrap();
+
+    let out = run(d, &["add", "-u"]);
+    assert!(out.contains("Staged 1 deletion"), "{out}");
+    run(d, &["commit", "-m", "rm"]);
+    let diff = run(d, &["diff", "HEAD~1", "HEAD"]);
+    assert!(diff.contains("gone.txt"), "{diff}");
+    assert!(!diff.contains("b1.txt"), "{diff}");
+}
+
+#[test]
 fn sparse_add_all_still_stages_real_deletion_inside_cone() {
     let temp = keep_big_repo();
     let d = temp.path();
