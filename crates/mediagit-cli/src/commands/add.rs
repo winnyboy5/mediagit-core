@@ -65,7 +65,13 @@ pub async fn stage_files_for_commit(paths: &[String], repo_root: &std::path::Pat
         if path.is_file() {
             // Never skip an existing file just because it cannot be
             // canonicalized (BUG-009): fall back to the plain absolute path.
-            let abs_path = dunce::canonicalize(path).or_else(|_| std::path::absolute(path))?;
+            let abs_path = match dunce::canonicalize(path).or_else(|_| std::path::absolute(path)) {
+                Ok(p) => p,
+                Err(e) => {
+                    crate::phash_index::flush(&repo_root).await;
+                    return Err(e.into());
+                }
+            };
             match AddCmd::process_single_file(
                 &abs_path,
                 &repo_root,

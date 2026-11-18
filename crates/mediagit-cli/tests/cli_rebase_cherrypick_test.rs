@@ -881,6 +881,50 @@ fn test_rebase_continue_refuses_edit_made_after_add() {
     );
 }
 
+/// F1, other half: a staged deletion whose file came back is the user's.
+/// `--continue` must refuse naming it, not delete it again.
+#[test]
+fn test_rebase_continue_refuses_file_that_came_back_after_staged_deletion() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    stopped_rebase(d, false);
+    fs::write(
+        d.join("notes.txt"),
+        "resolved
+",
+    )
+    .unwrap();
+    fs::remove_file(d.join("up.txt")).unwrap();
+    mediagit()
+        .args(["add", "-A"])
+        .current_dir(d)
+        .assert()
+        .success();
+    fs::write(
+        d.join("up.txt"),
+        "back again
+",
+    )
+    .unwrap();
+    let out = mediagit()
+        .args(["rebase", "--continue"])
+        .current_dir(d)
+        .output()
+        .unwrap();
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "continue must refuse: {all}");
+    assert!(all.contains("up.txt"), "names the returned path: {all}");
+    assert_eq!(
+        fs::read_to_string(d.join("up.txt")).unwrap(),
+        "back again
+"
+    );
+}
+
 /// F3: a fresh `cherry-pick` while one is in progress is refused, and the
 /// saved state is left as it was.
 #[test]
