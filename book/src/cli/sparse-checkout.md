@@ -18,7 +18,8 @@ file being absent, or having no pattern lines, means sparse checkout is
 Two pattern styles:
 
 - **Cone mode** (default): each pattern is a directory prefix, included
-  recursively.
+  recursively. Files in the repository root are **not** kept unless a pattern
+  names them. This differs from Git's cone mode, which always keeps root files.
 - **Pattern mode** (`--patterns`): gitignore-style globs, where a match means
   *include* — the inverse of `.mediagitignore`, where a match means exclude.
 

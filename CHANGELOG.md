@@ -142,6 +142,16 @@ changes fix real bugs.
   sign-in keeps the server's reason and now says to sign in again. New repository,
   person and password names are checked in the form (BUG-031), and "Test connection"
   asks for a missing bucket before calling the server (BUG-044).
+- **Small command-line clean-ups (IMP-001 to IMP-099).** `status` always names the
+  branch. `init` inside a repository warns about the nested one, and a refused
+  `init` prints no "Initializing" line first. An empty `.mediagit` folder is
+  reported as damaged instead of passing as a new repository. `--help` shows one
+  line for `--log-format`. `mediagit-server --version` and
+  `mediagit-desktop --version` print the version. `fsck --path` and
+  `verify --path` are hidden (use `-C`). `gc` counts "kept" objects out of the
+  ones it scanned, `stats` no longer calls a size increase "compression", the app
+  marks leftover-object lines in a check as "Note" instead of "Error", and
+  `bisect replay` accepts the output of `bisect log`.
 
 ### Fixed
 
