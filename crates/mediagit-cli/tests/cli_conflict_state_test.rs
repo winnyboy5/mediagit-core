@@ -1482,12 +1482,7 @@ fn bug029_revert_keeping_head_bytes_resolves() {
     let d = t.path();
     revert_conflict(d);
     let head_before = tip(d, "main");
-    fs::write(
-        d.join("shared.txt"),
-        "v3
-",
-    )
-    .unwrap();
+    fs::write(d.join("shared.txt"), "v3\n").unwrap();
     assert!(run(d, &["add", "--", "shared.txt"]).status.success());
     // DL-8: the resolution equals HEAD, so there is nothing to commit.
     let out = run(d, &["revert", "--continue"]);

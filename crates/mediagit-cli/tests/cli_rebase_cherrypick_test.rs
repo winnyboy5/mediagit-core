@@ -888,24 +888,14 @@ fn test_rebase_continue_refuses_file_that_came_back_after_staged_deletion() {
     let t = TempDir::new().unwrap();
     let d = t.path();
     stopped_rebase(d, false);
-    fs::write(
-        d.join("notes.txt"),
-        "resolved
-",
-    )
-    .unwrap();
+    fs::write(d.join("notes.txt"), "resolved\n").unwrap();
     fs::remove_file(d.join("up.txt")).unwrap();
     mediagit()
         .args(["add", "-A"])
         .current_dir(d)
         .assert()
         .success();
-    fs::write(
-        d.join("up.txt"),
-        "back again
-",
-    )
-    .unwrap();
+    fs::write(d.join("up.txt"), "back again\n").unwrap();
     let out = mediagit()
         .args(["rebase", "--continue"])
         .current_dir(d)
@@ -920,8 +910,7 @@ fn test_rebase_continue_refuses_file_that_came_back_after_staged_deletion() {
     assert!(all.contains("up.txt"), "names the returned path: {all}");
     assert_eq!(
         fs::read_to_string(d.join("up.txt")).unwrap(),
-        "back again
-"
+        "back again\n"
     );
 }
 
