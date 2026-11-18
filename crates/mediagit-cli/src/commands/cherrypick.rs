@@ -137,6 +137,14 @@ impl CherryPickCmd {
             );
         }
 
+        // F3: --continue and --skip resume through `start_cherrypick` with
+        // the state on file; a fresh run must not touch that state.
+        if repo_root.join(".mediagit/CHERRY_PICK_STATE").exists() {
+            anyhow::bail!(
+                "A cherry-pick is in progress. Run cherry-pick --continue, --skip or --abort."
+            );
+        }
+
         // Start new cherry-pick operation
         self.start_cherrypick(&repo_root).await
     }
