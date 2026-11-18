@@ -300,6 +300,24 @@ fn working_oid(
     Some((oid, Some(sym)))
 }
 
+/// Staged paths whose working file no longer matches what was staged, plus
+/// staged deletions whose file is back.
+pub fn edited_since_staged(repo_root: &Path, index: &Index) -> Vec<PathBuf> {
+    let stat = mediagit_versioning::StatCache::load(repo_root);
+    let mut out: Vec<PathBuf> = index
+        .entries()
+        .filter(|e| working_oid(repo_root, &e.path, &stat).is_some_and(|(w, _)| w != e.oid))
+        .map(|e| e.path.clone())
+        .collect();
+    out.extend(
+        index
+            .deleted_paths()
+            .filter(|p| repo_root.join(p).exists())
+            .cloned(),
+    );
+    out
+}
+
 fn indent(paths: &[PathBuf]) -> String {
     paths
         .iter()

@@ -753,6 +753,15 @@ impl RebaseCmd {
             )
             .await?;
             edited.modified.retain(|p| !staged.contains(p));
+            // F1: a staged path is the user's again once its file differs
+            // from what was staged.
+            edited
+                .modified
+                .extend(crate::worktree_guard::edited_since_staged(
+                    repo_root, &index,
+                ));
+            edited.modified.sort();
+            edited.modified.dedup();
             if !edited.is_empty() {
                 return Err(edited.bail("rebase --continue"));
             }

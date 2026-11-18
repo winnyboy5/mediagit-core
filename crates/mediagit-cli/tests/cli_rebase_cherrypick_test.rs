@@ -848,3 +848,68 @@ fn test_cherrypick_continue_lists_only_unapplied_after_a_failure() {
     );
     assert!(state.contains(&x3), "X3 still to do: {state}");
 }
+
+/// F1: an edit made after `add` to a staged path is the user's. `--continue`
+/// must refuse naming it, not write the staged version over it.
+#[test]
+fn test_rebase_continue_refuses_edit_made_after_add() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    stopped_rebase(d, false);
+    fs::write(d.join("notes.txt"), "resolved\n").unwrap();
+    mediagit()
+        .args(["add", "notes.txt"])
+        .current_dir(d)
+        .assert()
+        .success();
+    fs::write(d.join("notes.txt"), "edited after add\n").unwrap();
+    let out = mediagit()
+        .args(["rebase", "--continue"])
+        .current_dir(d)
+        .output()
+        .unwrap();
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "continue must refuse: {all}");
+    assert!(all.contains("notes.txt"), "names the edited path: {all}");
+    assert_eq!(
+        fs::read_to_string(d.join("notes.txt")).unwrap(),
+        "edited after add\n"
+    );
+}
+
+/// F3: a fresh `cherry-pick` while one is in progress is refused, and the
+/// saved state is left as it was.
+#[test]
+fn test_cherrypick_fresh_run_refused_while_in_progress() {
+    let t = TempDir::new().unwrap();
+    let d = t.path();
+    init_repo(d);
+    add_and_commit(d, "n.txt", "base\n", "Base");
+    create_and_switch_branch(d, "side");
+    add_and_commit(d, "n.txt", "theirs\n", "X1 clash");
+    let x1 = tip(d, "side");
+    add_and_commit(d, "a.txt", "two\n", "X2 adds a");
+    let x2 = tip(d, "side");
+    switch_main(d);
+    add_and_commit(d, "n.txt", "ours\n", "Main edit");
+    mediagit()
+        .args(["cherry-pick", &x1])
+        .current_dir(d)
+        .assert()
+        .failure();
+    let state = fs::read_to_string(d.join(".mediagit/CHERRY_PICK_STATE")).unwrap();
+    mediagit()
+        .args(["cherry-pick", &x2])
+        .current_dir(d)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("A cherry-pick is in progress"));
+    assert_eq!(
+        fs::read_to_string(d.join(".mediagit/CHERRY_PICK_STATE")).unwrap(),
+        state
+    );
+}
