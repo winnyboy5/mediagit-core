@@ -443,7 +443,13 @@ impl Config {
         {
             use std::io::Write;
             // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- operator config path
-            let mut f = std::fs::File::create(&tmp_path)?;
+            // The file can hold `secret_access_key` and remote API keys, so it
+            // is owner-only on Unix for every caller. Windows is unchanged.
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+            let mut f = opts.open(&tmp_path)?;
             f.write_all(toml_str.as_bytes())?;
             f.sync_all()?;
         }
@@ -950,6 +956,22 @@ impl Default for FileSystemStorage {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// I3: every caller of `save` keeps the file owner-only, including a rewrite
+    /// of a file that was widened to 0644 earlier.
+    #[cfg(unix)]
+    #[test]
+    fn save_keeps_config_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(".mediagit/config.toml");
+        Config::default().save(dir.path()).unwrap();
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        Config::default().save(dir.path()).unwrap();
+        assert_eq!(mode(&path), 0o600);
+    }
 
     #[test]
     fn test_default_config() {
