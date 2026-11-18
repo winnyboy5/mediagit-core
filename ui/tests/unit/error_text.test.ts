@@ -116,9 +116,7 @@ describe('ErrorState actions follow the code and the raw text', () => {
     expect(v.text).not.toMatch(/stash/i)
   })
   it('staged_changes asks to save or unstage, with no Retry', () => {
-    const raw = 'These files have staged changes that are not committed:
-  wip.psd
-Please commit them.'
+    const raw = 'These files have staged changes that are not committed:\n  wip.psd\nPlease commit them.'
     const v = plainError('staged_changes', raw)
     expect(v.text).toMatch(/unstage/)
     expect(v.retry).toBe(false)

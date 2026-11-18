@@ -201,7 +201,7 @@ test('n. Merge: conflicting branch, keep mine, finish; log shows the merge and f
   const finish = page.getByRole('button', { name: 'Finish merge' })
   await expect(finish).toBeEnabled()
   await finish.click()
-  await expect(page.getByTestId('merge-result')).toContainText('Done')
+  await expect(page.getByTestId('merge-result')).toContainText('Merged')
   await shot('15-merge-done')
   expect(readFileSync(notes(), 'utf8')).toBe('my version\n')
   expect(cli(st.repo, 'log', '-n', '3')).toMatch(/merge/i)

@@ -48,7 +48,7 @@ test('BUG-033: Get latest with a clash opens the merge and finishes with two par
 
   await row.getByRole('button', { name: /^Keep / }).first().click()
   await page.getByRole('button', { name: 'Finish merge' }).click()
-  await expect(page.getByTestId('merge-result')).toContainText('Done')
+  await expect(page.getByTestId('merge-result')).toContainText('Merged')
   expect(existsSync(join(repo, '.mediagit', 'MERGE_HEAD'))).toBe(false)
   expect(mg(st, repo, ['log', '--oneline', '-n', '1'])).toContain('Merge')
 })
