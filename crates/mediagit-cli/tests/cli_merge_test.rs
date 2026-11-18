@@ -760,6 +760,28 @@ fn test_merge_no_commit_abort_restores() {
     assert_eq!(main_tip(dir), before);
     assert!(!dir.join("other.txt").exists());
     assert!(!dir.join(".mediagit/MERGE_HEAD").exists());
+    // The index is restored too: nothing from the merge stays staged.
+    let status = mediagit().arg("status").current_dir(dir).output().unwrap();
+    let status = String::from_utf8_lossy(&status.stdout).to_string();
+    assert!(!status.contains("other.txt"), "{status}");
+}
+
+// BUG-030: a staged squash is saved with `commit`; the next step says so.
+#[test]
+fn test_merge_squash_no_commit_points_to_commit() {
+    let temp_dir = TempDir::new().unwrap();
+    let dir = temp_dir.path();
+    diverged_clean(dir);
+
+    let out = mediagit()
+        .args(["merge", "--squash", "--no-commit", "other"])
+        .current_dir(dir)
+        .assert()
+        .success();
+    let out = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    assert!(out.contains("commit -m"), "{out}");
+    assert!(!out.contains("--continue"), "{out}");
+    assert!(dir.join("other.txt").exists());
 }
 
 // BUG-023: the merge version is named after the branches and has the real author.

@@ -185,3 +185,57 @@ async fn pull_conflict_refuses_untracked_collision() {
 "
     );
 }
+
+/// BUG-023: a clean pull merge is named after the branches and has the
+/// configured author, not a placeholder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pull_clean_merge_records_configured_author_and_short_name() {
+    let repos_root = TempDir::new().unwrap();
+    let base_url = start_test_server(repos_root.path().to_path_buf()).await;
+    fs::create_dir_all(repos_root.path().join("p23")).unwrap();
+    let url = format!("{base_url}/p23");
+
+    let ben = TempDir::new().unwrap();
+    let b = ben.path();
+    mediagit(b).args(["init", "-q"]).assert().success();
+    save(b, "base\n", "base");
+    mediagit(b)
+        .args(["remote", "add", "origin", &url])
+        .assert()
+        .success();
+    mediagit(b)
+        .args(["push", "-u", "origin"])
+        .assert()
+        .success();
+
+    let parent = TempDir::new().unwrap();
+    let a = parent.path().join("ana");
+    mediagit(parent.path())
+        .arg("clone")
+        .arg(&url)
+        .arg(&a)
+        .assert()
+        .success();
+
+    // Different files on each side, so the merge is clean.
+    fs::write(b.join("ben.txt"), "ben\n").unwrap();
+    mediagit(b).args(["add", "ben.txt"]).assert().success();
+    mediagit(b)
+        .args(["commit", "-m", "ben file"])
+        .assert()
+        .success();
+    mediagit(b).args(["push", "origin"]).assert().success();
+    fs::write(a.join("ana.txt"), "ana\n").unwrap();
+    mediagit(&a).args(["add", "ana.txt"]).assert().success();
+    mediagit(&a)
+        .args(["commit", "-m", "ana file"])
+        .assert()
+        .success();
+
+    mediagit(&a).args(["pull", "origin"]).assert().success();
+    let log = mediagit(&a).arg("log").output().unwrap();
+    let log = String::from_utf8_lossy(&log.stdout).to_string();
+    assert!(log.contains("Merge branch 'main' into main"), "{log}");
+    assert!(!log.contains("MediaGit User"), "{log}");
+    assert!(log.contains("Test User"), "{log}");
+}

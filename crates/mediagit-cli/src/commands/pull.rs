@@ -6,10 +6,9 @@ use super::rebase::RebaseCmd;
 use crate::output;
 use crate::progress::{OperationStats, ProgressTracker};
 use anyhow::{Context, Result};
-use chrono::Utc;
 use clap::Parser;
 use console::style;
-use mediagit_versioning::{CheckoutManager, Commit, MergeStrategy, RefDatabase, Signature};
+use mediagit_versioning::{CheckoutManager, Commit, MergeStrategy, RefDatabase};
 use serde::Serialize;
 use std::sync::Arc;
 use std::time::Instant;
@@ -645,6 +644,14 @@ impl PullCmd {
                         .merge(&head_oid, &remote_oid_parsed, MergeStrategy::Recursive)
                         .await?;
 
+                    let merge_message = format!(
+                        "Merge branch '{}' into {}",
+                        remote_ref
+                            .strip_prefix("refs/heads/")
+                            .unwrap_or(&remote_ref),
+                        super::merge::short_branch(&head.target)
+                    );
+
                     // Conflicts stop here exactly as `merge` does.
                     if !merge_result.conflicts.is_empty() {
                         return super::merge::stop_for_conflicts(
@@ -653,10 +660,7 @@ impl PullCmd {
                             &repo_root,
                             head_oid,
                             remote_oid_parsed,
-                            &format!(
-                                "Merge remote branch into {}",
-                                head.target.as_deref().unwrap_or("HEAD")
-                            ),
+                            &merge_message,
                             self.verbose(),
                         )
                         .await;
@@ -664,19 +668,14 @@ impl PullCmd {
 
                     // Create merge commit
                     if let Some(tree_oid) = merge_result.tree_oid {
-                        let author = Signature::new(
-                            "MediaGit User".to_string(),
-                            "user@mediagit.local".to_string(),
-                            Utc::now(),
-                        );
+                        let author = super::merge::merge_signature(&repo_root).await;
                         // Create merge commit with both parents (local HEAD and remote)
-                        let branch_name = head.target.as_deref().unwrap_or("HEAD");
                         let merge_commit = Commit::with_parents(
                             tree_oid,
                             vec![head_oid, remote_oid_parsed],
                             author.clone(),
                             author,
-                            format!("Merge remote branch into {}", branch_name),
+                            merge_message,
                         );
                         let commit_oid = merge_commit.write(&odb).await?;
 

@@ -134,7 +134,7 @@ pub struct MergeCmd {
 }
 
 /// `main` for `refs/heads/main`; `HEAD` when detached.
-fn short_branch(head_target: &Option<String>) -> String {
+pub(crate) fn short_branch(head_target: &Option<String>) -> String {
     head_target
         .as_deref()
         .map(|t| t.strip_prefix("refs/heads/").unwrap_or(t))
@@ -144,7 +144,7 @@ fn short_branch(head_target: &Option<String>) -> String {
 
 /// Who a merge commit is by: MEDIAGIT_AUTHOR_NAME / MEDIAGIT_AUTHOR_EMAIL,
 /// then config.toml `[author]`, then $USER.
-async fn merge_signature(repo_root: &std::path::Path) -> Signature {
+pub(crate) async fn merge_signature(repo_root: &std::path::Path) -> Signature {
     let config = mediagit_config::Config::load(repo_root)
         .await
         .unwrap_or_default();
@@ -509,12 +509,18 @@ impl MergeCmd {
             std::fs::write(storage_path.join("MERGE_MSG"), format!("{message}\n"))
                 .context("Failed to write MERGE_MSG")?;
             if self.squash {
-                // A squash result has one parent: `--continue` must not add theirs.
+                // A squash result has one parent, so there is no merge to
+                // continue: it is saved with a plain `commit`.
                 let _ = std::fs::remove_file(storage_path.join("MERGE_HEAD"));
             }
             if !self.quiet() {
+                let next = if self.squash {
+                    "Run 'commit -m <message>' to save it"
+                } else {
+                    "Run 'merge --continue' to save it"
+                };
                 println!(
-                    "{} Merge staged. Run 'merge --continue' to save it or 'merge --abort' to drop it.",
+                    "{} Merge staged. {next} or 'merge --abort' to drop it.",
                     style("✓").green()
                 );
             }

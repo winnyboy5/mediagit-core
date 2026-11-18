@@ -147,7 +147,8 @@ changes fix real bugs.
   drops it.
 - **Merge versions were named "into HEAD" or "Merge branch 'theirs'", with a
   placeholder author.** They now read "Merge branch 'x' into main" and carry your
-  author name and email, also after `merge --continue`.
+  author name and email, also after `merge --continue` and after a clean `pull`.
+  A staged `merge --squash --no-commit` says to save it with `commit`.
 - **Sparse checkout: `add --all` / `add -u` deleted the excluded files from the
   next version.** Files outside the sparse set are absent by design, but the add
   scan staged them as deleted, so the following commit dropped them from history.
