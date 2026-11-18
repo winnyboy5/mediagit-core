@@ -208,6 +208,22 @@ describe('changes options', () => {
     expect(c.preview).toContain('Stopped')
   })
 
+  it('BUG-038: a stop after some batches says how many files were already included', async () => {
+    await open()
+    const c = useChangesStore()
+    const ops = useOpsStore()
+    const paths = Array.from({ length: 250 }, (_, i) => `f${i}.psd`)
+    api.add.mockResolvedValueOnce({ added: 200, modified: 0, deleted: 0 })
+    api.add.mockImplementationOnce(() => new Promise((_res, rej) => {
+      api.cancelOp.mockImplementation(async () => rej({ code: 'cancelled', message: 'Cancelled' }))
+    }))
+    const staging = c.setIncluded(paths, true)
+    await vi.waitFor(() => expect(api.add).toHaveBeenCalledTimes(2))
+    await ops.cancel(ops.running[0]!.id)
+    await staging
+    expect(c.preview).toBe('Stopped. 200 of 250 files were included. You can include the rest later.')
+  })
+
   it('unstage sends paths; Unstage all sends a dot', async () => {
     await open()
     const c = useChangesStore()

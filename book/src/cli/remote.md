@@ -45,8 +45,8 @@ mediagit remote remove <NAME>
 
 Alias: `rm`
 
-An access token saved for the remote (in the system keychain) is deleted too, unless
-another remote of this repository uses the same server.
+The saved sign-in for that server (in the system keychain) is kept, because other
+projects and `auth login` share it. Use `auth logout` to remove it.
 
 ### `list`
 

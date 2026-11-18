@@ -223,6 +223,40 @@ fn test_remote_remove() {
         .stdout(predicate::str::contains("origin").not());
 }
 
+/// BUG-034: the saved sign-in is keyed by server and shared with other
+/// projects and `auth login`, so `remote remove` must leave it. Opt-in: it
+/// writes a real OS keychain entry (and deletes it again).
+#[test]
+fn test_remote_remove_keeps_the_saved_sign_in() {
+    if std::env::var_os("MEDIAGIT_TEST_REAL_KEYRING").is_none() {
+        eprintln!("skipping: set MEDIAGIT_TEST_REAL_KEYRING=1 to run against the real OS keychain");
+        return;
+    }
+    let account = "http://127.0.0.1:9981";
+    let entry = keyring::Entry::new("mediagit", account).unwrap();
+    let _ = entry.delete_credential();
+    entry.set_password("bearer:bug034-test-token").unwrap();
+
+    let temp_dir = TempDir::new().unwrap();
+    init_repo(temp_dir.path());
+    mediagit()
+        .args(["remote", "add", "origin", "http://127.0.0.1:9981/hero"])
+        .env_remove("MEDIAGIT_NO_KEYRING")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+    mediagit()
+        .args(["remote", "remove", "origin"])
+        .env_remove("MEDIAGIT_NO_KEYRING")
+        .current_dir(temp_dir.path())
+        .assert()
+        .success();
+
+    let kept = entry.get_password();
+    let _ = entry.delete_credential();
+    assert_eq!(kept.as_deref().ok(), Some("bearer:bug034-test-token"));
+}
+
 // ============================================================================
 // Remote Rename Tests
 // ============================================================================

@@ -186,6 +186,7 @@ export const useChangesStore = defineStore('changes', () => {
     error.value = null
     preview.value = null
     let dry = 0
+    let done = 0
     let id = ''
     try {
       await ops.track(
@@ -196,6 +197,7 @@ export const useChangesStore = defineStore('changes', () => {
           for (const batch of batchPaths(paths)) {
             const r = await api.add(root, batch, { ...addOpts }, (p) => report(join.map(p)), opId)
             join.next()
+            done += batch.length
             if (addOpts.dryRun) dry += r.added + r.modified + r.deleted
           }
         },
@@ -205,8 +207,9 @@ export const useChangesStore = defineStore('changes', () => {
       else clearSelection()
     } catch (e) {
       const err = toApiError(e)
-      // Each step writes the index once, at its end: a stopped step includes nothing.
-      if (err.code === 'cancelled') preview.value = 'Stopped. You can include the rest again later.'
+      // Each step writes the index once, at its end: a stopped step includes nothing,
+      // but steps that already finished stay included.
+      if (err.code === 'cancelled') preview.value = `Stopped. ${done} of ${plural(paths.length, 'file')} ${done === 1 ? 'was' : 'were'} included. You can include the rest later.`
       else error.value = err
     } finally {
       busy.value = null

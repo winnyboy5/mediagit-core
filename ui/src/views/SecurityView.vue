@@ -216,7 +216,8 @@ const sourceText = (s: string | null) => s ?? 'No key available on this machine'
             </div>
           </template>
           <template v-else>
-            <template v-if="repo.status?.branch.has_commits">
+            <!-- key init refuses once the repository holds objects; staging stores them. -->
+            <template v-if="repo.status?.branch.has_commits || repo.status?.staged.length">
               <p class="muted">Files in this repository are stored as they are.</p>
               <p class="muted">Encryption must be turned on before the first version is saved. Make a new project to use it.</p>
             </template>

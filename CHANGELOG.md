@@ -202,11 +202,10 @@ changes fix real bugs.
 - **`download` showed no progress.** It now streams a bytes bar sized from the
   server's Content-Length (`--machine` emits it on stderr), so the app shows real
   bytes, speed and time left.
-- **`remote remove` left the remote's saved access token in the system keychain.**
-  It now deletes the entry unless another remote of the same repository uses the
-  same server. (The keychain entry is keyed by server, so other projects that rely
-  on the same sign-in are asked to sign in again.) The Add remote hint now says the
-  token is kept in the system keychain.
+- **`remote remove` keeps the saved sign-in for that server.** It is kept in the
+  system keychain by server, so other projects and `auth login` share it. Use
+  `auth logout` (or the app's sign-out) to remove it. The Add remote hint and the
+  remove dialog now say so.
 - **`stash -u` is accepted but does nothing: new files are always stashed.** The
   help text and the book now say so, and the app no longer offers a checkbox for it.
 - **Desktop app.** Create and Clone from the repository switcher open in place, and

@@ -17,10 +17,10 @@ beforeEach(() => {
   api.keyStatus.mockResolvedValue({ action: 'status', enabled: false, source: null, wrapped_key: null, recovery_slot: null, recovery_code: null })
 })
 
-async function view(hasCommits: boolean) {
+async function view(hasCommits: boolean, staged: string[] = []) {
   const repo = useRepoStore()
   repo.path = '/repos/hero'
-  repo.status = { root: '/repos/hero', branch: { name: 'main', detached: false, detached_oid: null, has_commits: hasCommits, upstream: null }, staged: [], modified: [], deleted: [], untracked: [] } as never
+  repo.status = { root: '/repos/hero', branch: { name: 'main', detached: false, detached_oid: null, has_commits: hasCommits, upstream: null }, staged: staged.map((path) => ({ path })), modified: [], deleted: [], untracked: [] } as never
   const w = mount(SecurityView)
   await flushPromises()
   return w
@@ -36,5 +36,11 @@ describe('BUG-037: encryption on a repository that already has versions', () => 
     const w = await view(true)
     expect(w.findAll('button').some((b) => b.text().includes('Turn on encryption'))).toBe(false)
     expect(w.text()).toContain('Encryption must be turned on before the first version is saved')
+  })
+
+  it('hides the button when files are staged but no version exists (staging stores them)', async () => {
+    const w = await view(false, ['a.psd'])
+    expect(w.findAll('button').some((b) => b.text().includes('Turn on encryption'))).toBe(false)
+    expect(w.text()).toContain('Make a new project')
   })
 })

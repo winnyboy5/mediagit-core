@@ -526,10 +526,9 @@ impl RemoteCmd {
             anyhow::bail!("No such remote: '{}'", name);
         }
 
-        // The token lives in the OS keychain, keyed by server: forget it unless
-        // another remote here still uses that server.
-        crate::repo::forget_credentials_if_unused(&config, name);
-
+        // The saved sign-in lives in the OS keychain keyed by server and is
+        // shared with other projects and `auth login`: keep it here.
+        // `auth logout` removes it.
         // Remove remote
         config.remove_remote(name);
 

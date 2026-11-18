@@ -311,7 +311,7 @@ function go(kind: TransferKind) {
             v-model="token"
             type="password"
             label="Access token"
-            hint="Optional. Saved in your system keychain, not in this project’s files. Other projects on the same server use it too." flag="--token-stdin"
+            hint="Optional. Saved in your system keychain, not in this project’s files. Other projects on the same server use it too, and removing this remote keeps it." flag="--token-stdin"
             mono
           />
         </MoreOptions>
@@ -373,7 +373,7 @@ function go(kind: TransferKind) {
     <AlertDialog
       v-model:open="removeOpen"
       :title="`Remove ${removing ?? ''}?`"
-      description="This project forgets the address, and the saved access token unless another remote here uses the same server. Nothing is deleted on the server and your versions stay here."
+      description="This project forgets the address. The saved sign-in for that server is kept; use Sign out in Security to remove it. Nothing is deleted on the server and your versions stay here."
       confirm-label="Remove remote"
       destructive
       @confirm="removing && sync.removeRemote(removing)"
