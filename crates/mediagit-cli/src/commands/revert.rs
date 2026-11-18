@@ -381,6 +381,14 @@ impl RevertCmd {
             )
             .await?;
 
+        let message = self.message.clone().unwrap_or_else(|| {
+            format!(
+                "Revert \"{}\"\n\nThis reverts commit {}.",
+                commit.summary(),
+                commit_oid.to_hex()
+            )
+        });
+
         if merge_result.has_conflicts() {
             // WT-5: materialise the conflict instead of staging HEAD unchanged.
             //
@@ -401,6 +409,7 @@ impl RevertCmd {
                 &mut index,
                 *parent_oid,
                 real_head,
+                &message,
             )
             .await
             .context("Failed to write revert conflict to the working directory")?;
@@ -450,14 +459,6 @@ impl RevertCmd {
                 )
                 .into());
             }
-
-            let message = self.message.clone().unwrap_or_else(|| {
-                format!(
-                    "Revert \"{}\"\n\nThis reverts commit {}.",
-                    commit.summary(),
-                    commit_oid.to_hex()
-                )
-            });
 
             let revert_commit = Commit::with_parents(
                 new_tree_oid,

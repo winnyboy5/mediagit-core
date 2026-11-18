@@ -2038,3 +2038,33 @@ fn dl7_rebase_skip_removes_the_skipped_commits_markers() {
     let shared = fs::read_to_string(d.join("shared.txt")).unwrap();
     assert_eq!(shared, "main-change\n", "skipped commit's markers remain");
 }
+
+// ============================================================================
+// A stopped operation's MERGE_MSG names that operation, not "Merge branch".
+// ============================================================================
+
+fn merge_msg(dir: &Path) -> String {
+    fs::read_to_string(dir.join(".mediagit/MERGE_MSG")).unwrap()
+}
+
+#[test]
+fn stopped_revert_writes_its_own_merge_msg() {
+    let t = TempDir::new().unwrap();
+    revert_conflict(t.path());
+    let msg = merge_msg(t.path());
+    assert!(msg.starts_with("Revert \"second\""), "{msg}");
+}
+
+#[test]
+fn stopped_cherry_pick_writes_the_picked_message() {
+    let t = TempDir::new().unwrap();
+    setup_cherry_pick_conflict(t.path());
+    assert_eq!(merge_msg(t.path()).trim(), "feature edit");
+}
+
+#[test]
+fn stopped_rebase_writes_the_replayed_message() {
+    let t = TempDir::new().unwrap();
+    setup_rebase_conflict(t.path());
+    assert_eq!(merge_msg(t.path()).trim(), "feature edit");
+}

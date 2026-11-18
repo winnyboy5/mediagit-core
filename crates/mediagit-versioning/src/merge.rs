@@ -525,7 +525,9 @@ impl MergeEngine {
 /// For conflicting paths: writes a conflict-marker file (or one side, for
 /// binaries), stages it and flags the path unresolved.
 ///
-/// Also writes `.mediagit/MERGE_HEAD`, `MERGE_MSG`, and `ORIG_HEAD`.
+/// Also writes `.mediagit/MERGE_HEAD`, `MERGE_MSG` (`message`, the text the
+/// stopped operation will commit with) and `ORIG_HEAD`.
+#[allow(clippy::too_many_arguments)]
 pub async fn apply_merge_to_workdir(
     result: &MergeResult,
     ours_tree: &Tree,
@@ -534,6 +536,7 @@ pub async fn apply_merge_to_workdir(
     index: &mut Index,
     theirs_tip: Oid,
     orig_head: Oid,
+    message: &str,
 ) -> Result<()> {
     let mediagit_dir = workdir.join(".mediagit");
 
@@ -689,7 +692,7 @@ pub async fn apply_merge_to_workdir(
     // --- Write MERGE_HEAD, MERGE_MSG, ORIG_HEAD ---
     std::fs::write(mediagit_dir.join("MERGE_HEAD"), theirs_tip.to_hex())
         .context("Failed to write MERGE_HEAD")?;
-    std::fs::write(mediagit_dir.join("MERGE_MSG"), "Merge branch 'theirs'\n")
+    std::fs::write(mediagit_dir.join("MERGE_MSG"), format!("{message}\n"))
         .context("Failed to write MERGE_MSG")?;
     std::fs::write(mediagit_dir.join("ORIG_HEAD"), orig_head.to_hex())
         .context("Failed to write ORIG_HEAD")?;
@@ -1258,6 +1261,7 @@ mod tests {
             &mut index,
             theirs_commit,
             ours_commit,
+            "Merge branch 'theirs'",
         )
         .await
         .unwrap();

@@ -501,13 +501,11 @@ impl MergeCmd {
             let ours_tree = Tree::read(&odb, &ours_commit.tree).await?;
             let mut index = Index::load(&repo_root)?;
             apply_merge_to_workdir(
-                &applied, &ours_tree, &odb, &repo_root, &mut index, their_oid, our_oid,
+                &applied, &ours_tree, &odb, &repo_root, &mut index, their_oid, our_oid, &message,
             )
             .await
             .context("Failed to apply merge to working directory")?;
             index.save(&repo_root)?;
-            std::fs::write(storage_path.join("MERGE_MSG"), format!("{message}\n"))
-                .context("Failed to write MERGE_MSG")?;
             if self.squash {
                 // A squash result has one parent, so there is no merge to
                 // continue: it is saved with a plain `commit`.
@@ -772,18 +770,12 @@ pub(crate) async fn stop_for_conflicts(
     let mut index = Index::load(repo_root)?;
 
     apply_merge_to_workdir(
-        result, &ours_tree, odb, repo_root, &mut index, their_oid, our_oid,
+        result, &ours_tree, odb, repo_root, &mut index, their_oid, our_oid, message,
     )
     .await
     .context("Failed to apply merge to working directory")?;
 
     index.save(repo_root)?;
-    // BUG-023: the shared writer names every merge "theirs"; name this one.
-    std::fs::write(
-        repo_root.join(".mediagit/MERGE_MSG"),
-        format!("{message}\n"),
-    )
-    .context("Failed to write MERGE_MSG")?;
 
     if output::machine_mode() {
         let mut report = merge_report("merge", "conflict", None);

@@ -410,6 +410,7 @@ impl CherryPickCmd {
                 &mut index,
                 *commit_oid,
                 head_oid,
+                commit.message.trim_end(),
             )
             .await?;
 

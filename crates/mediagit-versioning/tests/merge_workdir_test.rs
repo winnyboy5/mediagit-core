@@ -135,6 +135,7 @@ async fn merge_conflict_writes_markers_and_stages_clean_paths() {
         &mut index,
         theirs_tip,
         orig_head,
+        "Merge branch 'theirs'",
     )
     .await
     .unwrap();
@@ -286,6 +287,7 @@ async fn merge_of_chunked_blobs_does_not_use_whole_object_read() {
         &mut index,
         Oid::hash(b"theirs-tip"),
         Oid::hash(b"orig-head"),
+        "Merge branch 'theirs'",
     )
     .await
     .unwrap();

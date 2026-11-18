@@ -497,6 +497,7 @@ impl RebaseCmd {
                     &mut index,
                     *original_oid,
                     state.original_head,
+                    original_commit.message.trim_end(),
                 )
                 .await
                 .context("Failed to write rebase conflict to the working directory")?;
