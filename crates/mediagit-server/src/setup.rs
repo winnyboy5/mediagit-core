@@ -275,15 +275,40 @@ fn generate_jwt_secret() -> String {
 
 fn write_config_file(path: &Path, config: &ServerConfig) -> Result<()> {
     let toml_str = toml::to_string_pretty(config).context("serializing config")?;
-    std::fs::write(path, toml_str).with_context(|| format!("writing {:?}", path))?;
-    // The file can hold storage secrets: owner-only where the OS has modes.
+    // The file can hold storage secrets. Unix: write a sibling temp file that
+    // is created 0600, then rename over the target, so the secret is never
+    // readable at the umask mode and an old looser mode is replaced.
+    // Windows has no modes: plain write, unchanged.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("restricting {:?}", path))?;
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(format!(".tmp-{}", uuid::Uuid::new_v4()));
+        let tmp = std::path::PathBuf::from(tmp);
+        let written = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+            .and_then(|mut f| f.write_all(toml_str.as_bytes()))
+            .with_context(|| format!("writing {:?}", tmp))
+            .and_then(|_| {
+                std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+                    .with_context(|| format!("restricting {:?}", tmp))
+            })
+            .and_then(|_| {
+                std::fs::rename(&tmp, path).with_context(|| format!("writing {:?}", path))
+            });
+        if written.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        written
     }
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, toml_str).with_context(|| format!("writing {:?}", path))
+    }
 }
 
 // ---------------------------------------------------------------------
