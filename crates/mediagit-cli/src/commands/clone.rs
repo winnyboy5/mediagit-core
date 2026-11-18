@@ -136,9 +136,7 @@ impl CloneCmd {
                 target_dir.display()
             );
         }
-        if target_dir.exists() {
-            anyhow::bail!("Destination path '{}' already exists", target_dir.display());
-        }
+        let keep_dir = is_empty_existing_dir(&target_dir)?;
         std::fs::create_dir_all(&target_dir).context("Failed to create target directory")?;
         // Canonicalize so the paths derived from it below are absolute.
         let target_dir =
@@ -232,7 +230,7 @@ impl CloneCmd {
         .await;
 
         if clone_result.is_err() {
-            let _ = std::fs::remove_dir_all(&target_dir);
+            remove_clone_dir(&target_dir, keep_dir);
             if !output::machine_mode() {
                 println!("cleaned up partial clone at {}", target_dir.display());
             }
@@ -258,7 +256,7 @@ impl CloneCmd {
         // C5: an interrupted clone leaves a directory behind. Adopt it and
         // resume — but ONLY if this clone is what created it, which the
         // in-progress marker is the proof of. Anything else still bails.
-        let resuming = match read_clone_marker(&target_dir) {
+        let (resuming, keep_dir) = match read_clone_marker(&target_dir) {
             Some(marker) => {
                 if marker.url != self.url || marker.branch != branch {
                     anyhow::bail!(
@@ -278,14 +276,9 @@ impl CloneCmd {
                         target_dir.display()
                     );
                 }
-                true
+                (true, true)
             }
-            None => {
-                if target_dir.exists() {
-                    anyhow::bail!("Destination path '{}' already exists", target_dir.display());
-                }
-                false
-            }
+            None => (false, is_empty_existing_dir(&target_dir)?),
         };
 
         // Create progress tracker and stats (matching pull.rs pattern)
@@ -824,7 +817,7 @@ url = "{}"
                 // Setup failure — bad URL, auth, no such repo. Nothing was
                 // downloaded, so leaving a stub the next attempt refuses would
                 // be strictly worse than cleaning up. Unchanged behaviour.
-                let _ = std::fs::remove_dir_all(&target_dir);
+                remove_clone_dir(&target_dir, keep_dir);
                 if !output::machine_mode() {
                     println!("cleaned up partial clone at {}", target_dir.display());
                 }
@@ -887,6 +880,39 @@ fn copy_dir_skip(src: &Path, dst: &Path, skip_relative: &Path) -> std::io::Resul
         }
     }
     Ok(())
+}
+
+/// `Ok(true)` for an existing empty folder (clone may fill it, and must leave
+/// the folder itself in place on failure), `Ok(false)` when the path is free,
+/// an error for anything else (BUG-010).
+fn is_empty_existing_dir(target: &Path) -> Result<bool> {
+    if !target.exists() {
+        return Ok(false);
+    }
+    if target.is_dir() && std::fs::read_dir(target)?.next().is_none() {
+        return Ok(true);
+    }
+    anyhow::bail!(
+        "Destination path '{}' already exists and is not an empty folder",
+        target.display()
+    )
+}
+
+/// Remove what a failed clone created. A folder the user made stays; only its
+/// contents go.
+fn remove_clone_dir(target: &Path, keep_dir: bool) {
+    if !keep_dir {
+        let _ = std::fs::remove_dir_all(target);
+        return;
+    }
+    for entry in std::fs::read_dir(target).into_iter().flatten().flatten() {
+        let path = entry.path();
+        let _ = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+    }
 }
 
 /// What an interrupted clone left behind, read back from its marker file.

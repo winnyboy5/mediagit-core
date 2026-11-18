@@ -78,7 +78,7 @@ mediagit status           # check working tree
 
 - **0**: Success
 - **1**: Network error or repository not found
-- **2**: Destination directory already exists
+- **2**: Destination folder exists and is not empty (an empty folder is fine)
 
 
 ## Common options
