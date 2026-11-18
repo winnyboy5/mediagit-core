@@ -31,6 +31,16 @@ const restoreOpen = isOpen('restore')
 
 const s = computed(() => repo.status?.summary)
 const unsaved = computed(() => (s.value ? s.value.staged + s.value.modified + s.value.deleted : 0))
+// A new file that was included has no earlier copy: going back deletes it. Say which ones.
+const SHOWN = 8
+const newFiles = computed(() => repo.status?.staged.filter((f) => f.kind === 'added').map((f) => f.path) ?? [])
+const changedFiles = computed(() => {
+  const st = repo.status
+  if (!st) return []
+  const gone = new Set(newFiles.value)
+  return [...new Set([...st.staged.map((f) => f.path), ...st.modified, ...st.deleted])].filter((f) => !gone.has(f))
+})
+const names = (l: string[]) => l.slice(0, SHOWN).join(', ') + (l.length > SHOWN ? ` and ${l.length - SHOWN} more` : '')
 const understood = ref<boolean | 'indeterminate'>(false)
 watch(hardOpen, (o) => o && (understood.value = false))
 
@@ -124,6 +134,10 @@ const bar = computed(() => (undo.running ? primaryBar(undo.running) : undefined)
         <li>Your files are replaced with how they were at {{ rev }}.</li>
         <li v-if="unsaved"><strong>{{ unsaved }} {{ unsaved === 1 ? 'file with unsaved changes' : 'files with unsaved changes' }} will be lost.</strong></li>
         <li v-else>You have no unsaved changes to lose.</li>
+        <li v-if="newFiles.length" data-testid="discard-new">
+          <strong>{{ newFiles.length }} new {{ newFiles.length === 1 ? 'file' : 'files' }} will be deleted:</strong> {{ names(newFiles) }}. They were never saved, so they cannot be brought back.
+        </li>
+        <li v-if="changedFiles.length" data-testid="discard-changed">These go back to how they were: {{ names(changedFiles) }}.</li>
         <li v-if="p?.rev !== 'HEAD'">Versions after it leave this branch. They stay in the project until it is cleaned up.</li>
       </ul>
       <Checkbox v-model="understood" label="I understand my unsaved work will be lost" />
