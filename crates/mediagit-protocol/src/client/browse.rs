@@ -58,17 +58,12 @@ impl ProtocolClient {
                 anyhow::bail!("Path '{}' not found at ref '{}'", dir_path, ref_name);
             }
             if !status.is_success() {
-                let hint = match status.as_u16() {
-                    401 => "\n  Not authenticated. Run `mediagit auth login <server>`.",
-                    403 => "\n  Authenticated, but this account cannot read this repository.",
-                    _ => "",
-                };
-                anyhow::bail!(
-                    "GET tree '{}' failed with status: {}{}",
-                    dir_path,
-                    status,
-                    hint
-                );
+                return Err(crate::http_error::fail(
+                    "GET",
+                    &format!("tree '{}'", dir_path),
+                    response,
+                )
+                .await);
             }
             response
                 .json::<TreeListing>()
@@ -153,11 +148,12 @@ impl ProtocolClient {
                 anyhow::bail!("File '{}' not found at ref '{}'", file_path, ref_name);
             }
             if !response.status().is_success() {
-                anyhow::bail!(
-                    "GET file '{}' failed with status: {}",
-                    file_path,
-                    response.status()
-                );
+                return Err(crate::http_error::fail(
+                    "GET",
+                    &format!("file '{}'", file_path),
+                    response,
+                )
+                .await);
             }
 
             let expected = response.content_length();

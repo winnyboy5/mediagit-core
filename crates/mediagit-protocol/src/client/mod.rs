@@ -967,7 +967,7 @@ impl ProtocolClient {
                 .context("Failed to send GET /info/refs")?;
 
         if !response.status().is_success() {
-            anyhow::bail!("GET /info/refs failed with status: {}", response.status());
+            return Err(crate::http_error::fail("GET", "/info/refs", response).await);
         }
 
         response
@@ -996,7 +996,7 @@ impl ProtocolClient {
             });
         }
         if !response.status().is_success() {
-            anyhow::bail!("GET /info/refs failed with status: {}", response.status());
+            return Err(crate::http_error::fail("GET", "/info/refs", response).await);
         }
 
         response
@@ -1015,10 +1015,7 @@ impl ProtocolClient {
             .context("Failed to update refs")?;
 
         if !response.status().is_success() {
-            anyhow::bail!(
-                "POST /refs/update failed with status: {}",
-                response.status()
-            );
+            return Err(crate::http_error::fail("POST", "/refs/update", response).await);
         }
 
         response

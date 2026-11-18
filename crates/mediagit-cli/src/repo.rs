@@ -565,21 +565,13 @@ pub fn forget_credentials(config: &mediagit_config::Config, remote_name: &str) -
     origin_removed || legacy_removed
 }
 
-/// True if `err`'s full display chain indicates the server responded 401
-/// Unauthorized. `mediagit_protocol`'s control-plane client methods
-/// (`get_refs`, `update_refs`, `create_lock`, ...) return bare
-/// `anyhow::Result` and stringify the HTTP status into the bail message
-/// (e.g. `"GET /info/refs failed with status: 401 Unauthorized"`) rather
-/// than preserving it as typed data, so this is a deliberate substring
-/// check on the rendered error chain rather than a typed status code.
-///
-/// ponytail: string-matching a status code is a real ceiling — it breaks if
-/// a future protocol-crate error message stops using the literal
-/// "status: 401" wording. Upgrade path: give `mediagit_protocol` a typed
-/// error (e.g. a `status: u16` field) and match on that instead, once more
-/// than one caller needs it.
+/// True if the server answered 401 Unauthorized (a typed `HttpError` anywhere
+/// in the chain).
 fn is_unauthorized(err: &anyhow::Error) -> bool {
-    format!("{err:#}").contains("status: 401")
+    err.chain().any(|c| {
+        c.downcast_ref::<mediagit_protocol::http_error::HttpError>()
+            .is_some_and(|h| h.status == 401)
+    })
 }
 
 /// True if a 401 observed on a call made with `source` credentials should
@@ -1235,9 +1227,16 @@ mod tests {
 
     #[test]
     fn should_invalidate_keychain_only_for_keychain_source_and_401() {
-        let err_401 = anyhow::anyhow!("GET /info/refs failed with status: 401 Unauthorized");
-        let err_500 =
-            anyhow::anyhow!("GET /info/refs failed with status: 500 Internal Server Error");
+        let err_401: anyhow::Error =
+            mediagit_protocol::http_error::http_error("GET", "/info/refs", 401, "").into();
+        let err_500: anyhow::Error =
+            mediagit_protocol::http_error::http_error("GET", "/info/refs", 500, "").into();
+        // Text alone is not a 401: only the typed error counts.
+        let err_text = anyhow::anyhow!("GET /info/refs failed with status: 401 Unauthorized");
+        assert!(!should_invalidate_keychain(
+            CredentialSource::Keychain,
+            &err_text
+        ));
 
         assert!(should_invalidate_keychain(
             CredentialSource::Keychain,

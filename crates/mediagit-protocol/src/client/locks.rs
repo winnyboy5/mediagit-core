@@ -69,7 +69,7 @@ impl ProtocolClient {
             );
         }
         if !resp.status().is_success() {
-            anyhow::bail!("POST /locks failed with status: {}", resp.status());
+            return Err(crate::http_error::fail("POST", "/locks", resp).await);
         }
         resp.json::<LockInfo>()
             .await
@@ -91,7 +91,7 @@ impl ProtocolClient {
             .await
             .context("Failed to GET /locks")?;
         if !resp.status().is_success() {
-            anyhow::bail!("GET /locks failed with status: {}", resp.status());
+            return Err(crate::http_error::fail("GET", "/locks", resp).await);
         }
         Ok(resp
             .json::<Resp>()
@@ -120,10 +120,8 @@ impl ProtocolClient {
             .await
             .context("Failed to DELETE /locks/:lock_id")?;
         if !resp.status().is_success() {
-            anyhow::bail!(
-                "DELETE /locks/{} failed with status: {}",
-                lock_id,
-                resp.status()
+            return Err(
+                crate::http_error::fail("DELETE", &format!("/locks/{}", lock_id), resp).await,
             );
         }
         Ok(())

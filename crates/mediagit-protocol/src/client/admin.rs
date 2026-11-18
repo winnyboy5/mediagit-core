@@ -58,7 +58,7 @@ impl ProtocolClient {
             .await
             .context("Failed to GET /admin/repos")?;
         if !resp.status().is_success() {
-            anyhow::bail!("GET /admin/repos failed with status: {}", resp.status());
+            return Err(crate::http_error::fail("GET", "/admin/repos", resp).await);
         }
         resp.json()
             .await
@@ -66,7 +66,7 @@ impl ProtocolClient {
     }
 
     /// POST /admin/repos — create an empty hosted repository (admin only).
-    /// A 409 means the name is already taken.
+    /// A 409 means the name is already taken (the server says so in its reason).
     pub async fn create_repo(&self, name: &str) -> Result<RepoSummary> {
         let url = format!("{}/admin/repos", self.base_url);
         let resp = self
@@ -76,11 +76,8 @@ impl ProtocolClient {
             .send()
             .await
             .context("Failed to POST /admin/repos")?;
-        if resp.status().as_u16() == 409 {
-            anyhow::bail!("repository '{}' already exists", name);
-        }
         if !resp.status().is_success() {
-            anyhow::bail!("POST /admin/repos failed with status: {}", resp.status());
+            return Err(crate::http_error::fail("POST", "/admin/repos", resp).await);
         }
         resp.json()
             .await
@@ -100,17 +97,9 @@ impl ProtocolClient {
             .send()
             .await
             .context("Failed to DELETE /admin/repos/:name")?;
-        if resp.status().as_u16() == 409 {
-            anyhow::bail!(
-                "repository '{}' is not empty or has active transfers (use force to override a non-empty repo)",
-                name
-            );
-        }
         if !resp.status().is_success() {
-            anyhow::bail!(
-                "DELETE /admin/repos/{} failed with status: {}",
-                name,
-                resp.status()
+            return Err(
+                crate::http_error::fail("DELETE", &format!("/admin/repos/{}", name), resp).await,
             );
         }
         resp.json()
@@ -128,7 +117,12 @@ impl ProtocolClient {
             .await
             .context("Failed to GET /auth/users/:id/grants")?;
         if !resp.status().is_success() {
-            anyhow::bail!("GET {} failed with status: {}", url, resp.status());
+            return Err(crate::http_error::fail(
+                "GET",
+                &format!("/auth/users/{}/grants", user_id),
+                resp,
+            )
+            .await);
         }
         resp.json().await.context("Failed to parse user grants")
     }
@@ -143,7 +137,12 @@ impl ProtocolClient {
             .await
             .context("Failed to GET /admin/repos/:name/grants")?;
         if !resp.status().is_success() {
-            anyhow::bail!("GET {} failed with status: {}", url, resp.status());
+            return Err(crate::http_error::fail(
+                "GET",
+                &format!("/admin/repos/{}/grants", name),
+                resp,
+            )
+            .await);
         }
         resp.json().await.context("Failed to parse repo grants")
     }

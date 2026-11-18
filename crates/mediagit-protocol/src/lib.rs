@@ -32,6 +32,7 @@ pub fn ensure_crypto_provider() {
 pub mod bench;
 pub mod client;
 pub mod error_class;
+pub mod http_error;
 pub mod journal;
 pub mod pack_builder;
 pub mod streaming;

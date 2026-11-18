@@ -91,14 +91,15 @@ fn chunk_get_is_transient(status: reqwest::StatusCode) -> bool {
 /// unreachable in exactly the case it was written for — campaign
 /// 20260804-sigfix hit it and reported the generic text.
 fn chunk_get_error(chunk_id: &Oid, status: reqwest::StatusCode) -> anyhow::Error {
+    let mut e =
+        crate::http_error::http_error("GET", &format!("/chunks/{chunk_id}"), status.as_u16(), "");
     if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
-        anyhow::anyhow!(
-            "GET /chunks/{} failed: server storage backend unreachable (503) — verify the storage service (MinIO/S3/Azure) is running and accessible to the server",
-            chunk_id
-        )
-    } else {
-        anyhow::anyhow!("GET /chunks/{} failed with status: {}", chunk_id, status)
+        e.reason = Some(
+            "server storage backend unreachable; check that the storage service (MinIO/S3/Azure) is running and the server can reach it"
+                .into(),
+        );
     }
+    e.into()
 }
 
 /// Bounded retry for the proxy chunk-GET fallback.
@@ -430,10 +431,7 @@ impl ProtocolClient {
         .context("Failed to send want request")?;
 
         if !response.status().is_success() {
-            anyhow::bail!(
-                "POST /objects/want failed with status: {}",
-                response.status()
-            );
+            return Err(crate::http_error::fail("POST", "/objects/want", response).await);
         }
 
         // Parse the response to get the request_id (required for GET /objects/pack)
@@ -468,17 +466,9 @@ impl ProtocolClient {
         .context("Failed to download pack file")?;
 
         if !response.status().is_success() {
-            // Include the server's message. An incomplete-closure refusal is
-            // operator-actionable ("run fsck on the server"), and a bare
-            // status code strands the user with "500 Internal Server Error"
-            // for a condition the server can name precisely.
-            let status = response.status();
-            let detail = response.text().await.unwrap_or_default();
-            let detail = detail.trim();
-            if detail.is_empty() {
-                anyhow::bail!("GET /objects/pack failed with status: {}", status);
-            }
-            anyhow::bail!("GET /objects/pack failed ({}): {}", status, detail);
+            // The body carries the server's reason (an incomplete-closure
+            // refusal is operator-actionable); `fail` keeps it.
+            return Err(crate::http_error::fail("GET", "/objects/pack", response).await);
         }
 
         // Parse X-Chunked-Objects header for large files that need separate transfer
@@ -553,10 +543,7 @@ impl ProtocolClient {
         .context("Failed to send want request")?;
 
         if !response.status().is_success() {
-            anyhow::bail!(
-                "POST /objects/want failed with status: {}",
-                response.status()
-            );
+            return Err(crate::http_error::fail("POST", "/objects/want", response).await);
         }
 
         let want_response: WantResponse = response
@@ -590,17 +577,9 @@ impl ProtocolClient {
         .context("Failed to download pack file")?;
 
         if !response.status().is_success() {
-            // Include the server's message. An incomplete-closure refusal is
-            // operator-actionable ("run fsck on the server"), and a bare
-            // status code strands the user with "500 Internal Server Error"
-            // for a condition the server can name precisely.
-            let status = response.status();
-            let detail = response.text().await.unwrap_or_default();
-            let detail = detail.trim();
-            if detail.is_empty() {
-                anyhow::bail!("GET /objects/pack failed with status: {}", status);
-            }
-            anyhow::bail!("GET /objects/pack failed ({}): {}", status, detail);
+            // The body carries the server's reason (an incomplete-closure
+            // refusal is operator-actionable); `fail` keeps it.
+            return Err(crate::http_error::fail("GET", "/objects/pack", response).await);
         }
 
         // Parse X-Chunked-Objects header
@@ -741,10 +720,8 @@ impl ProtocolClient {
             .context(format!("Failed to GET /manifests/{}", oid))?;
 
         if !response.status().is_success() {
-            anyhow::bail!(
-                "GET /manifests/{} failed with status: {}",
-                oid,
-                response.status()
+            return Err(
+                crate::http_error::fail("GET", &format!("/manifests/{}", oid), response).await,
             );
         }
 
@@ -898,11 +875,12 @@ impl ProtocolClient {
                         .await
                         .with_context(|| format!("Failed to GET /manifests/{}", oid))?;
                         if !resp.status().is_success() {
-                            anyhow::bail!(
-                                "GET /manifests/{} failed with status: {}",
-                                oid,
-                                resp.status()
-                            );
+                            return Err(crate::http_error::fail(
+                                "GET",
+                                &format!("/manifests/{}", oid),
+                                resp,
+                            )
+                            .await);
                         }
                         let data = resp.bytes().await?;
                         let manifest = ChunkManifest::from_bytes(&data)
@@ -1376,11 +1354,12 @@ impl ProtocolClient {
                                     )
                                 })?;
                                 if !response.status().is_success() {
-                                    anyhow::bail!(
-                                        "GET /chunk-deltas/{} failed with status: {}",
-                                        chunk_id,
-                                        response.status()
-                                    );
+                                    return Err(crate::http_error::fail(
+                                        "GET",
+                                        &format!("/chunk-deltas/{}", chunk_id),
+                                        response,
+                                    )
+                                    .await);
                                 }
                                 let data = response.bytes().await.map_err(|e| {
                                     anyhow::anyhow!(
@@ -1483,17 +1462,19 @@ async fn write_deferred_deltas(
     while !pending.is_empty() {
         let before = pending.len();
         let mut still = Vec::new();
-        let mut last_err = String::new();
+        let mut last: Option<(Oid, Oid, anyhow::Error)> = None;
         for (chunk_id, base_id, bytes) in pending {
             if let Err(e) = odb.write_chunk_delta(&chunk_id, &base_id, &bytes).await {
-                last_err = format!("chunk {chunk_id} (base {base_id}): {e:#}");
+                last = Some((chunk_id, base_id, e));
                 still.push((chunk_id, base_id, bytes));
             }
         }
         if still.len() == before {
+            let (chunk_id, base_id, e) = last.expect("a round that wrote nothing failed once");
+            let base_local = odb.get_chunk(&base_id).await.is_ok();
             anyhow::bail!(
-                "the server sent a bad delta, or one with a missing base: {last_err}. \
-                 {before} chunk(s) could not be rebuilt; nothing was stored for them"
+                "{}",
+                deferred_failure_message(&e, base_local, &chunk_id, &base_id, before)
             );
         }
         pending = still;
@@ -1501,9 +1482,39 @@ async fn write_deferred_deltas(
     Ok(())
 }
 
+/// Say why a round of deferred deltas wrote nothing. Three different causes,
+/// three different next steps: a local write failure (this computer), a base
+/// that is not here (this download did not include it), or a delta that does
+/// not rebuild its chunk (the server's data).
+fn deferred_failure_message(
+    e: &anyhow::Error,
+    base_local: bool,
+    chunk_id: &Oid,
+    base_id: &Oid,
+    count: usize,
+) -> String {
+    // A storage `Io` error keeps the OS error as its source, so this finds it.
+    let local_io = e.chain().any(|c| c.is::<std::io::Error>());
+    if local_io {
+        format!(
+            "could not save downloaded data on this computer: {e:#}.              Check free disk space and folder permissions, then try again"
+        )
+    } else if !base_local {
+        format!(
+            "{count} chunk(s) need data (for example chunk {base_id}) that this download did not include.              Fetch all branches, then try again"
+        )
+    } else {
+        format!(
+            "the server sent a bad delta: chunk {chunk_id} (base {base_id}): {e:#}.              {count} chunk(s) could not be rebuilt; nothing was stored for them"
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{chunk_get_error, chunk_get_is_transient, get_chunk_with_retry};
+    use super::{
+        chunk_get_error, chunk_get_is_transient, deferred_failure_message, get_chunk_with_retry,
+    };
     use reqwest::StatusCode;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -1547,6 +1558,35 @@ mod tests {
         let msg = format!("{}", chunk_get_error(&oid, StatusCode::SERVICE_UNAVAILABLE));
         assert!(msg.contains("storage backend unreachable"), "got: {msg}");
         assert!(msg.contains("MinIO/S3/Azure"), "got: {msg}");
+    }
+
+    /// F-3: only a delta that does not rebuild is "the server sent a bad
+    /// delta"; a local I/O failure and a base this pull never had are not.
+    #[test]
+    fn deferred_failures_are_told_apart() {
+        let (c, b) = (
+            mediagit_versioning::Oid::from_bytes([1u8; 32]),
+            mediagit_versioning::Oid::from_bytes([2u8; 32]),
+        );
+        let disk = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::StorageFull))
+            .context("Failed to store chunk delta");
+        let denied = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        let bad = anyhow::anyhow!("refusing chunk delta: it rebuilds chunk X, not Y");
+        let table = [
+            (&disk, true, "on this computer", "free disk space"),
+            (&denied, true, "on this computer", "permissions"),
+            (&bad, false, "did not include", "Fetch all branches"),
+            (&bad, true, "server sent a bad delta", "nothing was stored"),
+        ];
+        for (e, base_local, a, z) in table {
+            let m = deferred_failure_message(e, base_local, &c, &b, 3);
+            assert!(m.contains(a) && m.contains(z), "{m}");
+            assert_eq!(
+                m.contains("server sent a bad delta"),
+                a == "server sent a bad delta",
+                "{m}"
+            );
+        }
     }
 
     #[test]

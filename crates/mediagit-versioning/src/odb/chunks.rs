@@ -549,7 +549,7 @@ impl ObjectDatabase {
                         // Drop the registration too, or the guard would refuse a
                         // legitimate delta for this chunk later in the same run.
                         rollback_delta_pair(&self.delta_written_pairs, chunk.id, base_id).await;
-                        return Err(anyhow::anyhow!("Failed to store chunk delta meta: {}", e));
+                        return Err(e.context("Failed to store chunk delta meta"));
                     }
 
                     if let Err(e) = self.storage.put(&delta_key, &compressed_delta).await {
@@ -3806,8 +3806,12 @@ impl ObjectDatabase {
         // live made fsck red and blocked "restored" health checks, and was
         // served on to other clients. A base that is not readable yet cannot
         // be verified against; refuse (the caller may retry after the base lands).
+        // `context`, not a formatted string: the caller tells a local I/O
+        // failure from a missing base by the error type in the chain.
         let base = self.get_chunk(base_id).await.map_err(|e| {
-            anyhow::anyhow!("cannot verify chunk delta {chunk_id}: base {base_id} unreadable: {e}")
+            e.context(format!(
+                "cannot verify chunk delta {chunk_id}: base {base_id} unreadable"
+            ))
         })?;
         let smart = self.smart_compressor.clone();
         let compressor = self.compressor.clone();
@@ -3902,7 +3906,7 @@ impl ObjectDatabase {
                      keeping the in-memory edge so the depth guard stays conservative"
                 ),
             }
-            return Err(anyhow::anyhow!("Failed to store chunk delta: {}", e));
+            return Err(e.context("Failed to store chunk delta"));
         }
 
         Ok(())

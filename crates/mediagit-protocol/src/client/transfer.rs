@@ -20,10 +20,7 @@ impl ProtocolClient {
                 .context("Failed to POST /chunks/check")?;
 
         if !response.status().is_success() {
-            anyhow::bail!(
-                "POST /chunks/check failed with status: {}",
-                response.status()
-            );
+            return Err(crate::http_error::fail("POST", "/chunks/check", response).await);
         }
 
         response

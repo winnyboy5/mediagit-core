@@ -33,20 +33,10 @@ fn signs_content_length(required_headers: &[[String; 2]]) -> bool {
 }
 
 /// Shared status handling for both `upload_pack` and `upload_pack_file`.
-fn handle_pack_upload_response(response: reqwest::Response) -> Result<()> {
-    let status = response.status();
-    if !status.is_success() {
-        // A rejection here is almost always authorization, and "403
-        // Forbidden" on its own does not tell the user what to do about it.
-        let hint = match status.as_u16() {
-            401 => "\n  Not authenticated. Run `mediagit auth login <server>`.",
-            403 => {
-                "\n  Authenticated, but this account cannot push to this repository. \
-                 An admin must grant it write access."
-            }
-            _ => "",
-        };
-        anyhow::bail!("POST /objects/pack failed with status: {status}{hint}");
+async fn handle_pack_upload_response(response: reqwest::Response) -> Result<()> {
+    if !response.status().is_success() {
+        // 401/403 get their wording from the CLI error mapper.
+        return Err(crate::http_error::fail("POST", "/objects/pack", response).await);
     }
 
     Ok(())
@@ -359,7 +349,7 @@ impl ProtocolClient {
         .await
         .context("Failed to upload pack file")?;
 
-        handle_pack_upload_response(response)
+        handle_pack_upload_response(response).await
     }
 
     /// Upload a metadata pack straight from disk, as a streaming body.
@@ -401,7 +391,7 @@ impl ProtocolClient {
         .await
         .context("Failed to upload pack file")?;
 
-        handle_pack_upload_response(response)
+        handle_pack_upload_response(response).await
     }
 
     /// Collect all NEW objects reachable from given commit OIDs
@@ -696,11 +686,7 @@ impl ProtocolClient {
                 "the server refused chunk delta {chunk_id}: it does not rebuild the chunk"
             );
         }
-        anyhow::bail!(
-            "PUT /chunk-deltas/{} failed with status: {}",
-            chunk_id,
-            status
-        );
+        Err(crate::http_error::fail("PUT", &format!("/chunk-deltas/{}", chunk_id), response).await)
     }
 
     /// Send deltas the server could not take yet (their base was not stored
@@ -751,10 +737,8 @@ impl ProtocolClient {
         .context(format!("Failed to PUT /manifests/{}", oid))?;
 
         if !response.status().is_success() {
-            anyhow::bail!(
-                "PUT /manifests/{} failed with status: {}",
-                oid,
-                response.status()
+            return Err(
+                crate::http_error::fail("PUT", &format!("/manifests/{}", oid), response).await,
             );
         }
 
@@ -1374,11 +1358,7 @@ impl ProtocolClient {
                                 anyhow::anyhow!("Failed to upload chunk {}: {}", chunk_id, e)
                             })?;
                             if !resp.status().is_success() {
-                                anyhow::bail!(
-                                    "PUT /chunks/{} failed with status: {}",
-                                    chunk_id,
-                                    resp.status()
-                                );
+                                return Err(crate::http_error::fail("PUT", &format!("/chunks/{}", chunk_id), resp).await);
                             }
                             Ok::<(Oid, u64), anyhow::Error>((chunk_id, chunk_size))
                         }
@@ -1548,11 +1528,12 @@ impl ProtocolClient {
                                 anyhow::anyhow!("Failed to upload chunk {}: {}", chunk_id, e)
                             })?;
                             if !resp.status().is_success() {
-                                anyhow::bail!(
-                                    "PUT /chunks/{} failed with status: {}",
-                                    chunk_id,
-                                    resp.status()
-                                );
+                                return Err(crate::http_error::fail(
+                                    "PUT",
+                                    &format!("/chunks/{}", chunk_id),
+                                    resp,
+                                )
+                                .await);
                             }
                             Ok::<(Oid, u64), anyhow::Error>((chunk_id, chunk_size))
                         }
@@ -2261,11 +2242,7 @@ impl ProtocolClient {
                                     )
                                 })?;
                                 if !resp.status().is_success() {
-                                    anyhow::bail!(
-                                        "PUT /chunks/{} failed with status: {}",
-                                        chunk_id,
-                                        resp.status()
-                                    );
+                                    return Err(crate::http_error::fail("PUT", &format!("/chunks/{}", chunk_id), resp).await);
                                 }
                                 Ok::<u64, anyhow::Error>(chunk_size)
                             }
@@ -2415,11 +2392,12 @@ impl ProtocolClient {
                                     anyhow::anyhow!("Failed to upload chunk {}: {}", chunk_id, e)
                                 })?;
                                 if !resp.status().is_success() {
-                                    anyhow::bail!(
-                                        "PUT /chunks/{} failed with status: {}",
-                                        chunk_id,
-                                        resp.status()
-                                    );
+                                    return Err(crate::http_error::fail(
+                                        "PUT",
+                                        &format!("/chunks/{}", chunk_id),
+                                        resp,
+                                    )
+                                    .await);
                                 }
                                 Ok::<u64, anyhow::Error>(chunk_size)
                             }

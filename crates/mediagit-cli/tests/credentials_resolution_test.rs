@@ -363,7 +363,8 @@ fn unauthorized_invalidates_keychain_and_falls_through() {
     assert_eq!(creds, Credentials::Bearer("expiring-token".to_string()));
     assert_eq!(source, mediagit_cli::repo::CredentialSource::Keychain);
 
-    let err = anyhow::anyhow!("GET /info/refs failed with status: 401 Unauthorized");
+    let err: anyhow::Error =
+        mediagit_protocol::http_error::http_error("GET", "/info/refs", 401, "").into();
     let invalidated =
         mediagit_cli::repo::invalidate_on_unauthorized(&config, "origin", source, &err);
     assert!(
