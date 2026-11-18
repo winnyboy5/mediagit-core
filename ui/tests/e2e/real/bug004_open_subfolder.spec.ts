@@ -1,12 +1,28 @@
-import { test } from '@playwright/test'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { expect, test } from '@playwright/test'
+import { attach, mg, stubPicker, tmp, type Ctx } from './bugs'
 
-// BUG-004, real app. PENDING: needs a release build at or after the BUG-004 commit
-// (the coordinator builds releases). Un-fixme once target/release/mediagit.exe has it.
-//
-// Flow, on a repository with a subfolder `art/`:
-//   1. Open the repository through the folder picker, choosing `art/`, not the root.
-//   2. Assert the rail shows the repository (parent) name, not `art`.
-//   3. Assert no `art/.mediagit` exists on disk afterwards.
-test.describe('BUG-004: opening a subfolder opens the repository root', () => {
-  test.fixme('the rail shows the parent name and no nested .mediagit appears', async () => {})
+// BUG-004, real app: choosing a subfolder in the folder picker opens the repository root.
+let c: Ctx
+test.beforeAll(async () => { c = await attach() })
+test.afterAll(async () => { await c?.browser.close().catch(() => {}) })
+
+test('BUG-004: the rail shows the parent name and no nested .mediagit appears', async () => {
+  const { st, page } = c
+  const repo = join(tmp('bug004'), 'bug004-film')
+  mkdirSync(join(repo, 'art'), { recursive: true })
+  mg(st, repo, ['init'])
+  writeFileSync(join(repo, 'art', 'a.txt'), 'art\n')
+  mg(st, repo, ['add', '.'])
+  mg(st, repo, ['commit', '-m', 'art'])
+
+  await page.evaluate(() => { localStorage.removeItem('mg.repo'); localStorage.setItem('mg.recent', '[]') })
+  await page.evaluate(() => { window.location.hash = '#/welcome' })
+  await page.reload()
+  await stubPicker(page, join(repo, 'art'))
+  await page.getByRole('button', { name: 'Open folder…' }).click()
+  await expect(page.getByTestId('repo-switcher')).toContainText('bug004-film')
+  await expect(page.getByTestId('repo-switcher')).not.toHaveText(/^\s*art\s*$/)
+  expect(existsSync(join(repo, 'art', '.mediagit'))).toBe(false)
 })

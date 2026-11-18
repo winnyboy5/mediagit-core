@@ -6,9 +6,7 @@ import { chromium, expect, test, type Browser, type Page } from '@playwright/tes
 import { goTo } from './nav'
 import { readState, type E2EState } from './setup'
 
-// BUG-047, real app. PENDING: needs a release build at or after the BUG-047 commit
-// (the coordinator builds releases). Un-fixme once target/release/mediagit.exe has it.
-//
+// BUG-047, real app.
 // On a new empty repository, turn encryption on with a passphrase. The "Save your recovery
 // code" dialog is on screen from the first sample and the unlock prompt is held until the
 // person ticks "I saved it" and closes it; then the prompt opens, unlocking works, and the
@@ -30,7 +28,7 @@ test.describe('BUG-047: the recovery code shows with a passphrase', () => {
     await browser?.close().catch(() => {})
   })
 
-  test.fixme('code dialog first, unlock prompt held until "I saved it"', async () => {
+  test('code dialog first, unlock prompt held until "I saved it"', async () => {
     const repo = mkdtempSync(join(tmpdir(), 'mg-bug047-'))
     execFileSync(st.cli, ['init'], { cwd: repo, env: { ...process.env, ...st.env }, encoding: 'utf8' })
     await page.evaluate(
@@ -43,6 +41,8 @@ test.describe('BUG-047: the recovery code shows with a passphrase', () => {
     await page.evaluate(() => { window.location.hash = '#/welcome' })
     await page.reload()
     await page.getByTestId('recent-list').locator('button.open', { hasText: 'bug047' }).click()
+    await expect(page.getByTestId('repo-switcher')).toContainText('bug047')
+    await expect(page).toHaveURL(/files[/]all/)
     await goTo(page, 'security')
 
     const pass = 'e2e-Passphrase-47'
