@@ -727,6 +727,8 @@ impl AddCmd {
                                 continue;
                             }
                             if !self.force {
+                                // The stored images' pHashes outlive a failed run.
+                                crate::phash_index::flush(&repo_root).await;
                                 return Err(e);
                             }
                             if !self.quiet {
@@ -735,6 +737,7 @@ impl AddCmd {
                         }
                         Err(e) => {
                             if !self.force {
+                                crate::phash_index::flush(&repo_root).await;
                                 return Err(anyhow::anyhow!("Task panicked: {}", e));
                             }
                         }
@@ -824,6 +827,8 @@ impl AddCmd {
                                 continue;
                             }
                             if !self.force {
+                                // The stored images' pHashes outlive a failed run.
+                                crate::phash_index::flush(&repo_root).await;
                                 return Err(e);
                             }
                             if !self.quiet {

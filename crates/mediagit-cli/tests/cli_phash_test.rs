@@ -309,3 +309,29 @@ fn test_phash_skips_already_stored_object() {
         .success();
     assert_eq!(read_index_entries(tmp.path()).len(), 1);
 }
+
+/// A failed add still saves the pHash entries of the images it stored: the
+/// objects exist, and "already stored" would skip them on the next run.
+#[cfg(windows)]
+#[test]
+fn test_phash_saved_when_add_fails_midway() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let img =
+        image::RgbImage::from_fn(64, 48, |x, y| image::Rgb([(x * 4) as u8, (y * 5) as u8, 7]));
+    let tmp = TempDir::new().unwrap();
+    init_repo(tmp.path());
+    img.save(tmp.path().join("a.png")).unwrap();
+    fs::write(tmp.path().join("z.bin"), "locked").unwrap();
+    // Nobody else may open it, so reading it fails (not an "untrackable" file).
+    let _lock = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(tmp.path().join("z.bin"))
+        .unwrap();
+    mediagit()
+        .args(["add", "--no-parallel", "a.png", "z.bin"])
+        .current_dir(tmp.path())
+        .assert()
+        .failure();
+    assert_eq!(read_index_entries(tmp.path()).len(), 1);
+}
