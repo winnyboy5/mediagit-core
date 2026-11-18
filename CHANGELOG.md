@@ -163,6 +163,8 @@ changes fix real bugs.
 
 ### Fixed
 
+- **A staged new file is no longer overwritten by a branch switch, merge, pull, cherry-pick, revert or rebase.** If the target version has a different file at a path you added but did not commit, the command now refuses and names the file. A refused branch switch also leaves HEAD where it was. The refusal carries the error code `would_overwrite`, and the app shows plain words with no Retry button.
+
 - **`reset` and revisions.** `reset` refuses `HEAD^^`, `HEAD^2` and a bare
   `HEAD~`; the old `reset` silently took the first parent.
 - **Small leftovers.** `revert HEAD^` works like `reset` and `show`. A stopped

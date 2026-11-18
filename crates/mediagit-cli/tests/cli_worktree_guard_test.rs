@@ -661,3 +661,115 @@ fn bound_still_deletes_tracked_file_on_reset_hard() {
     assert!(wip.exists(), "reset --hard deleted untracked work");
     assert!(temp.path().join("base.txt").exists(), "base.txt lost");
 }
+
+// ============================================================================
+// C1 — a staged, uncommitted new file must survive every checkout
+// ============================================================================
+
+/// `feat` commits `new.psd` (v1). On `main` the user stages a different
+/// `new.psd` (v2). Returns the temp dir; the working file holds v2.
+fn staged_new_file_setup() -> TempDir {
+    let temp = TempDir::new().unwrap();
+    init_repo(temp.path());
+    commit_file(temp.path(), "a.txt", "base", "initial");
+    branch_create(temp.path(), "feat");
+    branch_switch(temp.path(), "feat");
+    commit_file(temp.path(), "new.psd", "v1", "feat adds new.psd");
+    branch_switch(temp.path(), "main");
+    fs::write(temp.path().join("new.psd"), "v2").unwrap();
+    mediagit()
+        .args(["add", "new.psd"])
+        .current_dir(temp.path())
+        .assert()
+        .success();
+    temp
+}
+
+fn assert_staged_survives(temp: &TempDir, args: &[&str]) {
+    mediagit()
+        .args(args)
+        .current_dir(temp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("new.psd"));
+    assert_eq!(
+        fs::read_to_string(temp.path().join("new.psd")).unwrap(),
+        "v2",
+        "{args:?} overwrote a staged new file"
+    );
+    mediagit()
+        .args(["status", "--porcelain"])
+        .current_dir(temp.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("new.psd"));
+}
+
+#[test]
+fn c1_switch_refuses_staged_new_file_and_keeps_head() {
+    let temp = staged_new_file_setup();
+    assert_staged_survives(&temp, &["branch", "switch", "feat"]);
+    assert_eq!(
+        fs::read_to_string(temp.path().join(".mediagit/HEAD"))
+            .unwrap()
+            .trim(),
+        "ref: refs/heads/main"
+    );
+}
+
+#[test]
+fn c1_merge_refuses_staged_new_file() {
+    let temp = staged_new_file_setup();
+    assert_staged_survives(&temp, &["merge", "feat"]);
+}
+
+#[test]
+fn c1_cherry_pick_refuses_staged_new_file() {
+    let temp = staged_new_file_setup();
+    assert_staged_survives(&temp, &["cherry-pick", "feat"]);
+}
+
+#[test]
+fn c1_rebase_refuses_staged_new_file() {
+    let temp = staged_new_file_setup();
+    assert_staged_survives(&temp, &["rebase", "feat"]);
+}
+
+#[test]
+fn c1_revert_refuses_staged_new_file() {
+    let temp = TempDir::new().unwrap();
+    init_repo(temp.path());
+    commit_file(temp.path(), "new.psd", "v1", "adds new.psd");
+    fs::remove_file(temp.path().join("new.psd")).unwrap();
+    mediagit()
+        .args(["add", "-A"])
+        .current_dir(temp.path())
+        .assert()
+        .success();
+    mediagit()
+        .args(["commit", "-m", "removes new.psd"])
+        .current_dir(temp.path())
+        .assert()
+        .success();
+    fs::write(temp.path().join("new.psd"), "v2").unwrap();
+    mediagit()
+        .args(["add", "new.psd"])
+        .current_dir(temp.path())
+        .assert()
+        .success();
+    // Reverting the deletion would bring v1 back over the staged v2.
+    assert_staged_survives(&temp, &["revert", "HEAD"]);
+}
+
+/// I6: the refusal carries a stable code in the machine envelope.
+#[test]
+fn i6_refusal_has_would_overwrite_code() {
+    let temp = staged_new_file_setup();
+    mediagit()
+        .args(["--machine", "branch", "switch", "feat"])
+        .current_dir(temp.path())
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("\"code\":\"would_overwrite\""))
+        .stdout(predicate::str::contains("new.psd"));
+}

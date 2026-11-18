@@ -577,3 +577,30 @@ fn unreadable_folder_stops_add_and_stages_no_deletion() {
         "no deletion may be staged:\n{status}"
     );
 }
+
+/// I5: a switch whose checkout refuses (unsafe name in the target tree) must
+/// leave HEAD and the working tree as they were.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refused_switch_keeps_head_and_tree() {
+    let dir = repo_with(&[("a.txt", "a")]);
+    let root = dir.path();
+    must(root, &["branch", "create", "bad"]);
+    must(root, &["branch", "switch", "bad"]);
+    plant(
+        root,
+        |t| {
+            let oid = t.get_entry("a.txt").unwrap().oid;
+            t.add_entry(TreeEntry::new(BAD.to_string(), FileMode::Regular, oid));
+        },
+        true,
+    )
+    .await;
+    must(root, &["branch", "switch", "main"]);
+    let head = || fs::read_to_string(root.join(".mediagit/HEAD")).unwrap();
+    let before = head();
+
+    let (ok, text) = run(root, &["branch", "switch", "bad"]);
+    assert!(!ok, "switch to an unsafe tree must be refused: {text}");
+    assert_eq!(head(), before, "HEAD moved on a refused switch");
+    assert_eq!(read(root, "a.txt"), "a");
+}

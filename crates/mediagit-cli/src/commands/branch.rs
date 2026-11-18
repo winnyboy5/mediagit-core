@@ -838,7 +838,9 @@ impl BranchCmd {
                 .await?;
         }
 
-        // Update HEAD to point to the branch
+        // Update HEAD to point to the branch. I5: the checkout below can still
+        // refuse (case pair, unsafe name), so the old HEAD is put back then.
+        let old_head = refdb.read("HEAD").await.ok();
         let head = Ref::new_symbolic("HEAD".to_string(), branch_ref_name.clone());
         refdb.write(&head).await?;
 
@@ -856,19 +858,32 @@ impl BranchCmd {
 
         // OPTIMIZATION: Use differential checkout when we have a current commit
         // This only updates files that actually changed between commits
-        let files_updated = if let Some(ref current_oid) = current_commit_oid {
-            // Differential checkout: only update changed files
-            let checkout_stats = checkout_mgr
-                .checkout_diff(current_oid, &target_commit_oid)
-                .await
-                .context("Failed to update working directory")?;
-            checkout_stats.files_changed()
-        } else {
-            // No current commit (initial checkout) - do full checkout
-            checkout_mgr
-                .checkout_commit(&target_commit_oid)
-                .await
-                .context("Failed to update working directory")?
+        let checkout_result = async {
+            let n = if let Some(ref current_oid) = current_commit_oid {
+                // Differential checkout: only update changed files
+                let checkout_stats = checkout_mgr
+                    .checkout_diff(current_oid, &target_commit_oid)
+                    .await
+                    .context("Failed to update working directory")?;
+                checkout_stats.files_changed()
+            } else {
+                // No current commit (initial checkout) - do full checkout
+                checkout_mgr
+                    .checkout_commit(&target_commit_oid)
+                    .await
+                    .context("Failed to update working directory")?
+            };
+            anyhow::Ok(n)
+        }
+        .await;
+        let files_updated = match checkout_result {
+            Ok(n) => n,
+            Err(e) => {
+                if let Some(h) = &old_head {
+                    let _ = refdb.write(h).await;
+                }
+                return Err(e);
+            }
         };
 
         checkout_pb.finish_with_message("Working directory updated");

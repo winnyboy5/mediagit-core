@@ -326,7 +326,10 @@ fn branch_machine_lifecycle_and_dirty_switch_refusal() {
     commit_file(dir, "a.txt", b"two", "c2");
     human(dir, &["branch", "switch", "main"]);
     fs::write(dir.join("a.txt"), "dirty edit").unwrap();
-    assert_eq!(err(dir, &["branch", "switch", "feature"]), "error");
+    assert_eq!(
+        err(dir, &["branch", "switch", "feature"]),
+        "would_overwrite"
+    );
     assert_eq!(ok(dir, &["branch", "list"])["current"], "main");
     fs::write(dir.join("a.txt"), "one").unwrap();
 

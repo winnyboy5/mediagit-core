@@ -106,4 +106,12 @@ describe('ErrorState actions follow the code and the raw text', () => {
   it('permission_denied keeps Retry, as the table says', () => {
     expect(show('permission_denied', 'Access to a file or folder was denied. Check its permissions, then try again.').text()).toContain('Retry')
   })
+  it('would_overwrite explains the loss and offers no Retry', () => {
+    const raw = 'Your local changes to the following files would be overwritten by merge: new.psd. Please commit your changes or stash them before you merge.'.replace(': ', ':\n')
+    const v = plainError('would_overwrite', raw)
+    expect(v.text).toMatch(/would be lost/)
+    expect(v.retry).toBe(false)
+    expect(v.details).toContain('new.psd')
+    expect(show('would_overwrite', raw).text).not.toContain('Retry')
+  })
 })

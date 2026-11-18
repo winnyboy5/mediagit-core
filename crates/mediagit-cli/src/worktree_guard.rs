@@ -98,10 +98,20 @@ impl AtRisk {
         let _ = stat.save();
         modified.sort();
 
+        // C1: a path staged but not committed (absent at HEAD) is invisible to
+        // `modified` and `untracked_paths`. If the target brings a different
+        // blob for it, the checkout would overwrite the file and the staged
+        // blob would be left unreferenced.
+        let staged_new: Vec<(PathBuf, Oid)> = Index::load(repo_root)?
+            .entries()
+            .filter(|e| !head_files.contains_key(&e.path))
+            .map(|e| (e.path.clone(), e.oid))
+            .collect();
+
         let untracked_collisions = match target {
             Some(target_oid) => {
                 let untracked = untracked_paths(repo_root, &head_files.keys().cloned().collect())?;
-                if untracked.is_empty() {
+                if untracked.is_empty() && staged_new.is_empty() {
                     Vec::new()
                 } else {
                     let target_files = CheckoutManager::new(odb, repo_root)
@@ -115,16 +125,19 @@ impl AtRisk {
                         ),
                         None => None,
                     };
+                    let changed = |p: &PathBuf, t: &Oid| {
+                        base_files
+                            .as_ref()
+                            .is_none_or(|b| b.get(p).map(|(o, _)| o) != Some(t))
+                    };
                     let mut hits: Vec<PathBuf> = untracked
                         .into_iter()
-                        .filter(|p| {
-                            target_files.get(p).is_some_and(|(t, _)| {
-                                base_files
-                                    .as_ref()
-                                    .is_none_or(|b| b.get(p).map(|(o, _)| o) != Some(t))
-                            })
-                        })
+                        .filter(|p| target_files.get(p).is_some_and(|(t, _)| changed(p, t)))
                         .collect();
+                    hits.extend(staged_new.into_iter().filter_map(|(p, staged)| {
+                        let (t, _) = target_files.get(&p)?;
+                        (*t != staged && changed(&p, t)).then_some(p)
+                    }));
                     hits.sort();
                     hits
                 }
@@ -161,7 +174,7 @@ impl AtRisk {
                 indent(&self.untracked_collisions)
             ));
         }
-        anyhow::anyhow!(msg)
+        crate::output::CodedError::new("would_overwrite", msg).into()
     }
 
     /// Refuse unless clean.
