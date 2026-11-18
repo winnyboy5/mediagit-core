@@ -121,7 +121,10 @@ test.describe('advanced', () => {
 })
 
 test('security signed out: only Sign in is primary; encryption is secondary', async ({ page }) => {
-  await boot(page, '/security', { commands: { auth_run: fixture('auth_out'), key_status: fixture('key_off') } })
+  // Encryption can only be turned on before the first version exists (BUG-034).
+  const s = fixture<{ branch: object }>('status_empty')
+  const unborn = { ...s, branch: { ...s.branch, has_commits: false } }
+  await boot(page, '/security', { commands: { auth_run: fixture('auth_out'), key_status: fixture('key_off'), repo_status: unborn } })
   await expect(page.getByRole('button', { name: 'Sign in' })).toHaveClass(/primary/)
   await expect(page.getByRole('button', { name: 'Turn on encryption…' })).not.toHaveClass(/primary/)
 })

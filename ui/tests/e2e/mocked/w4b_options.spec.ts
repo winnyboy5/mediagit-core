@@ -155,15 +155,14 @@ test.describe('Stash: options', () => {
     await card.getByLabel('Message (optional)').fill('Only art')
     await card.getByRole('button', { name: 'Set aside 2 selected files' }).click()
     await polled(page, 'stash_save').toBe(1)
-    expect((await calls(page, 'stash_save'))[0]).toMatchObject({ message: 'Only art', includeUntracked: false, paths: ['art/hero.psd', 'char/rig_lod1.fbx'] })
+    expect((await calls(page, 'stash_save'))[0]).toMatchObject({ message: 'Only art', includeUntracked: true, paths: ['art/hero.psd', 'char/rig_lod1.fbx'] })
   })
 
-  test('new files can be picked once "Include new files" is on', async ({ page }) => {
+  test('new files are listed without any opt-in (BUG-027)', async ({ page }) => {
     await tagsBoot(page)
     const card = page.locator('section[aria-labelledby="stash-h"]')
     await more(card.locator('details'))
-    await expect(card.getByTestId('stash-files')).not.toContainText('env/fog_vol.vdb')
-    await card.getByRole('checkbox', { name: 'Include new files' }).click()
+    await expect(card.getByRole('checkbox', { name: 'Include new files' })).toHaveCount(0)
     await expect(card.getByTestId('stash-files')).toContainText('env/fog_vol.vdb')
   })
 
