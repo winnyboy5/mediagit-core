@@ -187,7 +187,7 @@ impl RevertCmd {
         // Resolve commits
         let mut resolved_commits = Vec::new();
         for commit_spec in &self.commits {
-            let oid = self.resolve_commit(&odb, &refs, commit_spec).await?;
+            let oid = mediagit_versioning::resolve_revision(commit_spec, &refs, &odb).await?;
             resolved_commits.push(oid);
         }
 
@@ -862,55 +862,5 @@ impl RevertCmd {
         }
 
         Ok(None)
-    }
-
-    async fn resolve_commit(
-        &self,
-        odb: &Arc<ObjectDatabase>,
-        refs: &RefDatabase,
-        spec: &str,
-    ) -> Result<Oid> {
-        if spec.contains('~') {
-            let parts: Vec<&str> = spec.splitn(2, '~').collect();
-            let base_ref = parts[0];
-            let count: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
-
-            let base_oid = if base_ref == "HEAD" {
-                refs.resolve("HEAD").await?
-            } else {
-                refs.resolve(base_ref).await?
-            };
-
-            let mut current = base_oid;
-            for _ in 0..count {
-                let commit = Commit::read(odb, &current).await?;
-                current = commit.parents.first().cloned().context("No parent")?;
-            }
-            return Ok(current);
-        }
-
-        if let Ok(oid) = refs.resolve(spec).await {
-            return Ok(oid);
-        }
-
-        if let Ok(oid) = refs.resolve(&format!("refs/heads/{}", spec)).await {
-            return Ok(oid);
-        }
-
-        // Try full OID
-        if let Ok(oid) = Oid::from_hex(spec) {
-            return Ok(oid);
-        }
-
-        // Try abbreviated OID (prefix scan)
-        if spec.len() >= 4
-            && spec.len() < 64
-            && spec.chars().all(|c| c.is_ascii_hexdigit())
-            && let Ok(oid) = odb.resolve_abbreviated_oid(spec).await
-        {
-            return Ok(oid);
-        }
-
-        anyhow::bail!("Unknown revision: {}", spec)
     }
 }

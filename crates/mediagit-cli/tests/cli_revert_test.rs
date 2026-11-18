@@ -328,3 +328,53 @@ fn test_revert_quiet() {
         .success()
         .stdout(predicate::str::is_empty());
 }
+
+// ============================================================================
+// Revision forms go through the shared resolver
+// ============================================================================
+
+/// Three commits, each adding its own file, so reverting the middle one is clean.
+fn three_commits(dir: &Path) {
+    init_repo(dir);
+    add_and_commit(dir, "a.txt", "a", "add a");
+    add_and_commit(dir, "b.txt", "b", "add b");
+    add_and_commit(dir, "c.txt", "c", "add c");
+}
+
+#[test]
+fn revert_accepts_head_caret() {
+    let t = TempDir::new().unwrap();
+    three_commits(t.path());
+    mediagit()
+        .args(["revert", "HEAD^"])
+        .current_dir(t.path())
+        .assert()
+        .success();
+    assert!(!t.path().join("b.txt").exists(), "b.txt must be reverted");
+    assert!(t.path().join("c.txt").exists());
+}
+
+#[test]
+fn revert_accepts_a_short_id() {
+    let t = TempDir::new().unwrap();
+    three_commits(t.path());
+    let out = mediagit()
+        .args(["log", "--oneline"])
+        .current_dir(t.path())
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let line = text.lines().find(|l| l.contains("add b")).unwrap();
+    let short: String = line
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_hexdigit())
+        .collect();
+    assert!(short.len() >= 4, "log line: {line}");
+    mediagit()
+        .args(["revert", &short])
+        .current_dir(t.path())
+        .assert()
+        .success();
+    assert!(!t.path().join("b.txt").exists());
+}
