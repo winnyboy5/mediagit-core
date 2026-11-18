@@ -641,3 +641,161 @@ fn test_merge_ff_only_refuses_diverged_branches() {
     assert!(!dir.join("feature.txt").exists(), "working files changed");
     assert_eq!(fs::read_to_string(dir.join("main.txt")).unwrap(), "Main");
 }
+
+fn main_tip(dir: &Path) -> String {
+    fs::read_to_string(dir.join(".mediagit/refs/heads/main")).unwrap()
+}
+
+fn log_text(dir: &Path) -> String {
+    let out = mediagit().arg("log").current_dir(dir).assert().success();
+    String::from_utf8_lossy(&out.get_output().stdout).to_string()
+}
+
+// BUG-025 / C-1: a branch with nothing new is "Already up to date", no commit.
+#[test]
+fn test_merge_already_up_to_date_makes_no_commit() {
+    let temp_dir = TempDir::new().unwrap();
+    let dir = temp_dir.path();
+    init_repo(dir);
+    add_and_commit(dir, "file.txt", "Content", "Initial commit");
+    mediagit()
+        .args(["branch", "create", "twin"])
+        .current_dir(dir)
+        .assert()
+        .success();
+    let before = main_tip(dir);
+
+    // Same commit, plain and --ff-only.
+    for flags in [vec![], vec!["--ff-only"]] {
+        mediagit()
+            .arg("merge")
+            .args(&flags)
+            .arg("twin")
+            .current_dir(dir)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Already up to date"));
+        assert_eq!(main_tip(dir), before, "tip moved for {flags:?}");
+    }
+
+    // Theirs is an ancestor of ours.
+    add_and_commit(dir, "more.txt", "More", "Second commit");
+    let before = main_tip(dir);
+    for flags in [vec![], vec!["--ff-only"]] {
+        mediagit()
+            .arg("merge")
+            .args(&flags)
+            .arg("twin")
+            .current_dir(dir)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Already up to date"));
+        assert_eq!(main_tip(dir), before, "tip moved for {flags:?}");
+    }
+}
+
+/// `main` and `other` each have one new version, in different files.
+fn diverged_clean(dir: &Path) {
+    init_repo(dir);
+    add_and_commit(dir, "base.txt", "Base", "Base commit");
+    create_and_switch_branch(dir, "other");
+    add_and_commit(dir, "other.txt", "Other", "Other commit");
+    mediagit()
+        .args(["branch", "switch", "main"])
+        .current_dir(dir)
+        .assert()
+        .success();
+    add_and_commit(dir, "main.txt", "Main", "Main commit");
+}
+
+// BUG-030: --no-commit leaves the merge applied and waiting to be finished.
+#[test]
+fn test_merge_no_commit_applies_and_continue_finishes() {
+    let temp_dir = TempDir::new().unwrap();
+    let dir = temp_dir.path();
+    diverged_clean(dir);
+    let before = main_tip(dir);
+
+    mediagit()
+        .args(["merge", "--no-commit", "other"])
+        .current_dir(dir)
+        .assert()
+        .success();
+
+    assert_eq!(main_tip(dir), before, "no-commit must not move the tip");
+    assert_eq!(fs::read_to_string(dir.join("other.txt")).unwrap(), "Other");
+    assert!(dir.join(".mediagit/MERGE_HEAD").exists(), "merge waiting");
+
+    mediagit()
+        .args(["merge", "--continue"])
+        .current_dir(dir)
+        .assert()
+        .success();
+    assert!(!dir.join(".mediagit/MERGE_HEAD").exists());
+    assert_ne!(main_tip(dir), before);
+    assert_eq!(fs::read_to_string(dir.join("other.txt")).unwrap(), "Other");
+    assert_eq!(fs::read_to_string(dir.join("main.txt")).unwrap(), "Main");
+    assert!(log_text(dir).contains("Merge branch 'other' into main"));
+}
+
+// BUG-030: --no-commit then --abort puts everything back.
+#[test]
+fn test_merge_no_commit_abort_restores() {
+    let temp_dir = TempDir::new().unwrap();
+    let dir = temp_dir.path();
+    diverged_clean(dir);
+    let before = main_tip(dir);
+
+    mediagit()
+        .args(["merge", "--no-commit", "other"])
+        .current_dir(dir)
+        .assert()
+        .success();
+    mediagit()
+        .args(["merge", "--abort"])
+        .current_dir(dir)
+        .assert()
+        .success();
+
+    assert_eq!(main_tip(dir), before);
+    assert!(!dir.join("other.txt").exists());
+    assert!(!dir.join(".mediagit/MERGE_HEAD").exists());
+}
+
+// BUG-023: the merge version is named after the branches and has the real author.
+#[test]
+fn test_merge_commit_message_and_author() {
+    let temp_dir = TempDir::new().unwrap();
+    let dir = temp_dir.path();
+    diverged_clean(dir);
+    mediagit()
+        .args(["merge", "other"])
+        .current_dir(dir)
+        .assert()
+        .success();
+    let log = log_text(dir);
+    assert!(log.contains("Merge branch 'other' into main"), "{log}");
+    assert!(!log.contains("into HEAD"), "{log}");
+}
+
+// BUG-023: finishing a conflicted merge keeps the name and the real author.
+#[test]
+fn test_merge_continue_message_and_author() {
+    let temp_dir = TempDir::new().unwrap();
+    let dir = temp_dir.path();
+    conflicted_merge(dir);
+    mediagit()
+        .args(["add", "file.bin"])
+        .current_dir(dir)
+        .assert()
+        .success();
+    mediagit()
+        .args(["merge", "--continue"])
+        .current_dir(dir)
+        .assert()
+        .success();
+    let log = log_text(dir);
+    assert!(log.contains("Merge branch 'side' into main"), "{log}");
+    assert!(!log.contains("MediaGit User"), "{log}");
+    assert!(log.contains("Test User"), "{log}");
+}

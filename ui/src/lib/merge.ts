@@ -39,6 +39,7 @@ const SUMMARY: Record<string, string> = {
   merged: 'Merged',
   squashed: 'Squashed into one change',
   not_committed: 'Merged, not saved yet',
+  up_to_date: 'Already up to date',
   aborted: 'Merge cancelled',
 }
 

@@ -8,8 +8,8 @@ use clap::Parser;
 use console::style;
 use mediagit_versioning::{
     CheckoutManager, Commit, ConflictType, Index, MergeEngine, MergeStrategy, ObjectDatabase,
-    ObjectType, Oid, Ref, RefDatabase, Reflog, ReflogEntry, Signature, apply_merge_to_workdir,
-    resolve_revision,
+    ObjectType, Oid, Ref, RefDatabase, Reflog, ReflogEntry, Signature, Tree,
+    apply_merge_to_workdir, resolve_revision,
 };
 use serde::Serialize;
 use std::sync::Arc;
@@ -21,7 +21,7 @@ use std::sync::Arc;
 pub struct MergeReport {
     /// `merge`, `continue` or `abort`.
     pub action: String,
-    /// `fast_forward`, `merged`, `squashed`, `not_committed`, `aborted` or
+    /// `fast_forward`, `merged`, `squashed`, `not_committed`, `up_to_date`, `aborted` or
     /// `conflict` (the command then also exits 1; `conflicts` lists the paths).
     pub status: String,
     /// New HEAD commit; `None` for `conflict`, `not_committed` and `aborted`.
@@ -133,6 +133,38 @@ pub struct MergeCmd {
     pub verbose: bool,
 }
 
+/// `main` for `refs/heads/main`; `HEAD` when detached.
+fn short_branch(head_target: &Option<String>) -> String {
+    head_target
+        .as_deref()
+        .map(|t| t.strip_prefix("refs/heads/").unwrap_or(t))
+        .unwrap_or("HEAD")
+        .to_string()
+}
+
+/// Who a merge commit is by: MEDIAGIT_AUTHOR_NAME / MEDIAGIT_AUTHOR_EMAIL,
+/// then config.toml `[author]`, then $USER.
+async fn merge_signature(repo_root: &std::path::Path) -> Signature {
+    let config = mediagit_config::Config::load(repo_root)
+        .await
+        .unwrap_or_default();
+    let name = std::env::var("MEDIAGIT_AUTHOR_NAME").unwrap_or_else(|_| {
+        config
+            .author
+            .name
+            .clone()
+            .unwrap_or_else(|| std::env::var("USER").unwrap_or_else(|_| "Unknown".to_string()))
+    });
+    let email = std::env::var("MEDIAGIT_AUTHOR_EMAIL").unwrap_or_else(|_| {
+        config
+            .author
+            .email
+            .clone()
+            .unwrap_or_else(|| "unknown@localhost".to_string())
+    });
+    Signature::now(name, email)
+}
+
 impl MergeCmd {
     fn quiet(&self) -> bool {
         self.quiet || output::machine_mode()
@@ -222,6 +254,23 @@ impl MergeCmd {
 
         let result = engine.merge(&our_oid, &their_oid, strategy).await?;
 
+        // BUG-025: nothing new on their side (same commit, or theirs is already
+        // part of ours): no commit, whatever the flags.
+        if our_oid == their_oid
+            || result
+                .fast_forward
+                .as_ref()
+                .is_some_and(|f| !f.is_fast_forward)
+        {
+            if output::machine_mode() {
+                return output::emit_ok(&merge_report("merge", "up_to_date", None));
+            }
+            if !self.quiet() {
+                println!("{} Already up to date.", style("✓").green());
+            }
+            return Ok(());
+        }
+
         // BUG-024: --ff-only refuses anything but a fast-forward or an
         // up-to-date branch, before any ref or file write.
         if self.ff_only && result.fast_forward.is_none() {
@@ -237,26 +286,14 @@ impl MergeCmd {
                 // using their tree rather than fast-forwarding, so the branch history
                 // is collapsed into one commit.
                 let their_commit = Commit::read(&odb, &their_oid).await?;
-                let config = mediagit_config::Config::load(&repo_root)
-                    .await
-                    .unwrap_or_default();
-                let author_name = std::env::var("MEDIAGIT_AUTHOR_NAME").unwrap_or_else(|_| {
-                    config.author.name.clone().unwrap_or_else(|| {
-                        std::env::var("USER").unwrap_or_else(|_| "Unknown".to_string())
-                    })
+                let signature = merge_signature(&repo_root).await;
+                let message = self.message.clone().unwrap_or_else(|| {
+                    format!(
+                        "Squash merge branch '{}' into {}",
+                        branch,
+                        short_branch(&head_target)
+                    )
                 });
-                let author_email = std::env::var("MEDIAGIT_AUTHOR_EMAIL").unwrap_or_else(|_| {
-                    config
-                        .author
-                        .email
-                        .clone()
-                        .unwrap_or_else(|| "unknown@localhost".to_string())
-                });
-                let signature = Signature::now(author_name, author_email);
-                let message = self
-                    .message
-                    .clone()
-                    .unwrap_or_else(|| format!("Squash merge branch '{}' into HEAD", branch));
                 let squash_commit = Commit {
                     tree: their_commit.tree,
                     parents: vec![our_oid],
@@ -349,43 +386,40 @@ impl MergeCmd {
 
         // Check for conflicts
         if !result.conflicts.is_empty() {
-            return stop_for_conflicts(&result, &odb, &repo_root, our_oid, their_oid, self.verbose)
-                .await;
+            let message = self.message.clone().unwrap_or_else(|| {
+                format!(
+                    "Merge branch '{}' into {}",
+                    branch,
+                    short_branch(&head_target)
+                )
+            });
+            return stop_for_conflicts(
+                &result,
+                &odb,
+                &repo_root,
+                our_oid,
+                their_oid,
+                &message,
+                self.verbose,
+            )
+            .await;
         }
 
-        // No conflicts - create merge commit
+        // No conflicts: the message is the same for a commit and for a merge
+        // left waiting (--no-commit).
+        let into = short_branch(&head_target);
+        let message = self.message.clone().unwrap_or_else(|| {
+            if self.squash {
+                format!("Squash merge branch '{}' into {}", branch, into)
+            } else {
+                format!("Merge branch '{}' into {}", branch, into)
+            }
+        });
+
         let mut merged_oid = None;
         if !self.no_commit {
             let tree_oid = result.tree_oid.context("No merged tree created")?;
-
-            // Create commit signature
-            // Priority: MEDIAGIT_AUTHOR_NAME / MEDIAGIT_AUTHOR_EMAIL > config.toml
-            // [author] > $USER > defaults
-            let config = mediagit_config::Config::load(&repo_root)
-                .await
-                .unwrap_or_default();
-            let author_name = std::env::var("MEDIAGIT_AUTHOR_NAME").unwrap_or_else(|_| {
-                config.author.name.clone().unwrap_or_else(|| {
-                    std::env::var("USER").unwrap_or_else(|_| "Unknown".to_string())
-                })
-            });
-            let author_email = std::env::var("MEDIAGIT_AUTHOR_EMAIL").unwrap_or_else(|_| {
-                config
-                    .author
-                    .email
-                    .clone()
-                    .unwrap_or_else(|| "unknown@localhost".to_string())
-            });
-
-            let signature = Signature::now(author_name, author_email);
-
-            let message = self.message.clone().unwrap_or_else(|| {
-                if self.squash {
-                    format!("Squash merge branch '{}' into HEAD", branch)
-                } else {
-                    format!("Merge branch '{}' into HEAD", branch)
-                }
-            });
+            let signature = merge_signature(&repo_root).await;
 
             // Verify both parent commits exist in the object database
             // This prevents creating merge commits with invalid parent references
@@ -457,8 +491,33 @@ impl MergeCmd {
                     &commit_oid.to_string()[..7]
                 );
             }
-        } else if !self.quiet() {
-            println!("{} Merge successful (not committed)", style("✓").green());
+        } else {
+            // BUG-030: write the merged files, stage them and leave MERGE_HEAD,
+            // so `merge --continue` or `merge --abort` can finish it.
+            let tree_oid = result.tree_oid.context("No merged tree created")?;
+            let mut applied = result.clone();
+            applied.clean_tree = Some(Tree::read(&odb, &tree_oid).await?);
+            let ours_commit = Commit::read(&odb, &our_oid).await?;
+            let ours_tree = Tree::read(&odb, &ours_commit.tree).await?;
+            let mut index = Index::load(&repo_root)?;
+            apply_merge_to_workdir(
+                &applied, &ours_tree, &odb, &repo_root, &mut index, their_oid, our_oid,
+            )
+            .await
+            .context("Failed to apply merge to working directory")?;
+            index.save(&repo_root)?;
+            std::fs::write(storage_path.join("MERGE_MSG"), format!("{message}\n"))
+                .context("Failed to write MERGE_MSG")?;
+            if self.squash {
+                // A squash result has one parent: `--continue` must not add theirs.
+                let _ = std::fs::remove_file(storage_path.join("MERGE_HEAD"));
+            }
+            if !self.quiet() {
+                println!(
+                    "{} Merge staged. Run 'merge --continue' to save it or 'merge --abort' to drop it.",
+                    style("✓").green()
+                );
+            }
         }
 
         if output::machine_mode() {
@@ -630,12 +689,7 @@ impl MergeCmd {
             .tree;
         let tree_oid = mediagit_versioning::tree_with_index(&odb, &head_tree, &index).await?;
 
-        // Create merge commit with two parents
-        let signature = mediagit_versioning::Signature {
-            name: "MediaGit User".to_string(),
-            email: "user@mediagit.local".to_string(),
-            timestamp: chrono::Utc::now(),
-        };
+        let signature = merge_signature(&repo_root).await;
 
         let commit = mediagit_versioning::Commit {
             tree: tree_oid,
@@ -702,6 +756,7 @@ pub(crate) async fn stop_for_conflicts(
     repo_root: &std::path::Path,
     our_oid: Oid,
     their_oid: Oid,
+    message: &str,
     verbose: bool,
 ) -> Result<()> {
     // The writer stages the merge as changes on top of ours.
@@ -717,6 +772,12 @@ pub(crate) async fn stop_for_conflicts(
     .context("Failed to apply merge to working directory")?;
 
     index.save(repo_root)?;
+    // BUG-023: the shared writer names every merge "theirs"; name this one.
+    std::fs::write(
+        repo_root.join(".mediagit/MERGE_MSG"),
+        format!("{message}\n"),
+    )
+    .context("Failed to write MERGE_MSG")?;
 
     if output::machine_mode() {
         let mut report = merge_report("merge", "conflict", None);

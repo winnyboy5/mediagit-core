@@ -653,6 +653,10 @@ impl PullCmd {
                             &repo_root,
                             head_oid,
                             remote_oid_parsed,
+                            &format!(
+                                "Merge remote branch into {}",
+                                head.target.as_deref().unwrap_or("HEAD")
+                            ),
                             self.verbose(),
                         )
                         .await;

@@ -24,12 +24,12 @@ conflicts, creates a merge commit with both branches as parents.
 
 | Flag | Description |
 |---|---|
-| `-m`, `--message <MESSAGE>` | Merge commit message (default: `Merge branch '<BRANCH>' into HEAD`, or a squash-merge equivalent with `--squash`) |
+| `-m`, `--message <MESSAGE>` | Merge commit message (default: `Merge branch '<BRANCH>' into <current branch>`, or a squash-merge equivalent with `--squash`) |
 | `--no-ff` | Always create a merge commit, even when a fast-forward is possible |
 | `--ff-only` | Fail instead of merging if a fast-forward isn't possible |
 | `--squash` | Collapse `BRANCH`'s changes into a single-parent commit instead of a merge commit |
 | `-s`, `--strategy <STRATEGY>` | `ours`, `theirs`, or `recursive` (default) |
-| `--no-commit` | Perform the merge but leave the result staged, uncommitted |
+| `--no-commit` | Write and stage the merge but do not commit it; finish with `--continue` or drop it with `--abort` |
 | `--abort` | Discard an in-progress merge and restore the pre-merge working tree |
 | `-q`, `--quiet` | Suppress non-error output |
 | `-v`, `--verbose` | Print conflict type detail |

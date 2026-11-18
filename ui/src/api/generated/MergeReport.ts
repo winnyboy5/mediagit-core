@@ -10,7 +10,7 @@ export type MergeReport = {
  */
 action: string, 
 /**
- * `fast_forward`, `merged`, `squashed`, `not_committed`, `aborted` or
+ * `fast_forward`, `merged`, `squashed`, `not_committed`, `up_to_date`, `aborted` or
  * `conflict` (the command then also exits 1; `conflicts` lists the paths).
  */
 status: string, 

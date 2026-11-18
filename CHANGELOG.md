@@ -139,6 +139,15 @@ changes fix real bugs.
 
 ### Fixed
 
+- **`merge` of a branch with nothing new made an empty merge version.** It now
+  says "Already up to date." and changes nothing, also with `--ff-only`. `--machine`
+  reports status `up_to_date`.
+- **`merge --no-commit` did nothing.** It now writes and stages the merged files and
+  leaves the merge waiting, so `merge --continue` saves it and `merge --abort`
+  drops it.
+- **Merge versions were named "into HEAD" or "Merge branch 'theirs'", with a
+  placeholder author.** They now read "Merge branch 'x' into main" and carry your
+  author name and email, also after `merge --continue`.
 - **Sparse checkout: `add --all` / `add -u` deleted the excluded files from the
   next version.** Files outside the sparse set are absent by design, but the add
   scan staged them as deleted, so the following commit dropped them from history.
