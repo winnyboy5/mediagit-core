@@ -1305,3 +1305,40 @@ async fn grant_rejects_traversal_repo_name() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     assert_eq!(state.grants.get("target-user", ".."), None);
 }
+
+/// BUG-031: a refused 400/409 says why, in a JSON `{code, message}` body.
+#[tokio::test]
+async fn user_admin_refusals_carry_a_reason_code_and_text() {
+    let (state, admin, _write) = test_state_with_tokens().await;
+    let app = create_router(Arc::clone(&state));
+    let good = r#"{"username":"dup","email":"dup@example.com","password":"render farm quiet hum","role":"Read"}"#;
+    // (body, status, code, text the sentence must mention)
+    let table = [
+        (
+            r#"{"username":"weak","email":"weak@example.com","password":"abc","role":"Read"}"#,
+            StatusCode::BAD_REQUEST,
+            "registration_invalid",
+            "at least 8 characters",
+        ),
+        (good, StatusCode::CREATED, "", ""),
+        (good, StatusCode::CONFLICT, "user_exists", "already in use"),
+    ];
+    for (body, status, code, text) in table {
+        let resp = app
+            .clone()
+            .oneshot(post_json("/auth/users", Some(&admin), body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), status, "{body}");
+        if code.is_empty() {
+            continue;
+        }
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["code"], code, "{v}");
+        assert!(v["message"].as_str().unwrap().contains(text), "{v}");
+        assert!(!v.to_string().contains("abc\""), "password echoed: {v}");
+    }
+}

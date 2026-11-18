@@ -447,7 +447,7 @@ pub async fn set_role(
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<SetRoleRequest>,
-) -> Result<Json<SetRoleResponse>, StatusCode> {
+) -> Result<Json<SetRoleResponse>, ApiError> {
     check_permission(
         auth_user.as_deref(),
         "user:manage",
@@ -468,7 +468,10 @@ pub async fn set_role(
             .count_by_role(Role::Admin)
             .await;
         if admin_count <= 1 {
-            return Err(StatusCode::CONFLICT);
+            return Err(ApiError::conflict(
+                "last_admin",
+                "There must be at least one admin. Make someone else an admin first.",
+            ));
         }
     }
 
@@ -500,7 +503,7 @@ pub async fn set_disabled(
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<SetDisabledRequest>,
-) -> Result<Json<SetDisabledResponse>, StatusCode> {
+) -> Result<Json<SetDisabledResponse>, ApiError> {
     check_permission(
         auth_user.as_deref(),
         "user:manage",
@@ -522,7 +525,10 @@ pub async fn set_disabled(
             .count_by_role(Role::Admin)
             .await;
         if admin_count <= 1 {
-            return Err(StatusCode::CONFLICT);
+            return Err(ApiError::conflict(
+                "last_admin",
+                "There must be at least one admin. Make someone else an admin first.",
+            ));
         }
     }
 
@@ -562,11 +568,12 @@ pub async fn change_password(
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<ChangePasswordRequest>,
-) -> Result<Json<ChangePasswordResponse>, StatusCode> {
+) -> Result<Json<ChangePasswordResponse>, ApiError> {
     let caller = auth_user.as_deref().ok_or(StatusCode::UNAUTHORIZED)?;
     let auth_service = state.auth_service().ok_or(StatusCode::NOT_FOUND)?;
 
-    validate_password_strength(&req.new_password).map_err(|_| StatusCode::BAD_REQUEST)?;
+    validate_password_strength(&req.new_password)
+        .map_err(|m| ApiError::bad_request("password_invalid", m))?;
 
     let verified = auth_service
         .credentials_store
@@ -574,7 +581,7 @@ pub async fn change_password(
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
     if !verified {
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(StatusCode::UNAUTHORIZED.into());
     }
 
     auth_service
@@ -600,7 +607,7 @@ pub async fn reset_password(
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<ResetPasswordRequest>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, ApiError> {
     check_permission(
         auth_user.as_deref(),
         "user:manage",
@@ -608,7 +615,8 @@ pub async fn reset_password(
         &state.grants,
         "",
     )?;
-    validate_password_strength(&req.new_password).map_err(|_| StatusCode::BAD_REQUEST)?;
+    validate_password_strength(&req.new_password)
+        .map_err(|m| ApiError::bad_request("password_invalid", m))?;
 
     let auth_service = state.auth_service().ok_or(StatusCode::NOT_FOUND)?;
     auth_service
@@ -634,7 +642,7 @@ pub async fn create_user(
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<CreateUserRequest>,
-) -> Result<(StatusCode, Json<AdminUserInfo>), StatusCode> {
+) -> Result<(StatusCode, Json<AdminUserInfo>), ApiError> {
     check_permission(
         auth_user.as_deref(),
         "user:manage",
@@ -643,7 +651,7 @@ pub async fn create_user(
         "",
     )?;
     validate_registration_input(&req.username, &req.email, &req.password)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+        .map_err(|m| ApiError::bad_request("registration_invalid", m))?;
 
     let auth_service = state.auth_service().ok_or(StatusCode::NOT_FOUND)?;
     let user_id = uuid::Uuid::new_v4().to_string();
@@ -651,7 +659,12 @@ pub async fn create_user(
         .credentials_store
         .create_user_with_role(user_id, req.username, req.email, &req.password, req.role)
         .await
-        .map_err(|_| StatusCode::CONFLICT)?;
+        .map_err(|_| {
+            ApiError::conflict(
+                "user_exists",
+                "That username or email is already in use. Choose another.",
+            )
+        })?;
 
     Ok((StatusCode::CREATED, Json(AdminUserInfo::from(creds.user))))
 }

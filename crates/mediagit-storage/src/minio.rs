@@ -464,6 +464,18 @@ impl MinIOBackend {
             if not_found {
                 return Err(crate::StorageError::BucketNotFound(config.bucket.clone()).into());
             }
+            // HEAD has no body, so the SDK reports a refused key only as
+            // "unhandled error". The status is the only signal.
+            if matches!(
+                head_err.raw_response().map(|r| r.status().as_u16()),
+                Some(401 | 403)
+            ) {
+                return Err(crate::StorageError::PermissionDenied(format!(
+                    "the storage server refused the keys for bucket '{}'",
+                    config.bucket
+                ))
+                .into());
+            }
             return Err(head_err)
                 .context(format!("Failed to access MinIO bucket: {}", config.bucket));
         }

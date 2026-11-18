@@ -265,3 +265,97 @@ fn storage_test_refuses_missing_bucket_without_creating_it() {
         "bucket was created by the first probe"
     );
 }
+
+fn s3_to(endpoint: &str) -> StorageConfig {
+    StorageConfig::S3(mediagit_config::S3Storage {
+        bucket: "media".into(),
+        region: "us-east-1".into(),
+        endpoint: Some(endpoint.into()),
+        access_key_id: Some(ACCESS.into()),
+        secret_access_key: Some(SECRET.into()),
+        prefix: String::new(),
+    })
+}
+
+/// BUG-044: each way a connection can fail has its own sentence, quickly.
+#[tokio::test]
+async fn probe_names_the_cause_of_a_dead_endpoint() {
+    // Nothing listens on port 1.
+    let started = std::time::Instant::now();
+    let e = mediagit_server::handlers::probe_storage(&s3_to("http://127.0.0.1:1"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("Nothing is listening at 127.0.0.1:1"), "{e}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    // A name that cannot exist (RFC 6761 .invalid).
+    let e = mediagit_server::handlers::probe_storage(&s3_to("http://no-such-host.invalid:9000"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("Cannot find or reach no-such-host.invalid:9000"),
+        "{e}"
+    );
+    assert!(!e.contains(SECRET) && !e.contains(ACCESS), "{e}");
+}
+
+/// BUG-044: a server that answers 403 means the keys were refused.
+#[tokio::test]
+async fn probe_says_when_the_keys_are_refused() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut s, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf).await;
+                let _ = s
+                    .write_all(
+                        b"HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                    )
+                    .await;
+            });
+        }
+    });
+    let e = mediagit_server::handlers::probe_storage(&s3_to(&format!("http://{addr}")))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("refused the access key or secret key"), "{e}");
+    assert!(!e.contains(SECRET) && !e.contains(ACCESS), "{e}");
+}
+
+/// IMP-101: a successful test leaves nothing behind, in particular no LAYOUT.
+#[tokio::test]
+async fn probe_leaves_no_layout_object_behind() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = tmp.path().join("bucket");
+    mediagit_server::handlers::probe_storage(&StorageConfig::FileSystem(FileSystemStorage {
+        base_path: store.to_string_lossy().into_owned(),
+        ..Default::default()
+    }))
+    .await
+    .unwrap();
+    fn files(dir: &std::path::Path, out: &mut Vec<String>) {
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                files(&p, out);
+            } else {
+                out.push(p.to_string_lossy().into_owned());
+            }
+        }
+    }
+    let mut all = Vec::new();
+    files(&store, &mut all);
+    assert!(all.is_empty(), "left behind: {all:?}");
+}

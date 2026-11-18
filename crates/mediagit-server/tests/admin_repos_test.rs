@@ -481,3 +481,53 @@ async fn served_repo_with_missing_bucket_is_503_not_404() {
     let (s, _) = call(&fx, req("GET", "/gone/info/refs", Some(&fx.admin), None)).await;
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
 }
+
+/// BUG-031: refusals of repo create/delete say why, as `{code, message}`.
+#[tokio::test]
+async fn repo_admin_refusals_carry_a_reason_code_and_text() {
+    let fx = fixture().await;
+    create(&fx, "studio").await;
+    let heads = fx.repos_dir.join("studio/.mediagit/refs/heads");
+    std::fs::create_dir_all(&heads).unwrap();
+    std::fs::write(heads.join("main"), "0".repeat(64)).unwrap();
+    let post = |name: &str| {
+        req(
+            "POST",
+            "/admin/repos",
+            Some(&fx.admin),
+            Some(&format!(r#"{{"name":"{name}"}}"#)),
+        )
+    };
+    // (request, status, code)
+    let table = [
+        (post("CON"), StatusCode::BAD_REQUEST, "repo_name_invalid"),
+        (post("film."), StatusCode::BAD_REQUEST, "repo_name_invalid"),
+        (post("studio"), StatusCode::CONFLICT, "repo_exists"),
+        (
+            req("DELETE", "/admin/repos/studio", Some(&fx.admin), None),
+            StatusCode::BAD_REQUEST,
+            "confirm_mismatch",
+        ),
+        (
+            req(
+                "DELETE",
+                "/admin/repos/studio?confirm=studio",
+                Some(&fx.admin),
+                None,
+            ),
+            StatusCode::CONFLICT,
+            "repo_not_empty",
+        ),
+    ];
+    for (r, status, code) in table {
+        let uri = r.uri().to_string();
+        let (s, body) = call(&fx, r).await;
+        assert_eq!(s, status, "{uri}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["code"], code, "{uri}: {v}");
+        assert!(v["message"].as_str().unwrap().ends_with('.'), "{v}");
+    }
+    // A bare status (no reason to give) stays a bare status.
+    let (s, body) = call(&fx, req("GET", "/admin/repos", None, None)).await;
+    assert_eq!((s, body.as_str()), (StatusCode::UNAUTHORIZED, ""));
+}

@@ -92,7 +92,7 @@ fn is_windows_device_name(name: &str) -> bool {
             && matches!(stem.as_bytes()[3], b'1'..=b'9'))
 }
 
-fn valid_admin_repo_name(name: &str) -> Result<(), StatusCode> {
+fn valid_admin_repo_name(name: &str) -> Result<(), ApiError> {
     let bad = name.is_empty()
         || name.contains('/')
         || name.starts_with('.')
@@ -101,7 +101,10 @@ fn valid_admin_repo_name(name: &str) -> Result<(), StatusCode> {
         || crate::security::validate_repo_name(name).is_err();
     if bad {
         tracing::warn!(repo = %name, "repo admin refused: invalid repository name");
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(ApiError::bad_request(
+            "repo_name_invalid",
+            "Repository names cannot be empty, contain slashes, start with a dot, end in a dot or a space, or be a reserved name like CON.",
+        ));
     }
     Ok(())
 }
@@ -205,7 +208,7 @@ pub async fn create_repo(
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
     Json(req): Json<CreateRepoRequest>,
-) -> Result<(StatusCode, Json<AdminRepoInfo>), StatusCode> {
+) -> Result<(StatusCode, Json<AdminRepoInfo>), ApiError> {
     let who = admin_gate(&state, auth_user.as_deref())?;
     valid_admin_repo_name(&req.name)?;
 
@@ -217,9 +220,12 @@ pub async fn create_repo(
     match tokio::fs::create_dir(&repo_path).await {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(StatusCode::CONFLICT);
+            return Err(ApiError::conflict(
+                "repo_exists",
+                "A repository with that name already exists. Choose another name.",
+            ));
         }
-        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR.into()),
     }
     let init = async {
         tokio::fs::create_dir_all(repo_path.join(".mediagit"))
@@ -245,7 +251,7 @@ pub async fn create_repo(
     if let Err(code) = init {
         // Do not leave a half-made repo that would 409 every retry.
         let _ = tokio::fs::remove_dir_all(&repo_path).await;
-        return Err(code);
+        return Err(code.into());
     }
     tracing::info!(admin = %who, repo = %req.name, "audit: repository created");
     let name = req.name.clone();
@@ -272,15 +278,18 @@ pub async fn delete_repo(
     Query(params): Query<DeleteRepoParams>,
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
-) -> Result<Json<DeleteRepoResult>, StatusCode> {
+) -> Result<Json<DeleteRepoResult>, ApiError> {
     let who = admin_gate(&state, auth_user.as_deref())?;
     valid_admin_repo_name(&name)?;
     if params.confirm.as_deref() != Some(name.as_str()) {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(ApiError::bad_request(
+            "confirm_mismatch",
+            "Type the repository name to confirm deleting it.",
+        ));
     }
     let repo_path = state.repos_dir.join(&name);
     if !repo_path.is_dir() {
-        return Err(StatusCode::NOT_FOUND);
+        return Err(StatusCode::NOT_FOUND.into());
     }
 
     // Active transfers: never overridable by force.
@@ -293,7 +302,10 @@ pub async fn delete_repo(
         .is_some_and(|s| !s.is_empty());
     if wants || unverified {
         tracing::warn!(admin = %who, repo = %name, "audit: repo delete refused: active transfers");
-        return Err(StatusCode::CONFLICT);
+        return Err(ApiError::conflict(
+            "repo_busy",
+            "People are sending or downloading this repository right now. Try again when they finish.",
+        ));
     }
 
     if !params.force {
@@ -303,7 +315,10 @@ pub async fn delete_repo(
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         if has_refs || !locks.is_empty() {
-            return Err(StatusCode::CONFLICT);
+            return Err(ApiError::conflict(
+                "repo_not_empty",
+                "This repository holds versions or locked files. Delete it anyway to remove them for good.",
+            ));
         }
     }
 
@@ -336,11 +351,11 @@ pub async fn list_repo_grants(
     Path(name): Path<String>,
     State(state): State<Arc<AppState>>,
     auth_user: Option<Extension<AuthUser>>,
-) -> Result<Json<Vec<RepoGrantInfo>>, StatusCode> {
+) -> Result<Json<Vec<RepoGrantInfo>>, ApiError> {
     admin_gate(&state, auth_user.as_deref())?;
     valid_admin_repo_name(&name)?;
     if !state.repos_dir.join(&name).is_dir() {
-        return Err(StatusCode::NOT_FOUND);
+        return Err(StatusCode::NOT_FOUND.into());
     }
     let mut grants = state.grants.list_for_repo(&name);
     grants.sort_by(|a, b| a.0.cmp(&b.0));
