@@ -63,7 +63,7 @@ mediagit --version
 ## Alternative: x64 Binary on ARM64 Windows
 
 Windows ARM64 supports running x64 binaries via emulation. You can download the standard
-`mediagit-0.7.0-rc.1-x86_64-windows.zip` from the [Releases page](https://github.com/winnyboy5/mediagit-core/releases)
+`mediagit-0.8.0-rc.1-x86_64-windows.zip` from the [Releases page](https://github.com/winnyboy5/mediagit-core/releases)
 and run it directly. Performance will be lower than native, but it is fully functional.
 
 ## Tracking Issue

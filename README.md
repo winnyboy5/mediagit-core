@@ -9,7 +9,7 @@
 
 ## 🎯 Status
 
-**Version**: v0.7.0-rc.1 (gc data-safety fixes for concurrent push and add, interrupted-pull recovery, a faster `status`, cherry-pick/revert/rebase empty-commit fixes, Windows fixes; see [CHANGELOG](CHANGELOG.md)). Previous release: v0.6.0-rc.1.
+**Version**: v0.8.0-rc.1 in development (not yet tagged or GA-validated; the changes since v0.7.0-rc.1 are listed under Unreleased in the [CHANGELOG](CHANGELOG.md)). Latest tagged release: v0.7.0-rc.1 (gc data-safety fixes for concurrent push and add, interrupted-pull recovery, a faster `status`, cherry-pick/revert/rebase empty-commit fixes, Windows fixes; see [CHANGELOG](CHANGELOG.md)). Previous release: v0.6.0-rc.1.
 **Status**: 🚧 **RELEASE CANDIDATE**
 **Features**: 100% complete (all P0–P3 items from the rc.3 feature-completeness sprint implemented — a closed batch, distinct from the forward-looking backlog in [FUTURE_TODOS.md](FUTURE_TODOS.md), which reuses the same P0–P3 labels as effort/impact tiers for planned work)
 **Last Validated**: November 3, 2026 (v0.7.0-rc.1) — SCALE QA campaign `20261103-ga-070rc1-9`, **292 gates: 291 pass, 0 failures, 1 skip**, across MinIO, AWS S3, Azure Blob, GCS and local. The campaign before it, `20261103-ga-070rc1-8`, passed every gate except the 16-clone MinIO concurrency drill, where every clone timed out while the test machine was short of memory; phase `10_scale` was then rerun on its own and passed 34 / 34. The skip is `A8-disk-full`, which needs an elevated shell to attach a size-capped volume. Previous release v0.6.0-rc.1 was validated on October 23, 2026 by campaigns `ga-060rc1-1` and `ga-060rc1-2` (279 gates, 0 failures, 1 skip).
@@ -156,19 +156,19 @@ curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/instal
 
 **Linux x86_64 — manual:**
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.7.0-rc.1/mediagit-0.7.0-rc.1-x86_64-linux.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.8.0-rc.1/mediagit-0.8.0-rc.1-x86_64-linux.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 **macOS Apple Silicon — manual:**
 ```bash
-curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.7.0-rc.1/mediagit-0.7.0-rc.1-aarch64-macos.tar.gz \
+curl -fsSL https://github.com/winnyboy5/mediagit-core/releases/download/v0.8.0-rc.1/mediagit-0.8.0-rc.1-aarch64-macos.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
 **Windows x86_64 (PowerShell):**
 ```powershell
-Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.7.0-rc.1/mediagit-0.7.0-rc.1-x86_64-windows.zip" -OutFile mediagit.zip
+Invoke-WebRequest -Uri "https://github.com/winnyboy5/mediagit-core/releases/download/v0.8.0-rc.1/mediagit-0.8.0-rc.1-x86_64-windows.zip" -OutFile mediagit.zip
 Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 # Add to PATH:
 [Environment]::SetEnvironmentVariable("Path", "$env:Path;$env:LOCALAPPDATA\MediaGit\bin", "User")
@@ -177,8 +177,8 @@ Expand-Archive mediagit.zip -DestinationPath "$env:LOCALAPPDATA\MediaGit\bin"
 #### Docker
 
 ```bash
-docker pull ghcr.io/winnyboy5/mediagit-core:0.7.0-rc.1
-docker run --rm ghcr.io/winnyboy5/mediagit-core:0.7.0-rc.1 mediagit --version
+docker pull ghcr.io/winnyboy5/mediagit-core:0.8.0-rc.1
+docker run --rm ghcr.io/winnyboy5/mediagit-core:0.8.0-rc.1 mediagit --version
 ```
 
 #### From Source
@@ -198,11 +198,11 @@ cargo build --release
 
 | Platform | Archive |
 |----------|---------|
-| Linux x86_64 | `mediagit-0.7.0-rc.1-x86_64-linux.tar.gz` |
-| Linux ARM64 | `mediagit-0.7.0-rc.1-aarch64-linux.tar.gz` |
-| macOS Intel | `mediagit-0.7.0-rc.1-x86_64-macos.tar.gz` |
-| macOS Apple Silicon | `mediagit-0.7.0-rc.1-aarch64-macos.tar.gz` |
-| Windows x86_64 | `mediagit-0.7.0-rc.1-x86_64-windows.zip` |
+| Linux x86_64 | `mediagit-0.8.0-rc.1-x86_64-linux.tar.gz` |
+| Linux ARM64 | `mediagit-0.8.0-rc.1-aarch64-linux.tar.gz` |
+| macOS Intel | `mediagit-0.8.0-rc.1-x86_64-macos.tar.gz` |
+| macOS Apple Silicon | `mediagit-0.8.0-rc.1-aarch64-macos.tar.gz` |
+| Windows x86_64 | `mediagit-0.8.0-rc.1-x86_64-windows.zip` |
 
 Each archive includes `mediagit` (CLI) and `mediagit-server` binaries, plus a `.sha256` checksum file.
 
@@ -850,7 +850,7 @@ aws iam get-user-policy --user-name mediagit-user --policy-name MediaGitS3Policy
 ```bash
 # The /releases/latest API returns 404 when only pre-releases exist.
 # Pass the version explicitly:
-VERSION=0.7.0-rc.1 curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
+VERSION=0.8.0-rc.1 curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 
 # Or on Windows PowerShell:
 iwr -UseBasicParsing https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.ps1 | iex
@@ -929,4 +929,4 @@ Special thanks to:
 
 **Made with 🦀 and ❤️ by Aswin Krishnamoorthy**
 
-**Status**: Release Candidate | **Version**: v0.7.0-rc.1 | **Updated**: November 3, 2026 | **Cloud-Validated**: QA campaign `20261103-ga-070rc1-9` 291 pass, 0 failures, 1 skip; `20261103-ga-070rc1-8` plus a `10_scale` rerun (34 / 34) ✅
+**Status**: Release Candidate | **Version**: v0.8.0-rc.1 (in development; latest tag v0.7.0-rc.1) | **Updated**: November 19, 2026 | **Cloud-Validated**: QA campaign `20261103-ga-070rc1-9` 291 pass, 0 failures, 1 skip; `20261103-ga-070rc1-8` plus a `10_scale` rerun (34 / 34) ✅
