@@ -246,7 +246,7 @@ pub struct DeleteOpts {
     #[arg(value_name = "BRANCHES", required = true)]
     pub branches: Vec<String>,
 
-    /// Force delete (ignore merge status)
+    /// Force delete (ignore merge status; does not override branch protection)
     #[arg(short = 'D', long)]
     pub force: bool,
 
@@ -1076,12 +1076,11 @@ impl BranchCmd {
             // Check branch protection
             if let Some(protection) = config.get_branch_protection(branch_name)
                 && protection.prevent_deletion
-                && !opts.force
             {
                 problems.push(format!("branch '{}' is protected", branch_name));
                 if !opts.quiet {
                     output::warning(&format!(
-                        "Branch '{}' is protected (use --force to override)",
+                        "Branch '{}' is protected (unprotect it first; -D does not override protection)",
                         branch_name
                     ));
                 }

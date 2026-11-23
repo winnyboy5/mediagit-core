@@ -636,3 +636,55 @@ fn bug022_branch_and_tag_refuse_windows_device_names() {
         .failure()
         .stderr(predicate::str::contains("reserved Windows device name"));
 }
+
+#[test]
+fn qa_b01_force_delete_does_not_override_protection() {
+    let temp_dir = TempDir::new().unwrap();
+    let d = temp_dir.path();
+    init_repo(d);
+    add_and_commit(d, "f.txt", "x", "one");
+    mediagit()
+        .args(["branch", "create", "keep"])
+        .current_dir(d)
+        .assert()
+        .success();
+    mediagit()
+        .args(["branch", "protect", "keep"])
+        .current_dir(d)
+        .assert()
+        .success();
+    let out = mediagit()
+        .args(["branch", "delete", "keep", "-D"])
+        .current_dir(d)
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("protected"), "{text}");
+    let out = mediagit()
+        .args(["branch", "list"])
+        .current_dir(d)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains("keep"));
+    mediagit()
+        .args(["log", "keep"])
+        .current_dir(d)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("one"));
+    // unprotect then -D works
+    mediagit()
+        .args(["branch", "protect", "keep", "--unprotect"])
+        .current_dir(d)
+        .assert()
+        .success();
+    mediagit()
+        .args(["branch", "delete", "keep", "-D"])
+        .current_dir(d)
+        .assert()
+        .success();
+}
