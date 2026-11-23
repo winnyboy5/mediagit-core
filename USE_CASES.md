@@ -196,8 +196,7 @@ mediagit remote add origin http://host:3000/training
 mediagit push -u origin main --tags
 mediagit clone http://host:3000/training training-clone
 
-# maintenance: repack, aggressive gc, full integrity check
-mediagit gc --repack -y
+# maintenance: repack and full integrity check
 mediagit gc --repack -y
 mediagit fsck --full
 mediagit stats --json

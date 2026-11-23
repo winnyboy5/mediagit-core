@@ -33,7 +33,7 @@ MediaGit uses **zstd dictionary compression** for chunk-level delta encoding:
 1. Compare new chunk with similar base chunk (via `SimilarityDetector`)
 2. Use base chunk as a zstd dictionary: `zstd::bulk::Compressor::with_dictionary(19, base)`
 3. Compress target chunk against the dictionary
-4. Store as wire format v2: `[0x5A, 0x44]` magic + varint(base_size) + varint(result_size) + zstd bytes
+4. Store as `[0x5A, 0x44]` magic + varint(base_size) + varint(result_size) + zstd bytes
 
 The base chunk is hash-checked before a delta is encoded against it.
 
@@ -236,21 +236,7 @@ Choose base to minimize average reconstruction time:
 ### Safety
 `mediagit gc` aborts without deleting anything if a reachable chunk manifest is unreadable or has vanished. It keeps every base on the delta chain of every reachable chunk (cycle-guarded).
 
-### Recompression
-`mediagit gc` optimizes delta chains:
-1. Identify long chains (depth >10)
-2. Create new base from most recent version
-3. Regenerate deltas from new base
-4. Delete old chain
-
-### Example
-```
-Before GC:
-Base (v1) → Δ2 → Δ3 → ... → Δ12 (depth 11)
-
-After GC:
-Base (v12) → Δ1 → ... → Δ5 (depth 5, rebalanced)
-```
+gc does not rebuild delta chains. The depth limit is applied when a chunk is written, so no chain grows past 10.
 
 ## Storage Savings
 

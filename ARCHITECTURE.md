@@ -11,7 +11,7 @@
 
 ```mermaid
 graph TD
-    subgraph CLI["mediagit-cli (35 commands)"]
+    subgraph CLI["mediagit-cli (36 commands)"]
         ADD["add"]
         COMMIT["commit"]
         PUSH["push"]
@@ -58,7 +58,7 @@ graph TD
 
 | Crate | Role | Key Modules |
 |-------|------|-------------|
-| **mediagit-cli** | CLI binary (35 commands) | `commands/`, main entry |
+| **mediagit-cli** | CLI binary (36 commands) | `commands/`, main entry |
 | **mediagit-versioning** | Core VCS engine | `odb/` & `chunking/` (submodules), index, refs, tree, commit, delta, similarity, cloud packs (`streaming_pack`, `streaming_index`, `pack`, `transaction`) |
 | **mediagit-compression** | Smart compression | Zstd, Brotli, Zlib, Store; `SmartCompressor` with type+size awareness |
 | **mediagit-media** | Media parsing & merging | Image, PSD, Video, Audio, 3D, VFX parsers & merge strategies |
@@ -103,7 +103,7 @@ graph TD
 
 ---
 
-## CLI Commands (35)
+## CLI Commands (36)
 
 ### Core Workflow
 | Command | Description |
@@ -260,13 +260,13 @@ graph TD
     B --> C{"Already compressed?"}
     C -->|"JPEG/PNG/GIF/WebP/AVIF/HEIC<br/>MP4/MOV/AVI/MKV/WebM<br/>MP3/AAC/OGG/Opus<br/>ZIP/GZ/7Z/RAR<br/>InDesign<br/>DOCX/XLSX/PPTX"| D["💾 Store"]
     C -->|No| E{"File category?"}
-    E -->|"TIFF/BMP/RAW/EXR/HDR<br/>WAV/AIFF/FLAC/ALAC"| F["🗜️ Zstd Best"]
+    E -->|"TIFF/BMP/RAW/EXR/HDR<br/>WAV/AIFF"| F["🗜️ Zstd Best"]
     E -->|"Text/Code/JSON/XML<br/>YAML/TOML/CSV"| G{"Size > 500MB?"}
     G -->|No| H["📦 Brotli Default"]
     G -->|Yes| I["🗜️ Zstd Default<br/>(10x faster)"]
     E -->|"ML Data/Weights"| J["🗜️ Zstd Fast"]
     E -->|"ML Checkpoints"| K["🗜️ Zstd Fast"]
-    E -->|"ML Inference/Deploy"| L["🗜️ Zstd Default"]
+    E -->|"ML Inference/Deploy<br/>FLAC/ALAC"| L["🗜️ Zstd Default"]
     E -->|"Creative Projects<br/>(PSD/AI/AEP/Blender/...)"| M["🗜️ Zstd Default"]
     E -->|"Database (SQLite)"| N["🗜️ Zstd Default"]
     E -->|"TAR (uncompressed)"| O["🗜️ Zstd Default"]
@@ -307,7 +307,8 @@ graph TD
 | **Image (uncompressed)** | TIFF, BMP, RAW, EXR, HDR | **Zstd Best** |
 | **Video** | MP4, MOV, AVI, MKV, WebM, FLV, WMV, MPG | **Store** |
 | **Audio (compressed)** | MP3, AAC, OGG, Opus | **Store** |
-| **Audio (uncompressed)** | FLAC, WAV, AIFF, ALAC | **Zstd Best** |
+| **Audio (uncompressed)** | WAV, AIFF | **Zstd Best** |
+| **Audio (lossless-compressed)** | FLAC, ALAC | **Zstd Default** |
 | **Text/Code** | 30+ extensions (rs, py, js, md, etc.) | **Brotli Default** (Zstd if >500MB) |
 | **Archives** | ZIP, GZ, 7Z, RAR, Parquet | **Store** |
 | **TAR** | Uncompressed containers | **Zstd Default** |
@@ -444,7 +445,7 @@ MediaGit uses the **`fastcdc` crate v4.0** (specifically `fastcdc::v2020`, the 2
 
 ```mermaid
 graph LR
-    subgraph InMemory["In-Memory Path (chunk_rolling)"]
+    subgraph InMemory["In-Memory Path (chunk_fastcdc)"]
         A1["data: &[u8]"] --> B1["FastCDC::new(data,<br/>min, avg, max)"]
         B1 --> C1["Iterator yields<br/>ChunkData entries"]
         C1 --> D1["Oid::hash(chunk)"]
@@ -520,14 +521,14 @@ The `get_chunk_params(file_size)` function selects FastCDC parameters:
 
 ## Delta Compression
 
-**Crate**: `mediagit-versioning` · **Key files**: `delta.rs` (424 lines), `similarity.rs` (573 lines)
+**Crate**: `mediagit-versioning` · **Key files**: `delta.rs` (680 lines), `similarity.rs` (573 lines)
 
 ### Delta Encoder — Zstd Dictionary Mode
 - **Algorithm**: Zstd dictionary compression — base chunk serves as the raw dictionary
 - **Encoder**: `zstd::bulk::Compressor::with_dictionary(level, base_bytes)`, level defaults to `19` and is tunable via `MEDIAGIT_DELTA_LEVEL` (1–22; out-of-range values warn and fall back to the default)
 - **Decoder**: `zstd::bulk::Decompressor::with_dictionary(base_bytes)`
 - **Wire format**: `[0x5A, 0x44]` magic ("ZD") + varint(base_size) + varint(result_size) + zstd-compressed bytes
-- **Max chain depth**: 10 (then re-stored as full object)
+- **Max chain depth**: 10 (the next delta is taken against the chain's root, restarting at depth 1)
 - **Base check**: the base chunk is hash-checked before a delta is encoded against it
 - **Tensor XOR-planes mode ("XP", experimental, opt-in)**: with `MEDIAGIT_TENSOR_DELTA=1` (since v0.6.0-rc.1), each `.safetensors` data chunk is stored as the XOR of its float byte-planes against the previous version's chunk at the same offset (magic `[0x58, 0x50]`). If XP does not win it falls back to the ZD delta, then to the full chunk. Measured: -12% to -49% stored, add 4-10x faster, add peak RSS about 35% lower; checkout of the newest version up to about 1 s slower on deep chains. Binaries older than v0.6.0-rc.1 stop with an error on an XP delta; they never misread it.
 - **Note**: Delta bytes are already zstd-compressed, so outer `compress_typed()` in ODB falls back to Store
@@ -604,13 +605,13 @@ graph TD
 
 ---
 
-## Media Merge Strategies
+## Media-Aware Overlap Analysis (not used by `merge`)
 
 **Crate**: `mediagit-media` · **Key file**: `strategy.rs` (676 lines)
 
 ```mermaid
 graph TD
-    A["3-way merge requested<br/>(base, ours, theirs)"] --> B["MediaType::from_extension()"]
+    A["Overlap analysis requested<br/>(base, ours, theirs)"] --> B["MediaType::from_extension()"]
     B --> C{"Media type?"}
     C -->|Image| D["ImageStrategy<br/>Perceptual hash comparison"]
     C -->|PSD| E["PsdStrategy<br/>Layer-based analysis"]
@@ -621,15 +622,15 @@ graph TD
     C -->|Unknown| J["Generic<br/>→ Always conflict"]
 
     D --> K{"≥95% similar?"}
-    K -->|Yes| L["✅ Auto-merge<br/>(merge metadata)"]
+    K -->|Yes| L["Edits do not overlap<br/>(still reported as a conflict)"]
     K -->|No| M["⚠️ Conflict"]
 
     E --> N{"Non-overlapping<br/>layer changes?"}
-    N -->|Yes| O["✅ Auto-merge layers"]
+    N -->|Yes| O["Edits do not overlap<br/>(still reported as a conflict)"]
     N -->|No| P["⚠️ Layer conflict"]
 
     F --> Q{"Non-overlapping<br/>timeline edits?"}
-    Q -->|Yes| R["✅ Auto-merge timeline"]
+    Q -->|Yes| R["Edits do not overlap<br/>(still reported as a conflict)"]
     Q -->|No| S["⚠️ Timeline conflict"]
 
     style L fill:#27AE60,color:#fff
@@ -641,14 +642,14 @@ graph TD
     style J fill:#e74c3c,color:#fff
 ```
 
-Six format-specific merge strategies with automatic conflict detection:
+`mediagit-media` can parse PSD, video, audio and 3D files and report whether two sets of edits overlap. `mediagit merge` does not use it: two edits to the same binary file are a conflict, and one side is checked out for you to resolve. See Media-Aware Merging in the book.
 
-| Strategy | Formats | Auto-Merge Logic |
+| Strategy | Formats | What the analysis checks |
 |----------|---------|------------------|
 | **Image** | JPEG, PNG, TIFF, WebP, RAW, HEIC, EXR, AVIF | Perceptual hashing (95% threshold) + metadata merge (EXIF, IPTC, XMP) |
-| **PSD** | PSD, PSB, XCF, KRA, ORA | Layer-based: auto-merge non-overlapping layer changes |
-| **Video** | MP4, MOV, AVI, MKV, WebM, MXF, R3D, BRAW | Timeline-based: auto-merge non-overlapping segments |
-| **Audio** | MP3, WAV, FLAC, AAC, OGG, MIDI | Track-based: auto-merge non-overlapping track changes |
+| **PSD** | PSD, PSB, XCF, KRA, ORA | Layer-based: detects non-overlapping layer changes (does not write a merged file) |
+| **Video** | MP4, MOV, AVI, MKV, WebM, MXF, R3D, BRAW | Timeline-based: detects non-overlapping segments (does not write a merged file) |
+| **Audio** | MP3, WAV, FLAC, AAC, OGG, MIDI | Track-based: detects non-overlapping track changes (does not write a merged file) |
 | **3D Model** | OBJ, FBX, glTF/GLB, STL, USD, Alembic, Blender | Structure analysis (always flags for manual review) |
 | **VFX** | Adobe suite, DaVinci, Nuke, Figma, Sketch | Composition analysis (always flags for manual review) |
 | **Generic** | Unknown formats | Always creates conflict |
@@ -657,7 +658,7 @@ Six format-specific merge strategies with automatic conflict detection:
 
 ## Staging & Index
 
-**Crate**: `mediagit-versioning` · **Key file**: `index.rs` (349 lines)
+**Crate**: `mediagit-versioning` · **Key file**: `index.rs` (425 lines)
 
 ### IndexEntry Fields
 ```rust
@@ -675,7 +676,7 @@ The `add` command uses a **size + mtime** stat-cache to skip unchanged files:
 1. Build `HashMap<PathBuf, (size, mtime)>` from the current index
 2. Compare file's current metadata against the index entry
 3. If both match → skip (no re-hashing or re-chunking needed)
-4. Backward-compatible: `mtime` defaults to `None` via `#[serde(default)]`
+4. `mtime` is optional in the index entry
 
 ---
 
@@ -707,7 +708,7 @@ pub trait StorageBackend: Send + Sync + Debug {
     async fn put(&self, key: &str, data: &[u8]) -> Result<()>;
     async fn exists(&self, key: &str) -> Result<bool>;
     async fn delete(&self, key: &str) -> Result<()>;
-    async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>>;
+    async fn list_objects(&self, prefix: &str) -> Result<Vec<String>>;
     // ... additional methods for streaming, size checks, etc.
 }
 ```
@@ -720,7 +721,7 @@ pub trait StorageBackend: Send + Sync + Debug {
 
 **Crate**: `mediagit-server` · **Framework**: Axum · **Port**: Configurable
 
-#### Endpoints (25 repo routes + health + auth)
+#### Endpoints
 
 Handler fn names below are exactly as registered in `mediagit-server/src/lib.rs` (`handlers/` submodule). Routes that bind two methods (`objects/pack`, `chunks/:chunk_id`, `chunk-deltas/:chunk_id`, `manifests/:oid`) are shown as combined GET/PUT (or GET/POST) rows.
 
@@ -748,6 +749,12 @@ Handler fn names below are exactly as registered in `mediagit-server/src/lib.rs`
 | PUT | `/:repo/packs/:pack_id` | `upload_pack_proxy` | Proxy-upload a pack when backend can't sign |
 | POST | `/:repo/packs/presign-download-urls` | `presign_pack_downloads` | Mint presigned GET URLs for pack Range reads |
 | POST | `/:repo/packs/rebuild-index` | `rebuild_pack_index` | Rebuild the server-side pack index |
+| GET / POST | `/:repo/locks` | `list_locks` / `create_lock` | List / create file locks |
+| DELETE | `/:repo/locks/:lock_id` | `delete_lock` | Release a file lock |
+| POST | `/:repo/objects/verify-integrity` | `verify_object_integrity` | Server-side integrity check of stored objects |
+| POST | `/:repo/packs/mpu/start`, `/complete`, `/abort` | `pack_mpu_start` / `pack_mpu_complete` / `pack_mpu_abort` | Presigned multipart upload for packs |
+| PUT / GET | `/:repo/encryption-key` | `put_encryption_key` / `get_encryption_key` | Key escrow (404 when `[encryption]` is off) |
+| POST | `/:repo/packs/batch-get` | `batch_get_pack_chunks` | Fetch many chunks from packs in one request |
 | GET | `/:repo/files/*path` | `download_file_by_path` | Stream file by path from any ref |
 | GET | `/:repo/tree/*path` | `list_tree` | List directory contents as JSON |
 | GET | `/:repo/tree` | `list_tree_root` | List root tree contents |
@@ -884,7 +891,7 @@ flowchart TD
 
 ### Path-Traversal Hardening
 
-`validate_object_key()` (`crates/mediagit-storage/src/lib.rs:662-701`) is the single choke point every `StorageBackend` implementation and wrapper (`NamespacedBackend`, `local::LocalBackend`) must call before turning a caller-supplied key into a filesystem path or remote object key. It rejects absolute paths, Windows drive/UNC prefixes, and `..`/`..\` traversal components (normalizing backslashes first so the check is platform-independent) — without it, a user-controlled chunk/pack id containing `..` could escape the repo's storage root or, once namespaced, escape into another tenant's namespace. Server handlers add a second layer of hex-id guards on untrusted path segments (e.g. `crates/mediagit-server/src/handlers/chunks.rs:646,656` reject any `chunk_id`/delta-base header that isn't exactly 64 hex characters) before those ids ever reach the storage layer.
+`validate_object_key()` (`crates/mediagit-storage/src/lib.rs:798-838`) is the single choke point every `StorageBackend` implementation and wrapper (`NamespacedBackend`, `local::LocalBackend`) must call before turning a caller-supplied key into a filesystem path or remote object key. It rejects absolute paths, Windows drive/UNC prefixes, and `..`/`..\` traversal components (normalizing backslashes first so the check is platform-independent) — without it, a user-controlled chunk/pack id containing `..` could escape the repo's storage root or, once namespaced, escape into another tenant's namespace. Server handlers add a second layer of hex-id guards on untrusted path segments (e.g. `crates/mediagit-server/src/handlers/chunks.rs:1073,1083` reject any `chunk_id`/delta-base header that isn't exactly 64 hex characters) before those ids ever reach the storage layer.
 
 ---
 
@@ -896,7 +903,7 @@ flowchart TD
 - **Roles**: `Read`, `Write`, `Admin` (wire form capitalized, e.g. `"Write"`). `Read` = `repo:read`; `Write` = `repo:read` + `repo:write` (self-registration default); `Admin` = all of the above + `repo:admin` + `user:manage` (the marker permission for admin-only routes).
 - **Tokens**: JWT access tokens (HS256, 24h TTL, self-contained claims — a password change does **not** revoke existing tokens) + refresh tokens (30d); API keys (64 hex chars, id `ak_<32hex>`) as a long-lived alternative for machine clients, created/listed/revoked via `mediagit auth key`.
 - **Persistence**: users, API keys, and per-repo grants are persisted to `users.jsonl` / `api_keys.jsonl` / `grants.jsonl` under `auth_store_dir`. Writes are atomic (tmp file + rename); each file starts with a `{"v":1}` version header, and a corrupt file is a **hard load-time error** — never silently dropped or reset.
-- **Per-repo grants**: `GrantLevel` is ordered `Read < Write < Admin`. `check_permission()` (`crates/mediagit-server/src/handlers/mod.rs:67-141`) checks in order:
+- **Per-repo grants**: `GrantLevel` is ordered `Read < Write < Admin`. `check_permission()` (`crates/mediagit-server/src/handlers/mod.rs:69-146`) checks in order:
   1. Auth disabled → allow everything.
   2. No authenticated user → reject.
   3. Admin role (flat `user:manage` permission) → always allowed, regardless of grants.
@@ -1269,8 +1276,8 @@ graph LR
   CLI as an `externalBin` sidecar and is merged only for installer builds
   (`--config`), so `cargo check` and tests need no staged binary. The
   installed sidecar lands beside the app as `mediagit.exe`, where the
-  engine already looks. `.github/workflows/desktop-release.yml` builds the NSIS
-  installer on `desktop-v*` tags. Code signing is not set up yet.
+  engine already looks. `.github/workflows/desktop-release.yml` builds the unsigned
+  installers (NSIS, dmg, deb, AppImage) on `desktop-v*` tags. Code signing is not set up yet.
 - **Why a subprocess, not an in-process ops crate.**
   - One source of truth: the app runs the same binary the CLI test suites and
     QA campaigns exercise, so GUI and CLI cannot drift.
@@ -1293,6 +1300,7 @@ graph LR
 - **Release profile**: `opt-level = 3`, LTO, `codegen-units = 1`
 - **Distribution**: cargo-dist (v0.32.0) with GitHub CI
 - **Installers**: Shell, PowerShell, Homebrew, MSI
+- **Desktop app**: separate `desktop-v*` tags, unsigned NSIS, dmg, deb and AppImage bundles (`desktop-release.yml`)
 - **Targets**: x86_64 + aarch64 for Linux and macOS; x86_64 only for Windows (no aarch64-windows target)
 
 ---

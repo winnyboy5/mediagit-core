@@ -26,7 +26,7 @@ Every object (blob, tree, commit) is stored under its BLAKE3 hash:
 
 ## Object Model
 
-MediaGit uses a four-object model inspired by Git:
+MediaGit uses a four-object model (blob, tree, commit, tag) inspired by Git:
 
 ```mermaid
 graph LR
@@ -77,7 +77,11 @@ graph LR
   Add updated PSD with new layers
   ```
 
-### Reference Objects
+### Tag Objects (annotated tags)
+- **Purpose**: Annotated tag: a named pointer to a commit with a message
+
+### References
+Refs are plain files, not objects.
 - **Purpose**: Human-readable names for commits
 - **Types**:
   - `refs/heads/main` → points to latest commit on main branch
@@ -105,7 +109,6 @@ Version 3: project.psd (100 MB) → Stored as delta from v2 (3 MB)
 ### Delta Chain Limits
 - Maximum chain depth: 10 (`MAX_DELTA_DEPTH`)
 - After depth exceeded, next version stored as new base
-- `mediagit gc` optimizes long chains
 
 ## Compression Strategy
 
@@ -136,7 +139,7 @@ MediaGit supports lightweight branches similar to Git:
 ### Branch Storage
 - Branches are just files in `refs/heads/`
 - Each file contains a commit hash (64 hex characters for the 32-byte BLAKE3 OID)
-- Creating a branch = writing a 40-byte file (instant)
+- Creating a branch = writing a 65-byte file (64 hex characters and a newline)
 
 ### Branch Visualization
 ```mermaid
@@ -157,9 +160,8 @@ gitGraph
 ```
 
 ### Branch Protection
-- Branches can be marked as protected
-- Protected branches require merge requests
-- Prevents force-push and deletion
+- Branches can be marked as protected with `mediagit branch protect`
+- A protected branch cannot be deleted with `branch delete` unless `--force` is given
 
 ## Merge Strategies
 

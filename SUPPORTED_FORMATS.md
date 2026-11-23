@@ -17,7 +17,7 @@
 | ✂️ FastCDC | Content-defined chunking (FastCDC v2020 gear hash) |
 | 🎬 Media | Structure-aware media chunking |
 | 📐 Fixed | Fixed 4 MB blocks |
-| 🧩 Merge | Media-aware merge strategy |
+| 🧩 Merge | Media analysis (inspection; merge reports a conflict) |
 
 ---
 
@@ -27,13 +27,13 @@
 graph TD
     A["File Input"] --> B["ObjectType::from_path()"]
     B --> C{"Already compressed?"}
-    C -->|"JPEG/PNG/GIF/WebP/AVIF/HEIC<br/>MP4/MOV/AVI/MKV/WebM/FLV/WMV/MXF<br/>MP3/AAC/OGG/Opus<br/>ZIP/GZ/7Z/RAR<br/>AI/InDesign<br/>DOCX/XLSX/PPTX<br/>Parquet/Arrow/ORC/Avro"| D["💾 Store"]
+    C -->|"JPEG/PNG/GIF/WebP/AVIF/HEIC<br/>MP4/MOV/AVI/MKV/WebM/FLV/WMV/MXF<br/>MP3/AAC/OGG/Opus<br/>ZIP/GZ/7Z/RAR<br/>InDesign<br/>DOCX/XLSX/PPTX<br/>Parquet/Arrow/ORC/Avro"| D["💾 Store"]
     C -->|No| E{"File category?"}
-    E -->|"TIFF/BMP/RAW/EXR/HDR/DPX<br/>WAV/AIFF/FLAC/ALAC<br/>3D (STL/OBJ/PLY/GLB/FBX/DAE)"| F["🗜️ Zstd Best (level 19)"]
+    E -->|"TIFF/BMP/RAW/EXR/HDR/DPX<br/>WAV/AIFF<br/>3D (STL/OBJ/PLY/GLB/FBX/DAE)"| F["🗜️ Zstd Best (level 19)"]
     E -->|"Text/Code ≤500MB"| G["📦 Brotli Default (level 9)"]
     E -->|"Text/Code >500MB"| H["🗜️ Zstd Default (10x faster)"]
     E -->|"ML Data/Weights/Checkpoints"| I["🗜️ Zstd Fast (level 1)"]
-    E -->|"ML Inference/Creative project<br/>PDF/EPS/SVG/Database/TAR"| J["🗜️ Zstd Default (level 3)"]
+    E -->|"ML Inference/Creative project<br/>PDF/EPS/SVG/Database/TAR<br/>FLAC/ALAC"| J["🗜️ Zstd Default (level 3)"]
     E -->|"Git Objects"| K["📋 Zlib Default (level 6)"]
 
     D --> L{"Compressed > Original?"}
@@ -61,12 +61,12 @@ graph TD
 graph TD
     A["File qualified for chunking"] --> B{"Select strategy<br/>by extension"}
     B -->|"MP4/MOV/M4V/M4A/3GP"| C["🎬 Frame-aligned MP4 Chunking<br/>(any file size)"]
-    B -->|"AVI/RIFF/WAV"| D["🎬 RIFF Parsing<br/>(LIST/hdrl/movi)"]
+    B -->|"AVI/RIFF"| D["🎬 RIFF Parsing<br/>(LIST/hdrl/movi)"]
     B -->|"MKV/WebM/MKA"| E["🎬 EBML Parsing<br/>(Segment/Cluster)"]
     B -->|"GLB/glTF"| F["🎬 GLB Parsing<br/>(header/JSON/bin)"]
     B -->|"FBX (binary)"| G["🎬 FBX Node Parsing"]
     B -->|"OBJ/STL/PLY"| H["🎬 Text 3D Parsing<br/>(vertices/faces)"]
-    B -->|"Text/ML/Docs/Design<br/>3D Apps/Audio/MPEG<br/>USD/Alembic/Unknown"| I["✂️ FastCDC v2020<br/>Gear table O(1)/byte"]
+    B -->|"Text/ML/Docs/Design<br/>3D Apps/Audio/WAV/MPEG<br/>USD/Alembic/Unknown"| I["✂️ FastCDC v2020<br/>Gear table O(1)/byte"]
     B -->|"JPEG/PNG/MP3/ZIP<br/>(pre-compressed)"| J["📐 Fixed 4MB blocks"]
 
     I --> K["get_chunk_params(file_size)"]
@@ -105,7 +105,7 @@ MediaGit uses the **`fastcdc` crate v4.0** (`fastcdc::v2020`) for all content-de
 
 | Mode | Rust API | Method | When Used |
 |------|----------|--------|-----------|
-| **In-memory** | `fastcdc::v2020::FastCDC::new(data, min, avg, max)` | `chunk_rolling()` | Default: data already in memory |
+| **In-memory** | `fastcdc::v2020::FastCDC::new(data, min, avg, max)` | `chunk_fastcdc()` | Default: data already in memory |
 | **Streaming** | `fastcdc::v2020::StreamCDC::new(file, min, avg, max)` | `chunk_file_streaming()` | Large files via ODB streaming path |
 
 ### Adaptive chunk parameters
@@ -187,7 +187,7 @@ unchanged portions.
 |--------|-----------|-------------|----------|-------|-------|
 | Photoshop | `.psd`, `.psb` | 🗜️ Zstd Default | ✂️ FastCDC (≥5MB) | ✅ Always | 🧩 PSD (layer-based) |
 
-> **PSD merge**: Auto-merges non-overlapping layer changes. Conflicts flagged when same layer modified by both branches.
+> **PSD merge**: MediaGit can tell whether layer edits overlap, but cannot write a merged PSD. A merge of a file changed on both sides is a conflict; one side is checked out.
 
 ---
 
@@ -215,7 +215,7 @@ unchanged portions.
 | Blackmagic | `.braw` | Video (via MediaType) | 🧩 Video |
 | ARRI | `.ari` | Video (via MediaType) | 🧩 Video |
 
-> **Video merge**: Timeline-based auto-merge for non-overlapping segment edits.
+> **Video merge**: MediaGit can tell whether timeline segment edits overlap, but cannot write a merged video. A merge of a file changed on both sides is a conflict; one side is checked out.
 
 ---
 
@@ -234,10 +234,10 @@ unchanged portions.
 
 | Format | Extensions | Compression | Chunking | Delta | Merge |
 |--------|-----------|-------------|----------|-------|-------|
-| WAV | `.wav` | 🗜️ Zstd Best | 🎬 RIFF parsing (≥10MB) | ✅ Always | 🧩 Audio |
+| WAV | `.wav` | 🗜️ Zstd Best | ✂️ FastCDC (≥10MB) | ✅ Always | 🧩 Audio |
 | AIFF | `.aiff`, `.aif`, `.aifc` | 🗜️ Zstd Best | ✂️ FastCDC (≥10MB) | ✅ Always | 🧩 Audio |
-| FLAC | `.flac` | 🗜️ Zstd Best | ✂️ FastCDC (≥10MB) | ❌ | 🧩 Audio |
-| ALAC | `.alac` | 🗜️ Zstd Best | ✂️ FastCDC (≥10MB) | ❌ | 🧩 Audio |
+| FLAC | `.flac` | 🗜️ Zstd Default | ✂️ FastCDC (≥10MB) | ❌ | 🧩 Audio |
+| ALAC | `.alac` | 🗜️ Zstd Default | ✂️ FastCDC (≥10MB) | ❌ | 🧩 Audio |
 
 ### Additional Audio (via MediaType)
 
@@ -247,7 +247,7 @@ unchanged portions.
 | APE | `.ape` | 🧩 Audio |
 | MIDI | `.mid`, `.midi` | 🧩 Audio |
 
-> **Audio merge**: Track-based auto-merge for non-overlapping track modifications.
+> **Audio merge**: MediaGit can tell whether track edits overlap, but cannot write a merged audio file. A merge of a file changed on both sides is a conflict; one side is checked out.
 
 ---
 
@@ -557,13 +557,13 @@ When file extension is unavailable, the ODB uses magic byte signatures:
 
 ---
 
-## Performance Benchmarks (v0.2.7-beta.1)
+## Performance Benchmarks (deep-test run, 2026-06-02)
 
-> Measured via deep test suite, all `fsck` + F8 compressed-hash integrity verified. Last run: 2026-06-02 (MinIO/AWS/Azure/GCS backends, 614/614 tests passing). Mixed-fixture aggregate savings 26.3–26.5%; compressible formats individually 50–81%. Already-compressed media (JPEG, PNG, MP4, OGG, ZIP) contributes ~0% by design — the aggregate is fixture-mix-weighted.
+> Measured via deep test suite, all `fsck` + F8 compressed-hash integrity verified. Last run: 2026-06-02 (MinIO/AWS/Azure/GCS backends, 614/614 tests passing). Mixed-fixture aggregate savings 26.3–26.5% on the three cloud backends (MinIO measured 8.4% on a cumulative multi-push fixture, so it is not comparable); compressible formats individually 50–81%. Already-compressed media (JPEG, PNG, MP4, OGG, ZIP) contributes ~0% by design — the aggregate is fixture-mix-weighted.
 
 ### Storage Savings
 
-> Mixed-fixture aggregate: **26.3–26.5%** across all backends (614/614 tests, 2026-06-02).
+> Mixed-fixture aggregate: **26.3–26.5%** on AWS S3, Azure Blob and GCS (614/614 tests, 2026-06-02).
 > Already-compressed media (JPEG, PNG, MP4, OGG, ZIP) contributes ~0% by design.
 > Compressible formats individually achieve 50–81%.
 
@@ -583,7 +583,7 @@ When file extension is unavailable, the ODB uses magic byte signatures:
 | Video (compressed) | MP4/MKV/MOV | — | — | ~0% | 1.00x |
 | Archive (compressed) | ZIP (656MB) | 656 MB | 657 MB | ~0% | 1.00x |
 
-> **Note**: FLAC receives `Zstd Best` compression (it is lossless audio, not lossy-encoded);
+> **Note**: FLAC receives `Zstd Default` compression (it is lossless audio, not lossy-encoded);
 > the ~0% row above reflects the SmartCompressor fallback-to-Store when compressed output
 > exceeds original — i.e. FLAC's internal prediction coding already approaches theoretical
 > entropy. OGG/MP3/AAC/Opus are codec-encoded → always Store.

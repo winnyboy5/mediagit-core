@@ -43,7 +43,7 @@ MediaGit can be used in **two different modes** depending on your needs:
 flowchart TD
     CLI["mediagit CLI"]
     META[".mediagit/<br/>refs, HEAD, index, config"]
-    OBJ["mediagit-data/<br/>chunks, manifests, packs"]
+    OBJ[".mediagit/objects/(namespace)/<br/>chunks, manifests, packs"]
     CLI --> META
     CLI --> OBJ
 ```
@@ -352,7 +352,7 @@ cd mediagit-core
 # Terminal 2
 cd /path/to/your/project
 ../mediagit-core/target/debug/mediagit init
-../mediagit-core/target/debug/mediagit remote add origin http://localhost:3000/repos/my-project
+../mediagit-core/target/debug/mediagit remote add origin http://localhost:3000/my-project
 ../mediagit-core/target/debug/mediagit add your-file.psd
 ../mediagit-core/target/debug/mediagit commit -m "First commit"
 ../mediagit-core/target/debug/mediagit push origin main
@@ -361,7 +361,7 @@ cd /path/to/your/project
 ../mediagit-core/target/debug/mediagit pull origin main
 
 # Clone
-../mediagit-core/target/debug/mediagit clone http://localhost:3000/repos/my-project
+../mediagit-core/target/debug/mediagit clone http://localhost:3000/my-project
 ```
 
 ### Debugging Transfers
@@ -449,7 +449,7 @@ For debugging auth issues on a dev server, know where the state lives:
 
 Client-side credential lookup for talking to a remote (used by `fetch`,
 `pull`, `push`, `clone`, `download`, `lock`) follows this precedence, in
-`crates/mediagit-cli/src/repo.rs::resolve_credentials_tiered` (repo.rs:162-218):
+`crates/mediagit-cli/src/repo.rs::resolve_credentials_tiered` (repo.rs:311):
 
 1. Env var `MEDIAGIT_TOKEN` (bearer token)
 2. Env var `MEDIAGIT_API_KEY`
@@ -497,7 +497,7 @@ powershell -ExecutionPolicy Bypass -File dev-tests\qa-suite\scripts\run_all.ps1
 
 It's organized as numbered phases (`01_preflight`, `02_matrix`,
 `03_persona_*`, `04_economics`, `05_branching`, `06_remote`, `07_abuse`,
-`08_perf`, `09_report`) with env knobs in `campaign_env.ps1`.
+`08_perf`, `09_report`, plus the opt-in phases `10_scale` through `17_desktop_killsafety`; see the QA suite README and `run_all.ps1`) with env knobs in `campaign_env.ps1`.
 
 ### Benchmarks
 
@@ -658,7 +658,7 @@ can't resolve.
 
 ```bash
 file .husky/pre-commit   # "with CRLF line terminators" if affected
-sed -i 's/\r//' .husky/pre-commit .husky/pre-push .husky/commit-msg
+sed -i 's/\r//' .husky/pre-commit .husky/commit-msg
 ```
 
 **Cause 2 — Missing execute bit.** NTFS/FAT32/some SMB shares/CI artifact
@@ -666,15 +666,15 @@ extracts don't preserve the `+x` bit.
 
 ```bash
 ls -la .husky/   # should show -rwxr-xr-x
-chmod +x .husky/pre-commit .husky/pre-push .husky/commit-msg
-git update-index --chmod=+x .husky/pre-commit .husky/pre-push .husky/commit-msg
+chmod +x .husky/pre-commit .husky/commit-msg
+git update-index --chmod=+x .husky/pre-commit .husky/commit-msg
 ```
 
 **Combined one-shot fix**:
 ```bash
-sed -i 's/\r//' .husky/pre-commit .husky/pre-push .husky/commit-msg
-chmod +x        .husky/pre-commit .husky/pre-push .husky/commit-msg
-git update-index --chmod=+x .husky/pre-commit .husky/pre-push .husky/commit-msg
+sed -i 's/\r//' .husky/pre-commit .husky/commit-msg
+chmod +x        .husky/pre-commit .husky/commit-msg
+git update-index --chmod=+x .husky/pre-commit .husky/commit-msg
 ```
 
 `.gitattributes` enforces `eol=lf` for `.husky/*` to prevent recurrence.
@@ -687,7 +687,7 @@ git update-index --chmod=+x .husky/pre-commit .husky/pre-push .husky/commit-msg
 server; `init`/`add`/`commit`/`status` don't.
 
 ```bash
-curl http://localhost:3000/health   # should return {"status":"healthy"}
+curl http://localhost:3000/health   # should return {"status":"ok", ...}
 ```
 
 ### Client credentials rejected / auth confusion
@@ -743,7 +743,7 @@ MEDIAGIT_BENCH=1 mediagit push origin main   # emits [bench] throughput summary
 | Variable | Default | Tunes |
 |----------|---------|-------|
 | `MEDIAGIT_UPLOAD_CONCURRENCY` | `32` | Total upload semaphore slots per push |
-| `MEDIAGIT_DOWNLOAD_CONCURRENCY` | `32` | Total chunk downloads during pull/clone |
+| `MEDIAGIT_DOWNLOAD_CONCURRENCY` | `32` (24 for pack range reads) | Total chunk downloads during pull/clone |
 | `MEDIAGIT_BENCH` | `0` | Set `1` to emit throughput summary after push/pull |
 | `MEDIAGIT_HASH_PARALLEL` | `1` (ON) | BLAKE3 tree-parallel mmap hashing for files ≥ 5 MiB (~2.6× faster). Set `0` to force sequential. |
 | `RUST_LOG` | — | Module-scoped log levels, see Debug Logging above |
@@ -760,7 +760,7 @@ download concurrency, MPU, range-parallel GET, GCS-specific tuning, etc.).
 | File Type | Expected Compression |
 |-----------|---------------------|
 | PNG | 0-5% (already compressed) |
-| PSD | 30-40% |
+| PSD | 35–65% (README, deep tests) |
 | Text/CSV | 85-95% |
 | Video (MP4) | 0% (already compressed) |
 
@@ -779,18 +779,9 @@ download concurrency, MPU, range-parallel GET, GCS-specific tuning, etc.).
 
 ## Project Maintenance
 
-### Test Archives
-
-Test artifacts from validation sessions are archived in `test-archives/` with
-dated folders (e.g. `2025-12-27-option-b-validation/`, 7.3GB). Each includes
-a README.md with results and metadata. Retention: 30 days from creation.
-
 ### Cleanup Commands
 
 ```bash
-# Remove old archives after retention period
-rm -rf test-archives/YYYY-MM-DD-*/
-
 # Clean build artifacts
 cargo clean
 

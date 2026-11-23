@@ -148,7 +148,7 @@ Path: <repo_namespace>/objects/58/91/5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163a
 
 ### Memory Cache
 - **Implementation**: LRU cache (Least Recently Used)
-- **Default Size**: 100 MB
+- **Default Size**: 512 MiB (`MEDIAGIT_ODB_CACHE_MB`); a separate 128 MiB delta-base cache (`MEDIAGIT_CHUNK_CACHE_BYTES`)
 - **Eviction**: Oldest unused objects evicted first
 - **Hit Rate Target**: >80% for typical workflows
 
@@ -332,12 +332,7 @@ into `get_chunk_params()`:
 
 ### Chunking Performance
 
-**Validated with 6GB Test File**:
-- **Chunks Created**: 1,541 chunks
-- **Average Chunk Size**: 4.12 MB (adaptive based on content)
-- **Processing**: Parallel chunk compression and delta encoding
-- **Throughput**: 35.5 MB/s (streaming mode)
-- **Memory Usage**: < 256 MB (constant, regardless of file size)
+**Measured (BENCHMARKS.md)**: `add` of a 4 GB random file took 8.7 s with a 417 MB peak. Chunk compression and delta encoding run in parallel.
 
 ### Chunk Storage
 
@@ -416,7 +411,7 @@ graph LR
 ### GC Process
 1. **Mark**: Traverse from all refs
 2. **Sweep**: Delete unmarked objects
-3. **Repack**: Optimize delta chains
+3. **Repack** (with `--repack`): move loose objects into pack files
 4. **Verify**: Check repository integrity
 
 ### Safety Mechanisms

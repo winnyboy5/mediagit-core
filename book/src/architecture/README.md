@@ -6,7 +6,7 @@ MediaGit-Core is designed as a modular, extensible version control system optimi
 
 ```mermaid
 graph TD
-    subgraph CLI["mediagit-cli (35 commands)"]
+    subgraph CLI["mediagit-cli (36 commands)"]
         ADD["add"]
         COMMIT["commit"]
         PUSH["push"]
@@ -23,7 +23,7 @@ graph TD
 
     subgraph Infra["Infrastructure"]
         STORE["mediagit-storage<br/>Local · S3 · Azure<br/>GCS · B2 · MinIO"]
-        SEC["mediagit-security<br/>AES-256-GCM · JWT<br/>TLS · Audit · KDF"]
+        SEC["mediagit-security<br/>XAES-256-GCM · JWT<br/>TLS · Audit · KDF"]
         PROTO["mediagit-protocol<br/>Client · Packs<br/>Chunk Transfer"]
     end
 
@@ -122,18 +122,20 @@ sequenceDiagram
 
 ## Performance Characteristics
 
+The times below are illustrative and unmeasured. Measured figures live in BENCHMARKS.md (for example, `add` of a 4 GB random file took 8.7 s with a 417 MB peak).
+
 | Operation | Local Backend | S3 Backend | Optimization |
 |-----------|---------------|------------|--------------|
 | Add 1GB file | ~2-3 seconds | ~15-20 seconds | Delta encoding for updates |
 | Commit | <100ms | ~200-500ms | Metadata-only operation |
 | Checkout | ~3-5 seconds | ~20-30 seconds | Parallel object fetch; delta apply and chunk hash checks run in parallel on the blocking pool (v0.6.0-rc.1) |
-| Merge | ~1-2 seconds | ~5-10 seconds | Media-aware strategies |
+| Merge | ~1-2 seconds | ~5-10 seconds | Three-way tree merge; binary conflicts are reported, not merged |
 
 ## Security Model
 
 ### Authentication (to storage backends)
 - Local: File system permissions
-- S3 (and MinIO/B2/Spaces, all built through the S3-compatible path): config-file `access_key_id`/`secret_access_key` only — no IAM role, instance-profile, or environment-variable path
+- S3 (and MinIO/B2/Spaces, all built through the S3-compatible path): config-file `access_key_id`/`secret_access_key` only — no IAM role or instance-profile path, and no client-side environment-variable path (the server alone reads `MEDIAGIT_S3_ACCESS_KEY_ID` and `MEDIAGIT_S3_SECRET_ACCESS_KEY`, which win over the file)
 - Azure: a tagged `auth` credential in `config.toml` (`account_key`, `connection_string`, `sas`, or `emulator`) — no service-principal or environment-variable path
 - GCS: the only backend with a real out-of-config path — falls back to Application Default Credentials (service account key file, `gcloud` login, or workload identity) when `credentials_path` is unset
 

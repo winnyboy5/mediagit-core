@@ -60,7 +60,7 @@ graph LR
 ## Results
 
 - **Object-count reduction**: repositories that previously created ~10,000 cloud objects now create a few **hundred** — roughly two orders of magnitude fewer requests, yielding the headline 5–10× clone speedup on small-chunk repositories.
-- **Verification**: all **614/614** deep tests pass across MinIO (151), AWS (150), Azure (154), and GCS (159), 2026-06-02. F8 compressed-hash integrity is clean across backends, with cloud storage savings of 26.3–26.5%.
+- **Verification**: all **614/614** deep tests pass across MinIO (151), AWS (150), Azure (154), and GCS (159), 2026-06-02. F8 compressed-hash integrity is clean across backends, with cloud storage savings of 26.3–26.5% on AWS, Azure and GCS (MinIO measured 8.4% on a cumulative multi-push fixture, so it is not comparable).
 
 The F-series tasks **F1–F11** delivered this design end to end; **F8** is the per-slice compressed-hash integrity verification.
 

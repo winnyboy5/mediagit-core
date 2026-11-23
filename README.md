@@ -17,10 +17,10 @@
 **🚨 WARNING 🚨**: This project is under active development. Be aware that large breaking changes may happen before 1.0 is reached.
 
 ✅ **614/614 deep-tests passing** across MinIO, AWS S3 (ap-south-1), Azure Blob (South India), Google Cloud Storage *(deep-test sweep, June 2026; the current per-campaign gate count is 292 — see Last Validated above)*
-✅ **32 CLI commands validated end-to-end** — 0 crashes, 0 data corruption across all 4 cloud backends *(that sweep's command count; the CLI now exposes 35 — see [CLI Reference](#cli-reference))*
+✅ **32 CLI commands validated end-to-end** — 0 crashes, 0 data corruption across all 4 cloud backends *(that sweep's command count; the CLI now exposes 36 — see [CLI Reference](#cli-reference))*
 ✅ **27+ file types tested** (58 GB dataset) across video, audio, 3D, image, design, ML
-✅ **26.3–26.5% storage savings** measured on cloud backends (compression + dedup + delta, validated June 2026)
-✅ **Files up to 398 MB** staged and transferred; single-file scalability to 6 GB tested
+✅ **26.3–26.5% storage savings** measured on AWS, Azure and GCS (MinIO measured 8.4% on a cumulative multi-push fixture, so it is not comparable) (compression + dedup + delta, validated June 2026)
+✅ **Files up to 19.25 GiB tested** (see BENCHMARKS.md)
 
 | Metric | Result |
 |--------|--------|
@@ -32,7 +32,7 @@
 | **Network clone (local server)** | 100 MB/s (150 MB local server) |
 | **Network clone (cloud WAN, South Asia)** | 0.03–0.10 MB/s (WAN-bound) |
 | **Commit latency** | 30–52 ms (constant regardless of file size) |
-| **Storage savings (validated, June 2026)** | **26.3–26.5%** across 4 cloud backends (MinIO, AWS, Azure, GCS) |
+| **Storage savings (validated, June 2026)** | **26.3–26.5%** across AWS, Azure and GCS (MinIO measured 8.4% on a cumulative multi-push fixture, not comparable) |
 | **Storage savings (average mixed media)** | ~30% (compression + dedup + delta) |
 | **Exact dedup (CAS): exact duplicate** | 99.9% savings (CAS hit, 0.7 KB overhead) |
 | **Exact dedup (CAS): 3× identical MP4** | 66% savings |
@@ -84,8 +84,8 @@ Traditional Git struggles with large binary files. MediaGit solves this with:
 
 🎨 **Media-Aware Intelligence**
 - **PSD Files**: Layer metadata extraction and conflict detection. Layer merging computes a merged *structure*, not a merged file — the parser is read-only, so `merge` reports the conflict and checks out one side (`psd.rs:492`)
-- **Video**: Timeline parsing, non-overlapping edit merge
-- **Audio**: Track-level merge, format metadata
+- **Video**: Stream and timeline inspection (`mediagit media info`); merging a video edited on both sides is a conflict
+- **Audio**: Track and format metadata; merging an audio file edited on both sides is a conflict
 - **3D Models**: OBJ, FBX, Blend, GLTF support
 
 ☁️ **Cloud Storage**
@@ -258,7 +258,7 @@ mediagit auth admin set-role bob admin
 
 ## CLI Reference
 
-All 35 MediaGit commands, grouped by workflow:
+All 36 MediaGit commands, grouped by workflow:
 
 ### Repository Setup
 | Command | Description |
@@ -386,10 +386,10 @@ mediagit-core/
 │   ├── mediagit-versioning/   # Object database & version control
 │   ├── mediagit-compression/  # Smart compression (zstd, brotli)
 │   ├── mediagit-media/        # Media-aware merge intelligence
+│   ├── mediagit-desktop/      # Desktop app (Tauri 2) shell
 │   ├── mediagit-config/       # Configuration management
 │   ├── mediagit-security/     # Auth, encryption, TLS
 │   └── ...
-├── tests/                     # Integration tests
 ├── Dockerfile                 # Server image build
 ├── docker-compose.yml         # Local multi-backend dev services (MinIO/Azurite/fake-GCS)
 ├── docker-compose.minio.yml   # Pinned MinIO-only backend (A7 outage drill)
@@ -442,14 +442,14 @@ MinIO is the loopback software ceiling; AWS/Azure/GCS are real cloud over WAN
 | MP4 | 5.1 MB | 146 MB/s | Store | Direct write, no chunking |
 | MP4 (large) | 264 MB | 174 MB/s | Store | Pre-compressed; store-mode |
 | MOV (large) | 398 MB | 153 MB/s | Store | Pre-compressed; store-mode |
-| PSD | 181 MB | 119 MB/s | Zstd Best | Layer data compresses well |
-| PSD | 72 MB | 72–81 MB/s | Zstd Best | Layer data compresses well |
+| PSD | 181 MB | 119 MB/s | Zstd Default | Layer data compresses well |
+| PSD | 72 MB | 72–81 MB/s | Zstd Default | Layer data compresses well |
 | GLB | 13.8 MB | 3.0–4.2 MB/s | Zstd Best | GLB parser + CDC chunking |
 | GLB | 25.4 MB | 5.2 MB/s | Zstd Best | GLB parser + CDC chunking |
-| FLAC | 38–39 MB | 2.2–4.1 MB/s | Zstd Best | FastCDC chunking |
+| FLAC | 38–39 MB | 2.2–4.1 MB/s | Zstd Default | FastCDC chunking |
 | WAV | 55–57 MB | 2.1–3.6 MB/s | Zstd Best | FastCDC + PCM codec hint (CPU-bound) |
-| AI (large) | 129 MB | 1.9 MB/s | Zstd Best | Deep delta + chunking |
-| AI (very large) | 216 MB | 2.4 MB/s | Zstd Best | Deep delta + chunking |
+| AI (large) | 129 MB | 1.9 MB/s | Zstd Default | Deep delta + chunking |
+| AI (very large) | 216 MB | 2.4 MB/s | Zstd Default | Deep delta + chunking |
 | MinIO PSD | 72 MB | 72.8 MB/s | Cloud upload | S3-compatible backend |
 | Push (150 MB) | — | 167 MB/s | Network | Local server |
 | Clone (150 MB) | — | 100 MB/s | Network | Local server |
@@ -468,14 +468,15 @@ Compression strategy is selected automatically per file type. Pre-compressed for
 | GPU textures | DDS, KTX, KTX2, ASTC | Store | ~0% | Hardware-compressed formats |
 | Archives | ZIP, GZ, 7Z, RAR, USDZ | Store | ~0% | Pre-compressed containers |
 | Office documents | DOCX, XLSX, PPTX, ODT | Store | ~0% | ZIP containers with compressed XML |
-| Creative (PDF containers) | AI, INDD | Store | ~0% | PDF-based; recompression expands |
+| Illustrator | AI | Zstd Default | 0–35% | Stored raw when output is not smaller |
+| InDesign | INDD | Store | ~0% | PDF-based; recompression expands |
 | ML columnar data | Parquet, Arrow, Feather, ORC | Store | ~0% | Already columnar-compressed |
-| Audio (lossless) | WAV, AIFF, ALAC | Zstd Best | 20–55% | Uncompressed PCM; content-dependent |
-| Audio (FLAC) | FLAC | Zstd Best | 0–15% | FLAC already compressed; limited gain |
+| Audio (uncompressed) | WAV, AIFF | Zstd Best | 20–55% | Uncompressed PCM; content-dependent |
+| Audio (lossless-compressed) | FLAC, ALAC | Zstd Default | 0–15% | Already compressed; limited gain |
 | Raw images | TIFF, BMP, EXR, HDR, RAW | Zstd Best | 30–60% | Uncompressed raster; compresses well |
 | 3D models (mesh) | STL, OBJ, PLY | Zstd Best | 40–73% | Triangle soup; float data compresses well |
 | 3D models (binary) | FBX, GLB, GLTF, DAE | Zstd Best | 20–83% | Mixed binary+metadata; DAE (XML) compresses very well |
-| PSD / PSB | PSD, PSB | Zstd Best | 35–65% | Layer data + compressed internal streams |
+| PSD / PSB | PSD, PSB | Zstd Default | 35–65% | Layer data + compressed internal streams |
 | Documents | PDF, SVG, EPS | Zstd Default | 20–81% | Mixed binary/text; vector formats compress very well |
 | DCC project files | AEP, PRPROJ, BLEND, MA, MB, C4D | Zstd Default | 10–35% | Binary project data |
 | Audio projects | .als, .ptx, .logic, .flp | Zstd Default | 10–30% | DAW project files |
@@ -498,7 +499,7 @@ Compression strategy is selected automatically per file type. Pre-compressed for
 | **Chunk-level Deduplication** | ✅ BLAKE3 CAS | ❌ | File-level only | ✅ BLAKE3 | Partial |
 | **Binary Delta** | ✅ Per-chunk zstd dict | ❌ | RCS file-level | ✅ Implicit | ✅ Delta sync |
 | **Built-in Compression** | ✅ Zstd+Brotli Smart | ❌ | ❌ | ❌ | ❌ |
-| **Storage Savings (validated)** | **26.3–26.5%** (614 tests, 4 clouds) | 0% extra | 0–5% RCS | Not published | Not published |
+| **Storage Savings (validated)** | **26.3–26.5%** (614 tests, AWS/Azure/GCS) | 0% extra | 0–5% RCS | Not published | Not published |
 | **Self-Hosted** | ✅ Primary mode | ✅ LFS server | ✅ Primary | ❌ Cloud-only | ❌ Cloud-only |
 | **Cloud Backends** | S3, Azure, GCS, MinIO, B2 | Any LFS server | None native | HF Hub only | Proprietary |
 | **Offline Commits** | ✅ | ✅ (Git) | ❌ | ❌ | Not documented |
@@ -589,7 +590,7 @@ of its own falls to the defaults, **0.30 / 0.80**.
 > `EPS` with `SVG` and `OBJ` with `STL`, none of which matches the code.
 | JPEG / PNG / ZIP | ❌ Never | — | — | Not eligible |
 
-**Delta chain cap**: depth 10 maximum. Prevents read-amplification — at depth 10 the object is re-stored as a full compressed copy.
+**Delta chain cap**: depth 10 maximum. Prevents read-amplification — at depth 10 the next delta is taken against the chain's root (a full chunk), so the chain restarts at depth 1.
 
 **Real-world storage observations:**
 - 329 MB AI (2 versions) → 248 MB stored — **25% saved**, 27 delta + 62 full chunks
@@ -607,7 +608,7 @@ MediaGit is **designed for terabyte-scale files**:
 | **Memory** | O(chunk_size) | Streaming I/O |
 | **Storage** | Unlimited | S3/cloud backends |
 
-**Tested**: Up to 6GB single file (1,541 chunks)
+**Tested**: up to 19.25 GiB single file
 **Designed for**: TB+ with adaptive 8MB chunks for >100GB files
 
 ---
@@ -628,12 +629,13 @@ secret_access_key = "..."
 # endpoint = "http://localhost:9000"   # for MinIO / S3-compatible services
 ```
 
-**There is no environment-variable path for storage settings**, and no
+**There is no environment-variable path for storage settings on the client**, and no
 IAM-role or `aws configure` auto-detection — the keys above are read from this
 file and passed straight to the backend, which rejects an empty key. Automation
 holding credentials in the environment should render them into `config.toml`;
 exporting them has no effect. Because secrets sit on disk, treat this file as a
 secret (MediaGit warns on Unix if it is world-readable).
+The one exception is the server: `mediagit-server` reads `MEDIAGIT_S3_ACCESS_KEY_ID` and `MEDIAGIT_S3_SECRET_ACCESS_KEY` for S3-compatible storage (they win over the file). The client still reads storage keys from `config.toml` only.
 
 Compression needs no configuration: `SmartCompressor` picks algorithm and level
 from the file type on its own.
@@ -656,7 +658,7 @@ from the file type on its own.
 ### Examples
 - Configuration examples: `crates/mediagit-config/examples/`
 - Docker configs: `Dockerfile`, `docker-compose*.yml` (repo root)
-- Test scripts: `tests/`
+- Integration tests: `crates/*/tests/`, QA suite: `dev-tests/qa-suite/`
 
 ---
 
@@ -665,7 +667,7 @@ from the file type on its own.
 ### Prerequisites
 
 - **Rust**: 1.97+ (MSRV — check with `rustc --version`)
-- **OS**: Linux, macOS, or WSL2 (Windows)
+- **OS**: Linux, macOS or Windows
 - **Tools**: cargo, git
 
 ### Building
@@ -677,8 +679,8 @@ cargo build
 # Release build (optimized)
 cargo build --release
 
-# Build with specific features
-cargo build --features tls
+# Build the server without TLS (TLS is on by default)
+cargo build -p mediagit-server --no-default-features
 ```
 
 ### Testing
@@ -756,7 +758,7 @@ cargo check
 | **Linux** | aarch64 | ✅ Supported | ARM64 support |
 | **macOS** | x86_64 | ✅ Supported | Intel Macs |
 | **macOS** | Apple Silicon | ✅ Supported | M1/M2/M3 |
-| **Windows** | x86_64 | ✅ Supported | Via WSL2 recommended |
+| **Windows** | x86_64 | ✅ Supported | Native Windows binary; WSL2 also works |
 | **Windows** | ARM64 | ⬜ Build from source | No release binary; `cross-rs` has no Windows target. See `book/src/installation/windows-arm64.md` |
 
 ---
@@ -810,7 +812,7 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 - Follow Rust best practices (rustfmt, clippy)
 - Write tests for new features
 - Update documentation
-- Maintain backward compatibility
+- Keep the compat fixture (`dev-tests/qa-suite` 02_compat) green; regenerate it in the same commit when a format change is intended
 - Add entries to CHANGELOG.md
 
 ---
@@ -914,15 +916,15 @@ Special thanks to:
 
 ## Statistics
 
-- **Lines of Code**: 122,000+ (Rust, 193 source files across 12 crates); 161,000+ across 313 files including test code
+- **Lines of Code**: 157,000+ lines of Rust (215 source files across 13 crates); 217,000+ across 389 files including tests and examples (git ls-files, 2026-11-19)
 - **Features**: 100% complete (all P0–P3 items from the rc.3 feature-completeness sprint — see disambiguation note above)
-- **Test Coverage**: **2,379 unit/integration tests, 0 failures** (measured 2026-10-19); 262 QA-campaign gates per run across all five backends — 261 pass, 0 fail, 1 skip, and the skipped A8 passes when run elevated (2026-10-20); **614/614 deep-tests** across MinIO, AWS S3, Azure Blob, GCS (validated 2026-06-02)
+- **Test Coverage**: **full workspace suite green at HEAD** (2026-11-19), Vitest 531/531; 262 QA-campaign gates per run across all five backends — 261 pass, 0 fail, 1 skip, and the skipped A8 passes when run elevated (2026-10-20); **614/614 deep-tests** across MinIO, AWS S3, Azure Blob, GCS (validated 2026-06-02)
 - **Staging Throughput**: 25–240 MB/s for small files; 2.8–5.2 MB/s for chunked large files (WAV/PSD/GLB)
 - **Network Throughput**: 134–267 MB/s push (local server, pack negotiation); WAN-bound on cloud backends
-- **Storage Savings**: **26.3–26.5%** validated on 4 cloud backends (June 2026); ~30% average across mixed media projects
+- **Storage Savings**: **26.3–26.5%** validated on AWS, Azure and GCS (June 2026); ~30% average across mixed media projects
 - **Stability**: 0 crashes, 0 data corruption across all validated test runs
 - **File Formats**: 70+ extensions (video, audio, image, 3D, DCC, ML, game engines, office)
-- **Server Endpoints**: 51 routes — 35 repo/health + 16 auth
+- **Server Endpoints**: 54 routes — 35 repo/health + 19 auth and admin
 - **Platforms**: Linux (x86_64 + ARM64), macOS (Intel + Apple Silicon), Windows (x86_64)
 
 ---

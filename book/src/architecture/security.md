@@ -7,7 +7,7 @@ MediaGit security model and best practices.
 - **Server mode**: JWT tokens + API key authentication, both off by
   default (`enable_auth = false`). A non-loopback server refuses to start
   with auth disabled unless `MEDIAGIT_ALLOW_INSECURE_BIND=1` is set.
-- **Cloud**: IAM roles, service principals, API keys
+- **Cloud**: credentials in `config.toml` (S3, B2, Spaces, Azure); GCS also accepts Application Default Credentials; the server also reads `MEDIAGIT_S3_ACCESS_KEY_ID`/`MEDIAGIT_S3_SECRET_ACCESS_KEY`
 
 See the [Authentication reference](../reference/authentication.md) for the
 full model: endpoints, JWT/API key mechanics, and the client credential
@@ -119,7 +119,7 @@ multi-repo server.
 - **In-transit**: TLS 1.3 on the server's TLS listener by default; set `tls_min_version = "1.2"` in `mediagit-server.toml` as an escape hatch for TLS 1.2-only clients/proxies (any other value fails config load). Client certificates (mTLS) are **not** wired — `TlsConfig` carries the fields but the server has no knob to set them and builds with `with_no_client_auth`.
 
 ## Best Practices
-1. Use IAM roles (avoid hardcoded keys)
+1. Use a dedicated bucket-scoped access key and keep `config.toml` owner-only (0600); rotate it regularly
 2. Enable bucket versioning
 3. Regular `mediagit verify` checks
 4. Restrict branch protection rules

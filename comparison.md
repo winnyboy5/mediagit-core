@@ -8,7 +8,7 @@
 
 ## TL;DR
 
-MediaGit is the only open-source, self-hosted VCS that combines content-defined chunking, per-chunk delta encoding, and a type-aware smart compressor into a single binary. The closest technical peer is Hugging Face Xet (cloud-only). The dominant market incumbent, Perforce Helix Core, has no chunking or deduplication at all.
+MediaGit is the only source-available, self-hosted VCS that combines content-defined chunking, per-chunk delta encoding, and a type-aware smart compressor into a single binary. The closest technical peer is Hugging Face Xet (cloud-only). The dominant market incumbent, Perforce Helix Core, has no chunking or deduplication at all.
 
 ---
 
@@ -27,7 +27,7 @@ MediaGit is the only open-source, self-hosted VCS that combines content-defined 
 | **Full DVCS (offline commits)** | ✅ | ✅ (Git) | ❌ server required | ❌ | ✅ | Not documented | ✅ (Git) |
 | **Branching cost** | ✅ instant ref-based | ✅ (Git) | ⚠️ copy-based | N/A | N/A | Not documented | ✅ (Git) |
 | **File size limit** | No limit (u64) | 5 GB (GitHub.com) | No limit | No limit | Unlimited | No limit | Not documented |
-| **Max file tested** | 398 MB single file; 6 GB scalability | — | 100 GB+ | — | — | 500 GB+ Unreal | — |
+| **Max file tested** | 19.25 GiB single file (BENCHMARKS.md); 4 GB random file in the memory runs | — | 100 GB+ | — | — | 500 GB+ Unreal | — |
 | **Source available** | ✅ BUSL-1.1 | ✅ MIT | ❌ proprietary | ❌ proprietary | ✅ Apache-2.0 | ❌ proprietary | ❌ proprietary |
 | **Price** | Free | Free + server | Free ≤5 seats; $39/user/mo cloud | Free tier + Enterprise | Free (lakeFS-acquired) | Beta TBD | $20–$25/user/mo |
 
@@ -151,9 +151,9 @@ Perforce is synchronous and server-centric. Client staging ("checkout") moves th
 |---------|---------|---------|---------|
 | AWS S3 | ✅ Native (presigned MPU) | Via s3-proxy or Gitea | ❌ |
 | Azure Blob | ✅ Native (SAS presigned) | Via custom storage | ❌ |
-| Google Cloud Storage | ✅ Native (server-proxy) | Via custom storage | ❌ |
+| Google Cloud Storage | ✅ Native (presigned with a service-account key; server proxy under ADC) | Via custom storage | ❌ |
 | MinIO / S3-compatible | ✅ Validated at 100+ MB/s | Via s3-proxy | ❌ |
-| Presigned direct upload | ✅ Client → storage (no server proxy except GCS) | ❌ | ❌ |
+| Presigned direct upload | ✅ Client → storage (server proxy only when the backend cannot sign, e.g. GCS under ADC) | ❌ | ❌ |
 
 ---
 
@@ -164,7 +164,7 @@ Perforce is synchronous and server-centric. Client staging ("checkout") moves th
 | Workflow | MediaGit | Git LFS | Perforce |
 |---------|---------|---------|---------|
 | Branch creation | Instant (ref only) | Instant (Git) | Copy-based (slow for large depots) |
-| Merge large binary | CDC-aware (chunk-level conflict detection) | Whole-file conflict | File-level merge (binary conflict = manual) |
+| Merge large binary | Whole-file conflict (one side checked out); media files can be inspected with `mediagit media` | Whole-file conflict | File-level merge (binary conflict = manual) |
 | Cherry-pick | ✅ | ✅ (Git) | ❌ (no cherry-pick concept) |
 | Rebase | ✅ | ✅ (Git) | ❌ |
 | Stash | ✅ | ✅ (Git) | ❌ (shelve equivalent) |
@@ -183,12 +183,12 @@ MediaGit tested 28+ commands across all 3 cloud backends with 459 passing tests:
 
 | Segment | Best Fit | Why |
 |---------|---------|-----|
-| **AAA game studio (10–50 TB assets)** | MediaGit or Perforce | Perforce: 30-year ecosystem, DCC integrations. MediaGit: open-source, lower TCO, better storage efficiency. |
+| **AAA game studio (10–50 TB assets)** | MediaGit or Perforce | Perforce: 30-year ecosystem, DCC integrations. MediaGit: source-available, lower TCO, better storage efficiency. |
 | **Indie / mid-size game studio** | MediaGit or Anchorpoint | Anchorpoint: polished UX. MediaGit: no per-seat cost, full DVCS. |
 | **VFX / post-production** | MediaGit or Perforce | Same tradeoff as AAA. MediaGit superior on storage efficiency; Perforce superior on Maya/Nuke/Resolve integrations. |
 | **ML / AI model repos** | HF Xet or DVC | Xet: HF Hub native. DVC: pipeline lineage. MediaGit: viable but not optimized for tensor-format awareness. |
 | **Open-source media project** | MediaGit | Git LFS is the default but MediaGit offers 26.5%+ storage savings and true dedup. |
-| **Individual designer / creative** | Adobe CC Libraries or Anchorpoint | MediaGit: too much ops overhead for non-technical users without a GUI client. |
+| **Individual designer / creative** | Adobe CC Libraries or Anchorpoint | MediaGit: a desktop app exists (preview) but the workflow is still Git-like and needs a server for sharing. |
 
 ---
 
@@ -214,9 +214,9 @@ MediaGit tested 28+ commands across all 3 cloud backends with 459 passing tests:
 | BLAKE3 hashing (10–20× faster than SHA-256 on non-SHA-NI) | ✅ BLAKE3 | Phase-2 Track A complete |
 | Pipelined push/pull (manifest+chunk overlap) | ✅ B2/B4/B7 pipeline (default ON) | Phase-2 Track B complete |
 | Cloud-side pack objects (chunk bundling) | ✅ Cloud packs (≤64 MiB / ≤1024-chunk bundles, F8 integrity) | Phase-3 Track F complete |
-| File locking (exclusive checkout) | Not implemented | On roadmap |
+| File locking (exclusive checkout) | ✅ Server-enforced (`mediagit lock`) | Shipped |
 | DCC plugin integrations (Maya, Nuke, Houdini) | Not implemented | Future milestone |
-| GUI client | CLI only | Future milestone |
+| GUI client | ✅ Desktop app (preview, unsigned release candidates) | Preview |
 | Cross-repo deduplication | Repo-local only | Future milestone |
 
 ---
@@ -227,4 +227,4 @@ MediaGit tested 28+ commands across all 3 cloud backends with 459 passing tests:
 
 **The closest technical peer is Hugging Face Xet.** Both use BLAKE3/SHA-256 + CDC + chunk-level identity. Xet is optimized for ML (64 KB chunks, multi-tenant hub dedup); MediaGit is optimized for media (1–8 MB chunks, self-hosted, built-in compression). Neither can replace the other's use case.
 
-**MediaGit's unique position:** the only open-source, self-hosted, Git-workflow-compatible VCS with CDC chunking + per-chunk delta + per-format SmartCompressor + multi-cloud presigned upload — validated across **459 automated tests on 3 cloud backends** with a **26.5%+ storage savings** measurement.
+**MediaGit's unique position:** the only source-available, self-hosted VCS with a Git-like workflow, CDC chunking + per-chunk delta + per-format SmartCompressor + multi-cloud presigned upload — validated across **459 automated tests on 3 cloud backends** with a **26.5%+ storage savings** measurement.

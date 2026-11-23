@@ -8,7 +8,7 @@ See [Storage Backend Configuration](../guides/storage-config.md) for detailed se
 
 ## Authentication
 
-Config-file only — `access_key_id`/`secret_access_key` under `[storage]` in `.mediagit/config.toml`. No environment-variable fallback, and no IAM-role/instance-profile path.
+Config-file only — `access_key_id`/`secret_access_key` under `[storage]` in `.mediagit/config.toml`. No client-side environment-variable fallback, and no IAM-role/instance-profile path. The one exception is the server: `mediagit-server` reads `MEDIAGIT_S3_ACCESS_KEY_ID` and `MEDIAGIT_S3_SECRET_ACCESS_KEY` for S3-compatible storage (they win over the file). The client still reads storage keys from `config.toml` only.
 
 ## Transfer
 

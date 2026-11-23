@@ -117,7 +117,8 @@ mediagit-core/
 │   ├── mediagit-observability/ # Logging and tracing
 │   ├── mediagit-security/      # Encryption and security
 │   ├── mediagit-metrics/       # Prometheus metrics
-│   └── mediagit-test-utils/    # Shared test utilities
+│   ├── mediagit-test-utils/    # Shared test utilities
+│   └── mediagit-desktop/       # Desktop app shell (Tauri 2); frontend in ui/
 ├── crates/*/benches/            # Per-crate performance benchmarks
 ├── book/                       # User documentation (mdBook)
 ├── docs/                       # gitignored, local-only working notes (not in a fresh clone)
@@ -151,7 +152,7 @@ cargo test --workspace -- --nocapture
 cargo bench --workspace
 
 # Run specific benchmark
-cargo bench --bench odb_benchmarks
+cargo bench -p mediagit-versioning --bench odb_bench
 
 # Compare with baseline
 cargo bench --workspace -- --save-baseline main
@@ -386,8 +387,8 @@ Releases are managed by maintainers. The process is:
 2. **Changelog**: Update `CHANGELOG.md`
 3. **Tag Release**: Create git tag (e.g., `v0.2.6-beta.1`)
 4. **CI/CD**: GitHub Actions builds and publishes binaries
-5. **Crates.io**: Publish to crates.io
-6. **Documentation**: Deploy docs to docs.mediagit.dev
+5. **Binaries**: cargo-dist publishes archives and installers (crates.io publishing is not enabled)
+6. **Documentation**: the book deploys to GitHub Pages
 7. **Announcement**: Announce release
 
 ## Getting Help

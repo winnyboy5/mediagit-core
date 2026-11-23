@@ -1,6 +1,6 @@
 # Storage Backends
 
-MediaGit supports 7 storage backends through a unified trait-based abstraction. All 614/614 deep tests pass across the cloud backends (MinIO 151, AWS 150, Azure 154, GCS 159; 2026-06-02), with cloud storage savings of 26.3–26.5%.
+MediaGit supports 7 storage backends through a unified trait-based abstraction. All 614/614 deep tests pass across the cloud backends (MinIO 151, AWS 150, Azure 154, GCS 159; 2026-06-02), with cloud storage savings of 26.3–26.5% on AWS, Azure and GCS (MinIO measured 8.4% on a cumulative multi-push fixture, so it is not comparable).
 
 ## Available Backends
 
@@ -45,14 +45,16 @@ sequenceDiagram
     participant B as Cloud Backend<br/>(S3/MinIO/Azure/GCS)
 
     Note over C,B: Push
-    C->>S: POST /push (ref updates + OID list)
-    S-->>C: presigned PUT URLs (per chunk)
-    C->>B: PUT chunks directly (parallel)
-    C->>S: POST /push/complete
+    C->>S: POST /:repo/packs/upload-urls (or /chunks/upload-urls)
+    S-->>C: presigned PUT URLs
+    C->>B: PUT packs directly (parallel)
+    C->>S: POST /:repo/packs/complete
+    C->>S: POST /:repo/refs/update
 
     Note over C,B: Pull / Clone
-    C->>S: POST /pull (want OIDs)
-    S-->>C: pack index + presigned GET URLs
+    C->>S: POST /:repo/chunks/locate
+    C->>S: POST /:repo/packs/presign-download-urls
+    S-->>C: presigned GET URLs
     C->>B: GET pack / Range-GET chunks (parallel)
     C->>C: reconstruct + write ODB
 ```

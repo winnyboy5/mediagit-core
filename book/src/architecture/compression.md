@@ -84,7 +84,7 @@ is **not read at runtime** (see [Configuration Reference](../reference/config.md
 
 | File Type | Size | Algorithm | Savings | Throughput |
 |-----------|------|-----------|---------|------------|
-| PSD-xl (Photoshop) | 213 MB | zstd-19 | 70.9% (3.44x) | 4.0 MB/s |
+| PSD-xl (Photoshop) | 213 MB | zstd-19 (measured before PSD moved to Zstd Default, level 3) | 70.9% (3.44x) | 4.0 MB/s |
 | FBX-ascii (3D) | 16 MB | zstd/brotli | 81.0% (5.27x) | 0.27 MB/s |
 | DAE (Collada 3D) | 8.6 MB | zstd/brotli | 81.4% (5.37x) | 0.39 MB/s |
 | SVG (Vector) | 496 KB | brotli | 80.8% (5.20x) | 1.90 MB/s |

@@ -38,7 +38,7 @@ layers, video/audio streams and 3D model metadata.
 
 ### Full Branching Support
 - Create, merge, and rebase branches just like Git
-- Protected branches with review requirements
+- Branch protection (blocks deleting a protected branch locally)
 - Branch-specific storage optimization
 
 ### Enterprise-Ready
@@ -62,7 +62,7 @@ MediaGit-Core is designed for teams and individuals working with large binary fi
 |---------|--------------|---------|----------|
 | Architecture | Standalone native VCS | Git extension + server | Centralized VCS |
 | Branch Switch Speed | Instant (ref-based) | Instant (Git handles) | ⚠️ Copy-based |
-| Storage Savings (avg) | ~30% avg, up to 81% per-format (compression + dedup + delta) | ~0% (no dedup/delta) | ~10-20% (RCS deltas) |
+| Storage Savings (avg) | ~30% avg, up to 81% per-format (compression + dedup + delta) | ~0% (no dedup/delta) | 0–5% (RCS delta, vendor docs) |
 | Deduplication | ✅ Content-addressable | ❌ None | ✅ Server-side |
 | Multi-Backend Support | 7 backends | Server-dependent | Proprietary |
 | Media-Aware Merging | ⚠️ Conflict *detection* only — see above; no auto-merge yet | ❌ No | ⚠️ Limited |

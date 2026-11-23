@@ -71,7 +71,7 @@ For very large files (10–100 GB), I/O tends to be the bottleneck rather than C
 A 1 TB media collection with 16 CPU cores and an SSD:
 
 ```bash
-# Time estimate: 33–105 minutes depending on content
+# Time depends on the content mix: store-mode media stages at up to about 240 MB/s, chunked media at 2–5 MB/s (BENCHMARKS.md, README Performance)
 mediagit add --jobs 16 /media/collection/
 ```
 
@@ -119,7 +119,7 @@ Increase connection pool and concurrency for large parallel uploads:
 
 ```bash
 MEDIAGIT_UPLOAD_CONCURRENCY=32    # parallel chunk uploads (default 32)
-MEDIAGIT_DOWNLOAD_CONCURRENCY=32  # parallel chunk downloads (default 24)
+MEDIAGIT_DOWNLOAD_CONCURRENCY=32  # parallel chunk downloads (default 32; pack range reads 24)
 MEDIAGIT_HTTP_POOL_MAX=64         # idle connections kept per host (default 64)
 ```
 
@@ -164,11 +164,7 @@ Total:  523 MB (vs 1,500 MB without delta)
 
 Delta chains are capped at depth 10 to prevent slow reads. After 10 revisions, the next version is stored as a new base.
 
-Run `mediagit gc` periodically to optimize chain depth:
-
-```bash
-mediagit gc
-```
+Chain depth is limited when data is written; `mediagit gc` only reclaims unreachable objects.
 
 ---
 
@@ -180,7 +176,7 @@ After deleting branches or files containing large objects, run GC to reclaim sto
 mediagit gc
 ```
 
-For maximum reclamation (slower):
+To also pack loose objects into pack files:
 
 ```bash
 mediagit gc --repack
@@ -197,7 +193,7 @@ After adding very large files, verify chunk integrity:
 mediagit fsck
 
 # Full chunk-level verification (slower)
-mediagit verify --path /path/to/large-file.mov
+mediagit verify --checksums
 ```
 
 ---
@@ -208,10 +204,10 @@ mediagit verify --path /path/to/large-file.mov
 |-----------|-------|
 | **MP4 / MOV / MKV** | Already compressed; stored as-is. Deduplication works at GOP level. |
 | **JPEG / PNG / WebP** | Already compressed; stored as-is. No re-compression overhead. |
-| **PSD / PSB** | Layer-aware chunking + Zstd compression. Excellent delta savings per revision. |
+| **PSD / PSB** | FastCDC with small creative-container chunk params + Zstd Default. Excellent delta savings per revision. |
 | **TIFF (uncompressed)** | Zstd compresses well. Large but effective delta encoding. |
-| **EXR** | Typically compressed. Stored as-is. |
-| **WAV / AIFF** | Audio-aware chunking. Zstd compresses ~40–60% on uncompressed audio. |
+| **EXR** | Uncompressed or lightly compressed raster; Zstd Best (stored raw if output is not smaller). |
+| **WAV / AIFF** | FastCDC; Zstd Best (about 40–60% on uncompressed audio). |
 | **PDF / AI / InDesign** | PDF containers with internal compression; PDF and AI get zstd (Default; raw if output is larger), InDesign is stored as-is. |
 | **ZIP / DOCX / XLSX** | ZIP containers; stored as-is. |
 | **3D (OBJ, FBX, GLB, STL)** | Binary 3D data; Zstd Best compression applied. |
