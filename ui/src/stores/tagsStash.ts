@@ -12,6 +12,7 @@ import {
   type TagVerifyReport,
 } from '@/api'
 import { useAction } from './action'
+import { useHistoryStore } from './history'
 import { useRepoStore } from './repo'
 
 /** What the tag detail dialog shows: the tag's own data and, once asked, its signature check. */
@@ -28,6 +29,7 @@ export interface TagDetail {
 /** Tags and the stash. */
 export const useTagsStashStore = defineStore('tagsStash', () => {
   const repo = useRepoStore()
+  const history = useHistoryStore()
 
   const tags = shallowRef<TagReport[]>([])
   const stashes = shallowRef<StashEntryReport[]>([])
@@ -73,7 +75,11 @@ export const useTagsStashStore = defineStore('tagsStash', () => {
     if (mine === token) loading.value = false
   }
 
-  const { busy, error: actionError, running, run } = useAction(refresh)
+  const { busy, error: actionError, running, run } = useAction(async () => {
+    // The version pills come from the history refs, so a tag change must reload them too.
+    if (history.loaded) void history.reload()
+    await refresh()
+  })
 
   const createTag = (name: string, options: TagOptions = {}) =>
     run(

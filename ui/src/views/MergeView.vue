@@ -66,7 +66,7 @@ async function start() {
 // Cancel -----------------------------------------------------------------
 const abortOpen = ref(false)
 const REASONS: Record<string, string> = { ours: 'You deleted this file, so there is no version of yours to keep.', theirs: 'They deleted this file, so there is no version of theirs to keep.' }
-const theirsMissing = computed(() => !merge.theirsOid)
+const theirsMissing = computed(() => !merge.theirsCommit)
 </script>
 
 <template>

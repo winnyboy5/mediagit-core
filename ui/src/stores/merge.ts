@@ -19,6 +19,8 @@ export const useMergeStore = defineStore('merge', () => {
   /** Commit of the branch being merged in; needed to take "their" version of a file. */
   const theirsOid = ref<string | null>(null)
   const last = ref<MergeReport | null>(null)
+  /** Their commit: remembered from the start, else the one the repo says is being merged. */
+  const theirsCommit = computed(() => theirsOid.value ?? repo.status?.operation?.theirs ?? null)
 
   /** Button wording: the two branches by name. */
   const sideNames = computed(() => ({ ours: branches.current ?? 'my version', theirs: theirsName.value ?? 'their version' }))
@@ -27,7 +29,8 @@ export const useMergeStore = defineStore('merge', () => {
 
   function apply(r: MergeReport, name: string | null, oid: string | null) {
     last.value = r
-    if (r.status === 'conflict') {
+    // `not_committed` (merge --no-commit) waits for Finish with nothing to decide.
+    if (r.status === 'conflict' || r.status === 'not_committed') {
       active.value = true
       conflicts.value = toConflicts(r.conflicts)
       if (name) {
@@ -52,7 +55,7 @@ export const useMergeStore = defineStore('merge', () => {
   }
 
   async function resolve(path: string, side: Side) {
-    const oid = theirsOid.value ?? repo.status?.operation?.theirs ?? null
+    const oid = theirsCommit.value
     if (side === 'theirs' && !oid) return false
     const label = side === 'ours' ? sideNames.value.ours : sideNames.value.theirs
     const ours = repo.status?.operation?.ours_commit ?? 'HEAD'
@@ -84,5 +87,5 @@ export const useMergeStore = defineStore('merge', () => {
     },
   )
 
-  return { apply, active, conflicts, sideNames, theirsName, theirsOid, last, resolved, canContinue, busy, error, running, start, resolve, continue: () => control('continue'), abort: () => control('abort') }
+  return { apply, active, conflicts, sideNames, theirsName, theirsOid, theirsCommit, last, resolved, canContinue, busy, error, running, start, resolve, continue: () => control('continue'), abort: () => control('abort') }
 })

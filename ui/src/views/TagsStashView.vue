@@ -17,6 +17,7 @@ import TagPill from '@/components/TagPill.vue'
 import TextField from '@/components/TextField.vue'
 import { refNameError } from '@/lib/inspect'
 import { shortOid } from '@/lib/history'
+import { useFocusRefresh } from '@/lib/focusRefresh'
 import { timeAgo } from '@/lib/persist'
 import { primaryBar } from '@/stores/ops'
 import { useRepoStore } from '@/stores/repo'
@@ -28,6 +29,8 @@ const ts = useTagsStashStore()
 const repo = useRepoStore()
 // The shell already loads these for the section counts; do not ask twice while that is in flight.
 onMounted(() => !ts.loading && void ts.refresh())
+// The CLI can stash behind the app's back; re-read when the window regains focus.
+useFocusRefresh(() => ts.refresh())
 
 const message = ref('')
 

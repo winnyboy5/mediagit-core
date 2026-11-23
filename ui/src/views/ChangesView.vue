@@ -127,7 +127,7 @@ const MODES = [
       </MoreOptions>
     </template>
 
-    <SaveDock v-if="!loadingFirst && !empty && !(repo.error && !repo.status)" />
+    <SaveDock v-if="!loadingFirst && !(repo.error && !repo.status)" />
   </section>
 </template>
 

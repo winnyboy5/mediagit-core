@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { onBeforeRouteLeave } from 'vue-router'
+import { onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
 import { SETTING_COPY } from '@/lib/settingCopy'
 import AlertDialog from '@/components/AlertDialog.vue'
 import Button from '@/components/Button.vue'
@@ -89,11 +89,14 @@ const dirtyKeys = reactive(new Set<string>())
 const onDirty = (k: string, d: boolean) => void (d ? dirtyKeys.add(k) : dirtyKeys.delete(k))
 const leaveOpen = ref(false)
 let leaveDecision: ((ok: boolean) => void) | null = null
-onBeforeRouteLeave(() => {
+const askLeave = () => {
   if (!dirtyKeys.size) return true
   leaveOpen.value = true
   return new Promise<boolean>((res) => (leaveDecision = res))
-})
+}
+onBeforeRouteLeave(askLeave)
+// Switching section keeps this route record, so it is an update, not a leave.
+onBeforeRouteUpdate(askLeave)
 watch(leaveOpen, (o) => {
   if (!o) setTimeout(() => leaveDecision && (leaveDecision(false), (leaveDecision = null)))
 })
