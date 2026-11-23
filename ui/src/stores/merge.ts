@@ -50,7 +50,8 @@ export const useMergeStore = defineStore('merge', () => {
   async function start(name: string, strategy: MergeStrategy, opts: MergeOpts = {}) {
     const oid = branches.list.find((b) => b.name === name)?.oid ?? null
     const r = await run(`Merge ${name}`, (root, report) => api.merge(root, name, strategy, opts, report), mergeSummary, isStopped)
-    if (r) apply(r.value, name, oid)
+    // A squash leaves no MERGE_HEAD, so there is nothing to Finish or Cancel: just show the report.
+    if (r) opts.squash && r.value.status === 'not_committed' ? (last.value = r.value) : apply(r.value, name, oid)
     return !!r
   }
 

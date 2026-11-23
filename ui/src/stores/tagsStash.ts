@@ -76,8 +76,8 @@ export const useTagsStashStore = defineStore('tagsStash', () => {
   }
 
   const { busy, error: actionError, running, run } = useAction(async () => {
-    // The version pills come from the history refs, so a tag change must reload them too.
-    if (history.loaded) void history.reload()
+    // The version pills come from the history refs, so a tag change must refresh them too.
+    if (history.loaded) void history.refreshRefs()
     await refresh()
   })
 

@@ -124,6 +124,16 @@ export const useHistoryStore = defineStore('history', () => {
     done.value = r.commits.length < PAGE_SIZE
   }
 
+  /** Re-read only the branch/tag labels (e.g. after tagging): keeps pages and selection. */
+  async function refreshRefs() {
+    if (!repo.path) return
+    try {
+      refs.value = (await api.log(repo.path, 0, 1, allRefs(), undefined, logFilter())).refs
+    } catch {
+      // Labels stay as they were; the next reload picks them up.
+    }
+  }
+
   /** (Re)load the first page. Old rows stay on screen until the new page arrives. */
   async function reload() {
     if (!repo.path) return
@@ -288,6 +298,7 @@ export const useHistoryStore = defineStore('history', () => {
     file,
     inspectFile,
     reload,
+    refreshRefs,
     loadMore,
     select,
     loadTree,
