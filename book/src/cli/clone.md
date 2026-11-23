@@ -77,8 +77,8 @@ mediagit status           # check working tree
 ## Exit Status
 
 - **0**: Success
-- **1**: Network error or repository not found
-- **2**: Destination folder exists and is not empty (an empty folder is fine)
+- **1**: Network error, repository not found, or the destination folder exists and is not empty (an empty folder is fine)
+- **2**: Invalid options (usage error)
 
 
 ## Common options

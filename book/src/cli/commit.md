@@ -174,7 +174,7 @@ Empty commits require explicit flag:
 
 ```bash
 $ mediagit commit -m "Trigger CI rebuild"
-error: no changes added to commit
+Error: nothing to commit
 
 $ mediagit commit -m "Trigger CI rebuild" --allow-empty
 [main i1k5f8h] Trigger CI rebuild

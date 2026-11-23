@@ -115,7 +115,7 @@ abc1234 is the first bad commit
 ### Start with explicit commits
 
 ```bash
-$ mediagit bisect start HEAD~20 HEAD~5
+$ mediagit bisect start HEAD~5 HEAD~20
 # HEAD~5 is bad, HEAD~20 is good
 ```
 
@@ -153,13 +153,7 @@ Returned to branch 'main'
 ## Session State
 
 Bisect state is stored in a single file, `.mediagit/BISECT_STATE`, written as
-pretty-printed JSON (`commands/bisect.rs:595`). `mediagit bisect reset` deletes
-it (`bisect.rs:320`).
-
-This section previously named `.mediagit/BISECT_HEAD`, `.mediagit/BISECT_LOG`
-and `.mediagit/BISECT_TERMS` — those are **git's** bisect state files, and none
-of them exists anywhere in this codebase. The subcommands above are real; only
-the on-disk layout was borrowed from git.
+pretty-printed JSON. `mediagit bisect reset` deletes it.
 
 ## Exit Status
 

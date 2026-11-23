@@ -41,7 +41,7 @@ by letter case only (`Hero.txt` to `hero.txt`) stages the old name as deleted on
 Windows and macOS too. A version holding two names that differ only by letter case
 cannot be saved; keep one name and run `mediagit add --all`.
 
-### `-n, --dry-run`
+### `--dry-run`
 Show what would be added without actually adding files.
 
 ### `-v, --verbose`

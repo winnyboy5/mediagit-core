@@ -94,7 +94,7 @@ error chain with URL credentials and query strings removed.
 | `json_unsupported` | Only `completions`, which prints shell code and has no machine output | 2 |
 | `keychain_unavailable` | `remote add --token` or `--token-stdin` was refused because no OS keychain can be used (none present, or `MEDIAGIT_NO_KEYRING` is set) | 1 |
 | `needs_input` | A prompt (passphrase, confirmation) was reached; collect the input and re-run with it supplied | 1 |
-| `invalid_args` | Flags combined wrongly (currently `show`: `--output` without `<rev>:<path>`, `--tree` with `<rev>:<path>`) | 1 |
+| `invalid_args` | Flags combined wrongly, or a secret passed in argv under `--machine` (for example `show --output` without `<rev>:<path>`, `show --tree` with `<rev>:<path>`, `remote add --token`, `config set` of a secret with a value) | 1 |
 | `would_overwrite` | A checkout, merge, pull, rebase, cherry-pick, revert or bisect step would overwrite or delete uncommitted work (a different file at the same path as one you added); nothing is written; `message` lists the paths. `reset --hard` discards instead | 1 |
 | `staged_changes` | A non-fast-forward merge, pull merge, rebase, cherry-pick or revert was asked to start while the index differs from HEAD; nothing is written; `message` lists the staged paths; commit them or run `mediagit reset <path>` | 1 |
 | `empty_commit` | `cherry-pick` (including `--continue`) or `revert` would create a commit whose tree equals HEAD's; nothing is committed (`revert --no-commit` skips the check) | 1 |
@@ -111,9 +111,10 @@ error chain with URL credentials and query strings removed.
 | `file_in_use` | Another program holds the file (Windows sharing or lock violation, Unix busy) | 1 |
 | `already_exists` | A file or folder with that name exists | 1 |
 | `disk_full` | No space left on the disk | 1 |
+| `internal` | The program panicked (a bug); always exit 2 | 2 |
 | `error` | Any other failure; `message` is the full error chain | 1 |
 
-Success exits 0. A panic exits 2 with no envelope.
+Success exits 0. A panic exits 2; under `--machine` it prints an `internal` error envelope first.
 
 **Progress** (stderr, one line per bar roughly every 200 ms, final line has `done:true`):
 
@@ -136,7 +137,7 @@ envelope and exits 2 without running.
 W4 completes the set: every subcommand now has machine output (`auth register|passwd|key|admin`,
 `branch protect|show`, `commit --dry-run`, `reflog show --all|delete|expire`, `remote rename|show|set-url`,
 `tag show|verify`, `verify <commit>|--start|--end`, `bisect replay`). Destructive ones (`reflog delete|expire`,
-`auth key revoke`, `auth admin revoke-grant`) need `--yes` in machine mode, else `needs_input`.
+`auth key revoke`, `auth admin disable-user|revoke-grant`, `remote repos delete`, `fsck --purge-quarantine`) need `--yes` in machine mode, else `needs_input`.
 
 W3 adds `auth` (`login|status|whoami|logout`; `whoami`/`status` carry the
 account `identity` to compare with lock owners), `key`, `stats`, `gc`, `fsck`,
@@ -185,7 +186,7 @@ The hidden `__cli-tree` command prints the clap command tree as JSON; the
 desktop test suite checks it against `ui/parity.toml`, so a new flag cannot
 miss the GUI silently.
 
-`tag` supports `list`, `create` and `delete`. `remote ls-tree <remote> [path] [--ref <ref>]` lists one remote directory
+`tag` supports `create`, `list`, `delete`, `show` and `verify`. `remote ls-tree <remote> [path] [--ref <ref>]` lists one remote directory
 (`{remote, ref, path, entries:[{name, path, kind: file|dir, size|null, oid}]}`);
 human output is `<type>\t<size>\t<path>` per entry. See `book/src/cli/remote.md`.
 

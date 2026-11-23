@@ -93,10 +93,10 @@ $ mediagit revert def5678
 [main ghi9012] Revert "Update hero texture"
 ```
 
-### Revert multiple commits
+### Revert multiple commits (listed explicitly)
 
 ```bash
-$ mediagit revert HEAD~3..HEAD
+$ mediagit revert HEAD HEAD~1 HEAD~2
 Reverting: Update audio mix (3/3)
 Reverting: Add V2 render assets (2/3)
 Reverting: Adjust lighting rig (1/3)
@@ -141,8 +141,8 @@ $ mediagit revert --abort
 ## Exit Status
 
 - **0**: Success
-- **1**: Conflicts detected, manual resolution required
-- **2**: Commit not found or invalid operation
+- **1**: Conflicts detected (manual resolution required), or the commit was not found
+- **2**: Invalid options (usage error)
 
 ## See Also
 

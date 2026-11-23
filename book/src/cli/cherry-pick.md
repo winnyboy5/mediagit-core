@@ -141,8 +141,8 @@ Changes applied but not committed. Review and then commit:
 ## Exit Status
 
 - **0**: Success
-- **1**: Conflicts detected, manual resolution required
-- **2**: Commit not found or invalid operation
+- **1**: Conflicts detected (manual resolution required), or the commit was not found
+- **2**: Invalid options (usage error)
 
 ## See Also
 

@@ -6,8 +6,9 @@ Show the history of HEAD and branch movements.
 
 ```bash
 mediagit reflog [OPTIONS] [REF]
-mediagit reflog expire
-mediagit reflog delete
+mediagit reflog show [REF] [-n <COUNT>] [--all]
+mediagit reflog expire [REF] [--keep <N>] [--yes]
+mediagit reflog delete <REFERENCE> [--yes]
 ```
 
 ## Description
@@ -34,13 +35,19 @@ Show only OIDs without messages.
 
 ## Subcommands
 
+### `show`
+
+The default action. `--all` shows every ref.
+
 ### `expire`
 
-Remove reflog entries older than the configured retention period (default: 90 days).
+Trim a ref's reflog to its newest `--keep` entries (default 90). With no REF it
+trims every ref. It asks first; `--yes` is required under `--machine`.
 
 ### `delete`
 
-Remove all reflog entries for a specific ref.
+Remove all reflog entries for REFERENCE (required). It asks first; `--yes` is
+required under `--machine`.
 
 ## Examples
 

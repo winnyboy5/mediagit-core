@@ -26,8 +26,7 @@ Stash entries are stored in `.mediagit/stash/` as numbered entries.
 
 ### `save` / `push`
 
-Save current changes to the stash. `push` is a git-compatible alias for `save` and accepts
-identical flags and arguments.
+Save current changes to the stash. `push` is the git-style form of `save`: both take `-m`, `-u` and `PATHS`; only `save` also accepts the message as a bare argument (`stash save "WIP"`).
 
 ```bash
 mediagit stash save [-m <MESSAGE>] [-u] [PATHS...]

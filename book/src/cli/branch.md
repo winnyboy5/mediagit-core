@@ -21,11 +21,10 @@ mediagit branch protect <branch> [--require-reviews] [--unprotect]
 Branches are lightweight references to commits stored under `refs/heads/`,
 enabling parallel development workflows.
 
-`branch` requires a subcommand. As git-style sugar, bare invocations are
-translated automatically: `mediagit branch` runs `branch list`, and
-`mediagit branch <name>` runs `branch create <name>`. The `mediagit
-checkout <name>` / `mediagit co <name>` shims translate to `branch switch
-<name>`.
+`branch` requires a subcommand. As git-style sugar, a bare `mediagit branch`
+runs `branch list`. `mediagit branch <name>` is not accepted; use
+`branch create <name>`. The `mediagit checkout <name>` / `mediagit co <name>`
+shims translate to `branch switch <name>`.
 
 ## Subcommands
 
@@ -68,7 +67,7 @@ and sets its upstream. Without a connection it stops and changes nothing:
 
 `switch` carries a staged new file over to the target. It refuses, naming the file, only when the target has a different file at that path; `-f` overrides. A refused switch leaves HEAD where it was.
 
-### `delete <branches>...`
+### `delete <branches>...` (alias: `rm`)
 
 Delete one or more branches.
 
@@ -79,7 +78,7 @@ Delete one or more branches.
 | `-r`, `--remote` | Delete remote-tracking branches (e.g. `origin/feature`) |
 | `-q`, `--quiet` | Quiet mode |
 
-### `rename [<old-name>] <new-name>`
+### `rename [<old-name>] <new-name>` (aliases: `move`, `mv`)
 
 With one argument, renames the current branch; with two, renames `<old-name>`
 to `<new-name>`. `-f`/`--force` overwrites an existing name.

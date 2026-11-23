@@ -43,8 +43,6 @@ Remove a remote and all its tracking refs.
 mediagit remote remove <NAME>
 ```
 
-Alias: `rm`
-
 The saved sign-in for that server (in the system keychain) is kept, because other
 projects and `auth login` share it. Use `auth logout` to remove it.
 

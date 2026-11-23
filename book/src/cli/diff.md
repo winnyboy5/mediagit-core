@@ -27,7 +27,7 @@ chunks and sizes) rather than attempting a textual diff.
 | `--cached` | Compare the staging area with the last commit instead of the working tree |
 | `--stat` | Show a diffstat summary (files changed, insertions/deletions/sizes) |
 | `--summary` | Show a condensed summary of changes |
-| `-q`, `--quiet` | Suppress output; exit status indicates whether differences exist |
+| `-q`, `--quiet` | Suppress output. Exit status is 0 whether or not there are differences |
 | `-- <path>...` | Limit the diff to the given paths |
 
 ## Examples

@@ -5,18 +5,16 @@ Verify integrity of specific objects or files.
 ## Synopsis
 
 ```bash
-mediagit verify [COMMIT]
-mediagit verify [OPTIONS] --path <file>...
+mediagit verify [OPTIONS] [COMMIT]
 ```
 
 ## Description
 
-Verifies the integrity of a commit and its reachable objects, or specific files. Unlike `fsck`
+Verifies the integrity of a commit and its reachable objects. Unlike `fsck`
 which checks the entire repository, `verify` can target a single commit (OID, abbreviated hash,
-branch name, or `HEAD`) or individual files for quick validation.
+branch name, or `HEAD`) or a range (`--start`/`--end`).
 
 Useful for:
-- Verifying specific media files after download
 - Checking object integrity before important operations
 - Validating chunks after recovery
 - Confirming successful transfers
@@ -42,9 +40,6 @@ Minimal checks only (skip connectivity analysis).
 #### `--detailed`
 Show a full statistics report and per-object results.
 
-#### `--path <PATH>`
-Repository path to verify (defaults to current directory).
-
 #### `-v`, `--verbose`
 Show per-commit verification results.
 
@@ -57,8 +52,7 @@ Colored output: `always`, `auto`, or `never`. Default: `auto`. Global option, sh
 
 #### `-C`, `--repository <PATH>`
 Run as if `verify` was started in `<PATH>` instead of the current directory. Global option,
-shared by every `mediagit` subcommand. Distinct from `--path` above, which is `verify`'s own
-(pre-existing) repository-path option.
+shared by every `mediagit` subcommand.
 
 #### `-h`, `--help`
 Print help for `verify` and exit.
@@ -79,7 +73,7 @@ $ mediagit verify a3c8f9d
 ✅ Verified 1 commits in range - all OK
 ```
 
-### Verify HEAD (default)
+### Verify the whole repository (default)
 
 ```bash
 $ mediagit verify
@@ -179,8 +173,8 @@ $ mediagit verify --quick --quiet || exit 1
 ## Exit Status
 
 - **0**: All verifications passed
-- **1**: One or more errors detected
-- **2**: Invalid options or could not open repository
+- **1**: One or more errors detected, or could not open repository
+- **2**: Invalid options (usage error)
 
 ## Notes
 

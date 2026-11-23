@@ -83,8 +83,6 @@ List all tags.
 mediagit tag list
 ```
 
-Aliases: `ls`
-
 Options:
 - `-n`, `--info` — Show commit info for each tag (git-style `-n`)
 - `--sort <KEY>` — Sort tags (default `refname`)
@@ -98,8 +96,6 @@ Delete a tag.
 ```bash
 mediagit tag delete <NAME>
 ```
-
-Aliases: `rm`
 
 Options:
 - `-f`, `--force` — Delete without confirmation
@@ -131,14 +127,14 @@ mediagit tag verify <NAME>
 
 ```bash
 $ mediagit tag create v1.0
-Tag 'v1.0' created at HEAD (abc1234d)
+Created lightweight tag 'v1.0' at <64-hex oid>
 ```
 
 ### Create an annotated tag with a message
 
 ```bash
 $ mediagit tag create v2.0 -m "Q2 2025 approved asset set"
-Tag 'v2.0' created: Q2 2025 approved asset set
+Created annotated tag 'v2.0' at <64-hex oid>
 ```
 
 ### Tag a specific commit

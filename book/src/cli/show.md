@@ -5,12 +5,12 @@ Show commit details and contents.
 ## Synopsis
 
 ```bash
-mediagit show [OPTIONS] [<object>]
+mediagit show [OPTIONS] [<object>|<rev>:<path>]
 ```
 
 ## Description
 
-Shows a commit object (defaults to `HEAD`). Displays the commit's author, date,
+Shows a commit, tag, tree or blob (defaults to `HEAD`). Displays the commit's author, date,
 message, and a summary of file changes (added, modified, deleted). Use
 `-v`/`--verbose` to include the tree OID and parent OIDs.
 
@@ -18,6 +18,12 @@ message, and a summary of file changes (added, modified, deleted). Use
 
 #### `<object>`
 Object to show (commit OID, abbreviated hash, branch name, tag, or `HEAD`). Defaults to `HEAD`.
+
+#### `--tree`
+With a commit: list every file in its tree as `<size>	<path>`, sorted by path. Not valid with `<rev>:<path>`.
+
+#### `--output <FILE>`
+With `<rev>:<path>`: write that file's content to FILE instead of stdout (required under `--machine`).
 
 #### `-v`, `--verbose`
 Show additional details (tree OID, parent OIDs).

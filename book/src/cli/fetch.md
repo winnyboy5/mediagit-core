@@ -21,12 +21,12 @@ transfer, with server-proxy fallback.
 Remote name (default: `origin`).
 
 #### `[BRANCH]`
-Specific branch to fetch. If omitted, fetches all branches.
+Specific branch to fetch. If omitted, fetches the current branch only; use `--all` for every branch.
 
 ## Options
 
 #### `--all`
-Fetch from all configured remotes.
+Fetch every branch of the remote (up to `MEDIAGIT_FETCH_BRANCH_CONCURRENCY`, default 4, in parallel).
 
 #### `-p`, `--prune`
 Remove remote-tracking refs that no longer exist on the remote.
@@ -54,7 +54,7 @@ From http://media-server.example.com/my-project
 $ mediagit fetch origin feature/lighting
 ```
 
-### Fetch from all remotes
+### Fetch all branches
 
 ```bash
 $ mediagit fetch --all

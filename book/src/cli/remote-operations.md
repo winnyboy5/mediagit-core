@@ -17,16 +17,18 @@ Remote commands (`push`, `pull`, `fetch`, `clone`, `download`) support optional
 client authentication. Credentials are resolved in this order (highest to lowest
 precedence):
 
-1. **Per-remote config** — `remotes.<name>.token` or `remotes.<name>.api_key` in
+1. **Environment variables** — `MEDIAGIT_TOKEN` or `MEDIAGIT_API_KEY`
+2. **Per-remote config** — `remotes.<name>.token` or `remotes.<name>.api_key` in
    `.mediagit/config.toml`
-2. **Environment variables** — `MEDIAGIT_TOKEN` or `MEDIAGIT_API_KEY`
-3. **None** — no authentication header sent (compatible with authless servers)
+3. **OS keychain** — the sign-in saved by `auth login` or `remote add --token`
+   (skipped when `MEDIAGIT_NO_KEYRING` is set)
+4. **None** — no authentication header sent (compatible with authless servers)
 
 If both `token` and `api_key` are set, `token` (Bearer) wins.
 
 `download` is the one command that can run without a local repository, by
-taking a full URL. In that full-URL mode, credentials (per-remote config or
-environment variables) are attached only if the typed URL's host matches
+taking a full URL. In that full-URL mode, credentials (the environment
+variables, config or keychain) are attached only if the typed URL's host matches
 one of the current repository's configured remotes — if there's no local
 repository, or no remote's host matches, no credentials are sent at all.
 This prevents a token from `MEDIAGIT_TOKEN` / `MEDIAGIT_API_KEY` leaking to

@@ -42,7 +42,6 @@ connectivity and chunk-delta checks.
 | `--max-objects <N>` | Limit number of objects to check (0 = unlimited) [default: 0] |
 | `-q`, `--quiet` | Quiet mode (only errors) |
 | `-v`, `--verbose` | Verbose mode (detailed progress) |
-| `--path <PATH>` | Repository path (defaults to current directory) |
 | `--color <WHEN>` | Colored output: `always`, `auto`, or `never` (default: `auto`) |
 | `-C`, `--repository <PATH>` | Repository path |
 | `-V`, `--version` | Print version |

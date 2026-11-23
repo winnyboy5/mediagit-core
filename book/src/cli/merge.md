@@ -20,6 +20,8 @@ If the current branch is a plain ancestor of `BRANCH`, the merge fast-forwards
 by default. Otherwise it computes a three-way merge and, if there are no
 conflicts, creates a merge commit with both branches as parents.
 
+If the current branch already contains `BRANCH`, `merge` prints "Already up to date." and changes nothing (machine status `up_to_date`).
+
 ## Options
 
 | Flag | Description |

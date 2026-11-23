@@ -17,6 +17,7 @@ graph LR
         status
         diff
         show
+        ls-files
     end
     subgraph "Branch & History"
         branch
@@ -47,6 +48,7 @@ graph LR
         verify
         stats
         config
+        key
         lock
         version
         completions
@@ -64,6 +66,7 @@ Essential commands for daily workflows:
 - [log](./log.md) - Show commit history
 - [diff](./diff.md) - Show differences
 - [show](./show.md) - Show object details
+- [ls-files](./ls-files.md) - List working-folder files with their status
 
 ### Branch Management
 Working with branches:
@@ -101,6 +104,8 @@ Repository maintenance:
 - [fsck](./fsck.md) - File system check
 - [verify](./verify.md) - Verify object integrity
 - [stats](./stats.md) - Repository statistics
+- [config](./config.md) - Read and change configuration
+- [key](./key.md) - Manage the repository encryption key
 
 ### Other
 - `version` - Show version information
@@ -139,6 +144,9 @@ Available for all commands:
 - `--verbose`, `-v` - Verbose output
 - `--quiet`, `-q` - Suppress output
 - `--color <when>` - Colorize output (auto/always/never)
+- `--log-format <pretty|full|compact|json>` - Log output format (env `MEDIAGIT_LOG_FORMAT`)
+- `--machine` - One JSON envelope on stdout, NDJSON progress on stderr (see CLI_REFERENCE.md)
+- `--secret-stdin` - With `--machine`, read secrets from stdin
 
 ## Environment Variables
 

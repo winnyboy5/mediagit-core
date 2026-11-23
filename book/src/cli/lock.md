@@ -166,8 +166,6 @@ List active locks.
 mediagit lock list [--json] [--remote <REMOTE>]
 ```
 
-Aliases: `ls`
-
 Options:
 - `--json` — Output as JSON
 - `--remote <REMOTE>` — Remote to talk to (default: `origin`)

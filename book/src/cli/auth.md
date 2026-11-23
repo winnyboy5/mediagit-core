@@ -6,13 +6,13 @@ Manage authentication with a MediaGit server.
 
 ```bash
 mediagit auth login    [--server <URL>] [--username <USERNAME>] [--token <TOKEN>] [--api-key <API_KEY>]
-mediagit auth register [--server <URL>]
+mediagit auth register [--server <URL>] [--username <NAME>] [--email <EMAIL>]
 mediagit auth status   [--server <URL>]
 mediagit auth logout   [--server <URL>] [--all]
 mediagit auth passwd   [--server <URL>]
 mediagit auth whoami   [--server <URL>]
 mediagit auth key    <create|list|revoke> ...
-mediagit auth admin  <list-users|set-role|create-user|reset-password|grant|revoke-grant> ...
+mediagit auth admin  <list-users|set-role|create-user|reset-password|disable-user|enable-user|list-grants|repo-access|grant|revoke-grant> ...
 ```
 
 Every subcommand takes `--server <URL>`. When omitted it defaults to the current
@@ -100,12 +100,18 @@ Requires the admin role. A non-admin calling these gets a 403.
 |---|---|---|
 | `admin list-users` | — | List every user account |
 | `admin set-role` | `<USER> <ROLE>` | Change a user's role (`read`, `write`, `admin`) |
-| `admin create-user` | `<USER> --role <ROLE>` | Create a user with an explicit role, for closed-registration servers |
+| `admin create-user` | `<USER> --role <ROLE> [--email <EMAIL>]` | Create a user with an explicit role, for closed-registration servers |
 | `admin reset-password` | `<USER>` | Reset a user's password (forgot-password recovery) |
+| `admin disable-user` | `<USER> [--yes]` | Suspend an account |
+| `admin enable-user` | `<USER>` | Re-enable a suspended account |
+| `admin list-grants` | `<USER>` | List a user's repository grants |
+| `admin repo-access` | `<REPO>` | List who can reach a repository |
 | `admin grant` | `<USER> <REPO> <LEVEL>` | Grant a user access to a repo (`read`, `write`, `admin`) |
 | `admin revoke-grant` | `<USER> <REPO>` | Remove a user's grant on a repo |
 
 `<USER>` accepts a username or a user id.
+
+`key revoke`, `admin disable-user` and `admin revoke-grant` ask for confirmation; pass `--yes` (required with `--machine`).
 
 ## Roles and grants
 
