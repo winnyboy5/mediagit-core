@@ -264,8 +264,14 @@ impl CredentialsStore {
             }
         };
 
-        let user_id =
-            user_id.ok_or_else(|| AuthError::Unauthorized("Invalid credentials".to_string()))?;
+        let Some(user_id) = user_id else {
+            // Pay the same bcrypt cost as a wrong password, so response time
+            // does not reveal which identifiers exist.
+            static DUMMY_HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+            let dummy = DUMMY_HASH.get_or_init(|| hash("dummy", bcrypt_cost()).unwrap_or_default());
+            let _ = verify(password, dummy);
+            return Err(AuthError::Unauthorized("Invalid credentials".to_string()));
+        };
 
         // Get credentials and verify password
         let credentials = self.credentials.read().await;
@@ -542,6 +548,30 @@ impl Default for CredentialsStore {
 mod tests {
     use super::*;
     use crate::auth::user::Role;
+
+    #[tokio::test]
+    async fn qa_s03_unknown_user_costs_like_a_wrong_password() {
+        let store = store_with_user("u9").await;
+        let time = |id: &'static str| {
+            let store = &store;
+            async move {
+                let t = std::time::Instant::now();
+                let e = store
+                    .authenticate(id, "wrong password here")
+                    .await
+                    .unwrap_err();
+                assert!(matches!(&e, AuthError::Unauthorized(m) if m == "Invalid credentials"));
+                t.elapsed()
+            }
+        };
+        let _warm = time("nobody@example.com").await;
+        let known = time("u9@example.com").await;
+        let unknown = time("nobody@example.com").await;
+        assert!(
+            unknown * 2 > known,
+            "unknown {unknown:?} vs known {known:?}"
+        );
+    }
 
     async fn store_with_user(id: &str) -> CredentialsStore {
         let store = CredentialsStore::new();
