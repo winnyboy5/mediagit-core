@@ -105,6 +105,21 @@ fn bcrypt_cost() -> u32 {
         .unwrap_or(DEFAULT_COST)
 }
 
+/// Pay the same bcrypt cost as a wrong password for an unknown identifier, so
+/// response time does not reveal which identifiers exist.
+fn verify_dummy(password: &str) {
+    static DUMMY_HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    #[cfg(test)]
+    DUMMY_VERIFIES.with(|c| c.set(c.get() + 1));
+    let dummy = DUMMY_HASH.get_or_init(|| hash("dummy", bcrypt_cost()).unwrap_or_default());
+    let _ = verify(password, dummy);
+}
+
+#[cfg(test)]
+thread_local! {
+    static DUMMY_VERIFIES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 /// AU-7: consecutive failures and when the account was locked.
 #[derive(Debug, Default, Clone)]
 struct FailureState {
@@ -265,11 +280,7 @@ impl CredentialsStore {
         };
 
         let Some(user_id) = user_id else {
-            // Pay the same bcrypt cost as a wrong password, so response time
-            // does not reveal which identifiers exist.
-            static DUMMY_HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-            let dummy = DUMMY_HASH.get_or_init(|| hash("dummy", bcrypt_cost()).unwrap_or_default());
-            let _ = verify(password, dummy);
+            verify_dummy(password);
             return Err(AuthError::Unauthorized("Invalid credentials".to_string()));
         };
 
@@ -550,26 +561,29 @@ mod tests {
     use crate::auth::user::Role;
 
     #[tokio::test]
-    async fn qa_s03_unknown_user_costs_like_a_wrong_password() {
+    async fn qa_s03_unknown_user_runs_the_dummy_verify() {
         let store = store_with_user("u9").await;
-        let time = |id: &'static str| {
-            let store = &store;
-            async move {
-                let t = std::time::Instant::now();
-                let e = store
-                    .authenticate(id, "wrong password here")
-                    .await
-                    .unwrap_err();
-                assert!(matches!(&e, AuthError::Unauthorized(m) if m == "Invalid credentials"));
-                t.elapsed()
-            }
-        };
-        let _warm = time("nobody@example.com").await;
-        let known = time("u9@example.com").await;
-        let unknown = time("nobody@example.com").await;
-        assert!(
-            unknown * 2 > known,
-            "unknown {unknown:?} vs known {known:?}"
+        let count = || DUMMY_VERIFIES.with(|c| c.get());
+        let before = count();
+        let e = store
+            .authenticate("nobody@example.com", "wrong password here")
+            .await
+            .unwrap_err();
+        assert!(matches!(&e, AuthError::Unauthorized(m) if m == "Invalid credentials"));
+        assert_eq!(
+            count(),
+            before + 1,
+            "unknown user must pay one dummy verify"
+        );
+        let e = store
+            .authenticate("u9@example.com", "wrong password here")
+            .await
+            .unwrap_err();
+        assert!(matches!(&e, AuthError::Unauthorized(m) if m == "Invalid credentials"));
+        assert_eq!(
+            count(),
+            before + 1,
+            "known user pays its real verify, not the dummy"
         );
     }
 
