@@ -427,14 +427,15 @@ pub async fn login_handler(
                 tokens,
             }))
         }
-        Err(_) => {
+        Err(e) => {
             warn!("Login failed for: {}", req.identifier);
-            Err((
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse {
-                    error: "Invalid credentials".to_string(),
-                }),
-            ))
+            // `authenticate` only words a specific reason (disabled, locked)
+            // after the password verified, so passing it through is no oracle.
+            let error = match e {
+                AuthError::Unauthorized(msg) => msg,
+                _ => "Invalid credentials".to_string(),
+            };
+            Err((StatusCode::UNAUTHORIZED, Json(ErrorResponse { error })))
         }
     }
 }
@@ -695,6 +696,40 @@ mod tests {
         assert!(result.is_err());
         let (status, _) = result.unwrap_err();
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn qa_s03_disabled_account_message_only_after_password_verifies() {
+        let auth_service = Arc::new(AuthService::new("test-secret"));
+        let (_, reg) = register_handler(
+            State(Arc::clone(&auth_service)),
+            Json(RegisterRequest {
+                username: "testuser".to_string(),
+                email: "test@example.com".to_string(),
+                password: "render farm quiet hum".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+        auth_service
+            .credentials_store
+            .set_disabled(&reg.user.id, true)
+            .await
+            .unwrap();
+        let login = |password: &str| {
+            login_handler(
+                State(Arc::clone(&auth_service)),
+                Json(LoginRequest {
+                    identifier: "test@example.com".to_string(),
+                    password: password.to_string(),
+                }),
+            )
+        };
+        let (status, body) = login("render farm quiet hum").await.unwrap_err();
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(body.error.contains("disabled"), "got {}", body.error);
+        let (_, body) = login("wrong password here").await.unwrap_err();
+        assert_eq!(body.error, "Invalid credentials");
     }
 
     #[tokio::test]
