@@ -500,7 +500,7 @@ Two follow-up approaches were measured and rejected before deployment: whole-fil
 **Cumulative example** (the full chain fixture set above, all versions of all families, computed from `economics.tsv`):
 - Git LFS stores every version in full: **2,331.9 MB**
 - MediaGit total ODB after the same adds: **1,188.2 MB**
-- **49.2% less storage** across the version history
+- **49.0% less storage** across the version history (1,188.2 / 2,331.9 MB stored)
 
 Per-family cumulative highlights: WAV chain 201.1 → 42.3 MB (79.0% less), GLB 39.5 → 7.8 MB (80.2% less), safetensors 750.0 → 410.0 MB (45.3% less), PSD 624.4 → 197.7 MB (68.3% less). Pre-compressed formats (JPG/PNG/video) store the same bytes as LFS would.
 
@@ -523,8 +523,11 @@ The following per-format anchor gates are embedded in the QA suite (`dev-tests/q
 | WAV | 94.0% | Measured floor: 95.3%, tolerance −1.3 pp |
 | GLB | 95.0% | Measured: 100%, tolerance −5 pp (handles fixture regeneration variance) |
 | Safetensors | 44.0% | Measured: 45.5%, tolerance −1.5 pp (rebased 2026-07-16 from prior lucky-seed 48 pp) |
+| PSD | 62.0% | Measured: 67.2% |
+| NPZ | 71.0% | Measured: 76.7% |
+| AI | 21.0% | Measured: 26.3% |
 
-Other formats have no minimum anchor (strong baseline in production if savings regress; weak formats [JPG/PNG/Video] are monitored for unexpected improvement, which would flag a tool malfunction).
+Other formats (JPG, PNG, SVG, video, Parquet, ONNX, FLAC) have no minimum anchor (strong baseline in production if savings regress; weak formats [JPG/PNG/Video] are monitored for unexpected improvement, which would flag a tool malfunction).
 
 ---
 

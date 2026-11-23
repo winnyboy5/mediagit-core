@@ -5,7 +5,7 @@ on Git internals, but a purpose-built VCS with chunk-level deduplication,
 BLAKE3-addressed objects, and pluggable storage backends (local filesystem,
 AWS S3, Azure Blob, GCS, MinIO). It ships two binaries: `mediagit` (the
 client) and `mediagit-server` (an optional HTTP(S) server for push/pull
-collaboration). Current release: **0.3.0-rc.5**.
+collaboration). Current release: **0.8.0-rc.1**.
 
 ## Which track am I?
 
@@ -52,6 +52,9 @@ Download from [GitHub Releases](https://github.com/winnyboy5/mediagit-core/relea
 ```bash
 curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh
 ```
+
+The script installs only the `mediagit` client. For `mediagit-server`,
+download the archive and copy `mediagit-server` out of it.
 
 **Linux x86_64 — manual:**
 ```bash
@@ -158,9 +161,9 @@ tls_min_version = "1.3"   # default; "1.2" is the escape hatch for old clients/p
 # Authentication
 enable_auth = true
 jwt_secret = "replace-with-a-long-random-secret"   # or set MEDIAGIT_JWT_SECRET instead
-allow_open_registration = true                     # default; set false so POST /auth/register
-                                                   # rejects anonymous callers (`init --enable-auth`
-                                                   # writes false). Only read when enable_auth = true
+allow_open_registration = false                    # default (closed). Set true to let anonymous callers
+                                                   # POST /auth/register (they get the Read role).
+                                                   # Only read when enable_auth = true
 presigned_url_ttl_seconds = 43200                  # 12h; TTL for direct-to-bucket upload URLs
 auth_store_dir = "./auth"                          # default: sibling `auth/` dir next to repos_dir
 
@@ -290,9 +293,10 @@ curl -X POST http://host:3000/auth/login \
 # → returns a JWT access token ("identifier" accepts username or email)
 ```
 
-Self-registration (`POST /auth/register`) always creates a **Write**-role
+Self-registration (`POST /auth/register`) is refused unless
+`allow_open_registration = true`; when open it always creates a **Read**-role
 account — there is no client-controlled `role` field. Promote a
-self-registered user to Admin with `mediagit auth admin set-role bob admin`
+self-registered user with `mediagit auth admin set-role bob write` (or `admin`)
 (requires an existing Admin), or use `mediagit-server admin create-user`
 offline (see below).
 
@@ -323,8 +327,8 @@ Every user has one of three roles:
 
 | Role | Permissions | Notes |
 |------|-------------|-------|
-| `Read` | `repo:read` | Read-only access to repos |
-| `Write` | `repo:read`, `repo:write` | Can push (self-registration default) |
+| `Read` | `repo:read` | Read-only access to repos (self-registration default) |
+| `Write` | `repo:read`, `repo:write` | Can push (assigned by an admin; `auth admin create-user --role write`) |
 | `Admin` | All above + `repo:admin`, `user:manage` | Bypasses per-repo grants; can manage users/keys |
 
 For finer-grained access control, an Admin can assign **per-repo grants**
@@ -338,12 +342,12 @@ mediagit auth admin revoke-grant alice design-assets
 (equivalent REST: `POST`/`DELETE /auth/users/<alice-id>/grants` with a
 `{"repo": "...", "level": "..."}` body and an admin bearer token.)
 
-**Important:** the moment any grant is created, per-repo enforcement
-activates for *all* repo-scoped permission checks — including repos with
-no grant for that user (which then deny access even if their flat role
-would allow it). A deployment with zero grants behaves exactly like the
-pre-grants flat role check. Set `MEDIAGIT_GRANTS_ENFORCE=0` to opt out of
-per-repo enforcement even after grants exist.
+**Important:** enforcement is decided per repository. A repo that has at
+least one grant is checked against grants (a user with no grant there is
+denied even if the flat role would allow it); a repo with no grants keeps the
+flat role check, however many grants exist elsewhere. Set
+`MEDIAGIT_GRANTS_ENFORCE=strict` to deny on repos with no grants too, or `=0`
+to turn grants off everywhere.
 
 Full reference:
 [`book/src/reference/authentication.md`](book/src/reference/authentication.md).
@@ -461,10 +465,8 @@ mediagit remote add origin http://host:3000/<repo-name>
 ```
 
 **Only `http://` and `https://` reach the remote protocol.** `mediagit remote add`
-also *accepts* `file://`, `ssh://` and `git://`, but no transport implements
-them — `clone` treats any non-HTTP(S) URL as a local directory path (a folder
-containing `.mediagit`), so an `ssh://` remote fails as a missing local path
-rather than dialling anything. Clone from a local repo by passing the path
+accepts only `http://` and `https://` URLs. `clone` treats any other string as
+a local directory path (a folder containing `.mediagit`), so pass the path
 directly, not a `file://` URL.
 
 Credentials are resolved in this order:
@@ -475,10 +477,12 @@ Credentials are resolved in this order:
 
 An **explicit config token outranks the keychain cache** — editing
 `remotes.<name>.token` takes effect immediately. After a successful request,
-the working credential is cached to the OS keychain (keyed by origin) so later
-commands across every repo on that server resolve without re-prompting; this
-write-through only happens on a successful server response, never
-speculatively. If a keychain-sourced credential is rejected with `401`, that
+a credential taken from the config file is cached to the OS keychain (keyed by
+origin) so later commands across every repo on that server resolve without
+re-prompting; this write-through only happens on a successful server response,
+never speculatively. A credential taken from `MEDIAGIT_TOKEN` or
+`MEDIAGIT_API_KEY` is never copied there, so a script or CI job cannot
+overwrite your own saved sign-in. If a keychain-sourced credential is rejected with `401`, that
 entry is invalidated and the next tier is tried — no stale token can wedge you.
 
 There is no top-level `auth_token` config key — if you see that referenced
@@ -527,10 +531,11 @@ Binaries land at `./target/{debug,release}/mediagit{,-server}`.
 
 ### Run the dev harness
 
-**`dev-tests/dev-server/` is gitignored.** `.gitignore:202` ignores `dev-tests/*`
-and re-includes only `!dev-tests/qa-suite/` (itself minus `work/`, `logs/`,
-`reports/`, `fixtures-synthetic/` and `.venv/`); `compat-fixture` is tracked
-because it predates the rule. So `dev-server/` is a scratch directory a
+**`dev-tests/dev-server/` is gitignored.** the `dev-tests/*` rule in `.gitignore`
+ignores it and re-includes only `!dev-tests/qa-suite/` (itself minus `work/`,
+`logs/`, `reports/`, `fixtures-synthetic/` and `.venv/`); a few older files
+(`compat-fixture`, `dedup-*`, `gen_dedup_pairs.py`, `compare_dedup.ps1`)
+predate the rule and stay tracked. So `dev-server/` is a scratch directory a
 maintainer accumulates locally, not something a fresh clone has — build your own
 harness rather than looking for one that isn't there:
 

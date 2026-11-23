@@ -1,6 +1,6 @@
 # MediaGit Configuration Reference
 
-Complete reference for configuring the MediaGit **client** (`.mediagit/config.toml`) and the MediaGit **server** (`mediagit-server.toml`), plus the operational environment variables that sit on top of both. Version: 0.3.0-rc.5.
+Complete reference for configuring the MediaGit **client** (`.mediagit/config.toml`) and the MediaGit **server** (`mediagit-server.toml`), plus the operational environment variables that sit on top of both. Version: 0.8.0-rc.1.
 
 All facts below were verified directly against the source (`crates/mediagit-config/src/schema.rs`, `crates/mediagit-server/src/config.rs`, `crates/mediagit-server/src/main.rs`, `crates/mediagit-cli/src/repo.rs`, and related read-sites) rather than assumed. Where a setting is defined but not actually wired to any runtime behavior, that is called out explicitly rather than left implied.
 
@@ -14,7 +14,9 @@ All facts below were verified directly against the source (`crates/mediagit-conf
 <repo-root>/.mediagit/config.toml
 ```
 
-Created by `mediagit init` / `mediagit clone`. All sections are optional in the file itself — any key not present falls back to its Rust-side default (`#[serde(default)]` in `schema.rs`). Loading goes through `Config::load()` (`crates/mediagit-config/src/schema.rs:174`), which parses the TOML directly. An environment-variable overlay (`apply_env_overrides` / `load_with_overrides`) used to exist in `mediagit-config` with no caller outside its own tests; it has been removed as of v0.4.0, along with the fourteen `MEDIAGIT_APP_*`/`MEDIAGIT_COMPRESSION_*`/etc. env vars it alone read (see [`env-knobs.md`](env-knobs.md#server-app-config-overrides--removed)).
+Edit values with `mediagit config set <key> <value>`; `mediagit config schema` lists every settable key with its type and default.
+
+Created by `mediagit init` / `mediagit clone`. All sections are optional in the file itself — any key not present falls back to its Rust-side default (`#[serde(default)]` in `schema.rs`). Loading goes through `Config::load()` (`Config::load` in `crates/mediagit-config/src/schema.rs`), which parses the TOML directly. An environment-variable overlay (`apply_env_overrides` / `load_with_overrides`) used to exist in `mediagit-config` with no caller outside its own tests; it has been removed as of v0.4.0, along with the fourteen `MEDIAGIT_APP_*`/`MEDIAGIT_COMPRESSION_*`/etc. env vars it alone read (see [`env-knobs.md`](env-knobs.md#server-app-config-overrides--removed)).
 
 ## Minimal example
 
@@ -94,12 +96,12 @@ Used when creating commits.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `name` | string \| absent | absent | Display name on commits. Precedence: `MEDIAGIT_AUTHOR_NAME` env var (`crates/mediagit-cli/src/commands/commit.rs:271`, and similarly in `lock.rs`, `merge.rs`, `tag.rs`) > `[author].name` in config.toml > `$USER`. |
+| `name` | string \| absent | absent | Display name on commits. `commit` refuses until both name and email are set (flag > `MEDIAGIT_AUTHOR_NAME` env var > `[author].name`); `tag`, `merge` and `lock` still fall back to `$USER`. |
 | `email` | string \| absent | absent | Email address on commits. |
 
 ## `[storage]` — storage backend
 
-Selected with the `backend` key. All backend-specific fields sit **directly under `[storage]`** alongside `backend` — there is no nested `[storage.s3]`/`[storage.filesystem]` table. `StorageConfig` is a Rust enum tagged on `backend` (`schema.rs:353-373`), so exactly one backend's fields apply per repo.
+Selected with the `backend` key. All backend-specific fields sit **directly under `[storage]`** alongside `backend` — there is no nested `[storage.s3]`/`[storage.filesystem]` table. `StorageConfig` is a Rust enum tagged on `backend`, so exactly one backend's fields apply per repo.
 
 ### Local filesystem (default)
 
@@ -160,7 +162,9 @@ secret stays out of the file. `AWS_ACCESS_KEY_ID` and friends are still not read
 - Secrets set through `mediagit-server init --storage s3 --storage-secret-stdin` are
   written to the server config, which `init` makes owner-only on Unix. On the CLI
   side, `.mediagit/config.toml` holds them in clear text and MediaGit warns when
-  it is world-readable. Treat both files as secrets.
+  it is world-readable. Since 0.8.0-rc.1 every save keeps config.toml owner-only
+  (mode 0600 on Unix, an owner-only ACL on Windows); the warning still fires for a
+  file you made world-readable yourself. Treat both files as secrets.
 - CLI automation that has credentials in the environment must **render** them into
   `config.toml` rather than exporting them (this project's QA harness does).
 
@@ -173,8 +177,8 @@ secret stays out of the file. `AWS_ACCESS_KEY_ID` and friends are still not read
 > **Not supported, despite appearing in earlier revisions of this document:**
 > `encryption` and `encryption_algorithm` under `[storage]`. There are no such
 > fields on `S3Storage` and no server-side-encryption code on any S3 path. The
-> client config is not `deny_unknown_fields`, so these keys **parse without
-> complaint and do nothing** — the worst shape for a security setting. For
+> storage structs reject unknown keys, so a config carrying these keys fails to
+> load with a TOML parse error rather than silently doing nothing. For
 > encryption that is real, see at-rest encryption (`mediagit key`), which
 > encrypts object contents before they ever reach the bucket.
 
@@ -196,7 +200,7 @@ flat configs fail with a message naming the replacement block. The backend
 runs on Apache OpenDAL; presign is Service SAS from the account key. OpenDAL
 hardcodes an SAS service version Azurite rejects, so presigned URLs cannot be
 exercised against the emulator — verified as an emulator-only gap; real Azure
-accepts the same SAS (`crates/mediagit-storage/src/azure.rs:16-29`).
+accepts the same SAS (see `crates/mediagit-storage/src/azure.rs`).
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -235,7 +239,7 @@ There is no `[compression]` section as of v0.4.0. It was removed from `schema.rs
 **Automatic algorithm selection by file type** (always active, not configurable):
 - Already-compressed formats (JPEG, MP4, ZIP, DOCX, InDesign): stored as-is (`none`)
 - PSD, AI, PDF: `zstd` at `Default` level (3); output larger than input is stored raw
-- Raw formats, 3D models: `zstd` at `Best` level (22)
+- Raw formats, 3D models: `zstd` at `Best` level (19)
 - Text, JSON, TOML: `brotli` at `Default` level (9; `zstd` above 500 MB)
 - ML checkpoints: `zstd` at `Fast` level (1)
 
@@ -245,15 +249,15 @@ There is no `[compression]` section as of v0.4.0. It was removed from `schema.rs
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `upload_concurrency` | usize \| absent | `None` | Client-side parallel chunk-upload concurrency override. When unset, falls back to `MEDIAGIT_UPLOAD_CONCURRENCY` env var, then an internal default of 32. Read in `crates/mediagit-cli/src/commands/push.rs`. |
-| `download_concurrency` | usize \| absent | `None` | Client-side parallel chunk-download concurrency override. Falls back to `MEDIAGIT_DOWNLOAD_CONCURRENCY`, then an internal default of 24. |
-| `pack_workers` | usize \| absent | `None` | Server-side concurrent pack-write worker override. Falls back to `MEDIAGIT_PACK_WORKERS`, then an internal default of 8. |
+| `upload_concurrency` | usize \| absent | `None` | Client-side parallel chunk-upload concurrency override. Precedence: `MEDIAGIT_UPLOAD_CONCURRENCY` env var, then this key, then an internal default of 32. Read in `crates/mediagit-cli/src/commands/push.rs`. |
+| `download_concurrency` | usize \| absent | `None` | Client-side parallel chunk-download concurrency override. Precedence: `MEDIAGIT_DOWNLOAD_CONCURRENCY` env var, then this key, then an internal default of 32 (per-chunk path) or 24 (pack range-GET path). |
+| `pack_workers` | usize \| absent | `None` | Server-side concurrent pack-write worker override. Precedence: `MEDIAGIT_PACK_WORKERS` env var, then this key, then an internal default of 8. |
 
 Those three are the whole table. Each is an `Option` with an env var and an
 internal default behind it, which is why an empty `[performance]` is the normal
 state of a freshly initialised repository.
 
-There is no `max_concurrency` or `chunk_write_concurrency` TOML key as of v0.4.0 — both were removed from `schema.rs` as dead knobs. Chunk-write concurrency is still controllable: `MEDIAGIT_CHUNK_WRITE_CONCURRENCY` is read directly by the chunked-write worker pool (`crates/mediagit-versioning/src/odb/chunks.rs:646,1179`, falling back to `num_cpus`) and remains live — see [`env-knobs.md`](env-knobs.md).
+There is no `max_concurrency` or `chunk_write_concurrency` TOML key as of v0.4.0 — both were removed from `schema.rs` as dead knobs. Chunk-write concurrency is still controllable: `MEDIAGIT_CHUNK_WRITE_CONCURRENCY` is read directly by the chunked-write worker pool (`crates/mediagit-versioning/src/odb/chunks.rs`, two read sites, falling back to `num_cpus`) and remains live — see [`env-knobs.md`](env-knobs.md).
 
 ### Removed in `config_version` 4
 
@@ -314,11 +318,11 @@ url = "http://backup-server.example.com/my-project"
 | `url` | string | — | **Required.** Remote server URL. |
 | `fetch` | string \| absent | `url` | Fetch URL if different from `url`. |
 | `push` | string \| absent | `url` | Push URL if different from `url`. |
-| `default_fetch` | bool \| absent | absent | Default-fetch flag. |
-| `token` | string \| absent | absent | JWT bearer token for this remote. Stored in plaintext; reading it triggers a world/group-readable-file warning. |
+| `default_fetch` | — | — | Accepted and ignored (removed; dropped on the next save). |
+| `token` | string \| absent | absent | JWT bearer token for this remote. Stored in plaintext when written by hand or by `config set remotes.<name>.token`; reading it triggers a world/group-readable-file warning. |
 | `api_key` | string \| absent | absent | API key for this remote. Same plaintext-storage caveat as `token`; `token` wins if both are set. |
 
-**Credential resolution precedence** (verified in `crates/mediagit-cli/src/repo.rs:152-185`, function `resolve_credentials`, used by every remote command — fetch, pull, push, clone, download, lock):
+**Credential resolution precedence** (verified in `crates/mediagit-cli/src/repo.rs`, function `resolve_credentials_tiered`, used by every remote command — fetch, pull, push, clone, download, lock):
 
 ```mermaid
 flowchart LR
@@ -329,15 +333,14 @@ flowchart LR
     D -->|"No"| F{"OS keychain entry<br/>for this origin?<br/>(skip with MEDIAGIT_NO_KEYRING)"}
     F -->|"Yes"| G["Use keychain credential"]
     F -->|"No"| H["No credential"]
-    C -.->|"cache after success"| KC["OS keychain<br/>(keyed by origin)"]
-    E -.->|"cache after success"| KC
+    E -.->|"cache after success"| KC["OS keychain<br/>(keyed by origin)"]
     G --> I{"401 response?"}
     I -->|"Yes"| J["Invalidate keychain entry, retry"]
 ```
 
-Note: `RemoteConfig`'s doc comment in `schema.rs` (`token`: "Highest-precedence credential source — checked before `MEDIAGIT_TOKEN`/`MEDIAGIT_API_KEY`") does not match this actual resolution order in `repo.rs` — the env vars are checked first. The precedence above reflects the real code path; the doc comment is stale.
+`mediagit remote add --token` (or `--token-stdin`) keeps the token in the OS keychain, not in this file; with `MEDIAGIT_NO_KEYRING` set it fails with `keychain_unavailable`. A `token` written by hand or by `config set remotes.<name>.token` is stored in plain text and used as the second credential tier.
 
-On a successful request, `remember_credentials` writes the credentials used into the OS keychain (unless `MEDIAGIT_NO_KEYRING` is set) so subsequent commands resolve from the faster keychain tier.
+On a successful request, `remember_credentials` writes a credential taken from the config file into the OS keychain (unless `MEDIAGIT_NO_KEYRING` is set) so subsequent commands resolve from the faster keychain tier. A credential taken from `MEDIAGIT_TOKEN` or `MEDIAGIT_API_KEY` is never copied there, so a script or CI job cannot overwrite your own saved sign-in.
 
 ---
 
@@ -372,7 +375,7 @@ min_approvals = 1
 
 # Part 2 — Server: `mediagit-server.toml`
 
-Every key in `ServerConfig` (`crates/mediagit-server/src/config.rs:45-175`), `#[serde(deny_unknown_fields)]` — an unrecognized key or section (including a `[storage]` table, see below) fails config load with a parse error rather than being silently ignored.
+Every key in `ServerConfig` (`ServerConfig` in `crates/mediagit-server/src/config.rs`), `#[serde(deny_unknown_fields)]` — an unrecognized key or section (including a `[storage]` table, see below) fails config load with a parse error rather than being silently ignored.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -396,7 +399,7 @@ Every key in `ServerConfig` (`crates/mediagit-server/src/config.rs:45-175`), `#[
 | `enable_rate_limiting` | bool | `false` | Enable request rate limiting. |
 | `rate_limit_rps` | u64 | `1000` | Requests per second, when rate limiting is enabled. Sized for bulk media transfer (roughly one request per chunk on a push), not for browsing — an earlier `10` here caused 429 storms on ordinary pushes. |
 | `rate_limit_burst` | u32 | `2000` | Burst allowance, when rate limiting is enabled. |
-| `auth_store_dir` | path \| absent | *(resolved)* | Directory for `users.jsonl`/`api_keys.jsonl`. When unset, resolves to a sibling `auth/` directory next to `repos_dir` (`resolved_auth_store_dir`, `config.rs:307-314`) — e.g. `repos_dir = "./repos"` → `./auth`. |
+| `auth_store_dir` | path \| absent | *(resolved)* | Directory for `users.jsonl`/`api_keys.jsonl`. When unset, resolves to a sibling `auth/` directory next to `repos_dir` (`resolved_auth_store_dir`) — e.g. `repos_dir = "./repos"` → `./auth`. |
 | `cors_allowed_origins` | array \| absent | absent (no CORS layer at all) | Allowed CORS origins, exact match (e.g. `"https://app.example.com"`). When unset, the server adds **no** CORS layer and emits no CORS headers — this is stricter than "allow none with headers present." |
 | `verify_content_on_complete` | bool | `true` | Server-enforced BLAKE3 content verification of presigned uploads — chunk completion (`POST /:repo/chunks/complete`) and pack registration (`POST /:repo/packs/complete`). Verification runs in the **background**; pushes do not wait for it. See below. |
 
@@ -512,7 +515,7 @@ access_key_id = "..."
 secret_access_key = "..."
 ```
 
-Omit the two keys to use the standard AWS credential sources. GCS takes `bucket`, `project_id` and an optional `credentials_path` (a service-account JSON file; without it Application Default Credentials are used). Azure takes `container`, an optional `prefix` and an `auth` table, for example `auth = { type = "account_key", account_name = "...", account_key = "..." }` or `auth = { type = "connection_string", value = "..." }`. Azure support is in preview.
+Omit the two keys only if the server has `MEDIAGIT_S3_ACCESS_KEY_ID` and `MEDIAGIT_S3_SECRET_ACCESS_KEY` set; otherwise creation fails with an error naming both options. The standard AWS credential sources are not read. GCS takes `bucket`, `project_id` and an optional `credentials_path` (a service-account JSON file; without it Application Default Credentials are used). Azure takes `container`, an optional `prefix` and an `auth` table, for example `auth = { type = "account_key", account_name = "...", account_key = "..." }` or `auth = { type = "connection_string", value = "..." }`. Azure support is in preview.
 
 You do not have to write this by hand. `mediagit-server init` takes `--storage s3|gcs|azure` and the `--storage-*` flags below, with secrets on stdin only, and `mediagit-server storage-test` checks the credentials before you rely on them:
 
@@ -545,7 +548,7 @@ printf 'access-key-id=KEY\nsecret-access-key=SECRET\n' | \
 ### Config discovery
 
 - Default config path is `mediagit-server.toml` in the process's current working directory.
-- If that default path is missing, the server falls back to built-in defaults and logs a warning (`ServerConfig::load`, `config.rs:265-289`) — first-run operators still get a working (loopback, no-auth) server.
+- If that default path is missing, the server falls back to built-in defaults and logs a warning (`ServerConfig::load`) — first-run operators still get a working (loopback, no-auth) server.
 - If an explicit path is given via `-c`/`--config` and that file is missing, the server **errors out** instead of silently using defaults — this prevents an operator from thinking S3/TLS/auth config is wired in when it isn't.
 
 ### CLI-argument overrides
@@ -568,7 +571,7 @@ CLI flags are applied after the config file is loaded, so they win over whatever
 
 ## Precedence rule
 
-Where both an environment variable and a TOML key configure the same thing, **the environment variable wins**, e.g. `MEDIAGIT_JWT_SECRET` overrides `jwt_secret` (server logs a warning if both are set and different). Client credential resolution has its own precedence — see [`[remotes.<name>]`](#remotesname--remote-repositories) above: `MEDIAGIT_TOKEN`/`MEDIAGIT_API_KEY` > `remotes.<name>.token`/`.api_key` in config.toml > OS keychain. The **keychain is checked last** because it is a write-through cache, not a source of truth (`mediagit-cli/src/repo.rs:173-218`, `resolve_credentials_tiered`); `MEDIAGIT_NO_KEYRING` skips that tier entirely. This matches the flowchart in Part 1 — an earlier revision of this sentence had the keychain ahead of config.toml, which was backwards.
+Where both an environment variable and a TOML key configure the same thing, **the environment variable wins**, e.g. `MEDIAGIT_JWT_SECRET` overrides `jwt_secret` (server logs a warning if both are set and different). Client credential resolution has its own precedence — see [`[remotes.<name>]`](#remotesname--remote-repositories) above: `MEDIAGIT_TOKEN`/`MEDIAGIT_API_KEY` > `remotes.<name>.token`/`.api_key` in config.toml > OS keychain. The **keychain is checked last** because it is a write-through cache, not a source of truth (`resolve_credentials_tiered` in `mediagit-cli/src/repo.rs`); `MEDIAGIT_NO_KEYRING` skips that tier entirely. This matches the flowchart in Part 1 — an earlier revision of this sentence had the keychain ahead of config.toml, which was backwards.
 
 ## Operational environment variables
 
@@ -576,30 +579,29 @@ Where both an environment variable and a TOML key configure the same thing, **th
 |----------|---------|--------|
 | `MEDIAGIT_JWT_SECRET` | unset | Server: JWT signing secret, used when `enable_auth = true`. Wins over the config file's `jwt_secret` key (warns if both set). Required — from either source — when auth is enabled. |
 | `MEDIAGIT_S3_ACCESS_KEY_ID` / `MEDIAGIT_S3_SECRET_ACCESS_KEY` | unset | Server: S3 credentials for served repositories and the default storage. Win over `access_key_id` / `secret_access_key` in the repo config, each independently. Neither place set is an error that names both. |
-| `MEDIAGIT_ALLOW_INSECURE_BIND` | unset | Server: set to `1` to allow binding a non-loopback host with `enable_auth = false`. Without it, the server refuses to start in that combination (`main.rs:197-212`). |
+| `MEDIAGIT_ALLOW_INSECURE_BIND` | unset | Server: set to `1` to allow binding a non-loopback host with `enable_auth = false`. Without it, the server refuses to start in that combination. |
 | `MEDIAGIT_METRICS_ADDR` | unset (metrics endpoint off) | Server: set to `host:port` (e.g. `127.0.0.1:9090`) to start a separate Prometheus `/metrics` listener at boot. Invalid `host:port` logs an error and leaves metrics disabled. |
-| `MEDIAGIT_STARTUP_PROBE` | on (any value except `"0"`) | Server: validates every served repo's storage backend at boot before accepting traffic (up to 4 concurrent probes, `main.rs:418` `buffer_unordered(4)`). Set to `0` to skip. |
-| `MEDIAGIT_STARTUP_PROBE_TIMEOUT_SECS` | `90` | Server: wall-clock budget for the whole startup probe above. Raised from an original `30` after two false-failure incidents against slow-but-alive MinIO/GCS backends; junk or `0` falls back to the default rather than disabling the probe (`main.rs:60-65`, `startup_probe_timeout_secs`). |
+| `MEDIAGIT_STARTUP_PROBE` | on (any value except `"0"`) | Server: validates every served repo's storage backend at boot before accepting traffic (up to 4 concurrent probes). Set to `0` to skip. |
+| `MEDIAGIT_STARTUP_PROBE_TIMEOUT_SECS` | `90` | Server: wall-clock budget for the whole startup probe above. Raised from an original `30` after two false-failure incidents against slow-but-alive MinIO/GCS backends; junk or `0` falls back to the default rather than disabling the probe (`startup_probe_timeout_secs`). |
 | `MEDIAGIT_TOKEN` | unset | Client: bearer token, highest-precedence credential source for talking to a remote. |
-| `MEDIAGIT_API_KEY` | unset | Client: API-key credential, checked after `MEDIAGIT_TOKEN`. Also read directly by the server's env-override path in `mediagit-config`'s (unused-by-CLI) loader — not a server runtime effect in practice; see the client credential precedence for the path that matters. |
+| `MEDIAGIT_API_KEY` | unset | Client: API-key credential (`X-Api-Key` header), checked after `MEDIAGIT_TOKEN`. Mutually exclusive with it (the token wins). |
 | `MEDIAGIT_NO_KEYRING` | unset | Client: when set (any value), skips the OS-keychain credential tier entirely on both read and write. |
 | `MEDIAGIT_REPO` | unset | Client: repo root override, set internally by `-C <path>`/some multi-step commands (rebase, merge, stash, cherry-pick) to guard the working repo across `.await` points. Not generally meant to be set by hand. |
-| `MEDIAGIT_AUTHOR_NAME` | unset | Client: author name for new commits/locks/tags/merges. Precedence: this env var > `[author].name` in config.toml > `$USER`. |
+| `MEDIAGIT_AUTHOR_NAME` | unset | Client: author name for new commits/locks/tags/merges. Precedence: `--author` flag > this env var > `[author].name` in config.toml. `commit` refuses without both name and email; `tag`, `merge` and `lock` still fall back to `$USER`. |
 | `MEDIAGIT_AUTH_PERSIST` | on (any value except `"0"`) | Server: persist auth state (`users.jsonl`, `api_keys.jsonl`) to `auth_store_dir`. Set to `0` to force in-memory-only auth (no load, no save) — a persistence failure is otherwise a hard error. |
 | `MEDIAGIT_GRANTS_ENFORCE` | per-repo (repos with no grants recorded fall back to flat roles — backward-compat) | Server: enforce per-repo access grants. `0` disables enforcement everywhere (flat roles only). `strict` forces per-repo enforcement everywhere, including a repo with no grants recorded (denies rather than falling back). |
 | `MEDIAGIT_LOCKS_ENFORCE` | on (any value except `"0"`) | Server: enforce file-lock checks on push. Set to `0` to disable. |
 | `MEDIAGIT_LOCKS_MAX_COMMITS` | `1000` | Server: lock enforcement fails open (allows the push) if the pushed commit range exceeds this many commits — bounds the cost of the tree-diff walk. |
-| `MEDIAGIT_SIGN` | off | Client: when truthy (`"1"`/`"true"`), sign new annotated tags with SSHSIG (namespace `mediagit-tag`) using the key from `MEDIAGIT_SIGN_KEY`. |
-| `MEDIAGIT_SIGN_KEY` | unset | Client: path to the private key used for tag signing when `MEDIAGIT_SIGN` is enabled. Required in that case — signing errors out if unset. |
-| `RUST_LOG` | `mediagit_server=debug,tower_http=debug,mediagit_storage=warn` (server); unset (CLI) | Log **filter**, both binaries. The server passes it to `EnvFilter`. The CLI reads `MEDIAGIT_LOG` first and falls back to `RUST_LOG` (`tracing_filter_from_env`, `mediagit-cli/src/main.rs:317-323`) — an earlier revision of this row claimed the CLI initialized no subscriber and read neither, which was wrong on both counts. |
+| `MEDIAGIT_SIGN` | off | Client: when `1`, `true` or `on` (case-insensitive), sign new annotated tags with SSHSIG (namespace `mediagit-tag`) using the key from `MEDIAGIT_SIGN_KEY`. |
+| `MEDIAGIT_SIGN_KEY` | unset | Client: path to the SSH private key used for tag signing when `MEDIAGIT_SIGN` is enabled. Default: `~/.ssh/id_ed25519` (`%USERPROFILE%\.ssh\id_ed25519` on Windows). |
+| `RUST_LOG` | `mediagit_server=debug,tower_http=debug,mediagit_storage=warn` (server); unset (CLI) | Log **filter**, both binaries. The server passes it to `EnvFilter`. The CLI reads `MEDIAGIT_LOG` first and falls back to `RUST_LOG` (`tracing_filter_from_env` in `mediagit-cli/src/main.rs`) — an earlier revision of this row claimed the CLI initialized no subscriber and read neither, which was wrong on both counts. |
 | `MEDIAGIT_LOG` | unset | Client: log filter, checked before `RUST_LOG`. Set this first when a client appears to hang — `debug` surfaces the protocol-layer tracing that is otherwise invisible. |
 | `MEDIAGIT_LOG_FORMAT` | `full` (server), `pretty` (CLI) | Log **output format**, both binaries: `full`, `pretty`, `compact`, `json`. Overrides `log_format` in `mediagit-server.toml`; the CLI's `--log-format` flag wins over it. An unrecognised value is a hard error, not a silent fallback. Distinct from the filter above. |
 
-The full ~88-knob performance/tuning catalog (chunking, compression, upload/download concurrency, pack workers, retry/backoff, timeouts, etc.) lives in [`env-knobs.md`](env-knobs.md) and [`book/src/reference/environment.md`](book/src/reference/environment.md) — this table covers only the operational (auth/bind/metrics/locking/signing) set, not the performance-tuning knobs.
+The full performance/tuning catalog (chunking, compression, upload/download concurrency, pack workers, retry/backoff, timeouts, etc.) lives in [`env-knobs.md`](env-knobs.md) and [`book/src/reference/environment.md`](book/src/reference/environment.md) — this table covers only the operational (auth/bind/metrics/locking/signing) set, not the performance-tuning knobs.
 
 ---
 
 ## Unverifiable / not independently confirmed
 
 - The exact default `layout_version` shown in the "top-level identity" table (`1` when the field is absent, `2` for new repos) is derived from `default_layout_version()` and `CURRENT_LAYOUT_VERSION` in `schema.rs`; I did not additionally trace every migration path that might touch it.
-- I did not open `env-knobs.md` or `book/src/reference/environment.md` to verify their contents match current code (only confirmed both files exist) — Part 3 defers the full knob catalog to them by reference, not by transcription, so any drift there is out of scope for this document.

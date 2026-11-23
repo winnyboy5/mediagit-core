@@ -76,9 +76,10 @@ Every user has a flat `Role`, which maps to permission strings:
 | `Write` | `repo:read`, `repo:write` |
 | `Admin` | `repo:read`, `repo:write`, `repo:admin`, `user:manage` |
 
-Self-registration (`POST /auth/register`) always creates a `Write`-role
-account — there's no client-controlled `role` field, so a caller can't
-mint themselves an `Admin` account through the registration endpoint.
+Self-registration is closed by default (`allow_open_registration = false`).
+When an operator opens it, `POST /auth/register` creates a `Read`-role
+account; there is no client-controlled `role` field, so a caller cannot mint
+an `Admin` account through it.
 
 ## Endpoints
 
@@ -89,7 +90,7 @@ mint themselves an `Admin` account through the registration endpoint.
 | POST | `/auth/register` | Register a new user. Body: `{username, email, password}`. Returns `{user, tokens}` with `201`. |
 | POST | `/auth/login` | Log in with email or username. Body: `{identifier, password}`. Returns `{user, tokens}`. |
 | POST | `/auth/refresh` | Exchange a refresh token for a new access token. Body: `{refresh_token}`. Returns a new `TokenPair`. |
-| POST | `/auth/logout` | No-op beyond `204 No Content` — JWTs are stateless, so logout is a client-side token deletion. Exists for API consistency and future blacklisting. |
+| POST | `/auth/logout` | Revokes the access token presented in the `Authorization` header (it stops working at once) and returns `204`. Only that token is revoked, not the user's other sessions. Without a usable token it is a no-op and still returns `204`. |
 
 Password requirements: at least 8 characters. Username: at least 3
 characters. Passwords are hashed with bcrypt and never stored in
@@ -112,6 +113,8 @@ plaintext.
 | GET | `/auth/keys` | List all API keys across all users: `{id, name, user_id, created_at}` (metadata only — the key hash and plaintext are never returned). |
 | DELETE | `/auth/keys/{id}` | Revoke an API key. |
 
+The full route list (user creation, role/disable/password changes, `whoami`, `/admin/repos*`) is in [API Documentation](./api.md).
+
 ## JWT Tokens
 
 Generated as an access/refresh pair:
@@ -128,11 +131,11 @@ fails for another reason.
 
 ## API Keys
 
-Generated server-side per user (there is currently no `POST /auth/keys`
-issuance endpoint documented here beyond the admin listing/revoke pair —
-key generation happens through `ApiKeyAuth::generate_key` on the server).
+Any signed-in user mints a key with `POST /auth/keys` (or
+`mediagit auth key create`; an admin may pass `user_id` for another user).
 The plaintext key is returned exactly once at creation; only its SHA-256
-hash is stored. Send it as `X-API-Key: <key>`.
+hash is stored. Send it as `X-API-Key: <key>`. `GET /auth/keys/mine` lists
+your own keys.
 
 ## Per-Repo Grants
 
@@ -247,7 +250,7 @@ For remote commands (`push`, `pull`, `fetch`, `clone`, `download`,
    (skip entirely with `MEDIAGIT_NO_KEYRING`)
 4. **No credentials** → 401 if the server requires auth
 
-**Write-through caching**: After a successful request using environment or config credentials, the CLI writes the credential to the OS keychain so the next invocation resolves faster. This only happens after success — credentials are never cached speculatively — and is best-effort; a locked keychain doesn't block commands.
+**Write-through caching**: After a successful request using a credential from the config file, the CLI writes it to the OS keychain so the next invocation resolves faster. A credential taken from `MEDIAGIT_TOKEN` or `MEDIAGIT_API_KEY` is never copied there, so a script or CI job cannot overwrite your own saved sign-in. This only happens after success — credentials are never cached speculatively — and is best-effort; a locked keychain doesn't block commands.
 
 ## See Also
 

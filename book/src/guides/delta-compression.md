@@ -194,7 +194,7 @@ $ MEDIAGIT_LOG=warn,mediagit=debug mediagit add large-file.psd
 A file that was genuinely rewritten between versions has low similarity, and a
 delta that fails its stream's benefit threshold is discarded by design — 0.80
 of full size for most content, but 0.60 for intra-only video and 0.90 for
-subtitle/metadata streams (`odb/mod.rs:100-114`).
+subtitle/metadata streams (`delta_ratio_threshold` in `odb/mod.rs`).
 
 ### Reconstruction feels slow
 

@@ -11,6 +11,8 @@ curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/instal
 This script automatically detects your architecture and downloads the correct binary from
 [GitHub Releases](https://github.com/winnyboy5/mediagit-core/releases).
 
+The script installs only the `mediagit` client. For `mediagit-server`, download the archive and copy `mediagit-server` out of it.
+
 ### Direct Download (x86_64)
 
 ```bash
@@ -165,7 +167,7 @@ verified; treat those as untested rather than confirmed.
 
 ```bash
 # If standard install fails, try user-local install
-curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | sh -s -- --no-sudo
+curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/install.sh | INSTALL_DIR=$HOME/.local/bin sh
 
 # Add to PATH
 export PATH="$HOME/.local/bin:$PATH"

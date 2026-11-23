@@ -213,13 +213,6 @@ Apple Silicon performance vs Intel:
 
 ## Updating
 
-### Via Homebrew
-
-```bash
-brew update
-brew upgrade mediagit-core
-```
-
 ### Manual Update
 
 ```bash

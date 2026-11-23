@@ -72,7 +72,7 @@ flowchart LR
 |---------|---------|-------------|
 | `bucket` | Required | S3 bucket name |
 | `region` | Required | AWS region |
-| `access_key_id` / `secret_access_key` | Optional | Falls back to the AWS credential chain when unset |
+| `access_key_id` / `secret_access_key` | Required | From the repo's `config.toml`; `mediagit-server` also reads `MEDIAGIT_S3_ACCESS_KEY_ID` / `MEDIAGIT_S3_SECRET_ACCESS_KEY`, which win. No AWS credential chain or IAM role. |
 | `endpoint` | AWS S3 | Custom endpoint for S3-compatible services |
 | `prefix` | `""` | Object key prefix |
 
@@ -86,9 +86,9 @@ project actually provides.
 
 **Credential Chain:** there isn't one. S3 credentials come from
 `access_key_id` / `secret_access_key` in the repository's own
-`.mediagit/config.toml` and nowhere else — no environment variables, no IAM
-role, no `~/.aws/credentials`. The chain above was documented for years and is
-dead code: see *Storage credentials are not environment variables* below, and
+`.mediagit/config.toml` or, on the server, the two `MEDIAGIT_S3_*` variables —
+no IAM role, no `~/.aws/credentials`. The chain above was documented for years
+and is dead code: see *Storage credentials* below, and
 note the module doc in `crates/mediagit-storage/src/b2_spaces_driver.rs` still describes
 the same non-existent chain -- though that file is the B2/Spaces driver and is not on the AWS path at all (it carried an S3 name until 2026-09-18).
 
@@ -109,18 +109,13 @@ Built on Apache OpenDAL (the `azure_storage_blobs` 0.21 line is EOL, and its GA
 replacement is Entra-ID-only). Managed-identity / Azure AD auth is not
 supported — authenticate by shared key, SAS, or connection string.
 
-**Storage Tiers:**
-- **Hot**: Frequently accessed data (active repos)
-- **Cool**: Infrequent access (archived branches)
-- **Archive**: Long-term retention (compliance)
-
 ---
 
 ### Google Cloud Storage
 
 | Setting | Description |
 |---------|-------------|
-| `project` | GCP project ID |
+| `project_id` | GCP project ID |
 | `bucket` | GCS bucket name |
 | `credentials_path` | Service account JSON path |
 
@@ -135,10 +130,6 @@ supported — authenticate by shared key, SAS, or connection string.
 | `secret_access_key` | MinIO secret key |
 | `bucket` | Bucket name |
 | `prefix` | Key prefix (e.g. `media/`) |
-
-**Production Performance:**
-- Upload: **108 MB/s**
-- Download: **263 MB/s**
 
 ---
 
@@ -250,7 +241,8 @@ flowchart LR
 | **Authentication** | JWT / API Keys | Access control |
 | **Key Derivation** | Argon2 | Password-based keys |
 | **Rate Limiting** | tower_governor | DDoS protection |
-| **Audit Logging** | Built-in | Compliance |
+| **Password hashing** | bcrypt (`MEDIAGIT_BCRYPT_COST`) | Account passwords |
+| **Audit Logging** | Built-in | Structured security-event logs |
 
 ---
 
@@ -495,12 +487,11 @@ flowchart LR
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `mediagit_bytes_uploaded_total` | Counter | Total bytes uploaded |
-| `mediagit_bytes_downloaded_total` | Counter | Total bytes downloaded |
-| `mediagit_objects_stored_total` | Counter | Total objects stored |
+| `mediagit_operation_total` | Counter | Total operations |
+| `mediagit_operation_duration_seconds` | Histogram | Operation latency |
 | `mediagit_dedup_ratio` | Gauge | Deduplication ratio |
 | `mediagit_compression_ratio` | Gauge | Compression ratio |
-| `mediagit_request_duration_seconds` | Histogram | Request latency |
+| `mediagit_backend_latency_seconds` | Histogram | Storage backend latency |
 
 ---
 
@@ -510,10 +501,11 @@ flowchart LR
 
 | Strategy | Savings |
 |----------|---------|
-| **Deduplication** | 60-95% (chunk-level) |
-| **Compression** | 50-93% (type-aware) |
-| **Delta Encoding** | Up to 95% (versioning) |
-| **Infrequent Access Tier** | 40-50% (old refs) |
+| **Deduplication** | chunk-level |
+| **Compression** | type-aware |
+| **Delta Encoding** | versioning |
+
+Savings depend on the content; see BENCHMARKS.md for measured figures. Storage tiering (hot/cool/archive) is a bucket lifecycle setting you manage yourself; MediaGit has no tiering code.
 
 ### Egress Optimization
 
@@ -537,7 +529,9 @@ All storage backend fields go directly in `[storage]` alongside the `backend` ke
 backend = "s3"
 bucket = "my-mediagit-repo"
 region = "us-east-1"
-# Uses AWS credential chain by default (IAM role, ~/.aws/credentials, env vars)
+access_key_id = "..."
+secret_access_key = "..."
+# Credentials are required: set them here or, for mediagit-server, in MEDIAGIT_S3_ACCESS_KEY_ID / MEDIAGIT_S3_SECRET_ACCESS_KEY
 # Optional: custom endpoint for S3-compatible services
 # endpoint = "https://s3.us-east-1.amazonaws.com"
 ```
@@ -550,7 +544,6 @@ backend = "azure"
 container = "repos"
 auth = { type = "account_key", account_name = "mediagitstorage", account_key = "..." }
 # variants: connection_string { value }, sas { account_name, token }, emulator {}
-# account_key may also come from the AZURE_STORAGE_KEY env var
 ```
 
 ### MinIO (mediagit.toml)
@@ -565,23 +558,9 @@ secret_access_key = "minioadmin"    # field: secret_access_key
 region = "us-east-1"                # any value; MinIO ignores region
 ```
 
-### Multi-Backend (mediagit.toml)
+### Multi-Backend
 
-```toml
-[storage]
-backend = "multi"
-primary = "primary-s3"
-replicas = ["replica-local"]
-
-[storage.backends.primary-s3]
-backend = "s3"
-bucket = "mediagit-backup"
-region = "us-west-2"
-
-[storage.backends.replica-local]
-backend = "filesystem"
-base_path = "/fast-storage/mediagit"
-```
+> The schema defines a `multi` backend, but it is not implemented: a repository configured with it fails to open.
 
 ---
 
@@ -627,20 +606,21 @@ MEDIAGIT_LOCKS_MAX_COMMITS=1000
 # Metrics
 MEDIAGIT_METRICS_ADDR=0.0.0.0:9091     # binds the Prometheus endpoint
 
-# GCS only - Application Default Credentials
+# S3 credentials (server)
+MEDIAGIT_S3_ACCESS_KEY_ID=...
+MEDIAGIT_S3_SECRET_ACCESS_KEY=...
+
+# GCS only - Application Default Credentials; the project comes from
+# project_id in the repo's config
 GOOGLE_APPLICATION_CREDENTIALS=/etc/mediagit/gcs-sa.json
-GCS_PROJECT_ID=my-project
 ```
 
-**Storage credentials are not environment variables.** The server resolves a
-repository's backend by loading that repository's own `.mediagit/config.toml`,
-exactly as the client does, and reads `access_key_id` / `secret_access_key`
-from it. `AWS_ACCESS_KEY_ID` and friends are read by no MediaGit code path on
-either side. GCS is the one exception above, because its SDK resolves
-Application Default Credentials from the environment.
-
-Deployments that keep secrets in the environment must render them into each
-repo's `config.toml` at provisioning time.
+**Storage credentials.** Server S3 credentials come from
+`MEDIAGIT_S3_ACCESS_KEY_ID` / `MEDIAGIT_S3_SECRET_ACCESS_KEY` first, then
+`access_key_id` / `secret_access_key` in the repository's `config.toml`; a
+missing credential is an error naming both options. Azure credentials are
+config-file only. `AWS_ACCESS_KEY_ID` and friends are read by no MediaGit path.
+GCS resolves Application Default Credentials from the environment.
 
 ### Docker Compose Example
 

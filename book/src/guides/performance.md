@@ -17,14 +17,7 @@ mediagit add --jobs 16 assets/
 mediagit add --no-parallel assets/
 ```
 
-**Expected throughput** (validated benchmarks, release build):
-| File type | Throughput | Notes |
-|-----------|-----------|-------|
-| PSD (72–181 MB) | 72–119 MB/s | Zstd Default; creative-container params |
-| MP4/MOV (5–398 MB) | 146–174 MB/s | Pre-compressed; store-mode, zero CPU overhead |
-| GLB (14–25 MB) | 3.0–5.2 MB/s | GLB parser + CDC chunking + Zstd |
-| WAV (55–57 MB) | 2.1–3.6 MB/s | RIFF parser + chunking (CPU-bound) |
-| Pre-compressed (JPEG, USDZ) | 25–182 MB/s | Direct write, no chunking |
+Throughput depends on file type: pre-compressed media is written in store mode with no chunking, while parsers plus chunking (GLB, WAV) are CPU-bound. See [BENCHMARKS.md](https://github.com/winnyboy5/mediagit-core/blob/main/BENCHMARKS.md) for measured figures.
 
 ## Compression Strategy
 
@@ -79,7 +72,7 @@ with file size:
 | > 100 GB | 8 MB (1 – 32 MB) |
 
 Formats with a dedicated structure-aware parser split at container
-boundaries instead: MP4/MOV (atom/box-aware), MKV/WebM (Matroska
+boundaries instead: MP4/MOV/M4V/M4A/3GP (frame-aligned), MKV/WebM (Matroska
 EBML-aware), AVI (RIFF-aware), GLB/glTF/OBJ/STL/PLY/FBX (3D-model
 structure-aware), and Blender (`.blend`, BHEAD block walker). PSD does not
 have a dedicated chunker — it uses generic FastCDC with small
@@ -92,21 +85,13 @@ forced cuts at embedded-stream boundaries (on by default since v0.6.0-rc.1;
 
 ## Storage Backend Performance
 
-Cloud backend upload speeds depend on network, not MediaGit:
-
-| Backend | Upload | Download | Notes |
-|---------|--------|----------|-------|
-| Local filesystem | 200–500 MB/s | 200–500 MB/s | Limited by disk I/O |
-| MinIO (local) | 100–300 MB/s | 200–500 MB/s | Validated: 108 MB/s upload |
-| Amazon S3 | 50–200 MB/s | 100–400 MB/s | Depends on region + instance |
-| Azure Blob | 50–150 MB/s | 100–300 MB/s | |
-| Google Cloud Storage | 50–200 MB/s | 100–400 MB/s | |
+Cloud backend speed depends on your network and region, not MediaGit. See [BENCHMARKS.md](https://github.com/winnyboy5/mediagit-core/blob/main/BENCHMARKS.md) for measured WAN-bound results.
 
 ### S3 Transfer Optimization
 
 ```bash
 MEDIAGIT_UPLOAD_CONCURRENCY=32    # parallel chunk uploads (default 32)
-MEDIAGIT_DOWNLOAD_CONCURRENCY=32  # parallel chunk downloads (default 24)
+MEDIAGIT_DOWNLOAD_CONCURRENCY=32  # parallel chunk downloads (default 32; 24 on the pack range-GET path)
 MEDIAGIT_HTTP_POOL_MAX=64         # idle connections kept per host (default 64)
 ```
 

@@ -14,7 +14,7 @@ All environment variables recognized by MediaGit. Environment variables take pre
 
 ## Author Identity
 
-These override the `[author]` section of `.mediagit/config.toml`. Priority (highest first): `--author` CLI flag → `MEDIAGIT_AUTHOR_NAME`/`MEDIAGIT_AUTHOR_EMAIL` → `config.toml [author]` → `$USER`.
+These override the `[author]` section of `.mediagit/config.toml`. Priority (highest first): `--author` CLI flag → `MEDIAGIT_AUTHOR_NAME`/`MEDIAGIT_AUTHOR_EMAIL` → `config.toml [author]`. `commit` stops with an error if name or email is still missing; set both with `mediagit config set author.name ...` and `author.email ...`.
 
 | Variable | Description |
 |----------|-------------|
@@ -24,28 +24,29 @@ These override the `[author]` section of `.mediagit/config.toml`. Priority (high
 ## Storage credentials
 
 **Storage credentials come from `.mediagit/config.toml`, not from the
-environment — with one exception (GCS).** This section previously listed the
+environment — with two exceptions: GCS, and the server's S3 variables.** This section previously listed the
 standard `AWS_*` and `AZURE_STORAGE_*` variables as if MediaGit read them. It
 does not, and exporting them has no effect: a push will still fail with
 "access key cannot be empty" while the shell looks correctly configured.
 
 | Backend | Where credentials come from |
 |---------|------------------------------|
-| `s3` — including real AWS, MinIO, and other S3-compatible services | **Config file only.** `access_key_id` / `secret_access_key` under `[storage.s3]`. No environment override, and no IAM-role or instance-profile path. |
-| `azure` | **Config file only.** A tagged `[storage.azure.auth]` table — `type` of `account_key`, `connection_string`, `sas`, or `emulator`. |
-| `gcs` | `credentials_path` in `[storage.gcs]` if set; **otherwise Application Default Credentials**, which do honour `GOOGLE_APPLICATION_CREDENTIALS` and a `gcloud auth application-default login` session. |
+| `s3` — including real AWS, MinIO, and other S3-compatible services | **Config file, or on `mediagit-server` the `MEDIAGIT_S3_ACCESS_KEY_ID` / `MEDIAGIT_S3_SECRET_ACCESS_KEY` variables (they win).** `access_key_id` / `secret_access_key` under `[storage]` (backend = "s3"). No IAM-role or instance-profile path. |
+| `azure` | **Config file only.** An `auth = { type = ... }` table under `[storage]` — `type` of `account_key`, `connection_string`, `sas`, or `emulator`. |
+| `gcs` | `credentials_path` under `[storage]` if set; **otherwise Application Default Credentials**, which do honour `GOOGLE_APPLICATION_CREDENTIALS` and a `gcloud auth application-default login` session. |
 
 Why: both the CLI and the server build every S3-family backend through
 `MinIOBackend`, and the AWS path fills its key and secret straight from the
-config file (`mediagit-server/src/handlers/mod.rs:610-638`,
-`mediagit-cli/src/repo.rs:655-668`). The AWS SDK credential chain does exist in
+config file, or on the server from the two `MEDIAGIT_S3_*` variables
+(`resolve_s3_credentials` in `mediagit-server`, `create_storage_backend` in
+`mediagit-cli/src/repo.rs`). The AWS SDK credential chain does exist in
 `mediagit-storage/src/b2_spaces_driver.rs`, but `B2SpacesDriver` is only ever
 constructed by the Backblaze/Spaces wrapper, so nothing on the AWS path goes
 through it. (That module carried an S3 name until 2026-09-18; the name was
 the whole reason this kept needing explaining.)
 
-Only GCS resolves credentials outside the config file
-(`mediagit-cli/src/repo.rs:745-749`).
+Only GCS (and the server's S3 variables) resolve credentials outside the
+config file.
 
 See [Configuration](./config.md) for the full `[storage]` schema.
 
@@ -154,7 +155,7 @@ MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurre
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `MEDIAGIT_MPU_THRESHOLD_BYTES` | Minimum chunk size to use multipart upload. | `10485760` (10 MiB) |
+| `MEDIAGIT_MPU_THRESHOLD_BYTES` | Minimum chunk size to use multipart upload. | `16777216` (16 MiB) |
 | `MEDIAGIT_MPU_PART_SIZE` | Override the MPU part size for S3/MinIO (must be within [5 MiB, 5 GiB]). | auto-computed |
 | `MEDIAGIT_STAGED_UPLOAD` | Use multipart upload for chunks ≥ the threshold. `0` forces single-PUT uploads. | `1` (ON) |
 | `MEDIAGIT_AWS_CONNECT_TIMEOUT_SECS` / `MEDIAGIT_AWS_MAX_ATTEMPTS` / `MEDIAGIT_AWS_POOL_IDLE_SECS` / `MEDIAGIT_AWS_POOL_WARM` | AWS SDK connect timeout, retry attempts, pool idle timeout, and startup pool warm count. | `10` / `5` / `90` / `16` |
@@ -175,6 +176,7 @@ MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurre
 | `MEDIAGIT_AUTH_PERSIST` | Persist auth state (users/grants) to disk. `0` keeps auth in-memory only. | `1` (ON) |
 | `MEDIAGIT_GRANTS_ENFORCE` | Per-repo permission grants. `0` = off everywhere (flat roles only); `strict` = enforce on every repo, so one with no grants denies instead of falling back; unset = per repo (enforced only on repos that have grants). | unset (per repo) |
 | `MEDIAGIT_LOCKS_ENFORCE` | Server rejects pushes that touch paths locked by another user. | `1` (ON) |
+| `MEDIAGIT_LOCKS_MAX_COMMITS` | Max commits walked when computing touched paths for lock enforcement. | `1000` |
 
 > **Removed from this table (DC-5).** `MEDIAGIT_APP_*`, `MEDIAGIT_LOG_LEVEL`,
 > `MEDIAGIT_METRICS_ENABLED` / `_PORT` — all removed, no such variables —
@@ -192,7 +194,6 @@ MediaGit exposes a large set of `MEDIAGIT_*` knobs for tuning push/pull concurre
 >
 > Set the corresponding key in `mediagit-server.toml` instead. Every variable
 > still listed above is read directly by the code that acts on it.
-| `MEDIAGIT_LOCKS_MAX_COMMITS` | Max commits walked when computing touched paths for lock enforcement. | `1000` |
 
 ### GC / Housekeeping
 

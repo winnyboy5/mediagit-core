@@ -260,18 +260,6 @@ New-ItemProperty -Path $commandPath -Name "(Default)" -Value "wt.exe -d `"%V`" p
 
 ## Updating
 
-### Via Chocolatey
-
-```powershell
-choco upgrade mediagit-core
-```
-
-### Via winget
-
-```powershell
-winget upgrade MediaGit.MediaGitCore
-```
-
 ### Manual Update
 
 1. Download latest ZIP from [GitHub Releases](https://github.com/winnyboy5/mediagit-core/releases)

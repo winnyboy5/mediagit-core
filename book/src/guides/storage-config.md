@@ -40,11 +40,12 @@ access_key_id = "AKIAIOSFODNN7EXAMPLE"
 secret_access_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 ```
 
-> **Credentials must live in this file.** MediaGit does not read
+> **Credentials come from this file** (or, for `mediagit-server`, from
+> `MEDIAGIT_S3_ACCESS_KEY_ID` / `MEDIAGIT_S3_SECRET_ACCESS_KEY`, which win and keep
+> the secret out of the file). MediaGit does not read
 > `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` or `AWS_SESSION_TOKEN`, and has
 > no IAM-role or instance-profile path — the S3 family is built through
-> `MinIOBackend`, whose key and secret come straight from `[storage]`
-> (`mediagit-server/src/handlers/mod.rs:610-638`). Exporting those variables
+> `MinIOBackend`, whose key and secret come from `[storage]`. Exporting those variables
 > leaves the shell looking configured while the push fails with "access key
 > cannot be empty". Protect the file instead: keep it out of version control
 > and restrict its permissions.
@@ -152,13 +153,12 @@ download_concurrency = 24   # client-side parallel chunk downloads
 pack_workers = 8            # server-side concurrent pack-write workers
 ```
 
-`upload_concurrency` and `download_concurrency` can also be set with
-`mediagit config set performance.upload_concurrency <n>` (and the
-`download_concurrency` equivalent); `pack_workers` has no `config` key and
-must be edited directly in `.mediagit/config.toml`. Each falls back to an
-env var when unset — `MEDIAGIT_UPLOAD_CONCURRENCY`, `MEDIAGIT_DOWNLOAD_CONCURRENCY`,
-`MEDIAGIT_PACK_WORKERS` — and the env var wins if both are set; only then
-does the internal default (32 / 24 / 8) apply.
+`upload_concurrency`, `download_concurrency` and `pack_workers` can all be set
+with `mediagit config set performance.<name> <n>`. Each has an env var —
+`MEDIAGIT_UPLOAD_CONCURRENCY`, `MEDIAGIT_DOWNLOAD_CONCURRENCY`,
+`MEDIAGIT_PACK_WORKERS` — and the env var wins if both are set; only when
+neither is set does the internal default apply (upload 32, download 32 on the
+per-chunk path and 24 on the pack range-GET path, pack workers 8).
 
 ---
 

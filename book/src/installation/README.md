@@ -12,6 +12,8 @@ curl -fsSL https://raw.githubusercontent.com/winnyboy5/mediagit-core/main/instal
 
 The install script automatically detects your OS and architecture and downloads the correct binary.
 
+The script installs only the `mediagit` client. For `mediagit-server`, download the archive and copy `mediagit-server` out of it.
+
 ### Linux (x86_64) — manual
 
 ```bash
@@ -86,7 +88,7 @@ After installation, verify MediaGit-Core is working:
 # Check version
 mediagit --version
 
-# Should output: mediagit-core 0.3.0-rc.5
+# Should output: mediagit 0.8.0-rc.1
 
 # Verify a repository's integrity (run inside a repo)
 mediagit fsck --full

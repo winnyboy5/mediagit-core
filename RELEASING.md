@@ -163,11 +163,11 @@ For urgent bug fixes:
 
 1. Create hotfix branch from the release tag:
    ```bash
-   git checkout -b hotfix/0.3.0 v0.3.0-rc.5
+   git checkout -b hotfix/0.8.0 v0.8.0-rc.1
    ```
 
 2. Make and commit the fix
-3. Update version to patch release (0.3.0-rc.5)
+3. Update the version to the next patch/rc (`./scripts/bump-version.sh 0.8.0-rc.2`)
 4. Create release tag
 5. Cherry-pick fix back to main
 
@@ -244,7 +244,7 @@ For PPA distribution:
 ## Security
 
 - All release assets include SHA-256 checksums
-- Docker images are signed and include attestations
+- Docker images are published to ghcr.io; image signing and attestations are not set up yet
 - Binaries are built in isolated GitHub Actions runners
 - No credentials are embedded in binaries
 

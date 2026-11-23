@@ -8,6 +8,8 @@ Complete reference for `.mediagit/config.toml`. All sections are optional — Me
 <repo-root>/.mediagit/config.toml
 ```
 
+Edit values with `mediagit config set <key> <value>`; `mediagit config schema` lists every settable key with its type and default.
+
 ## Minimal Configuration
 
 ```toml
@@ -56,7 +58,7 @@ Written once at `mediagit init`/`clone`; not meant to be edited by hand.
 |-----|------|---------|-------------|
 | `cdc_seed` | u64 | `0` | Per-repo content-defined chunking seed. Generated at `init`, propagated to clones via protocol capabilities. `0` reproduces legacy unseeded chunk boundaries (pre-existing repos). |
 | `repo_namespace` | string | *(derived)* | Per-repo storage namespace (layout v2): every object key is prefixed `<repo_namespace>/` so one bucket/root can host multiple repos. Absent on pre-v2 repos (falls back to sanitized repo-dir basename). Never change it after init — existing keys would be orphaned. |
-| `layout_version` | u32 | `2` | Physical storage layout version (`1` = flat pre-namespace, `2` = namespaced + hash fanout). Mirrored in the storage root's `LAYOUT` marker; a mismatched client fails fast. |
+| `layout_version` | u32 | `1` if absent from the file; new repositories are written with `2` | Physical storage layout version (`1` = flat pre-namespace, `2` = namespaced + hash fanout). Mirrored in the storage root's `LAYOUT` marker; a mismatched client fails fast. |
 | `repo_id` | string | *(generated)* | Unique repo identifier recorded in the `LAYOUT` marker so a namespace collision between independent repos is a hard error instead of a silent key-space merge. |
 | `config_version` | u32 | `0` | config.toml schema version, migrated automatically (distinct from `layout_version`). |
 
@@ -115,8 +117,8 @@ Used when creating commits. Override with `MEDIAGIT_AUTHOR_NAME` / `MEDIAGIT_AUT
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `name` | string | `$USER` | Display name on commits |
-| `email` | string | `""` | Email address on commits |
+| `name` | string | unset | Display name on commits. `commit` refuses until both name and email are set |
+| `email` | string | unset | Email address on commits |
 
 ---
 
@@ -166,9 +168,9 @@ secret_access_key = "..."
 | `prefix` | string | `""` | Object key prefix |
 
 > **Warning**: `encryption` and `encryption_algorithm` are not real keys —
-> `S3Storage` has no such fields. A config carrying them parses without
-> complaint and the values are silently ignored. If you copied them from an
-> older doc, remove them; they do not enable server-side encryption.
+> `S3Storage` has no such fields. A config carrying them is rejected as an
+> unknown field and fails to load. If you copied them from an older doc,
+> remove them; they do not enable server-side encryption.
 
 ### Azure Blob Storage
 
@@ -240,9 +242,9 @@ Compression is decided entirely by `SmartCompressor`, per file type:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `upload_concurrency` | integer | unset | Override for client-side parallel chunk uploads. Falls back to `MEDIAGIT_UPLOAD_CONCURRENCY` / internal default (`32`) when unset. |
-| `download_concurrency` | integer | unset | Override for client-side parallel chunk downloads. Falls back to `MEDIAGIT_DOWNLOAD_CONCURRENCY` / internal default (`24`) when unset. |
-| `pack_workers` | integer | unset | Override for server-side concurrent pack-write workers. Falls back to `MEDIAGIT_PACK_WORKERS` / internal default (`8`) when unset. |
+| `upload_concurrency` | integer | unset | Override for client-side parallel chunk uploads. Precedence: `MEDIAGIT_UPLOAD_CONCURRENCY` env var, then this key, then internal default (`32`). |
+| `download_concurrency` | integer | unset | Override for client-side parallel chunk downloads. Precedence: `MEDIAGIT_DOWNLOAD_CONCURRENCY` env var, then this key, then internal default (`32` per-chunk path, `24` pack range-GET path). |
+| `pack_workers` | integer | unset | Override for server-side concurrent pack-write workers. Precedence: `MEDIAGIT_PACK_WORKERS` env var, then this key, then internal default (`8`). |
 
 Those three are the whole table. Each is an `Option` with an environment
 variable and an internal default behind it, which is why an empty
@@ -271,6 +273,8 @@ url = "http://backup-server.example.com/my-project"
 | `url` | string | — | **Required.** Remote server URL |
 | `fetch` | string | `url` | Fetch URL if different from `url` |
 | `push` | string | `url` | Push URL if different from `url` |
+| `token` | string | — | JWT bearer token. `mediagit remote add --token` (or `--token-stdin`) keeps the token in the OS keychain, not in this file; with `MEDIAGIT_NO_KEYRING` set it fails with `keychain_unavailable`. A `token` written by hand or by `config set remotes.<name>.token` is stored in plain text and used as the second credential tier |
+| `api_key` | string | — | API key for this remote; `token` wins if both are set |
 
 ---
 

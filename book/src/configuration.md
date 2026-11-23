@@ -32,7 +32,7 @@ flowchart TD
     style J fill:#ffcdd2
 ```
 
-The moment any credential succeeds, it's written through to the OS keychain so the next invocation resolves faster.
+After a successful request using a credential from the config file, it is written through to the OS keychain so the next invocation resolves faster. A credential from `MEDIAGIT_TOKEN` or `MEDIAGIT_API_KEY` is never copied there.
 
 ## Repository Configuration
 

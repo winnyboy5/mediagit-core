@@ -9,7 +9,7 @@ Common issues and solutions for MediaGit.
 This warning appears during `mediagit push` when the **presigned URL fast path** is unavailable from your machine. The push still completes via the server-proxy route — it is slower but correct.
 
 **Affected backends:** AWS S3, MinIO, Backblaze B2, DigitalOcean Spaces.  
-**Not affected:** GCS (proxy-only), Azure Blob (SAS errors are caught server-side), local filesystem.
+**Not affected:** local filesystem. GCS fails backend construction (with an actionable error) instead of downgrading when it cannot sign; Azure SAS errors are caught server-side.
 
 The fast path lets the client upload chunk bytes directly to the storage bucket, bypassing the MediaGit server. It requires the client machine to have direct HTTPS access to the bucket endpoint.
 
@@ -118,7 +118,7 @@ url = "http://media-server.example.com/my-project"
 
 ### S3 upload fails with "Access Denied"
 
-Credentials come from `.mediagit/config.toml` — **not** from the environment.
+Credentials come from `.mediagit/config.toml` — **not** from the environment (`mediagit-server` also reads `MEDIAGIT_S3_ACCESS_KEY_ID` / `MEDIAGIT_S3_SECRET_ACCESS_KEY`).
 Exporting `AWS_ACCESS_KEY_ID` and friends does nothing, so if that is what you
 tried, the shell will look correctly configured while the push keeps failing.
 Check the file:
@@ -140,8 +140,8 @@ Common causes, in the order worth checking:
    bucket or prefix.
 3. `region` not matching the bucket's actual region (SigV4 signs over region,
    so a mismatch reads as an auth failure rather than a routing one).
-4. A misspelled key name. Unknown keys are **silently discarded**, so
-   `acces_key_id` is indistinguishable from having written nothing at all.
+4. A misspelled key name. MediaGit rejects unknown keys in `[storage]`, so
+   `acces_key_id` stops the load with an unknown-field error naming the key.
 
 For MinIO or other S3-compatible services, the `endpoint` key is what
 distinguishes them from real AWS — it belongs in the same `[storage]` block,
@@ -219,7 +219,7 @@ If the remote is on S3, increase upload concurrency:
 
 ```bash
 MEDIAGIT_UPLOAD_CONCURRENCY=32    # parallel chunk uploads (default 32)
-MEDIAGIT_DOWNLOAD_CONCURRENCY=32  # parallel chunk downloads (default 24)
+MEDIAGIT_DOWNLOAD_CONCURRENCY=32  # parallel chunk downloads (default 32; 24 on the pack range-GET path)
 MEDIAGIT_HTTP_POOL_MAX=64         # idle connections kept per host (default 64)
 ```
 
@@ -270,7 +270,8 @@ The priority chain for author identity is:
 1. `--author "Name <email>"` CLI flag
 2. `MEDIAGIT_AUTHOR_NAME` / `MEDIAGIT_AUTHOR_EMAIL` env vars
 3. `[author]` section in `.mediagit/config.toml`
-4. `$USER` environment variable
+
+`commit` stops with an error if name or email is still missing; set both with `mediagit config set author.name ...` and `author.email ...`.
 
 Set your identity in config:
 
