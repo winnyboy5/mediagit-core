@@ -1060,6 +1060,7 @@ impl BranchCmd {
             None
         };
         let mut unmerged: Vec<String> = Vec::new();
+        let mut protected: Vec<String> = Vec::new();
 
         for branch_name in &opts.branches {
             let branch_ref_name = format!("refs/heads/{}", branch_name);
@@ -1077,6 +1078,7 @@ impl BranchCmd {
             if let Some(protection) = config.get_branch_protection(branch_name)
                 && protection.prevent_deletion
             {
+                protected.push(branch_name.clone());
                 problems.push(format!("branch '{}' is protected", branch_name));
                 if !opts.quiet {
                     output::warning(&format!(
@@ -1131,6 +1133,13 @@ impl BranchCmd {
 
         if !opts.quiet && deleted_count == 0 && unmerged.is_empty() {
             output::info("No branches were deleted");
+        }
+
+        if !protected.is_empty() {
+            anyhow::bail!(
+                "The branch(es) {} are protected; unprotect them first",
+                protected.join(", ")
+            );
         }
 
         if !unmerged.is_empty() {

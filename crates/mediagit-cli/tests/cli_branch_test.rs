@@ -664,6 +664,7 @@ fn qa_b01_force_delete_does_not_override_protection() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(text.contains("protected"), "{text}");
+    assert!(!out.status.success(), "refusal must exit non-zero");
     let out = mediagit()
         .args(["branch", "list"])
         .current_dir(d)
