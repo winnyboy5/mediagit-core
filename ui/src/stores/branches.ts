@@ -1,12 +1,14 @@
 import { defineStore } from 'pinia'
 import { computed, ref, shallowRef, watch } from 'vue'
 import { api, toApiError, type ApiError, type BranchCreateOpts, type BranchDeleteOpts, type BranchEntryReport, type BranchSwitchOpts, type Progress } from '@/api'
+import { useHistoryStore } from './history'
 import { useOpsStore } from './ops'
 import { useRepoStore } from './repo'
 
 /** Branches view state: list plus create / switch / rename / delete. */
 export const useBranchesStore = defineStore('branches', () => {
   const repo = useRepoStore()
+  const history = useHistoryStore()
   const ops = useOpsStore()
 
   const list = shallowRef<BranchEntryReport[]>([])
@@ -63,7 +65,7 @@ export const useBranchesStore = defineStore('branches', () => {
     } finally {
       busy.value = false
       switchOpId.value = null
-      await Promise.all([refresh(), repo.refresh()])
+      await Promise.all([refresh(), repo.refresh(), history.loaded ? history.refreshRefs() : undefined])
     }
   }
 

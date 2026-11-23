@@ -127,8 +127,10 @@ export const useHistoryStore = defineStore('history', () => {
   /** Re-read only the branch/tag labels (e.g. after tagging): keeps pages and selection. */
   async function refreshRefs() {
     if (!repo.path) return
+    const mine = token // a repo switch (reset) or reload mid-flight supersedes this
     try {
-      refs.value = (await api.log(repo.path, 0, 1, allRefs(), undefined, logFilter())).refs
+      const r = await api.log(repo.path, 0, 1, allRefs(), undefined, logFilter())
+      if (mine === token) refs.value = r.refs
     } catch {
       // Labels stay as they were; the next reload picks them up.
     }

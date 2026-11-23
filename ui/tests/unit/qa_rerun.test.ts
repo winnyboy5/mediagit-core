@@ -1,7 +1,7 @@
 import { beforeEach, expect, it, vi } from 'vitest'
 import { createPinia, getActivePinia, setActivePinia } from 'pinia'
 
-const api = vi.hoisted(() => ({ pull: vi.fn(), repoStatus: vi.fn(), cancelOp: vi.fn(), mergeControl: vi.fn(), mergeResolve: vi.fn(), merge: vi.fn(), tagCreate: vi.fn(), tagList: vi.fn(), stashList: vi.fn(), log: vi.fn() }))
+const api = vi.hoisted(() => ({ pull: vi.fn(), repoStatus: vi.fn(), cancelOp: vi.fn(), mergeControl: vi.fn(), mergeResolve: vi.fn(), merge: vi.fn(), tagCreate: vi.fn(), branchList: vi.fn(), branchSwitch: vi.fn(), tagList: vi.fn(), stashList: vi.fn(), log: vi.fn() }))
 vi.mock('@/api', async (orig) => ({ ...(await orig<typeof import('@/api')>()), api }))
 vi.mock('@/router', () => ({ router: { push: vi.fn() } }))
 
@@ -136,4 +136,32 @@ it('B-04: squash with no-commit does not open a Finish-able merge', async () => 
   await merge.start('feat', 'recursive' as never, { squash: true, noCommit: true })
   expect(api.merge).toHaveBeenCalled()
   expect(merge.active).toBe(false)
+})
+
+// QA review round 2: refs refresh must not write an old repo's labels into a new repo.
+it('H-06: a repo switch mid-flight discards the stale refs', async () => {
+  const { useHistoryStore } = await import('@/stores/history')
+  useRepoStore().path = '/repos/a'
+  const h = useHistoryStore()
+  let release!: (v: unknown) => void
+  api.log.mockReturnValue(new Promise((res) => (release = res)))
+  const p = h.refreshRefs()
+  h.reset()
+  release({ commits: [], refs: [{ name: 'old-repo-tag' }] })
+  await p
+  expect(h.refs).toEqual([])
+})
+
+// QA review round 2: a branch switch must move the HEAD marker in the history labels.
+it('B-07b: a branch action refreshes the history refs', async () => {
+  const { useHistoryStore } = await import('@/stores/history')
+  const { useBranchesStore } = await import('@/stores/branches')
+  useRepoStore().path = '/repos/hero'
+  const h = useHistoryStore()
+  h.loaded = true
+  api.branchList.mockResolvedValue({ branches: [], current: 'dev' })
+  api.branchSwitch.mockResolvedValue({})
+  api.log.mockResolvedValue({ commits: [], refs: [{ name: 'dev', head: true }] })
+  await useBranchesStore().switchTo('dev')
+  expect(h.refs).toEqual([{ name: 'dev', head: true }])
 })
