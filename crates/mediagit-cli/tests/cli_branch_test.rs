@@ -349,20 +349,21 @@ fn test_branch_delete_force() {
 }
 
 #[test]
-#[ignore] // MediaGit may handle current branch deletion differently
 fn test_branch_delete_current_fails() {
     let temp_dir = TempDir::new().unwrap();
     init_repo(temp_dir.path());
 
     add_and_commit(temp_dir.path(), "file.txt", "Content", "Initial commit");
 
-    // Try to delete current branch - behavior may vary
-    let _ = mediagit()
+    // Refused, and the refusal exits non-zero.
+    mediagit()
         .arg("branch")
         .arg("delete")
         .arg("main")
         .current_dir(temp_dir.path())
-        .assert();
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("current branch"));
 }
 
 // ============================================================================

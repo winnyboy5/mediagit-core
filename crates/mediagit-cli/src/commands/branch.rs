@@ -1061,12 +1061,14 @@ impl BranchCmd {
         };
         let mut unmerged: Vec<String> = Vec::new();
         let mut protected: Vec<String> = Vec::new();
+        let mut current: Vec<String> = Vec::new();
 
         for branch_name in &opts.branches {
             let branch_ref_name = format!("refs/heads/{}", branch_name);
 
             // Check if trying to delete current branch
             if Some(&branch_ref_name) == current_branch.as_ref() {
+                current.push(branch_name.clone());
                 problems.push(format!("cannot delete current branch '{}'", branch_name));
                 if !opts.quiet {
                     output::warning(&format!("Cannot delete current branch '{}'", branch_name));
@@ -1131,8 +1133,17 @@ impl BranchCmd {
             return Self::finish_delete_machine(deleted_names, problems);
         }
 
-        if !opts.quiet && deleted_count == 0 && unmerged.is_empty() && protected.is_empty() {
+        if !opts.quiet
+            && deleted_count == 0
+            && unmerged.is_empty()
+            && protected.is_empty()
+            && current.is_empty()
+        {
             output::info("No branches were deleted");
+        }
+
+        if !current.is_empty() {
+            anyhow::bail!("Cannot delete the current branch {}", current.join(", "));
         }
 
         if !protected.is_empty() {
