@@ -739,6 +739,120 @@ function Check-26-StatusStatCacheSeesEdits {
 }
 
 # ============================================================================
+# CHK27-29 - QA-live regression gates (2026-11-23), local filesystem server.
+# CHK27 BUG-032  push --force-with-lease must use the pusher's OWN last-seen tip
+# CHK28 BUG-006  a fresh clone of a repo with two branches must pass fsck
+# CHK29 BUG-033  pull that conflicts stops like merge (no "no tree result")
+# ============================================================================
+function New-QaSeededServerRepo([string]$Tag, $Srv, [string]$File = "base.bin", [int]$Seed = 2701) {
+  $src = New-SandboxRepo "$Tag-src" $Phase
+  New-QaCommit $src $File "v1" 1 $Seed
+  Invoke-MG $src @("remote", "add", "origin", $Srv.Url) $Phase | Out-Null
+  $p = Invoke-MG $src @("push", "origin") $Phase
+  if ($p.Exit -ne 0) { throw "seed push failed: $($p.Out)" }
+  return $src
+}
+
+function New-QaClone([string]$Name, $Srv) {
+  $c = Join-Path $QA.Work $Name
+  if (Test-Path $c) { Remove-Item -Recurse -Force $c }
+  $r = Invoke-MG $null @("clone", $Srv.Url, $c) $Phase
+  if ($r.Exit -ne 0) { throw "clone failed: $($r.Out)" }
+  return $c
+}
+
+function Check-27-ForceWithLeaseRefusesStaleLease {
+  $id = "CHK27-force-with-lease-refuses-stale"
+  if (-not (ShouldRun $id)) { return }
+  $srv = $null
+  try {
+    $srv = Start-QaServer -Backend "local" -Phase $Phase
+    $seed = New-QaSeededServerRepo "c27" $srv
+    $a = New-QaClone "c27-a" $srv
+    $b = New-QaClone "c27-b" $srv
+    # Ben pushes b1. Ana never fetches.
+    New-QaCommit $b "ben.bin" "b1" 1 2702
+    $bp = Invoke-MG $b @("push", "origin") $Phase
+    New-QaCommit $a "ana.bin" "a1" 1 2703
+    # Baseline: a plain push is refused, so the server really is ahead of Ana.
+    $plain = Invoke-MG $a @("push", "origin") $Phase
+    $lease = Invoke-MG $a @("push", "--force-with-lease", "origin", "main") $Phase
+    $v = New-QaClone "c27-verify" $srv
+    $benKept = Test-Path (Join-Path $v "ben.bin")
+    $anaIn = Test-Path (Join-Path $v "ana.bin")
+    # After Ana has seen Ben's tip the same command is allowed (the lease is valid).
+    Invoke-MG $a @("fetch", "origin") $Phase | Out-Null
+    $lease2 = Invoke-MG $a @("push", "--force-with-lease", "origin", "main") $Phase
+    $pass = ($bp.Exit -eq 0) -and ($plain.Exit -ne 0) -and ($lease.Exit -ne 0) -and $benKept -and (-not $anaIn) -and ($lease2.Exit -eq 0)
+    Rec $id "push --force-with-lease with a stale tracking ref" $pass "ben-push=$($bp.Exit) plain-push-exit=$($plain.Exit) stale-lease-exit=$($lease.Exit) server-kept-bens-work=$benKept anas-work-leaked=$anaIn lease-after-fetch-exit=$($lease2.Exit)"
+  } catch {
+    if ("$_" -match "^SKIP:") { Rec $id "force-with-lease" "SKIP" "$_" } else { Rec $id "force-with-lease" $false "unexpected error: $_" }
+  } finally { Stop-QaServer $srv }
+}
+
+function Check-28-CloneOfTwoBranchesPassesFsck {
+  $id = "CHK28-clone-two-branches-fsck"
+  if (-not (ShouldRun $id)) { return }
+  $srv = $null
+  try {
+    $srv = Start-QaServer -Backend "local" -Phase $Phase
+    $src = New-SandboxRepo "c28-src" $Phase
+    New-QaCommit $src "m.bin" "main file" 1 2801
+    Br $src "feat"; Sw $src "feat" | Out-Null
+    New-QaCommit $src "f.bin" "feat file" 1 2802
+    $featHash = Get-QaHash (Join-Path $src "f.bin")
+    Sw $src "main" | Out-Null
+    Invoke-MG $src @("remote", "add", "origin", $srv.Url) $Phase | Out-Null
+    $p = Invoke-MG $src @("push", "--all", "origin") $Phase
+    $c = New-QaClone "c28-clone" $srv
+    $fs = Invoke-MG $c @("fsck", "--full") $Phase
+    $clean = ($fs.Exit -eq 0) -and ($fs.Out -notmatch "(?i)missing commit")
+    $ve = Invoke-MG $c @("verify") $Phase
+    $sw = Sw $c "feat"
+    $got = if (Test-Path (Join-Path $c "f.bin")) { Get-QaHash (Join-Path $c "f.bin") } else { "" }
+    $fs2 = Invoke-MG $c @("fsck", "--full") $Phase
+    $pass = ($p.Exit -eq 0) -and $clean -and ($ve.Exit -eq 0) -and ($sw.Exit -eq 0) -and ($got -eq $featHash) -and ($fs2.Exit -eq 0)
+    Rec $id "clone with 2 branches: fsck clean, branch switch downloads the other" $pass "push-all=$($p.Exit) fsck-after-clone=$($fs.Exit) verify=$($ve.Exit) switch-exit=$($sw.Exit) feat-bytes-ok=$($got -eq $featHash) fsck-after-switch=$($fs2.Exit)"
+  } catch {
+    if ("$_" -match "^SKIP:") { Rec $id "clone fsck" "SKIP" "$_" } else { Rec $id "clone fsck" $false "unexpected error: $_" }
+  } finally { Stop-QaServer $srv }
+}
+
+function Check-29-PullConflictStopsLikeMerge {
+  $id = "CHK29-pull-conflict-stops-like-merge"
+  if (-not (ShouldRun $id)) { return }
+  $srv = $null
+  try {
+    $srv = Start-QaServer -Backend "local" -Phase $Phase
+    $src = New-SandboxRepo "c29-src" $Phase
+    [IO.File]::WriteAllText((Join-Path $src "notes.txt"), "line1`nline2`nline3`n")
+    Invoke-MG $src @("add", "notes.txt") $Phase | Out-Null
+    Invoke-MG $src @("commit", "-m", "base") $Phase | Out-Null
+    Invoke-MG $src @("remote", "add", "origin", $srv.Url) $Phase | Out-Null
+    Invoke-MG $src @("push", "origin") $Phase | Out-Null
+    $a = New-QaClone "c29-a" $srv
+    $b = New-QaClone "c29-b" $srv
+    [IO.File]::WriteAllText((Join-Path $b "notes.txt"), "line1`nBEN`nline3`n")
+    Invoke-MG $b @("add", "notes.txt") $Phase | Out-Null
+    Invoke-MG $b @("commit", "-m", "ben") $Phase | Out-Null
+    Invoke-MG $b @("push", "origin") $Phase | Out-Null
+    [IO.File]::WriteAllText((Join-Path $a "notes.txt"), "line1`nANA`nline3`n")
+    Invoke-MG $a @("add", "notes.txt") $Phase | Out-Null
+    Invoke-MG $a @("commit", "-m", "ana") $Phase | Out-Null
+    $pl = Invoke-MG $a @("pull", "origin", "main") $Phase
+    $stopped = Test-Path (Join-Path $a ".mediagit\MERGE_HEAD")
+    $notes = if (Test-Path (Join-Path $a "notes.txt")) { [IO.File]::ReadAllText((Join-Path $a "notes.txt")) } else { "" }
+    $markers = ($notes -match "<<<<<<<") -and ($notes -match "ANA") -and ($notes -match "BEN")
+    $ab = Invoke-MG $a @("merge", "--abort") $Phase
+    $restored = ([IO.File]::ReadAllText((Join-Path $a "notes.txt")) -eq "line1`nANA`nline3`n")
+    $pass = ($pl.Exit -ne 0) -and ($pl.Out -notmatch "no tree result") -and $stopped -and $markers -and ($ab.Exit -eq 0) -and $restored
+    Rec $id "pull with a conflict writes merge state and markers" $pass "pull-exit=$($pl.Exit) no-'no tree result'=$($pl.Out -notmatch 'no tree result') merge-state=$stopped both-sides-in-markers=$markers abort-exit=$($ab.Exit) own-edit-restored=$restored"
+  } catch {
+    if ("$_" -match "^SKIP:") { Rec $id "pull conflict" "SKIP" "$_" } else { Rec $id "pull conflict" $false "unexpected error: $_" }
+  } finally { Stop-QaServer $srv }
+}
+
+# ============================================================================
 # Generic op matrix: {reset --soft/--mixed/--hard+reflog, revert, stash, switch(dirty),
 # merge --no-ff, cherry-pick, rebase} against a fresh 2-branch binary-file repo each time.
 # ============================================================================
@@ -904,6 +1018,9 @@ Check-23-RebaseDropsEmpty
 Check-24-RebaseKeepEmptyKept
 Check-25-StatusAfterSoftReset
 Check-26-StatusStatCacheSeesEdits
+Check-27-ForceWithLeaseRefusesStaleLease
+Check-28-CloneOfTwoBranchesPassesFsck
+Check-29-PullConflictStopsLikeMerge
 
 Matrix-ResetSoftMixedHard
 Matrix-Revert
