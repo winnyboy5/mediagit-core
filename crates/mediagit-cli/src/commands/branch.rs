@@ -1131,7 +1131,7 @@ impl BranchCmd {
             return Self::finish_delete_machine(deleted_names, problems);
         }
 
-        if !opts.quiet && deleted_count == 0 && unmerged.is_empty() {
+        if !opts.quiet && deleted_count == 0 && unmerged.is_empty() && protected.is_empty() {
             output::info("No branches were deleted");
         }
 
@@ -1307,6 +1307,18 @@ impl BranchCmd {
             .read(&old_ref_name)
             .await
             .context(format!("Branch '{}' not found", old_branch))?;
+
+        // A protected branch can neither move away nor be overwritten.
+        let config = mediagit_config::Config::load(&repo_root).await?;
+        for name in [&old_branch, &new_branch] {
+            if config
+                .get_branch_protection(name)
+                .is_some_and(|p| p.prevent_deletion)
+                && (name == &old_branch || refdb.read(&new_ref_name).await.is_ok())
+            {
+                anyhow::bail!("Branch '{}' is protected; unprotect it first", name);
+            }
+        }
 
         // Check if new branch already exists (unless force)
         if !opts.force && refdb.read(&new_ref_name).await.is_ok() {

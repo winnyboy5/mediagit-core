@@ -689,3 +689,50 @@ fn qa_b01_force_delete_does_not_override_protection() {
         .assert()
         .success();
 }
+
+#[test]
+fn qa_b01_rename_refuses_protected_source_and_overwrite_target() {
+    let temp_dir = TempDir::new().unwrap();
+    let d = temp_dir.path();
+    init_repo(d);
+    add_and_commit(d, "f.txt", "x", "one");
+    for b in ["keep", "other"] {
+        mediagit()
+            .args(["branch", "create", b])
+            .current_dir(d)
+            .assert()
+            .success();
+    }
+    mediagit()
+        .args(["branch", "protect", "keep"])
+        .current_dir(d)
+        .assert()
+        .success();
+    for args in [
+        vec!["branch", "rename", "--force", "other", "keep"],
+        vec!["branch", "rename", "keep", "moved"],
+    ] {
+        mediagit()
+            .args(&args)
+            .current_dir(d)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("protected"));
+        mediagit()
+            .arg("--machine")
+            .args(&args)
+            .current_dir(d)
+            .assert()
+            .failure();
+    }
+    let out = mediagit()
+        .args(["branch", "list"])
+        .current_dir(d)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("keep") && text.contains("other") && !text.contains("moved"),
+        "{text}"
+    );
+}
