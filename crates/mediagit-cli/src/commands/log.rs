@@ -43,7 +43,7 @@ use std::path::{Path, PathBuf};
 SEE ALSO:
     mediagit-show(1), mediagit-diff(1), mediagit-reflog(1)")]
 pub struct LogCmd {
-    /// Revision range (e.g., main..feature, v1.0..v2.0)
+    /// Commit to start from: branch, tag or commit (default HEAD). Ranges such as A..B are not supported
     #[arg(value_name = "REVISION")]
     pub revision: Option<String>,
 

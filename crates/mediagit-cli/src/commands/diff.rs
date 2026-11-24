@@ -135,7 +135,7 @@ pub struct DiffCmd {
     #[arg(value_name = "REVISION2")]
     pub to: Option<String>,
 
-    /// Compare with working directory
+    /// Show staged changes (index vs HEAD)
     #[arg(long)]
     pub cached: bool,
 

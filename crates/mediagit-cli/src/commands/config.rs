@@ -161,7 +161,7 @@ static SCHEMA: &[KeySpec] = &[
         ..spec(
             "performance.download_concurrency",
             Ty::Int,
-            "Parallel chunk downloads on pull/fetch. Unset: MEDIAGIT_DOWNLOAD_CONCURRENCY, then 24.",
+            "Parallel chunk downloads on pull/fetch. Unset: MEDIAGIT_DOWNLOAD_CONCURRENCY, then 32 (24 for pack range reads).",
         )
     },
     KeySpec {

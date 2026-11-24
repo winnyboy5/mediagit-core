@@ -731,7 +731,7 @@ pub struct PerformanceConfig {
     pub upload_concurrency: Option<usize>,
 
     /// Override for client-side parallel chunk downloads. When None, falls back
-    /// to MEDIAGIT_DOWNLOAD_CONCURRENCY env var or the internal default (24).
+    /// to MEDIAGIT_DOWNLOAD_CONCURRENCY env var or the internal default (32; 24 for pack range reads).
     #[serde(default)]
     pub download_concurrency: Option<usize>,
 

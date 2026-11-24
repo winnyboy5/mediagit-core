@@ -263,7 +263,7 @@ pub struct ProtocolClient {
     /// `MEDIAGIT_UPLOAD_CONCURRENCY` env var. Set via `with_concurrent_uploads`.
     concurrent_uploads: Option<usize>,
     /// Optional override for parallel chunk-download fan-out. Takes precedence
-    /// over the internal default (24) but is itself overridden by the
+    /// over the internal default (32; 24 for pack range reads) but is itself overridden by the
     /// `MEDIAGIT_DOWNLOAD_CONCURRENCY` env var. Set via `with_concurrent_downloads`.
     concurrent_downloads: Option<usize>,
 }

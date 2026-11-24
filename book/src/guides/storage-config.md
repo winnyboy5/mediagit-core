@@ -149,7 +149,7 @@ ignored with a warning. The knobs that do gate concurrency are the other
 ```toml
 [performance]
 upload_concurrency = 32     # client-side parallel chunk uploads (push/pull/fetch)
-download_concurrency = 24   # client-side parallel chunk downloads
+download_concurrency = 32   # client-side parallel chunk downloads (pack range reads default 24)
 pack_workers = 8            # server-side concurrent pack-write workers
 ```
 
