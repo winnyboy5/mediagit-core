@@ -56,8 +56,6 @@ url = "http://media-server.example.com/my-project"
 [protected_branches.main]
 prevent_force_push = true
 prevent_deletion = true
-require_reviews = false
-min_approvals = 1
 
 [custom]
 ```
@@ -360,16 +358,12 @@ Set automatically by `mediagit push -u origin main`. Rarely edited manually.
 [protected_branches.main]
 prevent_force_push = true
 prevent_deletion = true
-require_reviews = false
-min_approvals = 1
 ```
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `prevent_force_push` | bool | `true` | Block force pushes. |
 | `prevent_deletion` | bool | `true` | Block branch deletion. |
-| `require_reviews` | bool | `false` | Recorded only; not enforced (no review workflow yet). |
-| `min_approvals` | u32 | `1` | Recorded only; not enforced. |
 
 ---
 

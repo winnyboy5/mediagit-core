@@ -13,7 +13,7 @@ mediagit branch switch <branch> [-c|--create] [--track] [-f|--force]
 mediagit branch delete <branches>... [-D|--force] [-d|--delete-merged] [-r|--remote]
 mediagit branch rename [<old-name>] <new-name> [-f|--force]
 mediagit branch show [<branch>] [-v|--verbose]
-mediagit branch protect <branch> [--require-reviews] [--unprotect]
+mediagit branch protect <branch> [--unprotect]
 ```
 
 ## Description
@@ -92,8 +92,6 @@ verbose output.
 
 Protect a branch against force-push and deletion (see
 `[protected_branches]` in the [Configuration Reference](../reference/config.md)).
-`--require-reviews` records that merges need a review. It is not enforced:
-MediaGit has no review workflow yet.
 `--unprotect` removes protection.
 
 ## Examples

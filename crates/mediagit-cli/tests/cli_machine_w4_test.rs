@@ -158,10 +158,9 @@ fn branch_protect_and_show() {
     assert_eq!(d["oid"], oid);
     assert_eq!(d["protected"], false);
 
-    let d = ok(dir, &["branch", "protect", "main", "--require-reviews"]);
+    let d = ok(dir, &["branch", "protect", "main"]);
     assert_eq!(d["protected"], true);
     assert_eq!(d["changed"], true);
-    assert_eq!(d["require_reviews"], true);
     assert_eq!(ok(dir, &["branch", "show", "main"])["protected"], true);
 
     let d = ok(dir, &["branch", "protect", "main", "--unprotect"]);

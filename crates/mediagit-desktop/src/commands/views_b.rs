@@ -253,19 +253,14 @@ pub fn branch_rename_argv(
     Ok(argv)
 }
 
-/// `branch protect [--require-reviews|--unprotect] -- <name>`.
+/// `branch protect [--unprotect] -- <name>`.
 pub fn branch_protect_argv(
     name: &str,
-    require_reviews: bool,
     unprotect: bool,
     confirmed: bool,
 ) -> Result<Vec<String>, EngineError> {
     ref_name_ok("branch name", name)?;
-    if require_reviews && unprotect {
-        return Err(invalid("protect", "--require-reviews with --unprotect"));
-    }
     let mut argv = vec!["branch".to_owned(), "protect".into()];
-    flag(&mut argv, require_reviews, "--require-reviews");
     if unprotect {
         need_confirmed("remove protection", confirmed)?;
         argv.push("--unprotect".into());
@@ -538,12 +533,11 @@ pub async fn branch_protect(
     queues: tauri::State<'_, RepoQueues>,
     repo: String,
     name: String,
-    require_reviews: bool,
     unprotect: bool,
     confirmed: bool,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    let argv = branch_protect_argv(&name, require_reviews, unprotect, confirmed)?;
+    let argv = branch_protect_argv(&name, unprotect, confirmed)?;
     write(&engine, &queues, &repo, &argv).await
 }
 
@@ -888,23 +882,18 @@ mod tests {
         assert!(bad(branch_rename_argv("a", "--b", false, false)));
 
         assert_eq!(
-            branch_protect_argv("main", false, false, false).unwrap(),
+            branch_protect_argv("main", false, false).unwrap(),
             s(&["branch", "protect", "--", "main"])
         );
-        assert_eq!(
-            branch_protect_argv("main", true, false, false).unwrap(),
-            s(&["branch", "protect", "--require-reviews", "--", "main"])
-        );
         assert!(
-            bad(branch_protect_argv("main", false, true, false)),
+            bad(branch_protect_argv("main", true, false)),
             "unprotect without confirmation"
         );
         assert_eq!(
-            branch_protect_argv("main", false, true, true).unwrap(),
+            branch_protect_argv("main", true, true).unwrap(),
             s(&["branch", "protect", "--unprotect", "--", "main"])
         );
-        assert!(bad(branch_protect_argv("main", true, true, true)));
-        assert!(bad(branch_protect_argv("-x", false, false, false)));
+        assert!(bad(branch_protect_argv("-x", false, false)));
     }
 
     #[test]

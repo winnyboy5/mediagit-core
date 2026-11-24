@@ -11,4 +11,4 @@ protected: boolean,
 /**
  * `false` when `--unprotect` found nothing to remove.
  */
-changed: boolean, require_reviews: boolean, };
+changed: boolean, };

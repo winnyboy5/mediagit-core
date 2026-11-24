@@ -81,8 +81,8 @@ export const useBranchesStore = defineStore('branches', () => {
   const rename = (from: string, to: string, overwrite = false) =>
     act(`Rename ${from}`, (root) => api.branchRename(root, from, to, overwrite), `Renamed ${from} to ${to}`)
   const protect = (name: string) =>
-    act(`Protect ${name}`, (root) => api.branchProtect(root, name, false, false), `Protected ${name}`)
-  const unprotect = (name: string) => act(`Remove protection from ${name}`, (root) => api.branchProtect(root, name, false, true), `${name} is no longer protected`)
+    act(`Protect ${name}`, (root) => api.branchProtect(root, name, false), `Protected ${name}`)
+  const unprotect = (name: string) => act(`Remove protection from ${name}`, (root) => api.branchProtect(root, name, true), `${name} is no longer protected`)
 
   /** One branch's details (`branch show`). */
   const detail = shallowRef<BranchEntryReport | null>(null)

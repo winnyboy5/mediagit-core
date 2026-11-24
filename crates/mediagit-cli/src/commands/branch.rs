@@ -72,7 +72,6 @@ pub struct BranchProtectReport {
     pub protected: bool,
     /// `false` when `--unprotect` found nothing to remove.
     pub changed: bool,
-    pub require_reviews: bool,
 }
 
 fn short_ref(name: &str) -> String {
@@ -269,10 +268,6 @@ pub struct ProtectOpts {
     /// Branch name
     #[arg(value_name = "BRANCH")]
     pub branch: String,
-
-    /// Record that merges need a review. Not enforced: MediaGit has no review workflow yet
-    #[arg(long)]
-    pub require_reviews: bool,
 
     /// Unprotect the branch
     #[arg(long)]
@@ -1209,7 +1204,6 @@ impl BranchCmd {
 
     async fn protect(&self, opts: &ProtectOpts) -> Result<()> {
         use crate::output;
-        use mediagit_config::BranchProtection;
 
         let repo_root = find_repo_root()?;
         let mut config = mediagit_config::Config::load(&repo_root).await?;
@@ -1232,7 +1226,6 @@ impl BranchCmd {
                     name: branch_name,
                     protected: false,
                     changed: removed,
-                    require_reviews: false,
                 });
             }
             if removed {
@@ -1245,32 +1238,20 @@ impl BranchCmd {
             }
         } else {
             // Add protection
-            let protection = if opts.require_reviews {
-                BranchProtection::with_reviews(1)
-            } else {
-                BranchProtection::default_protection()
-            };
-
-            config.protect_branch_with(&branch_name, protection);
+            config.protect_branch(&branch_name);
             config.save(&repo_root)?;
             if output::machine_mode() {
                 return output::emit_ok(&BranchProtectReport {
                     name: branch_name,
                     protected: true,
                     changed: true,
-                    require_reviews: opts.require_reviews,
                 });
             }
 
             if !opts.quiet {
-                let mut rules = vec!["prevent force-push", "prevent deletion"];
-                if opts.require_reviews {
-                    rules.push("require reviews (recorded, not enforced)");
-                }
                 output::success(&format!(
-                    "Protected branch '{}' ({})",
-                    branch_name,
-                    rules.join(", ")
+                    "Protected branch '{}' (prevent force-push, prevent deletion)",
+                    branch_name
                 ));
             }
         }

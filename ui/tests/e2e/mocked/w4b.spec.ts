@@ -20,7 +20,7 @@ async function boot(page: Page, route: string, heading: string, commands: Record
       branch_switch: fixture('branch_switch_progress'),
       branch_delete: {},
       branch_rename: {},
-      branch_protect: { name: 'main', protected: true, changed: true, require_reviews: false },
+      branch_protect: { name: 'main', protected: true, changed: true },
       branch_show: { name: 'feature/grade', oid: OID, remote: false, upstream: null, ahead: null, behind: null, protected: false },
       repo_merge: { action: 'merge', status: 'merged', oid: OID, conflicts: [] },
       repo_revert: fixture('revert_ok'),
@@ -119,13 +119,12 @@ test.describe('Branches: options', () => {
     await expect.poll(() => args(page, 'branch_rename')).toMatchObject([{ from: 'feature/grade', to: 'review/cut-2', force: true, confirmed: true }])
   })
 
-  test('protect (no review option: nothing enforces it), then remove protection after asking; details dialog', async ({ page }) => {
+  test('protect, then remove protection after asking; details dialog', async ({ page }) => {
     await boot(page, '/branches', 'Branches')
     await menu(page, 'feature/grade', 'Protect branch…')
     const dlg = page.getByRole('dialog', { name: 'Protect feature/grade' })
-    await expect(dlg.getByRole('checkbox', { name: 'Ask for a review first' })).toHaveCount(0)
     await dlg.getByRole('button', { name: 'Protect branch' }).click()
-    await expect.poll(() => args(page, 'branch_protect')).toMatchObject([{ name: 'feature/grade', requireReviews: false, unprotect: false }])
+    await expect.poll(() => args(page, 'branch_protect')).toMatchObject([{ name: 'feature/grade', unprotect: false }])
 
     await menu(page, 'main', 'Remove protection…')
     const ask = page.getByRole('alertdialog')

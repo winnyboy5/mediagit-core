@@ -375,9 +375,6 @@ gui = "BranchesView"
 [arg."branch protect BRANCH"]
 gui = "BranchesView"
 
-[arg."branch protect --require-reviews"]
-gui = "BranchesView"
-
 [arg."branch protect --unprotect"]
 gui = "BranchesView"
 

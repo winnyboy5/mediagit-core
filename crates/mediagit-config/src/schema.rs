@@ -878,13 +878,20 @@ pub struct BranchProtection {
     #[serde(default = "default_true")]
     pub prevent_deletion: bool,
 
-    /// Recorded only: nothing enforces it yet (MediaGit has no review workflow)
-    #[serde(default)]
-    pub require_reviews: bool,
+    // ---- accepted, discarded, never written (see `Config`) -----------
+    //
+    // `require_reviews` / `min_approvals` were dropped 2026-11-24: nothing
+    // ever enforced them (there is no review workflow). Every protected
+    // branch an older binary saved carries both keys, so they must still
+    // parse; `save()` no longer writes them. Not warned about: the common
+    // value is the default `false`, and warning on it would be noise.
+    /// Was `require_reviews`.
+    #[serde(default, rename = "require_reviews", skip_serializing)]
+    pub deprecated_require_reviews: Option<serde_json::Value>,
 
-    /// Recorded only, like `require_reviews`; nothing enforces it yet
-    #[serde(default = "default_min_approvals")]
-    pub min_approvals: u32,
+    /// Was `min_approvals`.
+    #[serde(default, rename = "min_approvals", skip_serializing)]
+    pub deprecated_min_approvals: Option<serde_json::Value>,
 }
 
 impl BranchProtection {
@@ -893,24 +900,10 @@ impl BranchProtection {
         Self {
             prevent_force_push: true,
             prevent_deletion: true,
-            require_reviews: false,
-            min_approvals: 1,
+            deprecated_require_reviews: None,
+            deprecated_min_approvals: None,
         }
     }
-
-    /// Create protection with review requirement
-    pub fn with_reviews(min_approvals: u32) -> Self {
-        Self {
-            prevent_force_push: true,
-            prevent_deletion: true,
-            require_reviews: true,
-            min_approvals,
-        }
-    }
-}
-
-fn default_min_approvals() -> u32 {
-    1
 }
 
 // Default value functions
@@ -1051,6 +1044,29 @@ base_path = "./data"
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.cdc_seed, 0);
+    }
+
+    /// Protected branches saved before 2026-11-24 carry `require_reviews` and
+    /// `min_approvals`. They must still parse (the struct denies unknown
+    /// fields) and must not be written back.
+    #[test]
+    fn dropped_review_keys_parse_and_are_not_written() {
+        let toml_str = r#"
+[storage]
+backend = "filesystem"
+base_path = "./data"
+[protected_branches.main]
+prevent_force_push = true
+prevent_deletion = true
+require_reviews = true
+min_approvals = 2
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.is_branch_protected("main"));
+        let out = toml::to_string(&config).unwrap();
+        assert!(out.contains("[protected_branches.main]"), "{out}");
+        assert!(!out.contains("require_reviews"), "{out}");
+        assert!(!out.contains("min_approvals"), "{out}");
     }
 
     #[test]

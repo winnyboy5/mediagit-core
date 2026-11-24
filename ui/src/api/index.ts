@@ -256,8 +256,8 @@ export const api = {
   branchRename: (repo: string, from: string, to: string, overwrite = false) =>
     invoke<BranchActionReport>('branch_rename', { repo, from, to, ...(overwrite ? { force: true, confirmed: true } : {}) }),
   branchShow: (repo: string, name: string | null) => invoke<BranchEntryReport>('branch_show', { repo, name }),
-  branchProtect: (repo: string, name: string, requireReviews: boolean, unprotect: boolean) =>
-    invoke<BranchProtectReport>('branch_protect', { repo, name, requireReviews, unprotect, confirmed: unprotect }),
+  branchProtect: (repo: string, name: string, unprotect: boolean) =>
+    invoke<BranchProtectReport>('branch_protect', { repo, name, unprotect, confirmed: unprotect }),
   /** `pattern`: a glob that narrows the list (`v1.*`). */
   tagList: (repo: string, pattern: string | null = null) => invoke<TagListReport>('tag_list', { repo, pattern }),
   tagShow: (repo: string, name: string) => invoke<TagShowReport>('tag_show', { repo, name }),
