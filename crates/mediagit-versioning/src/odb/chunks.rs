@@ -3988,13 +3988,13 @@ async fn finalize_atomic_write(
         let _ = tokio::fs::remove_file(path).await;
         if let Err(retry_err) = tokio::fs::rename(tmp_path, path).await {
             let _ = tokio::fs::remove_file(tmp_path).await;
-            return Err(anyhow::anyhow!(
-                "Failed to rename {} to {}: {} (retry: {})",
+            // Keep the OS error in the chain (not just its text), so the CLI
+            // can say "in use" or "denied" in plain words (R-12).
+            return Err(anyhow::Error::new(retry_err).context(format!(
+                "Failed to rename {} to {} (first attempt: {first_err}; retried)",
                 tmp_path.display(),
                 path.display(),
-                first_err,
-                retry_err
-            ));
+            )));
         }
     }
     Ok(())

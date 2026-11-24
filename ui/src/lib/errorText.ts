@@ -29,7 +29,7 @@ const TABLE: Record<string, Entry> = {
   request_rejected: { text: 'The server refused the request. Check what you entered and try again.', retry: false, own: true },
   server_error: { text: 'The server hit a problem. Try again in a moment; if it keeps happening, tell the server admin.', retry: true, own: true },
   request_failed: { text: 'The server could not complete the request. Try again in a moment.', retry: true, own: true },
-  permission_denied: { text: 'Access to a file or folder was denied. Check its permissions, then try again.', retry: true, own: true },
+  permission_denied: { text: 'Access to a file or folder was denied. It may be open in another program or read-only. Close that program or check its permissions, then try again.', retry: true, own: true },
   file_in_use: { text: 'A file is in use by another program. Close that program, then try again.', retry: true, own: true },
   already_exists: { text: 'A file or folder with that name already exists. Choose another name or remove it first.', retry: false, own: true },
   disk_full: { text: 'The disk is full. Free some space, then try again.', retry: true, own: true },

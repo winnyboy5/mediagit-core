@@ -64,7 +64,7 @@ fn os_friendly(p: Os) -> (&'static str, &'static str) {
         ),
         Os::Denied => (
             "permission_denied",
-            "Access to a file or folder was denied. Check its permissions, then try again.",
+            "Access to a file or folder was denied. It may be open in another program or read-only. Close that program or check its permissions, then try again.",
         ),
         Os::InUse => (
             "file_in_use",

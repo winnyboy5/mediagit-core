@@ -346,3 +346,41 @@ fn bug035_reset_accepts_remote_tracking_tag_and_caret() {
     assert_eq!(fs::read_to_string(d.join("f.txt")).unwrap(), "v1");
     assert_eq!(tip(d), first);
 }
+
+/// R-12 / IMP-097: `reset --hard` over a file another program holds open
+/// fails with a plain headline. The raw OS text (`os error 5/32`) stays in
+/// the Details line only.
+#[cfg(windows)]
+#[test]
+fn reset_hard_over_a_locked_file_has_a_plain_headline() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let temp_dir = TempDir::new().unwrap();
+    let dir = temp_dir.path();
+    init_repo(dir);
+    add_and_commit(dir, "a.txt", "one", "c1");
+    add_and_commit(dir, "a.txt", "two", "c2");
+
+    // Share mode 0: no other process may read, write or delete it.
+    let _held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(dir.join("a.txt"))
+        .unwrap();
+    let out = mediagit()
+        .args(["reset", "--hard", "HEAD~1"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let headline = stderr
+        .lines()
+        .find(|l| l.contains("Error:"))
+        .unwrap_or_else(|| panic!("no headline: {stderr}"));
+    assert!(!headline.contains("os error"), "raw headline: {stderr}");
+    assert!(
+        headline.contains("in use by another program") || headline.contains("denied"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("Details:"), "{stderr}");
+}

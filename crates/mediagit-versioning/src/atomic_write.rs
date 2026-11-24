@@ -91,20 +91,64 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
         let _ = std::fs::remove_file(path);
         if let Err(retry) = std::fs::rename(&tmp, path) {
             let _ = std::fs::remove_file(&tmp);
-            return Err(io::Error::other(format!(
+            // Keep the OS error as the source (not just its text), so the CLI
+            // can say "in use" or "denied" in plain words (R-12).
+            let msg = format!(
                 "failed to rename {} -> {}: {first} (retry: {retry})",
                 tmp.display(),
                 path.display()
-            )));
+            );
+            return Err(io::Error::new(
+                retry.kind(),
+                RenameFailed { msg, source: retry },
+            ));
         }
     }
 
     Ok(())
 }
 
+/// Both rename attempts failed: the message names both, the source is the
+/// retry's OS error (code and kind intact).
+#[derive(Debug)]
+struct RenameFailed {
+    msg: String,
+    source: io::Error,
+}
+
+impl std::fmt::Display for RenameFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.msg)
+    }
+}
+
+impl std::error::Error for RenameFailed {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R-12: a rename that fails twice keeps the OS error reachable as the
+    /// source, so callers can classify it. A non-empty folder at the target
+    /// makes both attempts fail on every OS.
+    #[test]
+    fn failed_rename_keeps_the_os_error_as_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("busy");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("keep"), b"x").unwrap();
+        let err = write_atomic(&target, b"new").unwrap_err();
+        assert!(err.to_string().contains("(retry:"), "{err}");
+        let os = std::error::Error::source(&err)
+            .and_then(|s| s.downcast_ref::<io::Error>())
+            .and_then(io::Error::raw_os_error);
+        assert!(os.is_some(), "OS error lost: {err:?}");
+        assert!(target.join("keep").exists(), "the folder was touched");
+    }
     use std::collections::HashSet;
 
     #[test]
