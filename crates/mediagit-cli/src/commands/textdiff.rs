@@ -18,6 +18,8 @@ pub const MAX_SIDE: u64 = 8 * 1024 * 1024;
 pub const MAX_LINES: usize = 5000;
 const SNIFF: usize = 8000;
 const CONTEXT: usize = 3;
+/// Upper bound on line-diff time. Past it the diff is coarser, never wrong.
+const DIFF_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// `diff -p` result for one file.
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -88,7 +90,11 @@ pub fn compare(old: &Side, new: &Side) -> FileText {
         (Err(k), _) | (_, Err(k)) => return verdict(k),
         (Ok(o), Ok(n)) => (o, n),
     };
-    let diff = TextDiff::from_lines(old, new);
+    // Myers diff slows down sharply when most lines change (a re-exported
+    // .obj or .usda); past the deadline `similar` returns a coarser diff.
+    let diff = TextDiff::configure()
+        .timeout(DIFF_DEADLINE)
+        .diff_lines(old, new);
     let mut out = verdict("text");
     let mut emitted = 0usize;
     for group in diff.grouped_ops(CONTEXT) {
@@ -110,6 +116,11 @@ pub fn compare(old: &Side, new: &Side) -> FileText {
                 if emitted == MAX_LINES {
                     out.truncated = true;
                     if !hunk.lines.is_empty() {
+                        // The header must count only the lines actually kept.
+                        let count =
+                            |k: &str| hunk.lines.iter().filter(|l| l.kind != k).count() as u32;
+                        hunk.old_lines = count("+");
+                        hunk.new_lines = count("-");
                         out.hunks.push(hunk);
                     }
                     return out;
@@ -249,5 +260,61 @@ mod tests {
             "{s}"
         );
         assert!(render("y.psd", &verdict("binary")).contains("binary file"));
+    }
+
+    #[test]
+    fn a_cut_hunk_header_counts_only_the_kept_lines() {
+        let old: String = (0..MAX_LINES)
+            .map(|i| {
+                format!(
+                    "old{i}
+"
+                )
+            })
+            .collect();
+        let new: String = (0..MAX_LINES)
+            .map(|i| {
+                format!(
+                    "new{i}
+"
+                )
+            })
+            .collect();
+        let t = compare(&b(&old), &b(&new));
+        assert!(t.truncated);
+        let h = t.hunks.last().unwrap();
+        let minus = h.lines.iter().filter(|l| l.kind == "-").count() as u32;
+        let plus = h.lines.iter().filter(|l| l.kind == "+").count() as u32;
+        assert_eq!((h.old_lines, h.new_lines), (minus, plus));
+    }
+
+    #[test]
+    fn a_file_where_every_line_changes_finishes_quickly() {
+        // Interleaved changes are Myers' worst case; the deadline bounds it.
+        let old: String = (0..200_000)
+            .map(|i| {
+                format!(
+                    "{i}
+"
+                )
+            })
+            .collect();
+        let new: String = (0..200_000)
+            .map(|i| {
+                format!(
+                    "{}
+",
+                    i * 7 + 3
+                )
+            })
+            .collect();
+        let t0 = std::time::Instant::now();
+        let t = compare(&b(&old), &b(&new));
+        assert_eq!(t.kind, "text");
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(15),
+            "{:?}",
+            t0.elapsed()
+        );
     }
 }
