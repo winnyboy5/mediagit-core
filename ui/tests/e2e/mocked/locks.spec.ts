@@ -13,7 +13,10 @@ async function boot(page: Page, commands: Record<string, unknown> = {}, storage:
 
 test.describe('Locks: states', () => {
   test('populated: sorted table with owner and age; no axe violations', async ({ page }) => {
-    await boot(page)
+    // Fixture dates are fixed; shift them so the newest lock is 2 hours old and sky_hdri lands in the "Nd ago" bucket.
+    const { locks } = fixture<{ locks: { created_at: number }[] }>('locks')
+    const shift = Math.floor(Date.now() / 1000) - 2 * 3600 - locks[0]!.created_at
+    await boot(page, { lock_list: { locks: locks.map((l) => ({ ...l, created_at: l.created_at + shift })) } })
     const table = page.getByRole('table')
     await expect(table.getByRole('row')).toHaveCount(4) // header + 3
     await expect(table.getByRole('row').nth(1)).toContainText('art/hero.psd')

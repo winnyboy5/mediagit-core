@@ -3,6 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statS
 import { join, resolve } from 'node:path'
 import { deflateSync } from 'node:zlib'
 import { chromium, expect, test, type Browser, type Page } from '@playwright/test'
+import { openRecent } from './bugs'
 import { goTo } from './nav'
 import { readState, type E2EState } from './setup'
 
@@ -68,6 +69,7 @@ test.beforeAll(async () => {
   page = ctx.pages()[0] ?? (await ctx.waitForEvent('page'))
   await page.waitForLoadState('domcontentloaded')
   page.on('pageerror', (e) => appendFileSync(join(st.root, 'logs', 'pageerror.log'), `${e}\n`))
+  await openRecent(page, st.repo, 'hero-film') // earlier specs may have left another repo open
 })
 
 test.afterAll(async () => {
@@ -95,6 +97,7 @@ test('j. Tags: tag the latest version, see it listed, delete it via the confirm;
 
 test('k. Stash: park an edit, file is restored on disk, pop brings it back', async () => {
   const EDIT = 'stash me\n'
+  const NOTES = readFileSync(notes(), 'utf8') // committed content, whatever earlier tests left
   writeFileSync(notes(), EDIT)
   await refresh()
   await go('tags-stash')

@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path'
 import { chromium, expect, test, type Browser, type Page } from '@playwright/test'
 import { formatBytes } from '../../../src/components/format'
 import { goTo } from './nav'
-import { setLastRepo } from './bugs'
+import { openRecent, setLastRepo } from './bugs'
 import { readState, type E2EState } from './setup'
 
 // Gate G4, wave W3: Storage, Maintenance, Settings, Advanced and Security in the REAL app.
@@ -54,6 +54,7 @@ test.beforeAll(async () => {
   page = ctx.pages()[0] ?? (await ctx.waitForEvent('page'))
   await page.waitForLoadState('domcontentloaded')
   page.on('pageerror', (e) => appendFileSync(join(st.root, 'logs', 'pageerror.log'), `${e}\n`))
+  await openRecent(page, st.repo, 'hero-film')
 })
 
 test.afterAll(async () => {
