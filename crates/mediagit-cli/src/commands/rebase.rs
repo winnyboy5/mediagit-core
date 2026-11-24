@@ -183,6 +183,35 @@ impl RebaseCmd {
             anyhow::bail!("A rebase is already in progress. Use --continue, --skip, or --abort.");
         }
 
+        // `rebase <upstream> <branch>` rebases that branch: switch to it first
+        // (as git does). The switch's own guard refuses unsaved work it would
+        // overwrite, before anything moves. BRANCH used to be ignored.
+        if let Some(branch) = &self.branch {
+            let head = RefDatabase::new(repo_root.join(".mediagit"))
+                .read("HEAD")
+                .await
+                .ok()
+                .and_then(|h| h.target);
+            let wanted = branch.strip_prefix("refs/heads/").unwrap_or(branch);
+            if head.as_deref() != Some(&format!("refs/heads/{wanted}")) {
+                super::branch::BranchCmd {
+                    subcommand: super::branch::BranchSubcommand::Switch(
+                        super::branch::SwitchOpts {
+                            branch: wanted.to_owned(),
+                            create: false,
+                            track: false,
+                            force: false,
+                            quiet: self.quiet(),
+                            embedded: true,
+                        },
+                    ),
+                }
+                .execute()
+                .await
+                .with_context(|| format!("Cannot switch to '{wanted}' to rebase it"))?;
+            }
+        }
+
         let storage_path = repo_root.join(".mediagit");
         let storage = create_storage_backend(&repo_root).await?;
         let refdb = RefDatabase::new(&storage_path);

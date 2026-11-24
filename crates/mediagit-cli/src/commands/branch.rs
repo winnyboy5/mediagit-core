@@ -236,6 +236,11 @@ pub struct SwitchOpts {
     /// Quiet mode
     #[arg(short, long)]
     pub quiet: bool,
+
+    /// Run as a step of another command (`rebase <upstream> <branch>`): the
+    /// caller owns the `--machine` envelope, so this one must not print its own.
+    #[arg(skip)]
+    pub embedded: bool,
 }
 
 /// Delete a branch
@@ -942,7 +947,7 @@ impl BranchCmd {
             tracing::warn!("Failed to save operation stats: {}", e);
         }
 
-        if output::machine_mode() {
+        if output::machine_mode() && !opts.embedded {
             return output::emit_ok(&BranchActionReport {
                 action: "switch".into(),
                 name: branch_name.to_string(),
