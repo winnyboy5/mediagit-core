@@ -3,7 +3,7 @@
 // changed, and every file as it was at that point.
 import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { GitCompare, GitMerge, Tag } from 'lucide-vue-next'
+import { Copy, GitCompare, GitMerge, Tag } from 'lucide-vue-next'
 import AlertDialog from '@/components/AlertDialog.vue'
 import BranchPill from '@/components/BranchPill.vue'
 import Dialog from '@/components/Dialog.vue'
@@ -11,9 +11,11 @@ import EmptyState from '@/components/EmptyState.vue'
 import ErrorState from '@/components/ErrorState.vue'
 import MoreOptions from '@/components/MoreOptions.vue'
 import SkeletonRows from '@/components/SkeletonRows.vue'
+import Select from '@/components/Select.vue'
 import TagPill from '@/components/TagPill.vue'
 import TextField from '@/components/TextField.vue'
 import { refNameError } from '@/lib/inspect'
+import { usePickStore } from '@/stores/advanced'
 import { useCompareStore } from '@/stores/compare'
 import { useTagsStashStore } from '@/stores/tagsStash'
 import ChangeTiles from './ChangeTiles.vue'
@@ -83,6 +85,49 @@ async function doTag() {
   if (await tags.createTag(tagName.value, { commit: c.oid, message: '', tagger: null, email: null, force: false, confirmed: false })) tagOpen.value = false
 }
 
+// Copy this version to a branch ----------------------------------------------
+// Another branch: copied without switching (your files stay as they are). If it
+// would clash, nothing changes and the person can switch there and copy, which
+// stops on the clash so they choose file by file.
+const pickStore = usePickStore()
+const copyOpen = ref(false)
+const copyTo = ref('')
+const clashOn = ref<string | null>(null)
+const copyTargets = computed(() => {
+  const cur = branches.current
+  const names = branches.list.map((b) => b.name)
+  const sorted = cur ? [cur, ...names.filter((n) => n !== cur)] : names
+  return sorted.map((n) => ({ value: n, label: n === cur ? `${n} (the branch I am on)` : n }))
+})
+async function openCopy() {
+  pickStore.error = null
+  clashOn.value = null
+  copyOpen.value = true
+  if (!branches.loaded) await branches.refresh()
+  copyTo.value = branches.current ?? branches.list[0]?.name ?? ''
+}
+async function doCopy() {
+  const c = commit.value
+  if (!c || !copyTo.value) return
+  const elsewhere = copyTo.value !== branches.current
+  const ok = await pickStore.start(c.oid, { onto: elsewhere ? copyTo.value : undefined })
+  if (ok) {
+    copyOpen.value = false
+    if (pickStore.active) void router.push('/settings/advanced')
+    return
+  }
+  if (pickStore.error?.code === 'would_conflict') clashOn.value = copyTo.value
+}
+async function switchAndCopy() {
+  const c = commit.value
+  const b = clashOn.value
+  if (!c || !b) return
+  if (!(await branches.switchTo(b))) return
+  copyOpen.value = false
+  await pickStore.start(c.oid)
+  if (pickStore.active) void router.push('/settings/advanced')
+}
+
 const changed = computed<FileEntry[]>(() =>
   (history.detail?.files ?? []).map((f) => ({ path: f.path, status: f.status as FileStatus, size: f.new_size ?? f.old_size })),
 )
@@ -127,6 +172,7 @@ function askSwitch(name: string) {
         <div class="acts" role="group" aria-label="This version">
           <Button size="sm" :disabled="!commit.parents.length" @click="compareWithPrevious"><GitCompare :size="14" aria-hidden="true" /> Compare with previous</Button>
           <Button size="sm" @click="openTag"><Tag :size="14" aria-hidden="true" /> Tag this version</Button>
+          <Button size="sm" :disabled="!commit.parents.length" @click="openCopy"><Copy :size="14" aria-hidden="true" /> Copy to branch…</Button>
           <UndoMenu :rev="commit.oid" :summary="commit.summary" />
         </div>
         <UndoDialogs />
@@ -158,6 +204,22 @@ function askSwitch(name: string) {
         <VersionFiles v-else :entries="atVersion" group="tree" label="Files at this version" plain @pick="pick" />
       </MoreOptions>
     </template>
+
+    <Dialog v-model:open="copyOpen" title="Copy this version to a branch" description="Its changes are added to that branch as a new version. Copying to another branch does not touch your files or the branch you are on.">
+      <form id="copy-version" class="form" @submit.prevent="doCopy">
+        <Select v-model="copyTo" label="Copy to" :options="copyTargets" :disabled="pickStore.busy" />
+        <div v-if="clashOn" class="err" role="alert" data-testid="copy-clash">
+          This copy clashes with changes on {{ clashOn }}, so nothing was changed. Switch to {{ clashOn }} and copy there to choose what to keep?
+        </div>
+        <p v-else-if="pickStore.error && copyOpen" class="err" role="alert">{{ pickStore.error.message }}</p>
+        <p v-if="clashOn && branches.actionError" class="err" role="alert">{{ branches.actionError.message }}</p>
+      </form>
+      <template #footer>
+        <Button @click="copyOpen = false">Cancel</Button>
+        <Button v-if="clashOn" variant="primary" :disabled="pickStore.busy || branches.busy" @click="switchAndCopy">Switch to {{ clashOn }} and copy</Button>
+        <Button v-else type="submit" form="copy-version" variant="primary" :disabled="!copyTo || pickStore.busy" :loading="pickStore.busy">Copy version</Button>
+      </template>
+    </Dialog>
 
     <Dialog v-model:open="tagOpen" title="Tag this version" description="A tag gives this version a name you can find later, like v1.0 delivery.">
       <form id="tag-version" class="form" @submit.prevent="doTag">

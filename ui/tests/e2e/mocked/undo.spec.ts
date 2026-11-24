@@ -221,3 +221,52 @@ test.describe('Undo: Changes view', () => {
     await expect(page.getByRole('button', { name: 'More actions' })).toBeDisabled()
   })
 })
+
+test.describe('History: copy a version to a branch', () => {
+  const branches = { branch_list: fixture('branches'), pick_start: fixture('pick_done') }
+
+  test('another branch: copied with --onto, no switch; axe clean', async ({ page }) => {
+    await history(page, branches)
+    await detail(page).getByRole('button', { name: 'Copy to branch…' }).click()
+    const dlg = page.getByRole('dialog', { name: 'Copy this version to a branch' })
+    await expect(dlg.getByLabel('Copy to')).toContainText('main (the branch I am on)')
+    await dlg.getByLabel('Copy to').click()
+    await page.getByRole('option', { name: 'feature/grade' }).click()
+    await expectNoAxeViolations(page)
+    await dlg.getByRole('button', { name: 'Copy version' }).click()
+    await expect.poll(async () => (await ipcCalls(page, 'pick_start')).length).toBe(1)
+    expect((await ipcCalls(page, 'pick_start'))[0]!.args).toMatchObject({ commits: [SECOND], opts: { onto: 'feature/grade' } })
+    expect(await ipcCalls(page, 'branch_switch')).toHaveLength(0)
+    await expect(dlg).toHaveCount(0)
+  })
+
+  test('the current branch: the usual copy, no --onto', async ({ page }) => {
+    await history(page, branches)
+    await detail(page).getByRole('button', { name: 'Copy to branch…' }).click()
+    await page.getByRole('dialog', { name: 'Copy this version to a branch' }).getByRole('button', { name: 'Copy version' }).click()
+    await expect.poll(async () => (await ipcCalls(page, 'pick_start')).length).toBe(1)
+    const args = (await ipcCalls(page, 'pick_start'))[0]!.args as { opts?: { onto?: string } }
+    expect(args.opts?.onto).toBeUndefined()
+  })
+
+  test('a clash changes nothing and offers to switch there and copy', async ({ page }) => {
+    await history(page, {
+      ...branches,
+      branch_switch: fixture('branch_switch_progress'),
+      pick_start: { __error: { code: 'would_conflict', message: 'Copying conflicts in: art/a.psd.' } },
+    })
+    await detail(page).getByRole('button', { name: 'Copy to branch…' }).click()
+    const dlg = page.getByRole('dialog', { name: 'Copy this version to a branch' })
+    await dlg.getByLabel('Copy to').click()
+    await page.getByRole('option', { name: 'review/cut-2' }).click()
+    await dlg.getByRole('button', { name: 'Copy version' }).click()
+    await expect(dlg.getByTestId('copy-clash')).toContainText('nothing was changed')
+    await expect(dlg.getByTestId('copy-clash')).toContainText('review/cut-2')
+    await dlg.getByRole('button', { name: 'Switch to review/cut-2 and copy' }).click()
+    await expect.poll(async () => (await ipcCalls(page, 'branch_switch')).length).toBe(1)
+    expect((await ipcCalls(page, 'branch_switch'))[0]!.args).toMatchObject({ name: 'review/cut-2' })
+    await expect.poll(async () => (await ipcCalls(page, 'pick_start')).length).toBe(2)
+    const second = (await ipcCalls(page, 'pick_start'))[1]!.args as { opts?: { onto?: string } }
+    expect(second.opts?.onto).toBeUndefined()
+  })
+})

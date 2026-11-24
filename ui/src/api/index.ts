@@ -425,7 +425,8 @@ export const api = {
     invoke<RebaseReport>('rebase_start', { repo, upstream, ...extra, onProgress: channel(onProgress) }),
   sequencerControl: <T = RebaseReport | CherryPickReport>(repo: string, command: 'rebase' | 'cherry-pick', action: 'continue' | 'abort' | 'skip', onProgress: Report) =>
     invoke<T>('sequencer_control', { repo, command, action, onProgress: channel(onProgress) }),
-  pickStart: (repo: string, commits: string[], onProgress: Report, opts?: { noCommit?: boolean; appendMessage?: boolean }) =>
+  /** `onto`: copy to that branch without switching (refused with would_conflict if it clashes). */
+  pickStart: (repo: string, commits: string[], onProgress: Report, opts?: { noCommit?: boolean; appendMessage?: boolean; onto?: string }) =>
     invoke<CherryPickReport>('pick_start', { repo, commits, ...(opts ? { opts } : {}), onProgress: channel(onProgress) }),
   /** `restart` throws away a bisect already running; the person has agreed to that. */
   bisectStart: (repo: string, bad: string, good: string | null, onProgress: Report, restart = false) =>

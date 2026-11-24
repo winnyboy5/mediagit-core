@@ -148,6 +148,20 @@ test.describe('Advanced: cherry-pick', () => {
     expect((await ipcCalls(page, 'pick_start')).map((c) => c.args)).toMatchObject([{ repo: '/repos/hero-film', commits: ['0000000000000000000000000000000000000000'] }])
   })
 
+  test('Copy onto another branch sends --onto and hides "let me look first"', async ({ page }) => {
+    await boot(page, 'Cherry-pick', { pick_start: fixture('pick_done') })
+    await chooseVersion(page)
+    await page.getByText('More options').click()
+    await page.getByLabel('Copy onto').click()
+    await page.getByRole('option', { name: 'feature/grade' }).click()
+    await expect(page.getByLabel('Let me look before it is saved')).toHaveCount(0)
+    await page.getByRole('button', { name: 'Copy version' }).click()
+    await expect(page.getByRole('alertdialog')).toContainText('Copy this version to feature/grade?')
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Copy version' }).click()
+    await expect.poll(async () => (await ipcCalls(page, 'pick_start')).length).toBe(1)
+    expect((await ipcCalls(page, 'pick_start'))[0]!.args).toMatchObject({ opts: { onto: 'feature/grade' } })
+  })
+
   test('versions can come from another branch: pick the branch, then one of its versions', async ({ page }) => {
     await boot(page, 'Cherry-pick', { pick_start: fixture('pick_done') })
     await expect(page.getByLabel('From branch')).toContainText('All branches')

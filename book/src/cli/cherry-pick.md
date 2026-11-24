@@ -6,6 +6,7 @@ Apply commits from another branch onto the current branch.
 
 ```bash
 mediagit cherry-pick [OPTIONS] <COMMITS>...
+mediagit cherry-pick --onto <BRANCH> [-x] <COMMITS>...
 mediagit cherry-pick --abort
 mediagit cherry-pick --skip
 ```
@@ -35,6 +36,23 @@ Pick them one at a time, or leave out `-n` to save each one.
 #### `-x`, `--append-message`
 Append the original commit hash to the commit message for traceability:
 `(cherry picked from commit abc1234...)`.
+
+#### `--onto <BRANCH>`
+Copy the commits onto another branch without switching to it. Each commit is
+merged onto that branch's tip in memory and the branch moves once, at the end
+(with a reflog entry). Your working folder, the staging area, `HEAD` and the
+current branch are not touched, so unsaved work is fine.
+
+If a commit would conflict on that branch, nothing is changed and the command
+fails with `would_conflict`, naming the paths: switch to the branch and run a
+plain `cherry-pick` there to resolve the conflict file by file. It also refuses
+when the branch moved while copying, and cannot be combined with `--no-commit`.
+`--onto` the branch you are on is the usual cherry-pick.
+
+```bash
+# Copy a fix from main to the release branch, staying on main
+$ mediagit cherry-pick --onto release/1.2 a1b2c3d
+```
 
 #### `--abort`
 Abort the cherry-pick sequence and restore the pre-operation state.

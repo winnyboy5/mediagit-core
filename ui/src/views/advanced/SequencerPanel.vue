@@ -58,6 +58,10 @@ watch(
 const CURRENT = '*current'
 const rebaseBranch = ref(CURRENT)
 const rebaseBranches = computed(() => [{ value: CURRENT, label: 'The branch I am on' }, ...branches.list.map((b) => ({ value: b.name, label: b.name }))])
+// A copy can go to another branch without switching ('' = the current one).
+const pickOnto = ref(CURRENT)
+const ontoBranches = computed(() => [{ value: CURRENT, label: 'The branch I am on' }, ...branches.list.filter((b) => b.name !== branches.current).map((b) => ({ value: b.name, label: b.name }))])
+const onto = computed(() => (isRebase || pickOnto.value === CURRENT ? undefined : pickOnto.value))
 const keepEmpty = ref(false)
 const noCommit = ref(false)
 const appendMessage = ref(false)
@@ -124,7 +128,8 @@ const targetLabel = computed(() => options.value.find((o) => o.value === target.
           <OptionCheck v-model="keepEmpty" label="Keep versions that end up changing nothing" flag="--keep-empty" />
         </template>
         <template v-else>
-          <OptionCheck v-model="noCommit" label="Let me look before it is saved" flag="--no-commit" hint="Files change but no version is made yet" />
+          <Select v-model="pickOnto" label="Copy onto" :options="ontoBranches" :disabled="seq.busy" />
+          <OptionCheck v-if="!onto" v-model="noCommit" label="Let me look before it is saved" flag="--no-commit" hint="Files change but no version is made yet" />
           <OptionCheck v-model="appendMessage" label="Note where it was copied from" flag="--append-message" hint="Adds “(cherry picked from commit …)” to the message" />
         </template>
       </MoreOptions>
@@ -138,10 +143,10 @@ const targetLabel = computed(() => options.value.find((o) => o.value === target.
 
     <AlertDialog
       v-model:open="confirmOpen"
-      :title="isRebase ? `Rebase onto ${targetLabel}?` : 'Copy this version?'"
-      :description="isRebase ? 'This branch gets new versions in place of its old ones. If it clashes you decide file by file, and you can cancel.' : `${targetLabel} is copied onto this branch as a new version. If it clashes you decide file by file.`"
+      :title="isRebase ? `Rebase onto ${targetLabel}?` : onto ? `Copy this version to ${onto}?` : 'Copy this version?'"
+      :description="isRebase ? 'This branch gets new versions in place of its old ones. If it clashes you decide file by file, and you can cancel.' : onto ? `${targetLabel} is copied onto ${onto} as a new version. Your files and this branch are not touched. If it would clash, nothing is changed.` : `${targetLabel} is copied onto this branch as a new version. If it clashes you decide file by file.`"
       :confirm-label="isRebase ? 'Start rebase' : 'Copy version'"
-      @confirm="seq.start(target, { branch: rebaseBranch === CURRENT ? undefined : rebaseBranch, keepEmpty: keepEmpty === true, noCommit: noCommit === true, appendMessage: appendMessage === true })"
+      @confirm="seq.start(target, { branch: rebaseBranch === CURRENT ? undefined : rebaseBranch, keepEmpty: keepEmpty === true, noCommit: !onto && noCommit === true, appendMessage: appendMessage === true, onto })"
     />
     <AlertDialog
       v-model:open="abortOpen"

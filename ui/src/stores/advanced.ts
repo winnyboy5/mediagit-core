@@ -40,6 +40,8 @@ export interface SequencerExtra {
   keepEmpty?: boolean
   noCommit?: boolean
   appendMessage?: boolean
+  /** Copy: to this branch without switching (not the current one). */
+  onto?: string
 }
 
 /** The recent versions the pickers offer. */
@@ -113,13 +115,13 @@ function sequencer(command: 'rebase' | 'cherry-pick') {
     const stepOf = (r: RebaseReport | CherryPickReport): Step => ({ status: r.status, conflicts: r.conflicts, conflictCommit: r.conflict_commit })
 
     async function start(targetName: string, extra: SequencerExtra = {}) {
-      const label = command === 'rebase' ? `Rebase onto ${targetName}` : `Copy ${targetName.slice(0, 7)}`
+      const label = command === 'rebase' ? `Rebase onto ${targetName}` : `Copy ${targetName.slice(0, 7)}${extra.onto ? ` to ${extra.onto}` : ''}`
       const r = await run<RebaseReport | CherryPickReport>(
         label,
         (root, report) =>
           command === 'rebase'
             ? api.rebaseStart(root, targetName, report, { branch: extra.branch || undefined, keepEmpty: extra.keepEmpty || undefined })
-            : api.pickStart(root, [targetName], report, { noCommit: extra.noCommit || undefined, appendMessage: extra.appendMessage || undefined }),
+            : api.pickStart(root, [targetName], report, { noCommit: extra.noCommit || undefined, appendMessage: extra.appendMessage || undefined, onto: extra.onto || undefined }),
         (x) => stepSummary(stepOf(x)),
         stopped,
       )
