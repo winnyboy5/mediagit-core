@@ -489,10 +489,27 @@ describe('compare store', () => {
     c.select('notes.txt')
     await vi.waitFor(() => expect(c.fileText).toEqual(hunks('old')))
     // The file changes outside the app; the view refreshes on focus.
-    api.diffFile.mockResolvedValue(report({ files: [{ path: 'notes.txt', status: 'modified', old_size: 1, new_size: 3, binary: false, text: hunks('new') }] }))
+    let land!: (r: unknown) => void
+    api.diffFile.mockReturnValue(new Promise((r) => (land = r)))
     await c.compare()
+    expect(c.fileText).toEqual(hunks('old')) // no blank flash while the new hunks load
     expect(api.diffFile).toHaveBeenCalledTimes(2)
+    land(report({ files: [{ path: 'notes.txt', status: 'modified', old_size: 1, new_size: 3, binary: false, text: hunks('new') }] }))
     await vi.waitFor(() => expect(c.fileText).toEqual(hunks('new')))
+  })
+
+  it('picking the same version twice drops a comparison still running', async () => {
+    const c = await ready()
+    let land!: (r: unknown) => void
+    api.diff.mockReturnValue(new Promise((r) => (land = r)))
+    c.from = 'a1'
+    c.to = 'b2'
+    const running = c.compare()
+    c.to = 'a1'
+    await c.compare()
+    land(report({ files: [{ path: 'late.txt', status: 'modified', old_size: 1, new_size: 2, binary: false }] }))
+    await running
+    expect(c.report?.files).toEqual([])
   })
 
   it('keeps an error from the comparison', async () => {

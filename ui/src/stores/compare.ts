@@ -90,6 +90,7 @@ export const useCompareStore = defineStore('compare', () => {
     const root = repo.path
     if (!root || !commits.value.length) return
     if (!working.value && (!from.value || from.value === to.value)) {
+      token++ // an older comparison still running must not land over this one
       report.value = { mode: 'commits', from: from.value, to: to.value, files: [] }
       error.value = null
       return
@@ -104,7 +105,7 @@ export const useCompareStore = defineStore('compare', () => {
       report.value = r ?? { mode: working.value ? 'working' : 'commits', from: from.value, to: to.value, files: [] }
       if (!report.value.files.some((f) => f.path === selectedPath.value)) selectedPath.value = null
       // A refresh (focus, new compare) can change the file: its old hunks must not stay on screen.
-      reloadText(selectedPath.value)
+      reloadText(selectedPath.value, true)
     } catch (e) {
       if (mine === token) error.value = toApiError(e)
     } finally {
@@ -112,14 +113,18 @@ export const useCompareStore = defineStore('compare', () => {
     }
   }
 
-  /** Drop any line diff on screen (or in flight) and fetch it again for `path`. */
-  function reloadText(path: string | null) {
+  /**
+   * Cancel any line diff in flight and fetch it again for `path`. A refresh of
+   * the same file keeps the old hunks on screen until the new ones arrive.
+   */
+  function reloadText(path: string | null, refresh = false) {
     textToken++
-    fileText.value = null
+    // Line diffs only where they mean something: a text file, the one picked.
+    const load = !!path && !!file.value && !file.value.binary
+    if (!refresh || !load) fileText.value = null
     textError.value = null
     textLoading.value = false
-    // Line diffs only where they mean something: a text file, the one picked.
-    if (path && file.value && !file.value.binary) void loadText(path)
+    if (load) void loadText(path!)
   }
 
   /** Start fetching what the selected file needs: previews for images, metadata where a parser exists. */
