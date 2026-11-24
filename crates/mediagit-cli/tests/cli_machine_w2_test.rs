@@ -408,6 +408,28 @@ async fn pushed_source(server: &Path, base: &str, repo: &str) -> TempDir {
     src
 }
 
+/// `remote add -f` runs fetch as a step: exactly one envelope on stdout
+/// (`ok` asserts one line), for an empty server repo (fetch's early
+/// "no branches" return) and for one with a branch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_add_fetch_machine_prints_one_envelope() {
+    let server_dir = TempDir::new().unwrap();
+    let base = serve(mediagit_server::AppState::new(
+        server_dir.path().to_path_buf(),
+    ))
+    .await;
+    fs::create_dir_all(server_dir.path().join("w2-empty")).unwrap();
+    pushed_source(server_dir.path(), &base, "w2-full").await;
+
+    for repo in ["w2-empty", "w2-full"] {
+        let client = TempDir::new().unwrap();
+        init_repo(client.path());
+        let url = format!("{base}/{repo}");
+        let d = ok(client.path(), &["remote", "add", "-f", "origin", &url]);
+        assert_eq!(d["remotes"][0]["name"], "origin", "{repo}: {d}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_ls_tree_machine_root_subfolder_and_errors() {
     let server_dir = TempDir::new().unwrap();

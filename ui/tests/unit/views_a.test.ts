@@ -117,6 +117,17 @@ describe('transfer options', () => {
     await s.addRemote('b', 'https://y.example/r', { fetch: true, token: 'tok' })
     expect(api.remoteAdd).toHaveBeenCalledWith('/repos/hero', 'b', 'https://y.example/r', { fetch: true, token: 'tok' })
   })
+
+  it('a failed add re-reads the remotes: the fetch can fail after the remote was saved', async () => {
+    await open()
+    const s = useSyncStore()
+    await s.refresh()
+    api.remoteAdd.mockRejectedValue({ code: 'error', message: "remote 'b' was added, but the fetch failed" })
+    api.remoteList.mockResolvedValue({ remotes: [{ name: 'b', url: 'https://y.example/r' }] })
+    expect(await s.addRemote('b', 'https://y.example/r', { fetch: true })).toBe(false)
+    await vi.waitFor(() => expect(s.remotes.map((r) => r.name)).toEqual(['b']))
+    expect(s.actionError?.message).toContain('was added')
+  })
 })
 
 describe('locks remote and owner', () => {

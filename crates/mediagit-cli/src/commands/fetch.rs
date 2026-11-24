@@ -277,7 +277,7 @@ impl FetchCmd {
                 if !self.quiet() {
                     println!("{} No branches to fetch", style("ℹ").blue());
                 }
-                if output::machine_mode() {
+                if output::machine_mode() && !self.embedded {
                     return output::emit_ok(&FetchReport {
                         remote: remote.to_string(),
                         branches_updated: 0,

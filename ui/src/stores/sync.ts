@@ -74,6 +74,9 @@ export const useSyncStore = defineStore('sync', () => {
       return true
     } catch (e) {
       actionError.value = toApiError(e)
+      // A failure can still change the list: `remote add --fetch` keeps the
+      // remote when only the fetch fails.
+      void refresh()
       return false
     } finally {
       editing.value = false
