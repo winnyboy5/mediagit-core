@@ -37,12 +37,7 @@ test('BUG-045: both dialogs work with the address field empty', async () => {
   await dlg.getByRole('button', { name: 'Create account' }).click()
   await expect(dlg).toHaveCount(0)
   await expect(page.getByRole('alert')).toHaveCount(0)
-
-  await page.getByRole('button', { name: 'Sign in' }).click()
-  dlg = page.getByRole('dialog', { name: 'Sign in' })
-  await dlg.getByLabel('Username or email').fill('e2eacct')
-  await dlg.getByLabel('Password').fill(OLD)
-  await dlg.getByRole('button', { name: 'Sign in' }).click()
+  // Creating an account signs you in to it: there is no separate Sign in step.
   await expect(page.getByTestId('account')).toContainText('Signed in as e2eacct')
 
   await page.getByRole('button', { name: 'Change password…' }).click()
