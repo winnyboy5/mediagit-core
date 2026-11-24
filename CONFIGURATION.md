@@ -368,8 +368,8 @@ min_approvals = 1
 |-----|------|---------|-------------|
 | `prevent_force_push` | bool | `true` | Block force pushes. |
 | `prevent_deletion` | bool | `true` | Block branch deletion. |
-| `require_reviews` | bool | `false` | Require review before merge. |
-| `min_approvals` | u32 | `1` | Minimum approvals required (when `require_reviews` is true). |
+| `require_reviews` | bool | `false` | Recorded only; not enforced (no review workflow yet). |
+| `min_approvals` | u32 | `1` | Recorded only; not enforced. |
 
 ---
 

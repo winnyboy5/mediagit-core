@@ -259,12 +259,11 @@ fn preprocess_args(args: Vec<String>) -> Vec<String> {
             return result;
         }
 
-        // 3. Bare subcommands: `branch` → `branch list`, `tag` → `tag list`,
-        //    `remote` → `remote list` when invoked with no positional. When a
-        //    positional name is supplied (BUG-006), dispatch to `create` for
-        //    `branch` / `tag` — matching the muscle-memory `branch feat-a`
-        //    idiom. `remote` keeps list-default because `remote add`/`remove`
-        //    have distinct verbs without an obvious name-only sugar.
+        // 3. Bare subcommands: `branch`, `tag`, `remote` and `lock` with no
+        //    positional become `<cmd> list`. A non-verb positional (BUG-006)
+        //    becomes `tag create <name>`, `lock create <path>` or
+        //    `remote list <word>` (which clap rejects). `branch` leaves
+        //    unknown words to clap (BUG-CLI-B2, below).
         let default_action: Option<&'static str> = match subcmd {
             "branch" | "tag" | "lock" => Some("create"),
             "remote" => Some("list"),
@@ -274,10 +273,9 @@ fn preprocess_args(args: Vec<String>) -> Vec<String> {
             // Known verbs come from clap itself (names AND aliases), so an
             // alias like `tag rm` is never mistaken for a tag name. A
             // hardcoded list here once drifted and missed `ls`/`rm`.
-            let cli = Cli::command();
             let is_verb = |s: &str| {
                 s == "help"
-                    || cli
+                    || Cli::command()
                         .find_subcommand(subcmd)
                         .is_some_and(|c| c.find_subcommand(s).is_some())
             };

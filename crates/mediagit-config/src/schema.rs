@@ -878,11 +878,11 @@ pub struct BranchProtection {
     #[serde(default = "default_true")]
     pub prevent_deletion: bool,
 
-    /// Require pull request reviews before merge
+    /// Recorded only: nothing enforces it yet (MediaGit has no review workflow)
     #[serde(default)]
     pub require_reviews: bool,
 
-    /// Minimum number of approvals required (if require_reviews is true)
+    /// Recorded only, like `require_reviews`; nothing enforces it yet
     #[serde(default = "default_min_approvals")]
     pub min_approvals: u32,
 }
