@@ -259,6 +259,22 @@ test.describe('Compare: line-by-line changes', () => {
     await expectNoAxeViolations(page)
   })
 
+  test('a focus refresh keeps the changed lines on screen while the new ones load', async ({ page }) => {
+    await boot(page, {}, { repo_diff: `() => (${JSON.stringify(report)})` }, { repo_diff_file: [{ hold: true }, { resolve: withText }] })
+    await file(page, /shotlist/).click()
+    await expect(pane(page).getByText('Loading line-by-line changes…')).toBeVisible()
+    await ipcRelease(page)
+    const hunks = pane(page).getByTestId('diff-hunks')
+    await expect(hunks).toContainText('shot 2 close')
+
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+    await expect.poll(async () => (await ipcCalls(page, 'repo_diff_file')).length).toBe(2)
+    // The second request is still held: the old lines stay, with no loading line in their place.
+    await expect(hunks).toContainText('shot 2 close')
+    await expect(pane(page).getByText('Loading line-by-line changes…')).toHaveCount(0)
+    await ipcRelease(page)
+  })
+
   test('a text file over the size limit says so instead of showing lines', async ({ page }) => {
     const big = { ...report, files: [{ ...report.files[0], text: { kind: 'too_large', truncated: false, hunks: [] } }] }
     await boot(page, { repo_diff_file: big }, { repo_diff: `() => (${JSON.stringify(report)})` })

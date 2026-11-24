@@ -510,6 +510,7 @@ describe('compare store', () => {
     land(report({ files: [{ path: 'late.txt', status: 'modified', old_size: 1, new_size: 2, binary: false }] }))
     await running
     expect(c.report?.files).toEqual([])
+    expect(c.loading).toBe(false)
   })
 
   it('keeps an error from the comparison', async () => {

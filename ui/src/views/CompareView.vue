@@ -257,7 +257,8 @@ const size = (f: { old_size: number | null; new_size: number | null }) =>
             }}</span>
           </header>
           <template v-if="!compare.file.binary">
-            <p v-if="compare.textLoading" class="muted" role="status">Loading line-by-line changes…</p>
+            <!-- A refresh keeps the hunks on screen until the new ones arrive. -->
+            <p v-if="compare.textLoading && !compare.fileText" class="muted" role="status">Loading line-by-line changes…</p>
             <p v-else-if="compare.textError" class="muted" role="alert">{{ compare.textError.message }}</p>
             <DiffHunks v-else-if="compare.fileText" :text="compare.fileText" />
           </template>

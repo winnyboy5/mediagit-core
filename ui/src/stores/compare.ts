@@ -91,6 +91,7 @@ export const useCompareStore = defineStore('compare', () => {
     if (!root || !commits.value.length) return
     if (!working.value && (!from.value || from.value === to.value)) {
       token++ // an older comparison still running must not land over this one
+      loading.value = false // ...and its own finally no longer clears this
       report.value = { mode: 'commits', from: from.value, to: to.value, files: [] }
       error.value = null
       return
