@@ -318,11 +318,12 @@ impl ShowCmd {
         refdb: &RefDatabase,
         odb: &ObjectDatabase,
     ) -> Result<u64> {
-        let mut file = tokio::fs::File::create(out)
+        let file_oid = Self::blob_at_revision(rev, path, refdb, odb).await?;
+        // Temp sibling + rename (and parent folders created): a failed read
+        // leaves `out` exactly as it was, never truncated.
+        odb.read_to_file(&file_oid, out)
             .await
-            .with_context(|| format!("Cannot create {}", out.display()))?;
-        Self::write_path_at_revision(rev, path, refdb, odb, &mut file).await?;
-        Ok(tokio::fs::metadata(out).await?.len())
+            .with_context(|| format!("Cannot write {}", out.display()))
     }
 
     async fn execute_machine(
@@ -492,17 +493,7 @@ impl ShowCmd {
         odb: &ObjectDatabase,
         out: &mut W,
     ) -> Result<()> {
-        let oid = resolve_revision(rev, refdb, odb)
-            .await
-            .context(format!("Cannot resolve revision: {}", rev))?;
-        let commit_oid = Self::peel_to_commit(oid, odb).await?;
-        let data = odb.read(&commit_oid).await?;
-        let commit =
-            Commit::deserialize(&data).context(format!("Object {} is not a commit", commit_oid))?;
-
-        let file_oid = Self::find_path_in_tree(odb, &commit.tree, path)
-            .await
-            .context(format!("Path '{}' not found in revision '{}'", path, rev))?;
+        let file_oid = Self::blob_at_revision(rev, path, refdb, odb).await?;
         // Streamed: the blob may be far larger than RAM.
         use tokio::io::AsyncWriteExt;
         odb.stream_object_to(&file_oid, out)
@@ -510,6 +501,25 @@ impl ShowCmd {
             .context(format!("Failed to read blob for '{}'", path))?;
         out.flush().await?;
         Ok(())
+    }
+
+    /// The blob `path` has at `rev`.
+    async fn blob_at_revision(
+        rev: &str,
+        path: &str,
+        refdb: &RefDatabase,
+        odb: &ObjectDatabase,
+    ) -> Result<Oid> {
+        let oid = resolve_revision(rev, refdb, odb)
+            .await
+            .context(format!("Cannot resolve revision: {}", rev))?;
+        let commit_oid = Self::peel_to_commit(oid, odb).await?;
+        let data = odb.read(&commit_oid).await?;
+        let commit =
+            Commit::deserialize(&data).context(format!("Object {} is not a commit", commit_oid))?;
+        Self::find_path_in_tree(odb, &commit.tree, path)
+            .await
+            .context(format!("Path '{}' not found in revision '{}'", path, rev))
     }
 
     /// Follow a Tag object to its target, repeating until a Commit is
