@@ -149,7 +149,7 @@ All stash entries cleared.
 - `-u`, `--include-untracked` — Accepted for compatibility. New files are always stashed
 
 `show`:
-- `-p`, `--patch` — Show the stash as a patch
+- `-p`, `--patch` — Not supported yet: refused with an error
 
 `pop` and `apply`:
 - `--index` — Reinstate index (staged) changes as well as the working tree

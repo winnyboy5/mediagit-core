@@ -192,7 +192,7 @@ pub struct ShowOpts {
     #[arg(value_name = "STASH")]
     pub stash: Option<usize>,
 
-    /// Show patch
+    /// Show the stash as a patch. Not supported yet: refused with an error
     #[arg(short = 'p', long)]
     pub patch: bool,
 }
@@ -764,6 +764,10 @@ impl StashCmd {
     }
 
     async fn show(&self, opts: &ShowOpts) -> Result<()> {
+        // Refuse rather than print a "coming soon" note and exit 0.
+        if opts.patch {
+            anyhow::bail!("stash show --patch is not supported yet");
+        }
         let repo_root = find_repo_root()?;
         let mediagit_dir = repo_root.join(".mediagit");
 
@@ -791,11 +795,6 @@ impl StashCmd {
         );
         println!("Commit:   {}", stash_entry.commit_oid);
         println!("Date:     {}", stash_entry.timestamp);
-
-        if opts.patch {
-            // Future enhancement: integrate diff display here
-            println!("\n{} Patch display feature coming soon", style("ℹ").blue());
-        }
 
         Ok(())
     }
@@ -1161,6 +1160,16 @@ mod tests {
         let cmd = parse(&["apply", "0"]).unwrap();
         let err = execute_in(temp.path(), &cmd).await.unwrap_err();
         assert!(err.to_string().contains("Stash entry 0 not found"));
+    }
+
+    #[tokio::test]
+    async fn show_patch_is_refused_not_stubbed() {
+        let temp = TempDir::new().unwrap();
+        init_repo_with_commit(temp.path()).await;
+
+        let cmd = parse(&["show", "-p"]).unwrap();
+        let err = execute_in(temp.path(), &cmd).await.unwrap_err();
+        assert!(err.to_string().contains("not supported yet"));
     }
 
     #[tokio::test]
