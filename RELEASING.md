@@ -24,6 +24,7 @@ if you need it published.
 2. **Secrets**: The following secrets must be configured in GitHub:
    - `CARGO_REGISTRY_TOKEN`: Token for publishing to crates.io
    - `GITHUB_TOKEN`: Automatically provided by GitHub Actions
+   - `HOMEBREW_TAP_TOKEN`: Write access to `winnyboy5/homebrew-tap` (optional; see [Homebrew Tap](#homebrew-tap))
 
 ## Release Checklist
 
@@ -103,18 +104,15 @@ After the workflow completes:
 - [ ] Announce release on social media/blog
 - [ ] Update documentation website
 - [ ] Monitor for issues
-- [ ] Update Homebrew tap (if separate repository)
-- [ ] Submit to package managers:
-  - [ ] Chocolatey Community Repository
-  - [ ] AUR (Arch User Repository)
-  - [ ] Debian/Ubuntu PPA (if needed)
+- [ ] Check the `homebrew` job updated `winnyboy5/homebrew-tap`, then
+      `brew install winnyboy5/tap/mediagit && mediagit --version`
 
 ## Desktop App Releases
 
 The desktop app has its own tag series, separate from `v*.*.*`. Pushing a tag
 that matches `desktop-v*` runs `.github/workflows/desktop-release.yml`, which
 builds the CLI and server, stages them as Tauri sidecars, builds the bundles
-(deb + AppImage on Linux, dmg on macOS, NSIS on Windows) and attaches them to a
+(deb + AppImage on Linux, dmg on macOS, NSIS `.exe` and MSI on Windows) and attaches them to a
 GitHub release. Run the workflow manually (`workflow_dispatch`) to build the
 bundles as artifacts without publishing.
 
@@ -213,33 +211,29 @@ If automated release fails completely:
    cargo publish -p mediagit-cli
    ```
 
-## Package Manager Submissions
+## Homebrew Tap
 
-### Homebrew
+Homebrew core only accepts OSI-licensed software, so MediaGit (BSL 1.1) ships
+through its own tap, `winnyboy5/homebrew-tap`. Users install with:
 
-Formula is auto-generated in `packaging/homebrew/mediagit.rb`. For Homebrew core:
+```bash
+brew install winnyboy5/tap/mediagit
+```
 
-1. Fork homebrew-core
-2. Update formula
-3. Submit PR to Homebrew/homebrew-core
+`packaging/homebrew/mediagit.rb` is a template. On every `v*` tag the
+`homebrew` job in `release.yml` fills in the version and the four macOS/Linux
+checksums from the release's `.sha256` files and pushes `Formula/mediagit.rb`
+to the tap. It needs the `HOMEBREW_TAP_TOKEN` secret (a token with write
+access to the tap repository only). Without the secret the job logs a notice
+and skips, and the release itself still succeeds.
 
-### Chocolatey
+## MSI Version Numbers
 
-Package configuration in `packaging/chocolatey/`:
-
-1. Update version in `mediagit.nuspec`
-2. Update checksums in `tools/chocolateyinstall.ps1`
-3. Test locally: `choco pack`
-4. Submit to Chocolatey Community: `choco push mediagit.0.3.0-rc.5.nupkg --source https://push.chocolatey.org/`
-
-### APT (Debian/Ubuntu)
-
-For PPA distribution:
-
-1. Build .deb packages using `packaging/apt/build-deb.sh`
-2. Sign with GPG key
-3. Upload to PPA
-4. Update repository index
+WiX only accepts numeric versions, so `desktop-release.yml` maps the Cargo
+version to `major.minor.patch.build`: `0.8.0-rc.1` becomes `0.8.0.1`, and a
+final `0.8.0` becomes `0.8.0.1000` so an rc installed with the MSI upgrades
+cleanly to the final release. Only `-alpha.N`, `-beta.N` and `-rc.N`
+pre-release forms are accepted; any other form fails the Windows build.
 
 ## Security
 

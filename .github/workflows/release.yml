@@ -406,6 +406,61 @@ jobs:
   #         sleep 30
   #         publish_crate mediagit-cli
 
+  # Update the Homebrew tap (winnyboy5/homebrew-tap). Homebrew core only takes
+  # OSI-licensed software, so BSL 1.1 ships through our own tap. Skipped with a
+  # notice when HOMEBREW_TAP_TOKEN is not set, so a release never fails on it.
+  homebrew:
+    needs: [plan, release]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    env:
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          path: artifacts
+
+      - name: Render formula
+        run: |
+          set -euo pipefail
+          sha() {
+            f=$(find artifacts -name "mediagit-${VERSION}-$1.tar.gz.sha256" | head -n1)
+            [ -n "$f" ] || { echo "missing checksum for $1" >&2; exit 1; }
+            s=$(cut -d' ' -f1 "$f")
+            [[ "$s" =~ ^[0-9a-f]{64}$ ]] || { echo "bad checksum for $1: $s" >&2; exit 1; }
+            echo "$s"
+          }
+          sed -e "s/@VERSION@/${VERSION}/" \
+              -e "s/@SHA_X86_64_MACOS@/$(sha x86_64-macos)/" \
+              -e "s/@SHA_AARCH64_MACOS@/$(sha aarch64-macos)/" \
+              -e "s/@SHA_X86_64_LINUX@/$(sha x86_64-linux)/" \
+              -e "s/@SHA_AARCH64_LINUX@/$(sha aarch64-linux)/" \
+              packaging/homebrew/mediagit.rb > mediagit.rb
+          if grep -n '"@[A-Z0-9_]*@"' mediagit.rb; then echo "unfilled placeholder" >&2; exit 1; fi
+          cat mediagit.rb
+
+      - name: Push to tap
+        run: |
+          set -euo pipefail
+          if [ -z "${TAP_TOKEN}" ]; then
+            echo "::notice::HOMEBREW_TAP_TOKEN not set; tap not updated"
+            exit 0
+          fi
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/winnyboy5/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          cp mediagit.rb tap/Formula/mediagit.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/mediagit.rb
+          git diff --cached --quiet && { echo "formula unchanged"; exit 0; }
+          git commit -m "mediagit ${VERSION}"
+          git push
+
   # Build and publish Docker images
   docker:
     needs: [plan, build]
