@@ -27,6 +27,7 @@ chunks and sizes) rather than attempting a textual diff.
 | `--cached` | Compare the staging area with the last commit instead of the working tree |
 | `--stat` | Show a diffstat summary (files changed, insertions/deletions/sizes) |
 | `--summary` | Show a condensed summary of changes |
+| `-p`, `--patch` | Also show line-by-line changes for text files. Only files that are not chunked, at most 8 MiB on each side, contain no NUL byte and are valid UTF-8 qualify; binary and large files are listed as such, with no lines. Without `-p` nothing is read beyond the usual check. With `--machine`, each file gets `text.kind` (`text`, `binary`, `too_large`) and `text.hunks` |
 | `-q`, `--quiet` | Suppress output. Exit status is 0 whether or not there are differences |
 | `-- <path>...` | Limit the diff to the given paths |
 

@@ -11,6 +11,7 @@ const api = vi.hoisted(() => ({
   mergeControl: vi.fn(),
   mergeResolve: vi.fn(),
   diff: vi.fn(),
+  diffFile: vi.fn(),
   log: vi.fn(),
   extract: vi.fn(),
   mediaInfo: vi.fn(),
@@ -453,6 +454,30 @@ describe('compare store', () => {
     c.select('notes.txt')
     await nextTick()
     expect(api.extract).not.toHaveBeenCalled()
+  })
+
+  it('line changes are fetched only for the picked text file, never for a binary one', async () => {
+    const c = await ready()
+    api.diff.mockResolvedValue(
+      report({
+        files: [
+          { path: 'notes.txt', status: 'modified', old_size: 1, new_size: 2, binary: false },
+          { path: 'hero.psd', status: 'modified', old_size: 1, new_size: 2, binary: true },
+        ],
+      }),
+    )
+    await c.compare()
+    const text = { kind: 'text', truncated: false, hunks: [{ old_start: 1, old_lines: 1, new_start: 1, new_lines: 1, lines: [{ kind: '-', text: 'a' }, { kind: '+', text: 'b' }] }] }
+    api.diffFile.mockResolvedValue(report({ files: [{ path: 'notes.txt', status: 'modified', old_size: 1, new_size: 2, binary: false, text }] }))
+    expect(api.diffFile).not.toHaveBeenCalled()
+    c.select('hero.psd')
+    expect(api.diffFile).not.toHaveBeenCalled()
+    c.select('notes.txt')
+    expect(api.diffFile).toHaveBeenCalledTimes(1)
+    expect(api.diffFile.mock.calls[0]![4]).toBe('notes.txt')
+    await vi.waitFor(() => expect(c.fileText).toEqual(text))
+    c.select('hero.psd')
+    expect(c.fileText).toBeNull()
   })
 
   it('keeps an error from the comparison', async () => {

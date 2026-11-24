@@ -6,6 +6,7 @@ import { api } from "@/api";
 import { formatBytes } from "@/components/format";
 import Checkbox from "@/components/Checkbox.vue";
 import EmptyState from "@/components/EmptyState.vue";
+import DiffHunks from "./compare/DiffHunks.vue";
 import ErrorState from "@/components/ErrorState.vue";
 import ProgressBar from "@/components/ProgressBar.vue";
 import Select from "@/components/Select.vue";
@@ -255,10 +256,11 @@ const size = (f: { old_size: number | null; new_size: number | null }) =>
               compare.file.binary ? "Binary file" : "Text file"
             }}</span>
           </header>
-          <p v-if="!compare.file.binary" class="muted">
-            Line-by-line changes are not shown here yet; sizes and properties
-            are.
-          </p>
+          <template v-if="!compare.file.binary">
+            <p v-if="compare.textLoading" class="muted" role="status">Loading line-by-line changes…</p>
+            <p v-else-if="compare.textError" class="muted" role="alert">{{ compare.textError.message }}</p>
+            <DiffHunks v-else-if="compare.fileText" :text="compare.fileText" />
+          </template>
 
           <div
             v-if="extracting"

@@ -142,7 +142,7 @@ test.describe('Compare: files and previews', () => {
     await boot(page)
     await file(page, /shot_list/).click()
     await expect(pane(page)).toContainText('Text file')
-    await expect(pane(page)).toContainText('Line-by-line changes are not shown here yet')
+    await expect.poll(async () => (await ipcCalls(page, 'repo_diff_file')).length).toBe(1)
     await expect(pane(page)).toContainText('No picture preview')
     await expect(pane(page).getByRole('img')).toHaveCount(0)
     await expect(pane(page).getByRole('table').getByRole('row', { name: /Size/ })).toContainText('2.0 KB')
@@ -222,5 +222,47 @@ test.describe('Compare: two versions', () => {
     await expect(file(page, /new_concept/)).toBeFocused()
     await page.keyboard.press('Enter')
     await expect(pane(page)).toContainText('art/new_concept.png')
+  })
+})
+
+test.describe('Compare: line-by-line changes', () => {
+  const report = {
+    mode: 'working',
+    from: HEAD,
+    to: null,
+    files: [
+      { path: 'notes/shotlist.txt', status: 'modified', old_size: 20, new_size: 22, binary: false },
+      { path: 'art/hero.psd', status: 'modified', old_size: 9000, new_size: 9100, binary: true },
+    ],
+  }
+  const text = {
+    kind: 'text',
+    truncated: false,
+    hunks: [{ old_start: 1, old_lines: 2, new_start: 1, new_lines: 2, lines: [{ kind: ' ', text: 'shot 1' }, { kind: '-', text: 'shot 2 wide' }, { kind: '+', text: 'shot 2 close' }] }],
+  }
+  const withText = { ...report, files: [{ ...report.files[0], text }] }
+
+  test('a picked text file shows its changed lines; a binary file asks for none', async ({ page }) => {
+    await boot(page, { repo_diff_file: withText }, { repo_diff: `() => (${JSON.stringify(report)})` })
+    await file(page, /hero\.psd/).click()
+    await expect(pane(page)).toContainText('Binary file')
+    expect(await ipcCalls(page, 'repo_diff_file')).toHaveLength(0)
+
+    await file(page, /shotlist/).click()
+    const hunks = pane(page).getByTestId('diff-hunks')
+    await expect(hunks).toContainText('shot 2 wide')
+    await expect(hunks).toContainText('shot 2 close')
+    await expect(hunks).toContainText('removed line')
+    expect((await ipcCalls(page, 'repo_diff_file')).map((c) => c.args)).toEqual([
+      { repo: '/repos/hero-film', from: null, to: null, cached: false, path: 'notes/shotlist.txt' },
+    ])
+    await expectNoAxeViolations(page)
+  })
+
+  test('a text file over the size limit says so instead of showing lines', async ({ page }) => {
+    const big = { ...report, files: [{ ...report.files[0], text: { kind: 'too_large', truncated: false, hunks: [] } }] }
+    await boot(page, { repo_diff_file: big }, { repo_diff: `() => (${JSON.stringify(report)})` })
+    await file(page, /shotlist/).click()
+    await expect(pane(page).getByTestId('diff-text-large')).toBeVisible()
   })
 })

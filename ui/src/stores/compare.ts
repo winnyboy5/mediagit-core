@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { computed, ref, shallowRef, watch } from 'vue'
-import { api, toApiError, type ApiError, type DiffFileReport, type DiffReport, type LogCommitReport } from '@/api'
+import { api, toApiError, type ApiError, type DiffFileReport, type DiffReport, type FileText, type LogCommitReport } from '@/api'
 import { hasMediaInfo, previewKind, type InspectFile } from '@/lib/inspect'
 import { useInspectorStore } from './inspector'
 import { useRepoStore } from './repo'
@@ -27,6 +27,28 @@ export const useCompareStore = defineStore('compare', () => {
   const error = ref<ApiError | null>(null)
   const selectedPath = ref<string | null>(null)
   let token = 0
+  /** Line-by-line changes of the selected file; fetched only for a text file when it is picked. */
+  const fileText = shallowRef<FileText | null>(null)
+  const textLoading = ref(false)
+  const textError = ref<ApiError | null>(null)
+  let textToken = 0
+
+  async function loadText(path: string) {
+    const root = repo.path
+    if (!root) return
+    const mine = ++textToken
+    textLoading.value = true
+    textError.value = null
+    try {
+      const r = working.value ? await api.diffFile(root, null, null, staged.value, path) : await api.diffFile(root, from.value, to.value, false, path)
+      if (mine !== textToken) return
+      fileText.value = r?.files.find((f) => f.path === path)?.text ?? null
+    } catch (e) {
+      if (mine === textToken) textError.value = toApiError(e)
+    } finally {
+      if (mine === textToken) textLoading.value = false
+    }
+  }
 
   const staged = computed(() => to.value === STAGED)
   /** Either side-less comparison: the left side is the latest version. */
@@ -91,6 +113,12 @@ export const useCompareStore = defineStore('compare', () => {
   /** Start fetching what the selected file needs: previews for images, metadata where a parser exists. */
   function select(path: string | null) {
     selectedPath.value = path
+    textToken++
+    fileText.value = null
+    textError.value = null
+    textLoading.value = false
+    // Line diffs only where they mean something: a text file, the one picked.
+    if (path && file.value && !file.value.binary) void loadText(path)
     const { before, after } = sides.value
     for (const side of [before, after]) {
       if (!side) continue
@@ -104,6 +132,8 @@ export const useCompareStore = defineStore('compare', () => {
 
   watch([from, to], () => {
     selectedPath.value = null
+    textToken++
+    fileText.value = null
     void compare()
   })
   watch(
@@ -118,8 +148,10 @@ export const useCompareStore = defineStore('compare', () => {
       report.value = null
       error.value = null
       selectedPath.value = null
+      textToken++
+      fileText.value = null
     },
   )
 
-  return { commits, commitsLoaded, commitsError, from, to, working, staged, report, files, file, sides, loading, error, selectedPath, loadCommits, compare, select }
+  return { commits, commitsLoaded, commitsError, from, to, working, staged, report, files, file, sides, loading, error, selectedPath, fileText, textLoading, textError, loadCommits, compare, select }
 })

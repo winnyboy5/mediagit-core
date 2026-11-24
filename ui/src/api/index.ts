@@ -301,6 +301,9 @@ export const api = {
 
   /** Two versions, or (both null) the working folder against the latest version. */
   /** `cached` (both null): the changes set aside for the next version, against the latest one. */
+  /** One file of a comparison with its line-by-line changes (text files; `text.kind` says why not). */
+  diffFile: (repo: string, from: string | null, to: string | null, cached: boolean, path: string) =>
+    invoke<DiffReport | null>('repo_diff_file', { repo, from, to, cached, path }),
   diff: (repo: string, from: string | null, to: string | null, cached = false) =>
     invoke<DiffReport>('repo_diff', { repo, from, to, ...(cached ? { cached } : {}) }),
 
