@@ -346,9 +346,11 @@ pub struct PickOpts {
     pub no_commit: bool,
     /// Add "(cherry picked from commit ..)" to the message.
     pub append_message: bool,
+    /// Copy onto this branch without switching (`--onto`).
+    pub onto: Option<String>,
 }
 
-/// `cherry-pick [--no-commit] [--append-message] -- <commits>`.
+/// `cherry-pick [--no-commit] [--append-message] [--onto <branch>] -- <commits>`.
 pub fn pick_start_argv(commits: &[String], o: &PickOpts) -> Result<Vec<String>, EngineError> {
     if commits.is_empty() {
         return Err(invalid("commits", "none"));
@@ -356,6 +358,10 @@ pub fn pick_start_argv(commits: &[String], o: &PickOpts) -> Result<Vec<String>, 
     let mut argv = vec!["cherry-pick".to_owned()];
     flag(&mut argv, o.no_commit, "--no-commit");
     flag(&mut argv, o.append_message, "--append-message");
+    if let Some(b) = o.onto.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
+        ref_name_ok("branch", b)?;
+        argv.push(format!("--onto={b}"));
+    }
     argv.push("--".into());
     for c in commits {
         rev_ok(c)?;
@@ -1036,6 +1042,7 @@ mod tests {
         let o = PickOpts {
             no_commit: true,
             append_message: true,
+            onto: None,
         };
         assert_eq!(
             pick_start_argv(&c, &o).unwrap(),
@@ -1046,6 +1053,17 @@ mod tests {
             bad(pick_start_argv(&s(&["main"]), &o)),
             "a version id, not a name"
         );
+        let onto = |b: &str| PickOpts {
+            onto: Some(b.into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            pick_start_argv(&c, &onto("feature/g4")).unwrap(),
+            s(&["cherry-pick", "--onto=feature/g4", "--", OID])
+        );
+        for bad_b in ["-x", "a..b", "a b", "--all"] {
+            assert!(bad(pick_start_argv(&c, &onto(bad_b))), "{bad_b}");
+        }
     }
 
     #[test]

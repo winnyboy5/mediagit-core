@@ -38,6 +38,7 @@ const TABLE: Record<string, Entry> = {
   needs_input: { text: 'This repository is locked. Unlock it with its passphrase to continue.', retry: false },
   input_required: { text: 'This step needs an answer the app cannot ask for. Run it from the command line instead.', retry: false },
   wrong_passphrase: { text: 'That passphrase did not unlock the repository. Check it and try again.', retry: false, own: true },
+  would_conflict: { text: 'This copy clashes with changes already on that branch, so nothing was changed. Switch to that branch and copy there to choose what to keep.', retry: false },
   empty_commit: { text: 'Nothing would change: those changes are already here. Pick a different version.', retry: false },
   invalid_args: { text: 'Those options do not fit together. Change them and try again.', retry: false, own: true },
   invalid_argument: { text: 'The app refused something you entered. Check it and try again.', retry: false, own: true },

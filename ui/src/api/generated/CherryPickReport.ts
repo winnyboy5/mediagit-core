@@ -20,4 +20,8 @@ commits: Array<string>,
 /**
  * `conflict`: the commit being picked and the unresolved paths.
  */
-conflict_commit: string | null, conflicts: Array<string>, };
+conflict_commit: string | null, conflicts: Array<string>, 
+/**
+ * `--onto`: the branch the commits were copied to.
+ */
+onto: string | null, };

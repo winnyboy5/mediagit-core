@@ -98,6 +98,7 @@ error chain with URL credentials and query strings removed.
 | `invalid_args` | Flags combined wrongly, or a secret passed in argv under `--machine` (for example `show --output` without `<rev>:<path>`, `show --tree` with `<rev>:<path>`, `remote add --token`, `config set` of a secret with a value) | 1 |
 | `would_overwrite` | A checkout, merge, pull, rebase, cherry-pick, revert or bisect step would overwrite or delete uncommitted work (a different file at the same path as one you added); nothing is written; `message` lists the paths. `reset --hard` discards instead | 1 |
 | `staged_changes` | A non-fast-forward merge, pull merge, rebase, cherry-pick or revert was asked to start while the index differs from HEAD; nothing is written; `message` lists the staged paths; commit them or run `mediagit reset <path>` | 1 |
+| `would_conflict` | `cherry-pick --onto <branch>` would conflict on that branch; nothing is written; `message` lists the paths. Switch to the branch and cherry-pick there to resolve | 1 |
 | `would_delete` | `restore` named files that are not in the source version, without `--delete-new`; nothing is changed; `message` lists them | 1 |
 | `empty_commit` | `cherry-pick` (including `--continue`) or `revert` would create a commit whose tree equals HEAD's; nothing is committed (`revert --no-commit` skips the check) | 1 |
 | `server_unreachable` | Nothing answered at the server address (refused, unknown host, no route) | 1 |

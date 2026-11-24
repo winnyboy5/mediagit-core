@@ -759,6 +759,9 @@ gui = "AdvancedView/more"
 [arg."cherry-pick --continue"]
 gui = "MergeView"
 
+[arg."cherry-pick --onto"]
+gui = "HistoryView"
+
 [cmd."stash"]
 gui = "TagsStashView"
 

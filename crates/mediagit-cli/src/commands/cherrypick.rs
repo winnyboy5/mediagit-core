@@ -38,9 +38,14 @@ pub struct CherryPickCmd {
     #[arg(short = 'n', long)]
     pub no_commit: bool,
 
-    /// Use original commit message
+    /// Append '(cherry picked from commit <id>)' to the message
     #[arg(short = 'x', long)]
     pub append_message: bool,
+
+    /// Copy onto this branch instead of the current one. Your files and the
+    /// current branch are not touched; a copy that would conflict is refused
+    #[arg(long, value_name = "BRANCH")]
+    pub onto: Option<String>,
 
     /// Quiet mode
     #[arg(short, long)]
@@ -62,15 +67,22 @@ pub struct CherryPickReport {
     /// `conflict`: the commit being picked and the unresolved paths.
     pub conflict_commit: Option<String>,
     pub conflicts: Vec<String>,
+    /// `--onto`: the branch the commits were copied to.
+    pub onto: Option<String>,
 }
 
 struct Outcome {
     status: &'static str,
     commits: Vec<String>,
+    onto: Option<String>,
 }
 
 fn outcome(status: &'static str, commits: Vec<String>) -> Result<Outcome> {
-    Ok(Outcome { status, commits })
+    Ok(Outcome {
+        status,
+        commits,
+        onto: None,
+    })
 }
 
 impl CherryPickCmd {
@@ -95,6 +107,7 @@ impl CherryPickCmd {
                 commits: o.commits,
                 conflict_commit: None,
                 conflicts: Vec::new(),
+                onto: o.onto,
             }),
             Ok(_) => Ok(()),
             Err(e) if output::machine_mode() => match e.downcast_ref::<ConflictStop>() {
@@ -105,6 +118,7 @@ impl CherryPickCmd {
                         commits: Vec::new(),
                         conflict_commit: c.commit.clone(),
                         conflicts: c.paths.clone(),
+                        onto: None,
                     })?;
                     std::process::exit(1);
                 }
@@ -143,6 +157,18 @@ impl CherryPickCmd {
             anyhow::bail!(
                 "A cherry-pick is in progress. Run cherry-pick --continue, --skip or --abort."
             );
+        }
+
+        if let Some(branch) = &self.onto {
+            let head = RefDatabase::new(repo_root.join(".mediagit"))
+                .read("HEAD")
+                .await
+                .ok()
+                .and_then(|h| h.target);
+            if head.as_deref() != Some(&format!("refs/heads/{branch}")) {
+                return self.pick_onto(&repo_root, branch).await;
+            }
+            // The branch you are on: the usual pick, through your files.
         }
 
         // Start new cherry-pick operation
@@ -535,12 +561,11 @@ impl CherryPickCmd {
 
         let commit_oid = new_commit.write(odb).await?;
 
-        // Update HEAD
+        // Move the branch HEAD names; a detached HEAD moves itself (the new
+        // commit used to be written with nothing pointing at it).
         let head = refdb.read("HEAD").await?;
-        if let Some(target) = head.target {
-            let new_ref = Ref::new_direct(target, commit_oid);
-            refdb.write(&new_ref).await?;
-        }
+        let moved = Ref::new_direct(head.target.unwrap_or_else(|| "HEAD".to_owned()), commit_oid);
+        refdb.write(&moved).await?;
 
         if !self.quiet() {
             println!(
@@ -551,6 +576,143 @@ impl CherryPickCmd {
         }
 
         Ok(commit_oid)
+    }
+
+    /// `--onto <branch>` (not the current one): merge each commit onto the
+    /// branch tip in memory and move only that branch, once, at the end.
+    /// Never touches the working folder, the index or HEAD. Any conflict
+    /// refuses the whole copy (`would_conflict`) with nothing written to the
+    /// branch, so the person can switch there and copy with the resolver.
+    async fn pick_onto(&self, repo_root: &std::path::Path, branch: &str) -> Result<Outcome> {
+        if self.no_commit {
+            return Err(output::CodedError::new(
+                "invalid_args",
+                "--onto saves each copy as a version; it cannot be combined with --no-commit",
+            )
+            .into());
+        }
+        let storage = create_storage_backend(repo_root).await?;
+        let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 1000));
+        let refdb = RefDatabase::new(repo_root.join(".mediagit"));
+        let target = format!("refs/heads/{branch}");
+        let start = refdb
+            .read(&target)
+            .await
+            .ok()
+            .and_then(|r| r.oid)
+            .ok_or_else(|| {
+                output::CodedError::new("invalid_args", format!("No branch named '{branch}'"))
+            })?;
+
+        let mut tip = start;
+        let mut created = Vec::new();
+        for commit_ref in &self.commits {
+            let oid = self
+                .resolve_commit(&refdb, repo_root, commit_ref)
+                .await
+                .context(format!("Failed to resolve commit: {}", commit_ref))?;
+            let picked = Commit::read(odb.as_ref(), &oid).await?;
+            let Some(parent) = picked.parents.first() else {
+                anyhow::bail!(
+                    "Cannot cherry-pick {}: it is the first version, with nothing \
+                     before it to compare. Nothing was changed.",
+                    &oid.to_hex()[..7]
+                );
+            };
+            let base = Commit::read(odb.as_ref(), parent).await?.tree;
+            let ours = Commit::read(odb.as_ref(), &tip).await?.tree;
+            let merged = MergeEngine::new(odb.clone())
+                .merge_trees(
+                    &base,
+                    &ours,
+                    &picked.tree,
+                    mediagit_versioning::MergeStrategy::Recursive,
+                )
+                .await?;
+            if !merged.conflicts.is_empty() {
+                let paths: Vec<&str> = merged.conflicts.iter().map(|c| c.path.as_str()).collect();
+                return Err(output::CodedError::new(
+                    "would_conflict",
+                    format!(
+                        "Copying {} onto {branch} conflicts in: {}. Nothing was changed. \
+                         Switch to {branch} and copy there to resolve it.",
+                        &oid.to_hex()[..7],
+                        paths.join(", ")
+                    ),
+                )
+                .into());
+            }
+            let tree = merged
+                .tree_oid
+                .context("merge produced no tree without conflicts")?;
+            if tree == ours {
+                return Err(output::CodedError::new(
+                    "empty_commit",
+                    format!(
+                        "nothing to commit - the change from {} is already on {branch}. \
+                         Nothing was changed.",
+                        &oid.to_hex()[..7]
+                    ),
+                )
+                .into());
+            }
+            let mut message = picked.message.clone();
+            if self.append_message {
+                message.push_str(&format!("\n\n(cherry picked from commit {})", oid.to_hex()));
+            }
+            let copy = Commit {
+                tree,
+                parents: vec![tip],
+                author: picked.author.clone(),
+                committer: mediagit_versioning::Signature {
+                    name: picked.committer.name.clone(),
+                    email: picked.committer.email.clone(),
+                    timestamp: chrono::Utc::now(),
+                },
+                message,
+            };
+            tip = copy.write(odb.as_ref()).await?;
+            created.push(tip.to_hex());
+        }
+
+        // ponytail: re-read then write, no ref lock; a writer landing between
+        // the two is the remaining window. Add a refdb compare-and-swap if
+        // concurrent writers to one branch become real.
+        let now = refdb.read(&target).await.ok().and_then(|r| r.oid);
+        if now != Some(start) {
+            return Err(output::CodedError::new(
+                "conflict",
+                format!("{branch} changed while copying. Nothing was changed; try again."),
+            )
+            .into());
+        }
+        refdb.write(&Ref::new_direct(target.clone(), tip)).await?;
+        let who = Commit::read(odb.as_ref(), &tip).await?.committer;
+        let entry = mediagit_versioning::ReflogEntry::now(
+            start,
+            tip,
+            &who.name,
+            &who.email,
+            &format!("cherry-pick --onto {branch}: {} version(s)", created.len()),
+        );
+        // Best-effort, as for commit.
+        let _ = mediagit_versioning::Reflog::new(repo_root.join(".mediagit"))
+            .append(&target, &entry)
+            .await;
+
+        if !self.quiet() {
+            println!(
+                "{} Copied {} version(s) onto {}",
+                style("✓").green(),
+                created.len(),
+                style(branch).yellow()
+            );
+        }
+        Ok(Outcome {
+            status: "picked",
+            commits: created,
+            onto: Some(branch.to_owned()),
+        })
     }
 
     async fn continue_cherrypick(&self, repo_root: &PathBuf) -> Result<Outcome> {
@@ -632,6 +794,7 @@ impl CherryPickCmd {
             skip: false,
             no_commit: self.no_commit,
             append_message: self.append_message,
+            onto: None,
             quiet: self.quiet,
         };
 
@@ -710,6 +873,7 @@ impl CherryPickCmd {
             skip: false,
             no_commit: self.no_commit,
             append_message: self.append_message,
+            onto: None,
             quiet: self.quiet,
         };
 
