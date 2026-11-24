@@ -141,6 +141,44 @@ impl Default for MinIOConfig {
     }
 }
 
+/// A failed bucket HEAD, in plain words. `bucket_region` is the
+/// `x-amz-bucket-region` header (AWS sends it on 301, 400 and 403; it is not a
+/// secret). `None` when the status says nothing useful.
+fn head_bucket_refusal(
+    status: u16,
+    bucket_region: Option<&str>,
+    config_region: &str,
+    bucket: &str,
+) -> Option<crate::StorageError> {
+    let say = |t: String| Some(crate::StorageError::UserFacing(t));
+    // The header comes off the wire: only a plain region name is ever shown.
+    let valid = |r: &&str| {
+        (1..=32).contains(&r.len())
+            && r.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    };
+    if let Some(r) = bucket_region.filter(valid).filter(|r| *r != config_region)
+        && matches!(status, 301 | 400 | 403)
+    {
+        return say(format!(
+            "The bucket '{bucket}' is in region {r}; set the region to {r}."
+        ));
+    }
+    match status {
+        301 => say(format!(
+            "The bucket '{bucket}' is in a different region. Set the region to where the bucket was created."
+        )),
+        400 => say(format!("The bucket name '{bucket}' is not valid.")),
+        307 => say(format!(
+            "The bucket '{bucket}' is not ready yet. Wait a minute and test again."
+        )),
+        401 | 403 => say(format!(
+            "The storage server refused access to bucket '{bucket}': the keys are wrong, or the bucket belongs to another account."
+        )),
+        _ => None,
+    }
+}
+
 /// Normalize a prefix so it ends with `/` (or is empty). Idempotent. Mirrors
 /// the helper in azure.rs to keep the multi-tenant key shape consistent
 /// across backends.
@@ -464,17 +502,17 @@ impl MinIOBackend {
             if not_found {
                 return Err(crate::StorageError::BucketNotFound(config.bucket.clone()).into());
             }
-            // HEAD has no body, so the SDK reports a refused key only as
-            // "unhandled error". The status is the only signal.
-            if matches!(
-                head_err.raw_response().map(|r| r.status().as_u16()),
-                Some(401 | 403)
-            ) {
-                return Err(crate::StorageError::PermissionDenied(format!(
-                    "the storage server refused the keys for bucket '{}'",
-                    config.bucket
-                ))
-                .into());
+            // HEAD has no body, so the SDK reports a refusal only as
+            // "unhandled error". The status and the region header are the signal.
+            if let Some(r) = head_err.raw_response()
+                && let Some(refusal) = head_bucket_refusal(
+                    r.status().as_u16(),
+                    r.headers().get("x-amz-bucket-region"),
+                    &config.region,
+                    &config.bucket,
+                )
+            {
+                return Err(refusal.into());
             }
             return Err(head_err)
                 .context(format!("Failed to access MinIO bucket: {}", config.bucket));
@@ -1637,6 +1675,51 @@ fn combine_part_crc64(parts: &[crate::MpuCompletedPart]) -> Option<String> {
 #[allow(unsafe_code)] // edition-2024: test-only env::set_var/remove_var requires unsafe
 mod tests {
     use super::*;
+
+    fn refusal(status: u16, region: Option<&str>) -> String {
+        head_bucket_refusal(status, region, "us-east-1", "media")
+            .map(|e| e.to_string())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn head_bucket_301_with_region_header_names_the_region() {
+        let m = refusal(301, Some("eu-west-1"));
+        assert!(
+            m.contains("is in region eu-west-1; set the region to eu-west-1"),
+            "{m}"
+        );
+    }
+
+    #[test]
+    fn a_hostile_region_header_is_ignored() {
+        let m = refusal(301, Some("eu\nInjected: <script> and a very long value"));
+        assert!(
+            !m.contains("Injected") && m.contains("different region"),
+            "{m}"
+        );
+    }
+
+    #[test]
+    fn head_bucket_400_without_header_is_a_bad_name() {
+        assert!(refusal(400, None).contains("bucket name 'media' is not valid"));
+    }
+
+    #[test]
+    fn head_bucket_403_says_keys_or_other_account() {
+        let m = refusal(403, Some("us-east-1"));
+        assert!(
+            m.contains("refused access to bucket 'media'") && m.contains("another account"),
+            "{m}"
+        );
+    }
+
+    #[test]
+    fn head_bucket_307_is_transient_and_other_statuses_pass_through() {
+        assert!(refusal(307, None).contains("not ready yet"));
+        assert!(head_bucket_refusal(409, None, "us-east-1", "media").is_none());
+        assert!(head_bucket_refusal(500, None, "us-east-1", "media").is_none());
+    }
 
     #[test]
     fn test_normalize_prefix_empty_passthrough() {

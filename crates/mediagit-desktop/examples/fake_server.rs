@@ -60,6 +60,9 @@ fn main() {
         eprintln!("boom: cannot start");
         std::process::exit(3);
     }
+    if mode.starts_with("mode=slow-refusal") {
+        eprintln!("Error: The server could not start (Azure): The connection string is not valid.");
+    }
     if mode.starts_with("mode=slow") {
         std::thread::sleep(Duration::from_secs(6));
     }

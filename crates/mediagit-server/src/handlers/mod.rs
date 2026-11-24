@@ -178,6 +178,17 @@ pub async fn get_or_init_storage(
     state: &AppState,
     repo_path: &StdPath,
 ) -> Result<Arc<dyn StorageBackend>, StatusCode> {
+    get_or_init_storage_explained(state, repo_path)
+        .await
+        .map_err(|(status, _)| status)
+}
+
+/// [`get_or_init_storage`], keeping the plain cause the backend gave when it
+/// refused to open. The startup probe prints it; no extra cloud call is made.
+pub async fn get_or_init_storage_explained(
+    state: &AppState,
+    repo_path: &StdPath,
+) -> Result<Arc<dyn StorageBackend>, (StatusCode, Option<String>)> {
     let key = repo_path.to_path_buf();
 
     // Fast path: cached backend.
@@ -190,17 +201,17 @@ pub async fn get_or_init_storage(
     if let Some(backend) = map.get(&key).cloned() {
         return Ok(backend);
     }
-    let backend = build_storage_backend(repo_path).await.map_err(|c| {
+    let backend = build_storage_backend(repo_path).await.map_err(|f| {
         // 404 here would read as "repo not created yet" to clients (push
         // auto-create, clone "not found"); only the probe may use it.
-        if c == StatusCode::NOT_FOUND {
+        if f.status == StatusCode::NOT_FOUND {
             tracing::error!(
                 "Storage bucket for {} does not exist; create it, then retry",
                 repo_path.display()
             );
-            StatusCode::SERVICE_UNAVAILABLE
+            (StatusCode::SERVICE_UNAVAILABLE, f.cause)
         } else {
-            c
+            (f.status, f.cause)
         }
     })?;
     map.insert(key, Arc::clone(&backend));
@@ -440,7 +451,10 @@ impl From<StatusCode> for BuildFailure {
 /// every other backend init failure stays a 500, with its cause named.
 fn init_status(e: &anyhow::Error) -> BuildFailure {
     match e.downcast_ref::<mediagit_storage::StorageError>() {
-        Some(mediagit_storage::StorageError::BucketNotFound(_)) => StatusCode::NOT_FOUND.into(),
+        Some(mediagit_storage::StorageError::BucketNotFound(_)) => BuildFailure {
+            status: StatusCode::NOT_FOUND,
+            cause: Some(storage_cause(e)),
+        },
         _ => BuildFailure {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             cause: Some(storage_cause(e)),
@@ -451,13 +465,43 @@ fn init_status(e: &anyhow::Error) -> BuildFailure {
 /// One plain sentence for why a storage call failed. Keeps DNS, refused,
 /// timeout and refused-credentials apart; never includes keys or URLs.
 pub(crate) fn storage_cause(e: &anyhow::Error) -> String {
-    if e.chain().any(|c| {
-        matches!(
-            c.downcast_ref::<mediagit_storage::StorageError>(),
-            Some(mediagit_storage::StorageError::PermissionDenied(_))
+    if let Some(who) =
+        e.chain().find_map(
+            |c| match c.downcast_ref::<mediagit_storage::StorageError>() {
+                Some(mediagit_storage::StorageError::PermissionDenied(m)) => Some(m),
+                _ => None,
+            },
         )
-    }) {
-        return "The storage server refused the access key or secret key. Check both and test again.".into();
+    {
+        // Name the setting that belongs to the backend that refused.
+        return if who.starts_with("GCS") {
+            "Google Cloud refused the service-account key file. Check that it is the right key for this project and test again."
+        } else if who.starts_with("Azure") {
+            "Azure refused the account key or connection string. Check it and test again."
+        } else {
+            "The storage server refused the access key or secret key. Check both and test again."
+        }
+        .into();
+    }
+    if let Some(plain) =
+        e.chain().find_map(
+            |c| match c.downcast_ref::<mediagit_storage::StorageError>() {
+                Some(mediagit_storage::StorageError::UserFacing(s)) => Some(s),
+                _ => None,
+            },
+        )
+    {
+        return plain.clone();
+    }
+    if let Some(b) =
+        e.chain().find_map(
+            |c| match c.downcast_ref::<mediagit_storage::StorageError>() {
+                Some(mediagit_storage::StorageError::BucketNotFound(b)) => Some(b),
+                _ => None,
+            },
+        )
+    {
+        return format!("The bucket '{b}' does not exist. Create it first, then test again.");
     }
     // Typed OS errors first, then the message text. Only the Display chain is
     // read: Debug output of an SDK error can hold response headers.
@@ -467,7 +511,7 @@ pub(crate) fn storage_cause(e: &anyhow::Error) -> String {
         .map(|io| io.kind());
     let text = format!("{e:#}").to_lowercase();
     let has = |words: &[&str]| words.iter().any(|w| text.contains(w));
-    if io_kind == Some(std::io::ErrorKind::TimedOut) || has(&["timed out", "timeout"]) {
+    if io_kind == Some(std::io::ErrorKind::TimedOut) || has(&["timed out", "timeout", "deadline"]) {
         "The storage server did not answer in time. Check the endpoint address and your network."
     } else if has(&[
         "dns error",
@@ -494,7 +538,13 @@ pub(crate) fn storage_cause(e: &anyhow::Error) -> String {
         "unauthorized",
     ]) {
         "The storage server refused the access key or secret key. Check both and test again."
-    } else if has(&["dispatch failure", "error sending request", "connect"]) {
+    } else if has(&[
+        "dispatch failure",
+        "error sending request",
+        "error trying to connect",
+        "connect error",
+        "tcp connect",
+    ]) {
         "Cannot reach the storage server. Check the endpoint address and your network."
     } else {
         "The storage server gave an error. See the server log for details."
@@ -606,11 +656,7 @@ pub async fn probe_storage(storage: &mediagit_config::StorageConfig) -> anyhow::
         let (backend, _) = build_namespaced(&dir, &|k| std::env::var(k).ok())
             .await
             .map_err(|f| {
-                if f.status == StatusCode::NOT_FOUND {
-                    anyhow::anyhow!(
-                        "That bucket does not exist. Create it first, then test again."
-                    )
-                } else if f.status == StatusCode::UNPROCESSABLE_ENTITY {
+                if f.status == StatusCode::UNPROCESSABLE_ENTITY {
                     anyhow::anyhow!(
                         "No S3 credentials. Set {S3_ACCESS_KEY_ENV} and {S3_SECRET_KEY_ENV} in the server's environment, or save them in the config."
                     )
@@ -632,24 +678,45 @@ pub async fn probe_storage(storage: &mediagit_config::StorageConfig) -> anyhow::
     .await
 }
 
+/// Marks the one plain sentence the server prints when it refuses to start. The
+/// desktop app finds it in the server log and shows it as it is.
+pub const START_FAILED_PREFIX: &str = "The server could not start";
+
+/// The one plain sentence for a refused start: the backend and the cause the
+/// storage layer already computed.
+pub fn start_failure_sentence(
+    storage: &mediagit_config::StorageConfig,
+    cause: Option<&str>,
+) -> String {
+    let backend = match storage {
+        mediagit_config::StorageConfig::S3(s) if s.endpoint.is_some() => "S3-compatible",
+        mediagit_config::StorageConfig::S3(_) => "Amazon S3",
+        mediagit_config::StorageConfig::Azure(_) => "Azure",
+        mediagit_config::StorageConfig::GCS(_) => "Google Cloud",
+        _ => "local",
+    };
+    let cause = cause.unwrap_or("The storage settings could not be opened. See the server log.");
+    format!("{START_FAILED_PREFIX} ({backend}): {cause}")
+}
+
 /// Helper function to create storage backend based on repository configuration.
 ///
 /// Layout v2: always wraps the backend in
 /// [`mediagit_storage::NamespacedBackend`] — one of exactly two production
 /// construction sites (the other is the CLI's `create_storage_backend`).
-async fn build_storage_backend(repo_path: &StdPath) -> Result<Arc<dyn StorageBackend>, StatusCode> {
-    build_storage_backend_with_env(repo_path, &|k| std::env::var(k).ok()).await
+async fn build_storage_backend(
+    repo_path: &StdPath,
+) -> Result<Arc<dyn StorageBackend>, BuildFailure> {
+    build_storage_backend_explained(repo_path, &|k| std::env::var(k).ok()).await
 }
 
 /// `build_storage_backend` with the environment injected (tests cannot set
 /// process env: the workspace forbids `unsafe`).
-async fn build_storage_backend_with_env(
+async fn build_storage_backend_explained(
     repo_path: &StdPath,
     env: &(dyn Fn(&str) -> Option<String> + Sync),
-) -> Result<Arc<dyn StorageBackend>, StatusCode> {
-    let (namespaced, repo_id) = build_namespaced(repo_path, env)
-        .await
-        .map_err(|f| f.status)?;
+) -> Result<Arc<dyn StorageBackend>, BuildFailure> {
+    let (namespaced, repo_id) = build_namespaced(repo_path, env).await?;
     mediagit_storage::check_or_write_layout_marker(
         &namespaced,
         mediagit_config::CURRENT_LAYOUT_VERSION,
@@ -658,7 +725,10 @@ async fn build_storage_backend_with_env(
     .await
     .map_err(|e| {
         tracing::error!("Layout version check failed: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
+        BuildFailure {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            cause: Some(storage_cause(&e)),
+        }
     })?;
 
     Ok(Arc::new(namespaced))
@@ -827,7 +897,7 @@ async fn build_namespaced(
                     .await
                     .map_err(|e| {
                         tracing::error!("Failed to initialize GCS backend: {}", e);
-                        StatusCode::INTERNAL_SERVER_ERROR
+                        init_status(&e)
                     })?,
                 None => GcsBackend::with_default_credentials_and_config(gcs_backend_config)
                     .await
@@ -836,7 +906,7 @@ async fn build_namespaced(
                             "Failed to initialize GCS backend with default credentials: {}",
                             e
                         );
-                        StatusCode::INTERNAL_SERVER_ERROR
+                        init_status(&e)
                     })?,
             };
 
@@ -1674,6 +1744,32 @@ mod tests {
     use super::*;
     use mediagit_security::auth::middleware::AuthMethod;
 
+    /// "connection string" contains "connect"; it must not read as a network failure.
+    #[test]
+    fn a_refusal_names_the_credential_of_its_backend() {
+        use mediagit_storage::StorageError::PermissionDenied;
+        let say = |m: &str| storage_cause(&anyhow::Error::new(PermissionDenied(m.into())));
+        assert!(
+            say("GCS refused the service-account credentials").contains("service-account key file")
+        );
+        assert!(say("Azure: put x: nope").contains("account key or connection string"));
+        assert!(say("refused the keys for bucket 'b'").contains("access key or secret key"));
+    }
+
+    #[test]
+    fn a_request_deadline_is_a_timeout() {
+        let e = anyhow::anyhow!("the request exceeded the request deadline");
+        assert!(storage_cause(&e).contains("did not answer in time"));
+    }
+
+    #[test]
+    fn a_connection_string_error_is_not_a_network_error() {
+        let e = anyhow::anyhow!("Invalid connection string: missing AccountName");
+        assert!(!storage_cause(&e).contains("Cannot reach"));
+        let net = anyhow::anyhow!("error trying to connect: tcp connect error");
+        assert!(storage_cause(&net).contains("Cannot reach"));
+    }
+
     // ---- Task 4.6: S3 credentials from the environment (fake values only) ----
 
     fn s3(id: Option<&str>, secret: Option<&str>) -> mediagit_config::S3Storage {
@@ -1774,12 +1870,16 @@ mod tests {
             ..Default::default()
         };
         cfg.save(&dir).unwrap();
-        let before = build_storage_backend_with_env(&dir, &env_of(None, None))
+        let before = build_storage_backend_explained(&dir, &env_of(None, None))
             .await
-            .err();
+            .err()
+            .map(|f| f.status);
         assert_eq!(before, Some(StatusCode::UNPROCESSABLE_ENTITY));
         let env = env_of(Some("fake-id-env"), Some("fake-sec-env"));
-        let after = build_storage_backend_with_env(&dir, &env).await.err();
+        let after = build_storage_backend_explained(&dir, &env)
+            .await
+            .err()
+            .map(|f| f.status);
         let _ = std::fs::remove_dir_all(&dir);
         assert_ne!(
             after,
@@ -1802,9 +1902,10 @@ mod tests {
             ..Default::default()
         };
         cfg.save(&dir).unwrap();
-        let got = build_storage_backend_with_env(&dir, &env_of(None, None))
+        let got = build_storage_backend_explained(&dir, &env_of(None, None))
             .await
-            .err();
+            .err()
+            .map(|f| f.status);
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(got, Some(StatusCode::UNPROCESSABLE_ENTITY));
     }

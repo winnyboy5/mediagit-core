@@ -24,6 +24,12 @@ pub enum StorageError {
     #[error("permission denied: {0}")]
     PermissionDenied(String),
 
+    /// A failure whose text is already one plain sentence a person can act on
+    /// (bad key file, bad connection string, inaccessible bucket). It never
+    /// holds a secret; callers show it as it is.
+    #[error("{0}")]
+    UserFacing(String),
+
     /// I/O error occurred
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
@@ -47,6 +53,21 @@ pub enum StorageError {
     /// Useful for catch-all error handling and opaque error types.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+/// The bucket exists but these credentials cannot use it (wrong account or region).
+pub(crate) fn bucket_inaccessible(bucket: &str) -> StorageError {
+    StorageError::UserFacing(format!(
+        "The bucket '{bucket}' cannot be accessed with these credentials. It may belong to another account; check the bucket name and the keys."
+    ))
+}
+
+/// A service-account key file that is missing, unreadable or not a key.
+pub(crate) fn key_file_error(path: &std::path::Path, problem: &str) -> StorageError {
+    StorageError::UserFacing(format!(
+        "The key file {} {problem}. Check the path and that the file is a service-account key.",
+        path.display()
+    ))
 }
 
 impl StorageError {

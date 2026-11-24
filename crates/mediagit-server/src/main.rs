@@ -437,7 +437,7 @@ async fn main() -> Result<()> {
                         // repos that completed are named and the missing one is
                         // the suspect.
                         let started = std::time::Instant::now();
-                        let result = mediagit_server::handlers::get_or_init_storage(
+                        let result = mediagit_server::handlers::get_or_init_storage_explained(
                             &probe_state,
                             &repo_path,
                         )
@@ -502,23 +502,36 @@ async fn main() -> Result<()> {
                     })?;
 
             let mut failed = 0;
+            let mut first_failed = None;
             for (repo_path, result) in results {
-                if let Err(status) = result {
+                if let Err((status, cause)) = result {
                     failed += 1;
                     tracing::error!(
                         "Startup probe failed for repo {:?}: storage backend init returned {}",
                         repo_path,
                         status
                     );
+                    first_failed.get_or_insert((repo_path, cause));
                 }
             }
-            if failed > 0 {
-                anyhow::bail!(
+            if let Some((repo_path, cause)) = first_failed {
+                tracing::error!(
                     "startup probe failed for {} of {} repo(s); see errors above for details, \
                      or set MEDIAGIT_STARTUP_PROBE=0 to skip this check",
                     failed,
                     repo_count
                 );
+                let sentence = match mediagit_config::Config::load(&repo_path).await {
+                    Ok(cfg) => mediagit_server::handlers::start_failure_sentence(
+                        &cfg.storage,
+                        cause.as_deref(),
+                    ),
+                    Err(_) => format!(
+                        "{}: a repository's settings could not be read.",
+                        mediagit_server::handlers::START_FAILED_PREFIX
+                    ),
+                };
+                anyhow::bail!("{sentence}");
             }
             tracing::info!("Startup probe passed for {} repo(s)", repo_count);
         }

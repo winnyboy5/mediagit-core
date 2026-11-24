@@ -49,6 +49,7 @@ const TABLE: Record<string, Entry> = {
   contract_mismatch: { text: 'This app and the MediaGit core were built for different versions. Reinstall MediaGit so they match.', retry: true },
   spawn_failed: { text: 'MediaGit could not start its core. Restart the app; if it keeps happening, reinstall MediaGit.', retry: true },
   protocol: { text: 'The app and the MediaGit core did not understand each other. Restart the app and try again.', retry: true },
+  start_failed: { text: 'The server could not start. Open Details to see why.', retry: true, own: true },
   setup_failed: { text: 'Setup did not finish. Check what you entered and try again.', retry: true, own: true },
   cancelled: { text: 'Stopped.', retry: false },
   error: { text: GENERIC, retry: true, own: true },

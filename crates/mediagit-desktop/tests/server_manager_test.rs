@@ -125,6 +125,25 @@ async fn overlapping_starts_leave_exactly_one_child() {
     m.stop().await.unwrap();
 }
 
+/// A server that prints its refusal but is slow to exit still gets the plain sentence.
+#[tokio::test]
+async fn a_slow_refusal_shows_the_plain_sentence() {
+    let tmp = tempfile::tempdir().unwrap();
+    let m = manager(tmp.path());
+    set_up(&m).await;
+    std::fs::write(
+        tmp.path().join("mediagit-server.toml"),
+        "mode=slow-refusal\n",
+    )
+    .unwrap();
+    let e = m.start().await.unwrap_err();
+    assert_eq!(code(&e), "start_failed");
+    assert!(
+        e.to_string().contains("The connection string is not valid"),
+        "{e}"
+    );
+}
+
 #[tokio::test]
 async fn a_server_that_never_answers_times_out_and_is_killed() {
     let tmp = tempfile::tempdir().unwrap();
@@ -136,6 +155,22 @@ async fn a_server_that_never_answers_times_out_and_is_killed() {
     assert_eq!(code(&e), "health_timeout");
     assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
     assert_eq!(m.status().await.state, "stopped");
+}
+
+/// The log is appended to across runs: an earlier run's sentence is never this run's reason.
+#[tokio::test]
+async fn an_earlier_runs_refusal_is_not_reported_again() {
+    let tmp = tempfile::tempdir().unwrap();
+    let m = manager(tmp.path());
+    set_up(&m).await;
+    let log = tmp.path().join("server.log");
+    let old = "Error: The server could not start (Azure): The connection string is not valid.\n";
+    std::fs::write(&log, old).unwrap();
+    std::fs::write(tmp.path().join("mediagit-server.toml"), "mode=exit\n").unwrap();
+    let e = m.start().await.unwrap_err();
+    assert_eq!(code(&e), "start_failed");
+    assert!(!e.to_string().contains("connection string"), "{e}");
+    assert!(e.to_string().contains("boom"), "{e}");
 }
 
 #[tokio::test]

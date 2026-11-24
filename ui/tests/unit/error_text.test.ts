@@ -11,7 +11,7 @@ const CODES = [
   'request_rejected', 'server_error', 'request_failed', 'permission_denied', 'file_in_use', 'already_exists',
   'disk_full', 'needs_input', 'invalid_args', 'keychain_unavailable', 'empty_commit', 'json_unsupported',
   'internal', 'error', 'cli_not_found', 'spawn_failed', 'protocol', 'contract_mismatch', 'invalid_argument',
-  'cancelled', 'input_required', 'setup_failed', 'wrong_passphrase', 'unknown', 'E_SOMETHING_NEW',
+  'cancelled', 'input_required', 'setup_failed', 'start_failed', 'wrong_passphrase', 'unknown', 'E_SOMETHING_NEW',
 ]
 const RAW = 'POST /admin/repos failed with status: 400 Bad Request'
 const FORBIDDEN = [/\bempty_commit\b/, /\bE_[A-Z_]+\b/, /failed with status/, /\b[1-5]\d\d (Bad|Not|Internal|Conflict|Forbidden|Unauthorized)/, /^error$/i]
@@ -87,6 +87,20 @@ describe('form checks', () => {
     expect(storageMissing({ kind: 's3', bucket: 'b' })).toBeUndefined()
     expect(storageMissing({ kind: 'filesystem' })).toBeUndefined()
     expect(storageMissing({ kind: 'azure' })).toBeTruthy()
+  })
+})
+
+describe('start_failed', () => {
+  it("shows the server's own reason and keeps the log under Details", () => {
+    const reason = 'The server could not start (Amazon S3): The storage server refused the access key or secret key. Check both and test again.'
+    const v = plainError('start_failed', reason, 'INFO x ERROR y')
+    expect(v.text).toBe(reason)
+    expect(v.details).toContain('ERROR y')
+  })
+  it('falls back to the table sentence when the message is a raw log tail', () => {
+    const v = plainError('start_failed', 'the server exited (exit code: 3): INFO a\nERROR b', 'INFO a\nERROR b')
+    expect(v.text).toBe('The server could not start. Open Details to see why.')
+    expect(v.details).toContain('ERROR b')
   })
 })
 

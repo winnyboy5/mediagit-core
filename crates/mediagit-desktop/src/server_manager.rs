@@ -363,6 +363,8 @@ impl ServerManager {
         let bin = self.server_bin()?;
         let log = self.open_log()?;
         let log_err = log.try_clone().map_err(|e| err("io", e.to_string()))?;
+        // The log is append-only across runs: only what this start writes counts.
+        let log_from = log.metadata().map(|m| m.len()).unwrap_or(0);
         let mut cmd = Command::new(bin);
         cmd.arg("--config")
             .arg(self.config_path())
@@ -381,22 +383,32 @@ impl ServerManager {
         let deadline = Instant::now() + HEALTH_BUDGET;
         loop {
             if let Ok(Some(code)) = child.try_wait() {
-                return Err(err(
-                    "start_failed",
-                    format!("the server exited ({code}): {}", self.log_tail(5)),
-                ));
+                let tail = last_lines(&self.log_since(log_from), 5);
+                return Err(EngineError::Cli {
+                    code: "start_failed".into(),
+                    message: start_failure_message(&tail)
+                        .unwrap_or_else(|| format!("the server exited ({code}): {tail}")),
+                    details: Some(tail.clone()),
+                });
             }
             if healthy(saved.port).await {
                 break;
             }
             if Instant::now() >= deadline {
                 let _ = child.kill().await;
+                let tail = last_lines(&self.log_since(log_from), 5);
+                if let Some(reason) = start_failure_message(&tail) {
+                    return Err(EngineError::Cli {
+                        code: "start_failed".into(),
+                        message: reason,
+                        details: Some(tail),
+                    });
+                }
                 return Err(err(
                     "health_timeout",
                     format!(
-                        "the server did not answer within {} seconds: {}",
-                        HEALTH_BUDGET.as_secs(),
-                        self.log_tail(5)
+                        "the server did not answer within {} seconds: {tail}",
+                        HEALTH_BUDGET.as_secs()
                     ),
                 ));
             }
@@ -454,6 +466,13 @@ impl ServerManager {
         last_lines(&text, n)
     }
 
+    /// What the server printed after byte `from` of its log.
+    fn log_since(&self, from: u64) -> String {
+        let bytes = std::fs::read(self.log_path()).unwrap_or_default();
+        let from = usize::try_from(from).unwrap_or(usize::MAX).min(bytes.len());
+        String::from_utf8_lossy(&bytes[from..]).into_owned()
+    }
+
     fn open_log(&self) -> Result<std::fs::File, EngineError> {
         let path = self.log_path();
         if std::fs::metadata(&path).is_ok_and(|m| m.len() > LOG_MAX_BYTES) {
@@ -465,6 +484,13 @@ impl ServerManager {
             .open(&path)
             .map_err(|e| err("io", e.to_string()))
     }
+}
+
+/// The plain sentence the server prints when it refuses to start
+/// (`mediagit_server::handlers::START_FAILED_PREFIX`), found in its log tail.
+fn start_failure_message(log: &str) -> Option<String> {
+    let at = log.rfind("The server could not start")?;
+    log[at..].lines().next().map(|l| l.trim().to_string())
 }
 
 fn last_lines(text: &str, n: usize) -> String {
@@ -659,3 +685,23 @@ impl ServerManager {
 
 /// How long `storage_test` may take (cloud retries are slow to give up).
 const STORAGE_TEST_BUDGET: Duration = Duration::from_secs(120);
+
+#[cfg(test)]
+mod start_failure_tests {
+    use super::start_failure_message;
+
+    #[test]
+    fn plain_sentence_is_taken_from_the_log_tail() {
+        let log = "INFO x
+ERROR Startup probe failed
+Error: The server could not start (Amazon S3): The storage server refused the access key or secret key.
+";
+        assert_eq!(
+            start_failure_message(log).as_deref(),
+            Some(
+                "The server could not start (Amazon S3): The storage server refused the access key or secret key."
+            )
+        );
+        assert_eq!(start_failure_message("INFO nothing"), None);
+    }
+}

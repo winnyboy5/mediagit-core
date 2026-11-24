@@ -181,6 +181,14 @@ fn ensure_crypto_provider() {
     });
 }
 
+/// A connection string without its account parts. Never echoes the string.
+fn bad_connection_string() -> anyhow::Error {
+    StorageError::UserFacing(
+        "The connection string is not valid. Copy the whole string from the Azure portal (it has AccountName= and AccountKey= parts).".into(),
+    )
+    .into()
+}
+
 /// Map an OpenDAL error onto the crate's typed [`StorageError`].
 ///
 /// This replaces substring-matching on `"404"` / `"BlobNotFound"` / `"403"`,
@@ -192,7 +200,7 @@ fn map_error(err: &opendal::Error, context: &str) -> StorageError {
     let msg = format!("{context}: {err}");
     match err.kind() {
         ErrorKind::NotFound => StorageError::NotFound(msg),
-        ErrorKind::PermissionDenied => StorageError::PermissionDenied(msg),
+        ErrorKind::PermissionDenied => StorageError::PermissionDenied(format!("Azure: {msg}")),
         ErrorKind::AlreadyExists => StorageError::Backend(msg),
         ErrorKind::RateLimited => StorageError::Backend(msg),
         _ => StorageError::Backend(msg),
@@ -335,10 +343,10 @@ impl AzureBackend {
             return Err(anyhow::anyhow!("connection_string cannot be empty"));
         }
 
-        let account_name = conn_field(&connection_string, "AccountName")
-            .ok_or_else(|| anyhow::anyhow!("Invalid connection string: missing AccountName"))?;
-        let account_key = conn_field(&connection_string, "AccountKey")
-            .ok_or_else(|| anyhow::anyhow!("Invalid connection string: missing AccountKey"))?;
+        let account_name =
+            conn_field(&connection_string, "AccountName").ok_or_else(bad_connection_string)?;
+        let account_key =
+            conn_field(&connection_string, "AccountKey").ok_or_else(bad_connection_string)?;
 
         // BlobEndpoint already includes the account segment for Azurite
         // (http://host:port/devstoreaccount1); the cloud form does not.

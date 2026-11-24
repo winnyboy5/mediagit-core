@@ -294,27 +294,17 @@ impl GcsBackend {
 
         let path = service_account_path.as_ref();
         if !path.exists() {
-            return Err(anyhow::anyhow!(
-                "service account file not found: {}",
-                path.display()
-            ));
+            return Err(crate::error::key_file_error(path, "cannot be found").into());
         }
 
         // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- operator config path
-        let sa_json_str = std::fs::read_to_string(path).map_err(|e| {
-            anyhow::anyhow!(
-                "failed to read service account file '{}': {}",
-                path.display(),
-                e
-            )
-        })?;
-        let sa_json: serde_json::Value = serde_json::from_str(&sa_json_str).map_err(|e| {
-            anyhow::anyhow!(
-                "failed to parse service account JSON '{}': {}",
-                path.display(),
-                e
-            )
-        })?;
+        let sa_json_str = std::fs::read_to_string(path)
+            .map_err(|_| crate::error::key_file_error(path, "cannot be read"))?;
+        let sa_json: serde_json::Value = serde_json::from_str(&sa_json_str)
+            .map_err(|_| crate::error::key_file_error(path, "is not valid JSON"))?;
+        if sa_json.get("type").and_then(|t| t.as_str()) != Some("service_account") {
+            return Err(crate::error::key_file_error(path, "is not a service-account key").into());
+        }
 
         let creds = google_cloud_auth::credentials::service_account::Builder::new(sa_json.clone())
             .build()
@@ -357,27 +347,17 @@ impl GcsBackend {
 
         let path = service_account_path.as_ref();
         if !path.exists() {
-            return Err(anyhow::anyhow!(
-                "service account file not found: {}",
-                path.display()
-            ));
+            return Err(crate::error::key_file_error(path, "cannot be found").into());
         }
 
         // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path -- operator config path
-        let sa_json_str = std::fs::read_to_string(path).map_err(|e| {
-            anyhow::anyhow!(
-                "failed to read service account file '{}': {}",
-                path.display(),
-                e
-            )
-        })?;
-        let sa_json: serde_json::Value = serde_json::from_str(&sa_json_str).map_err(|e| {
-            anyhow::anyhow!(
-                "failed to parse service account JSON '{}': {}",
-                path.display(),
-                e
-            )
-        })?;
+        let sa_json_str = std::fs::read_to_string(path)
+            .map_err(|_| crate::error::key_file_error(path, "cannot be read"))?;
+        let sa_json: serde_json::Value = serde_json::from_str(&sa_json_str)
+            .map_err(|_| crate::error::key_file_error(path, "is not valid JSON"))?;
+        if sa_json.get("type").and_then(|t| t.as_str()) != Some("service_account") {
+            return Err(crate::error::key_file_error(path, "is not a service-account key").into());
+        }
 
         let creds = google_cloud_auth::credentials::service_account::Builder::new(sa_json.clone())
             .build()
@@ -922,7 +902,21 @@ impl StorageBackend for GcsBackend {
             .write_object(&bucket_path, key, payload)
             .send_buffered()
             .await
-            .map_err(|e| anyhow::anyhow!("GCS write_object error for key '{}': {}", key, e))?;
+            .map_err(|e| match e.http_status_code() {
+                // 401: the token was refused (bad key). 403: the key is fine
+                // but this bucket is not ours to write.
+                Some(401) => anyhow::Error::new(crate::StorageError::PermissionDenied(
+                    "GCS refused the service-account credentials".into(),
+                )),
+                Some(403) => {
+                    anyhow::Error::new(crate::error::bucket_inaccessible(&self.config.bucket_name))
+                }
+                // A write to a bucket that does not exist is a 404.
+                Some(404) => anyhow::Error::new(crate::StorageError::BucketNotFound(
+                    self.config.bucket_name.clone(),
+                )),
+                _ => anyhow::anyhow!("GCS write_object error for key '{}': {}", key, e),
+            })?;
 
         debug!(key = %key, "Successfully uploaded object to GCS");
         Ok(())
