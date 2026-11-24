@@ -197,15 +197,28 @@ impl RebaseCmd {
                 // Every refusal rebase itself can make must happen before the
                 // switch, or a failed rebase leaves the user on BRANCH.
                 let refdb = RefDatabase::new(repo_root.join(".mediagit"));
-                let odb = ObjectDatabase::with_smart_compression(
+                let odb = Arc::new(ObjectDatabase::with_smart_compression(
                     create_storage_backend(&repo_root).await?,
                     1000,
-                );
+                ));
                 let upstream_oid = resolve_revision(upstream, &refdb, &odb).await?;
                 let branch_oid = resolve_revision(wanted, &refdb, &odb)
                     .await
                     .with_context(|| format!("Cannot rebase '{wanted}': no such branch"))?;
                 let current = refdb.resolve("HEAD").await.ok();
+                // Same order as the checks below: an unsafe path first (BUG-008).
+                crate::repo::ensure_no_unsafe_paths(&odb, &repo_root, &[branch_oid, upstream_oid])
+                    .await?;
+                // Untracked files UPSTREAM would overwrite: the switch only
+                // checks against BRANCH's files.
+                crate::worktree_guard::AtRisk::check(
+                    &repo_root,
+                    &odb,
+                    current.as_ref(),
+                    Some(&upstream_oid),
+                )
+                .await?
+                .ensure_clean("rebase")?;
                 crate::worktree_guard::ensure_index_clean(
                     &repo_root,
                     &odb,
@@ -213,8 +226,19 @@ impl RebaseCmd {
                     "rebase",
                 )
                 .await?;
-                crate::repo::ensure_no_unsafe_paths(&odb, &repo_root, &[branch_oid, upstream_oid])
+                let bases = LcaFinder::new(odb.clone())
+                    .find_merge_base(&branch_oid, &upstream_oid)
                     .await?;
+                let Some(base) = bases.first() else {
+                    anyhow::bail!("No common ancestor found");
+                };
+                let replayed: Vec<Oid> = self
+                    .collect_commits(&odb, base, &branch_oid)
+                    .await?
+                    .iter()
+                    .map(|(oid, _)| *oid)
+                    .collect();
+                crate::repo::ensure_no_unsafe_paths(&odb, &repo_root, &replayed).await?;
                 super::branch::BranchCmd {
                     subcommand: super::branch::BranchSubcommand::Switch(
                         super::branch::SwitchOpts {

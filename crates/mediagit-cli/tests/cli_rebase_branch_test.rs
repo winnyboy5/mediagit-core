@@ -130,3 +130,28 @@ fn a_missing_branch_refuses_with_nothing_moved() {
     assert_eq!(head_branch(r), "main");
     assert_eq!(tip(r, "main"), main_before);
 }
+
+#[test]
+fn an_untracked_file_upstream_would_overwrite_refuses_before_switching() {
+    // dev and feature never had m.txt; main tracks it. From dev, an untracked
+    // m.txt is safe for the switch to feature but not for the rebase onto main.
+    let dir = TempDir::new().unwrap();
+    let r = dir.path();
+    run(r, &["init", "-q"]);
+    commit(r, "a.txt", "base", "base");
+    run(r, &["branch", "create", "dev"]);
+    run(r, &["branch", "create", "feature"]);
+    run(r, &["branch", "switch", "feature"]);
+    commit(r, "f.txt", "feature", "f1");
+    run(r, &["branch", "switch", "main"]);
+    commit(r, "m.txt", "main", "m1");
+    run(r, &["branch", "switch", "dev"]);
+    std::fs::write(r.join("m.txt"), "mine, untracked").unwrap();
+    let (code, _) = machine(r, &["rebase", "main", "feature"]);
+    assert_ne!(code, 0);
+    assert_eq!(head_branch(r), "dev", "a failed rebase must not switch");
+    assert_eq!(
+        std::fs::read_to_string(r.join("m.txt")).unwrap(),
+        "mine, untracked"
+    );
+}
