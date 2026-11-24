@@ -1155,6 +1155,21 @@ gui = "ChangesView"
 [arg."reset --mixed"]
 gui = "ChangesView"
 
+[cmd."restore"]
+gui = "ChangesView"
+
+[arg."restore PATHS"]
+gui = "ChangesView"
+
+[arg."restore --source"]
+gui = "HistoryView"
+
+[arg."restore --delete-new"]
+gui = "ChangesView"
+
+[arg."restore --yes"]
+gui = "ChangesView"
+
 [cmd."revert"]
 gui = "HistoryView"
 

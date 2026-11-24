@@ -172,6 +172,9 @@ enum Commands {
     /// Reset current HEAD to specified state
     Reset(ResetCmd),
 
+    /// Put files back to a saved version, throwing away unsaved changes
+    Restore(RestoreCmd),
+
     /// Revert commits by creating inverse commits
     Revert(RevertCmd),
 
@@ -474,6 +477,7 @@ fn main() {
                 | "diff"
                 | "stash"
                 | "reset"
+                | "restore"
                 | "revert"
                 | "download"
                 | "auth"
@@ -746,6 +750,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         Some(Commands::Stats(cmd)) => cmd.execute().await,
         Some(Commands::Reflog(cmd)) => cmd.execute().await,
         Some(Commands::Reset(cmd)) => cmd.execute().await,
+        Some(Commands::Restore(cmd)) => cmd.execute().await,
         Some(Commands::Revert(cmd)) => cmd.execute().await,
         Some(Commands::SparseCheckout(cmd)) => cmd.execute().await,
         Some(Commands::Version) => {
@@ -797,6 +802,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             println!("  ls-files     List every file in the working folder with its status");
             println!("  reflog       Show history of ref updates");
             println!("  reset        Reset current HEAD to a given state");
+            println!("  restore      Put files back to a saved version");
             println!("  revert       Revert existing commits");
             println!("  lock         Lock files against concurrent edits");
             println!("  auth         Manage server credentials");

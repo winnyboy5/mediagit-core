@@ -177,6 +177,11 @@ impl Index {
         self.entries.remove(path)
     }
 
+    /// Drop a staged deletion of `path`; `true` if one was staged.
+    pub fn unmark_deleted(&mut self, path: &Path) -> bool {
+        self.deleted_entries.remove(path)
+    }
+
     /// Get an entry from the index
     pub fn get_entry(&self, path: &Path) -> Option<&IndexEntry> {
         self.entries.get(path)
