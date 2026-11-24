@@ -141,8 +141,10 @@ foreach ($s in "aws", "gcs", "azure") {
   $after = Count-Objects $s
   if ($null -eq $after) { Say "FATAL: could not re-list $s after delete"; $failed = $true; continue }
   Say "$s - $after object(s) after"
-  if ($after -ne 0) { Say "FATAL: $s still holds $after object(s)"; exit 83 }
+  if ($after -ne 0) { Say "FATAL: $s still holds $after object(s)"; Remove-Item $gcfg -Recurse -Force -EA SilentlyContinue; exit 83 }
 }
 Remove-Item $gcfg -Recurse -Force -EA SilentlyContinue
 if ($failed) { exit 82 }
 Say "CLOUD_CLEAN_DONE$(if ($DryRun) { ' (dry run)' })"
+
+exit 0
