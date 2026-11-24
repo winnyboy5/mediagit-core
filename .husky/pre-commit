@@ -78,11 +78,20 @@ done
 # on a staged AKIA key. A gate that cannot fail is worse than no gate, so the
 # value side matches an optional double quote only, and both directions are
 # exercised before this is trusted.
-SECRET_RE='AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|ya29\.[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|gh[pousr]_[A-Za-z0-9]{30,}|(secret_access_key|account_key|access_key_id|client_secret|api_key|password|jwt_secret)[[:space:]]*[:=][[:space:]]*"?[A-Za-z0-9+/=_-]{32,}'
-ALLOW_RE='EXAMPLE|CHANGE-THIS|CHANGE_THIS|your-|your_|replace-with|replace_with|placeholder|test-secret|dummy|fake|xxxx'
+#
+# 2026-11-24: widened for the cloud QA work -- PEM private keys (also inside
+# GCS service-account JSON), Azure AccountKey= and SAS sig=, Bearer tokens,
+# fine-grained GitHub PATs, and *token / env-style UPPER_CASE names (the
+# match is now case-insensitive). Server API keys are bare 64-hex with no
+# prefix, indistinguishable from BLAKE3 ids, so they are caught only by the
+# name rule (api_key=, token=, Bearer). The extra allowlist entries are the
+# public Azurite key and test-only PEM fixtures already in the tree; with
+# them the pattern still matches zero lines of the tracked corpus.
+SECRET_RE='AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|ya29\.[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|AccountKey=[A-Za-z0-9+/]{40,}|[?&]sig=[A-Za-z0-9%+/]{30,}|Bearer [A-Za-z0-9._~+/-]{32,}|(secret_access_key|account_key|access_key_id|client_secret|api_key|password|jwt_secret|token)[[:space:]]*[:=][[:space:]]*"?[A-Za-z0-9+/=_-]{32,}'
+ALLOW_RE='EXAMPLE|CHANGE-THIS|CHANGE_THIS|your-|your_|replace-with|replace_with|placeholder|test-secret|dummy|fake|xxxx|devstoreaccount1|Eby8vdM0|contains\("-----BEGIN|ENCRYPTED_TEST_KEY|override-secret|MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC1d3bros'
 secret_hits=$(git diff --cached -U0 --diff-filter=ACM |
   grep -E '^\+' | grep -vE '^\+\+\+' |
-  grep -EI "$SECRET_RE" |
+  grep -iEI "$SECRET_RE" |
   grep -viE "$ALLOW_RE")
 if [ -n "$secret_hits" ]; then
   echo "❌ Possible credential in staged changes:"
