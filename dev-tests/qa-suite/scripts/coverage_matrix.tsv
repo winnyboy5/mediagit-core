@@ -132,6 +132,7 @@ cherry-pick	--abort	no	ERROR
 cherry-pick	--skip	no	ERROR
 cherry-pick	-n,--no-commit	no	OK
 cherry-pick	-x,--append-message	no	ERROR
+cherry-pick	--onto	yes	ERROR
 stash	-(bare invocation)	no	USAGE
 stash push	-(bare invocation)	no	OK
 stash push	-m,--message	yes	OK
@@ -175,6 +176,7 @@ diff	-(bare invocation)	no	OK
 diff	--cached	no	OK
 diff	--stat	no	OK
 diff	--summary	no	OK
+diff	-p,--patch	no	OK
 show	-(bare invocation)	no	OK
 show	--tree	no	OK
 show	--output	yes	ERROR

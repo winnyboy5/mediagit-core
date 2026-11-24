@@ -988,6 +988,191 @@ function Matrix-Rebase {
 }
 
 # ============================================================================
+# CHK30-36 - History-shaping CLI features: cherry-pick --onto, rebase UPSTREAM BRANCH,
+# log A..B / A...B, diff -p. These checks use TEXT fixtures (line hunks need text).
+# ============================================================================
+function New-QaTextCommit([string]$Repo, [string]$RelPath, [string]$Text, [string]$Msg) {
+  [IO.File]::WriteAllText((Join-Path $Repo $RelPath), $Text)
+  Invoke-MG $Repo @("add", $RelPath) $Phase | Out-Null
+  Invoke-MG $Repo @("commit", "-m", $Msg) $Phase | Out-Null
+}
+
+function Get-QaTip([string]$Repo, [string]$Branch) {
+  $r = Invoke-MG $Repo @("log", "--oneline", "-n", "1", $Branch) $Phase
+  # unique sentinel per failed read, so two failed reads never compare equal
+  if ($r.Exit -ne 0) { return "ERR-$([guid]::NewGuid())" }
+  return ($r.Out.Trim() -split "\s+")[0]
+}
+
+function Get-QaCurrentBranch([string]$Repo) {
+  $l = (Invoke-MG $Repo @("branch", "list") $Phase).Out -split "`n" | Where-Object { $_ -match '^\s*\*' } | Select-Object -First 1
+  return ("$l" -replace '^\s*\*\s*', '').Trim()
+}
+
+function Get-QaRangeCount([string]$Repo, [string]$Range) {
+  $r = Invoke-MG $Repo @("log", "--oneline", $Range) $Phase
+  if ($r.Exit -ne 0) { return -1 }
+  # count only oneline commit rows; "No commits to show" and error text are not commits
+  return @($r.Out -split "`n" | Where-Object { $_ -match '^[0-9a-f]{7} ' }).Count
+}
+
+function Check-30-CherryPickOntoCopiesWithoutSwitch {
+  $id = "CHK30-cherrypick-onto-copies-without-switch"
+  if (-not (ShouldRun $id)) { return }
+  $repo = New-SandboxRepo "c30-cp-onto" $Phase
+  New-QaTextCommit $repo "t.txt" "a`nb`n" "base"
+  Br $repo "feature"; Br $repo "topic"
+  Sw $repo "feature" | Out-Null
+  New-QaTextCommit $repo "f.txt" "from feature`n" "feature adds f.txt"
+  $pick = Get-QaTip $repo "feature"
+  Sw $repo "main" | Out-Null
+  $mainTip = Get-QaTip $repo "main"
+  $topicBefore = Get-QaTip $repo "topic"
+  $tHash = Get-QaHash (Join-Path $repo "t.txt")
+  $r = Invoke-MG $repo @("cherry-pick", "--onto", "topic", "-x", $pick) $Phase
+  $topicAfter = Get-QaTip $repo "topic"
+  $moved = $topicAfter -ne $topicBefore
+  $topicHas = (Get-QaRangeCount $repo "main..topic") -eq 1
+  $mainSame = (Get-QaTip $repo "main") -eq $mainTip
+  $stayed = (Get-QaCurrentBranch $repo) -eq "main"
+  $wtSame = (-not (Test-Path (Join-Path $repo "f.txt"))) -and ((Get-QaHash (Join-Path $repo "t.txt")) -eq $tHash)
+  $fsckOk = Test-QaFsckClean $repo
+  # a COPY, not a fast-forward: topic's tip is a new commit, carries f.txt's content, and -x left its trailer
+  $isCopy = $topicAfter -ne $pick
+  $content = (Invoke-MG $repo @("diff", "main", "topic", "-p") $Phase).Out -match '(?m)^\+from feature\s*$'
+  $trailer = (Invoke-MG $repo @("show", "topic") $Phase).Out -match 'cherry picked from commit'
+  $pass = ($r.Exit -eq 0) -and $moved -and $topicHas -and $mainSame -and $stayed -and $wtSame -and $fsckOk -and $isCopy -and $content -and $trailer
+  Rec $id "cherry-pick --onto topic -x <commit> from main" $pass "exit=$($r.Exit) topic-moved=$moved topic-one-ahead=$topicHas main-tip-same=$mainSame head-still-main=$stayed worktree-same=$wtSame fsck=$fsckOk new-commit-not-ff=$isCopy content-on-topic=$content x-trailer=$trailer"
+}
+
+function Check-31-CherryPickOntoRefusals {
+  $id = "CHK31-cherrypick-onto-refuses-conflict-and-alias"
+  if (-not (ShouldRun $id)) { return }
+  $repo = New-SandboxRepo "c31-cp-onto-refuse" $Phase
+  New-QaTextCommit $repo "t.txt" "base`n" "base"
+  Br $repo "feature"; Br $repo "topic"
+  Sw $repo "topic" | Out-Null
+  New-QaTextCommit $repo "t.txt" "topic edit`n" "topic edits t"
+  Sw $repo "feature" | Out-Null
+  New-QaTextCommit $repo "t.txt" "feature edit`n" "feature edits t"
+  $pick = Get-QaTip $repo "feature"
+  Sw $repo "main" | Out-Null
+  $topicBefore = Get-QaTip $repo "topic"
+  $mainTip = Get-QaTip $repo "main"
+  $tHash = Get-QaHash (Join-Path $repo "t.txt")
+  $r = Invoke-MG $repo @("cherry-pick", "--onto", "topic", $pick) $Phase
+  $topicSame = (Get-QaTip $repo "topic") -eq $topicBefore
+  $mainSame = (Get-QaTip $repo "main") -eq $mainTip
+  $stayed = (Get-QaCurrentBranch $repo) -eq "main"
+  $wtSame = (Get-QaHash (Join-Path $repo "t.txt")) -eq $tHash
+  # another spelling of an existing branch name must be refused, not silently create/alias
+  $ra = Invoke-MG $repo @("cherry-pick", "--onto", "MAIN", $pick) $Phase
+  $mainSame2 = (Get-QaTip $repo "main") -eq $mainTip
+  $why1 = $r.Out -match 'conflicts in'
+  $why2 = $ra.Out -match 'case-sensitive'
+  $fsckOk = Test-QaFsckClean $repo
+  $pass = $why1 -and $why2 -and ($r.Exit -ne 0) -and $topicSame -and $mainSame -and $stayed -and $wtSame -and ($ra.Exit -ne 0) -and $mainSame2 -and $fsckOk
+  Rec $id "cherry-pick --onto with a conflicting commit, and --onto MAIN" $pass "conflict-exit=$($r.Exit) (must be nonzero) topic-tip-same=$topicSame main-tip-same=$mainSame head-still-main=$stayed worktree-same=$wtSame alias-exit=$($ra.Exit) (must be nonzero) main-tip-same-after-alias=$mainSame2 reason-conflicts-in=$why1 reason-case-sensitive=$why2 fsck=$fsckOk"
+}
+
+function Check-32-RebaseUpstreamBranch {
+  $id = "CHK32-rebase-upstream-branch-switches-and-rebases"
+  if (-not (ShouldRun $id)) { return }
+  $repo = New-SandboxRepo "c32-rebase-ub" $Phase
+  New-QaTextCommit $repo "t.txt" "base`n" "base"
+  Br $repo "feature"; Sw $repo "feature" | Out-Null
+  New-QaTextCommit $repo "f1.txt" "f1`n" "feature one"
+  New-QaTextCommit $repo "f2.txt" "f2`n" "feature two"
+  Sw $repo "main" | Out-Null
+  New-QaTextCommit $repo "m1.txt" "m1`n" "main one"
+  $r = Invoke-MG $repo @("rebase", "main", "feature") $Phase
+  $onFeature = (Get-QaCurrentBranch $repo) -eq "feature"
+  $ahead = (Get-QaRangeCount $repo "main..feature") -eq 2
+  $behind = (Get-QaRangeCount $repo "main...feature") -eq 2   # main contained: symmetric diff is just feature's 2
+  $files = (Test-Path (Join-Path $repo "m1.txt")) -and (Test-Path (Join-Path $repo "f1.txt")) -and (Test-Path (Join-Path $repo "f2.txt"))
+  $fsckOk = Test-QaFsckClean $repo
+  $pass = ($r.Exit -eq 0) -and $onFeature -and $ahead -and $behind -and $files -and $fsckOk
+  Rec $id "rebase main feature (run from main)" $pass "exit=$($r.Exit) head-on-feature=$onFeature feature-2-ahead-of-main=$ahead main-fully-contained=$behind all-files-present=$files fsck=$fsckOk"
+}
+
+function Check-33-RebaseRefusesBeforeSwitch {
+  $id = "CHK33-rebase-refusal-leaves-head-on-original-branch"
+  if (-not (ShouldRun $id)) { return }
+  $repo = New-SandboxRepo "c33-rebase-refuse" $Phase
+  New-QaTextCommit $repo "t.txt" "base`n" "base"
+  Br $repo "feature"; Sw $repo "feature" | Out-Null
+  New-QaTextCommit $repo "f1.txt" "f1`n" "feature one"
+  Sw $repo "main" | Out-Null
+  $featTip = Get-QaTip $repo "feature"
+  $r = Invoke-MG $repo @("rebase", "no-such-upstream", "feature") $Phase
+  $stayed = (Get-QaCurrentBranch $repo) -eq "main"
+  $featSame = (Get-QaTip $repo "feature") -eq $featTip
+  $r2 = Invoke-MG $repo @("rebase", "main", "no-such-branch") $Phase
+  $stayed2 = (Get-QaCurrentBranch $repo) -eq "main"
+  # pre-flight only: from a third branch, an untracked file that main tracks (and feature does not)
+  Br $repo "third"
+  New-QaTextCommit $repo "u.txt" "tracked on main`n" "main adds u.txt"
+  Sw $repo "third" | Out-Null
+  $uPath = Join-Path $repo "u.txt"
+  [IO.File]::WriteAllText($uPath, "local untracked`n")
+  $uHash = Get-QaHash $uPath
+  $r3 = Invoke-MG $repo @("rebase", "main", "feature") $Phase
+  $stayed3 = (Get-QaCurrentBranch $repo) -eq "third"
+  $uSame = (Get-QaHashOrNull $uPath) -eq $uHash
+  $featSame3 = (Get-QaTip $repo "feature") -eq $featTip
+  $fsckOk = Test-QaFsckClean $repo
+  $pass = ($r.Exit -ne 0) -and $stayed -and $featSame -and ($r2.Exit -ne 0) -and $stayed2 -and $fsckOk -and ($r3.Exit -ne 0) -and $stayed3 -and $uSame -and $featSame3
+  Rec $id "rebase with a bad upstream, then a missing branch" $pass "bad-upstream-exit=$($r.Exit) (must be nonzero) head-still-main=$stayed feature-tip-same=$featSame missing-branch-exit=$($r2.Exit) (must be nonzero) head-still-main2=$stayed2 untracked-clash-exit=$($r3.Exit) (must be nonzero) head-still-third=$stayed3 untracked-file-same=$uSame feature-tip-same2=$featSame3 fsck=$fsckOk"
+}
+
+function Check-34-LogRanges {
+  $id = "CHK34-log-two-and-three-dot-ranges"
+  if (-not (ShouldRun $id)) { return }
+  $repo = New-SandboxRepo "c34-log-ranges" $Phase
+  New-QaTextCommit $repo "t.txt" "base`n" "base"
+  Br $repo "feature"
+  New-QaTextCommit $repo "m1.txt" "m1`n" "main one"
+  New-QaTextCommit $repo "m2.txt" "m2`n" "main two"
+  Sw $repo "feature" | Out-Null
+  New-QaTextCommit $repo "f1.txt" "f1`n" "feature one"
+  New-QaTextCommit $repo "f2.txt" "f2`n" "feature two"
+  New-QaTextCommit $repo "f3.txt" "f3`n" "feature three"
+  $two = Get-QaRangeCount $repo "main..feature"
+  $three = Get-QaRangeCount $repo "main...feature"
+  $pass = ($two -eq 3) -and ($three -eq 5)
+  Rec $id "log main..feature / main...feature" $pass "two-dot=$two (want 3) three-dot=$three (want 5)"
+}
+
+function Check-35-DiffPatchTextHunks {
+  $id = "CHK35-diff-patch-text-hunks"
+  if (-not (ShouldRun $id)) { return }
+  $repo = New-SandboxRepo "c35-diff-patch-text" $Phase
+  New-QaTextCommit $repo "t.txt" "alpha`nbeta`ngamma`n" "base"
+  [IO.File]::WriteAllText((Join-Path $repo "t.txt"), "alpha`nBETA-NEW`ngamma`n")
+  $r = Invoke-MG $repo @("diff", "-p") $Phase
+  $hunk = $r.Out -match '(?m)^@@ '
+  $minus = $r.Out -match '(?m)^-beta\s*$'
+  $plus = $r.Out -match '(?m)^\+BETA-NEW\s*$'
+  $m = Invoke-MG $repo @("diff", "--patch", "--machine") $Phase
+  $machine = ($m.Out -match '"hunks"') -and ($m.Out -match 'BETA-NEW')
+  $pass = ($r.Exit -eq 0) -and $hunk -and $minus -and $plus -and $machine
+  Rec $id "diff -p on a modified text file" $pass "exit=$($r.Exit) @@-header=$hunk -old-line=$minus +new-line=$plus machine-hunks=$machine"
+}
+
+function Check-36-DiffPatchBinaryNoHunks {
+  $id = "CHK36-diff-patch-binary-no-hunks"
+  if (-not (ShouldRun $id)) { return }
+  $repo = New-SandboxRepo "c36-diff-patch-bin" $Phase
+  New-QaCommit $repo "b.bin" "base binary" 1 3601
+  New-QaBinaryFixture (Join-Path $repo "b.bin") 1 3602
+  $r = Invoke-MG $repo @("diff", "-p") $Phase
+  $noHunk = $r.Out -notmatch '(?m)^@@ '
+  $says = $r.Out -match '(?i)binary file|too large'
+  $pass = ($r.Exit -eq 0) -and $noHunk -and $says
+  Rec $id "diff -p on a modified binary file" $pass "exit=$($r.Exit) no-@@=$noHunk says-binary=$says"
+}
+
+# ============================================================================
 # Run everything
 # ============================================================================
 Write-QaLog $Phase "=== 05_branching start (Only='$Only') ==="
@@ -1021,6 +1206,13 @@ Check-26-StatusStatCacheSeesEdits
 Check-27-ForceWithLeaseRefusesStaleLease
 Check-28-CloneOfTwoBranchesPassesFsck
 Check-29-PullConflictStopsLikeMerge
+Check-30-CherryPickOntoCopiesWithoutSwitch
+Check-31-CherryPickOntoRefusals
+Check-32-RebaseUpstreamBranch
+Check-33-RebaseRefusesBeforeSwitch
+Check-34-LogRanges
+Check-35-DiffPatchTextHunks
+Check-36-DiffPatchBinaryNoHunks
 
 Matrix-ResetSoftMixedHard
 Matrix-Revert
