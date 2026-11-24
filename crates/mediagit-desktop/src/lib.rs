@@ -457,6 +457,7 @@ pub fn run() {
             commands::repo_merge_control,
             commands::merge_resolve,
             commands::repo_diff,
+            commands::repo_diff_file,
             commands::stash_list,
             commands::stash_show,
             commands::stash_save,

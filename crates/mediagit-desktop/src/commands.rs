@@ -1287,6 +1287,27 @@ pub async fn repo_diff(
     read(&engine, &repo, &argv).await
 }
 
+/// Line-by-line changes of one file for Compare (`diff --patch -- <path>`).
+#[tauri::command]
+pub async fn repo_diff_file(
+    engine: tauri::State<'_, Engine>,
+    repo: String,
+    from: Option<String>,
+    to: Option<String>,
+    cached: Option<bool>,
+    path: String,
+) -> Result<Value, EngineError> {
+    let repo = repo_path(&repo)?;
+    let argv = views_b::diff_file_argv(
+        &repo,
+        from.as_deref(),
+        to.as_deref(),
+        cached.unwrap_or(false),
+        &path,
+    )?;
+    read(&engine, &repo, &argv).await
+}
+
 /// All stash entries, newest first.
 #[tauri::command]
 pub async fn stash_list(

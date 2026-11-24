@@ -940,7 +940,10 @@ gui = "CompareView"
 gui = "CompareView"
 
 [arg."diff PATHS"]
-excluded = "Compare already lists every changed file and filters that list in the view; a path filter on the CLI call adds nothing"
+gui = "CompareView"
+
+[arg."diff --patch"]
+gui = "CompareView"
 
 [arg."diff --cached"]
 gui = "CompareView"

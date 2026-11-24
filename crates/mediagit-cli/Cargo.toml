@@ -57,6 +57,7 @@ dialoguer = "0.12"
 futures = "0.3"
 glob = "0.3"
 dunce = "1.0"  # Cross-platform path canonicalization (handles Windows \\?\ prefix)
+similar = "2"  # Line diffs for `diff -p` on text files only
 num_cpus = "1.16"
 husky-rs = "0.3.2"
 ignore = "0.4"  # .gitignore-compatible pattern matching for .mediagitignore

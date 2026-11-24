@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use super::textdiff::{self, FileText, Side};
 use crate::ignore_rules::IgnoreMatcher;
 use crate::output;
 
@@ -43,8 +44,12 @@ pub struct DiffFileReport {
     #[cfg_attr(test, ts(type = "number | null"))]
     pub new_size: Option<u64>,
     /// Either side looks binary (NUL byte in the first 8000 bytes, or too
-    /// large to sniff). No text hunks are produced.
+    /// large to sniff).
     pub binary: bool,
+    /// `diff -p` only: line-by-line changes, for text files.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub text: Option<FileText>,
 }
 
 const BINARY_SNIFF: usize = 8000;
@@ -81,22 +86,70 @@ fn file_side(path: &Path) -> (Option<u64>, bool) {
     (size, binary)
 }
 
-/// A stored `old`/`new` pair becomes one report row.
+/// A stored side for `diff -p`: chunked (big media) or above the cutoff is
+/// never read in full.
+async fn stored_side(odb: &ObjectDatabase, oid: Option<&Oid>) -> Side {
+    let Some(oid) = oid else {
+        return Side::Absent;
+    };
+    if odb.is_chunked(oid).await.unwrap_or(true) {
+        return Side::TooLarge;
+    }
+    match odb.get_object_size(oid).await {
+        Ok(n) if n as u64 <= textdiff::MAX_SIDE => match odb.read(oid).await {
+            Ok(b) => Side::Bytes(b),
+            // Unreadable: no line view (the size row still shows).
+            Err(_) => Side::TooLarge,
+        },
+        _ => Side::TooLarge,
+    }
+}
+
+/// A working-tree side for `diff -p`.
+fn disk_side(path: &Path) -> Side {
+    match std::fs::metadata(path) {
+        Err(_) => Side::Absent,
+        Ok(m) if m.len() > textdiff::MAX_SIDE => Side::TooLarge,
+        Ok(_) => std::fs::read(path).map_or(Side::TooLarge, Side::Bytes),
+    }
+}
+
+/// A stored `old`/`new` pair becomes one report row (hunks with `patch`).
 async fn stored_file(
     odb: &ObjectDatabase,
     path: String,
     status: &str,
     old: Option<&Oid>,
     new: Option<&Oid>,
+    patch: bool,
 ) -> DiffFileReport {
     let (old_size, old_bin) = oid_side(odb, old).await;
     let (new_size, new_bin) = oid_side(odb, new).await;
+    let text = if patch {
+        Some(textdiff::compare(
+            &stored_side(odb, old).await,
+            &stored_side(odb, new).await,
+        ))
+    } else {
+        None
+    };
     DiffFileReport {
         path,
         status: status.into(),
         old_size,
         new_size,
         binary: old_bin || new_bin,
+        text,
+    }
+}
+
+/// `diff -p` in a terminal: unified changes after the file list.
+fn print_patches(files: Option<Vec<DiffFileReport>>) {
+    for f in files.into_iter().flatten() {
+        if let Some(t) = &f.text {
+            println!();
+            print!("{}", textdiff::render(&f.path, t));
+        }
     }
 }
 
@@ -146,6 +199,10 @@ pub struct DiffCmd {
     /// Show summary
     #[arg(long)]
     pub summary: bool,
+
+    /// Show line-by-line changes for text files (binary and large files: sizes only)
+    #[arg(short = 'p', long)]
+    pub patch: bool,
 
     /// Only show these paths (files or directories), after `--`
     #[arg(last = true, value_name = "PATHS")]
@@ -205,7 +262,7 @@ impl DiffCmd {
         let to_commit = Commit::deserialize(&to_data)
             .context(format!("Failed to deserialize commit {}", to_oid))?;
 
-        if output::machine_mode() {
+        let patched = if output::machine_mode() || self.patch {
             let mut files = Vec::new();
             if from_commit.tree != to_commit.tree {
                 let mut diff = TreeDiffer::new(odb.clone())
@@ -216,8 +273,17 @@ impl DiffCmd {
                 diff.modified.retain(|e| self.keep(&e.path));
                 diff.deleted.retain(|e| self.keep(&e.name));
                 for e in &diff.added {
-                    files
-                        .push(stored_file(&odb, e.name.clone(), "added", None, Some(&e.oid)).await);
+                    files.push(
+                        stored_file(
+                            &odb,
+                            e.name.clone(),
+                            "added",
+                            None,
+                            Some(&e.oid),
+                            self.patch,
+                        )
+                        .await,
+                    );
                 }
                 for e in &diff.modified {
                     files.push(
@@ -227,24 +293,38 @@ impl DiffCmd {
                             "modified",
                             Some(&e.source.oid),
                             Some(&e.target.oid),
+                            self.patch,
                         )
                         .await,
                     );
                 }
                 for e in &diff.deleted {
                     files.push(
-                        stored_file(&odb, e.name.clone(), "deleted", Some(&e.oid), None).await,
+                        stored_file(
+                            &odb,
+                            e.name.clone(),
+                            "deleted",
+                            Some(&e.oid),
+                            None,
+                            self.patch,
+                        )
+                        .await,
                     );
                 }
                 files.sort_by(|a, b| a.path.cmp(&b.path));
             }
-            return output::emit_ok(&DiffReport {
-                mode: "commits".into(),
-                from: Some(from_oid.to_hex()),
-                to: Some(to_oid.to_hex()),
-                files,
-            });
-        }
+            if output::machine_mode() {
+                return output::emit_ok(&DiffReport {
+                    mode: "commits".into(),
+                    from: Some(from_oid.to_hex()),
+                    to: Some(to_oid.to_hex()),
+                    files,
+                });
+            }
+            Some(files)
+        } else {
+            None
+        };
 
         // Display diff header
         println!("{} Comparing commits:", style("📊").cyan().bold());
@@ -303,6 +383,7 @@ impl DiffCmd {
             );
         }
 
+        print_patches(patched);
         Ok(())
     }
 
@@ -389,28 +470,41 @@ impl DiffCmd {
         added.retain(wanted);
         deleted.retain(wanted);
 
-        if output::machine_mode() {
+        let patched = if output::machine_mode() || self.patch {
             let mut files = Vec::new();
             for path in &modified {
                 let name = path.to_string_lossy().replace('\\', "/");
                 let (new_size, new_bin) = file_side(&repo_root.join(path));
                 let (old_size, old_bin) = oid_side(odb, head_files.get(path)).await;
+                let text = if self.patch {
+                    Some(textdiff::compare(
+                        &stored_side(odb, head_files.get(path)).await,
+                        &disk_side(&repo_root.join(path)),
+                    ))
+                } else {
+                    None
+                };
                 files.push(DiffFileReport {
                     path: name,
                     status: "modified".into(),
                     old_size,
                     new_size,
                     binary: old_bin || new_bin,
+                    text,
                 });
             }
             for path in &added {
                 let (new_size, binary) = file_side(&repo_root.join(path));
+                let text = self
+                    .patch
+                    .then(|| textdiff::compare(&Side::Absent, &disk_side(&repo_root.join(path))));
                 files.push(DiffFileReport {
                     path: path.to_string_lossy().replace('\\', "/"),
                     status: "added".into(),
                     old_size: None,
                     new_size,
                     binary,
+                    text,
                 });
             }
             for path in &deleted {
@@ -421,18 +515,24 @@ impl DiffCmd {
                         "deleted",
                         head_files.get(path),
                         None,
+                        self.patch,
                     )
                     .await,
                 );
             }
             files.sort_by(|a, b| a.path.cmp(&b.path));
-            return output::emit_ok(&DiffReport {
-                mode: "working".into(),
-                from: Some(head_oid.to_hex()),
-                to: None,
-                files,
-            });
-        }
+            if output::machine_mode() {
+                return output::emit_ok(&DiffReport {
+                    mode: "working".into(),
+                    from: Some(head_oid.to_hex()),
+                    to: None,
+                    files,
+                });
+            }
+            Some(files)
+        } else {
+            None
+        };
 
         // Display results
         let short_head = &head_oid.to_hex()[..7];
@@ -478,6 +578,7 @@ impl DiffCmd {
             );
         }
 
+        print_patches(patched);
         Ok(())
     }
 
@@ -543,7 +644,7 @@ impl DiffCmd {
         staged_new.retain(|p| self.keep(&p.to_string_lossy()));
         staged_modified.retain(|p| self.keep(&p.to_string_lossy()));
 
-        if machine {
+        let patched = if machine || self.patch {
             let staged: HashMap<&PathBuf, &Oid> =
                 index.entries().map(|e| (&e.path, &e.oid)).collect();
             let mut files = Vec::new();
@@ -556,19 +657,25 @@ impl DiffCmd {
                             status,
                             head_files.get(path),
                             staged.get(path).copied(),
+                            self.patch,
                         )
                         .await,
                     );
                 }
             }
             files.sort_by(|a, b| a.path.cmp(&b.path));
-            return output::emit_ok(&DiffReport {
-                mode: "cached".into(),
-                from: Some(head_oid.to_hex()),
-                to: None,
-                files,
-            });
-        }
+            if machine {
+                return output::emit_ok(&DiffReport {
+                    mode: "cached".into(),
+                    from: Some(head_oid.to_hex()),
+                    to: None,
+                    files,
+                });
+            }
+            Some(files)
+        } else {
+            None
+        };
 
         if staged_new.is_empty() && staged_modified.is_empty() {
             println!("{}", style("No staged changes vs HEAD").dim());
@@ -583,6 +690,7 @@ impl DiffCmd {
         }
 
         println!();
+        print_patches(patched);
         Ok(())
     }
 

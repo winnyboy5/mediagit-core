@@ -37,6 +37,7 @@ pub mod stash;
 pub mod stats;
 pub mod status;
 pub mod tag;
+pub mod textdiff;
 pub(crate) mod utils;
 pub mod verify;
 

@@ -417,6 +417,25 @@ pub fn diff_argv(
     }
 }
 
+/// The same comparison as [`diff_argv`] for ONE file, with line-by-line
+/// changes (`--patch -- <path>`): Compare asks only for the file the person
+/// picked, so a big comparison never carries every file's text.
+pub fn diff_file_argv(
+    repo: &Path,
+    from: Option<&str>,
+    to: Option<&str>,
+    cached: bool,
+    path: &str,
+) -> Result<Vec<String>, EngineError> {
+    let rel = repo_relative(repo, path)?;
+    if rel == "." {
+        return Err(invalid("path", path));
+    }
+    let mut argv = diff_argv(from, to, cached)?;
+    argv.extend(["--patch".into(), "--".into(), rel]);
+    Ok(argv)
+}
+
 // ---------------------------------------------------------------------------
 // bisect, reflog
 // ---------------------------------------------------------------------------
@@ -1106,6 +1125,18 @@ mod tests {
         assert!(bad(diff_argv(Some(OID), Some("HEAD"), true)));
         assert!(bad(diff_argv(Some(OID), None, false)));
         assert!(bad(diff_argv(Some("--cached"), Some(OID), false)));
+        let repo = std::env::temp_dir();
+        assert_eq!(
+            diff_file_argv(&repo, None, None, true, "art/notes.txt").unwrap(),
+            s(&["diff", "--cached", "--patch", "--", "art/notes.txt"])
+        );
+        assert_eq!(
+            diff_file_argv(&repo, Some(OID), Some("HEAD"), false, "a.txt").unwrap(),
+            s(&["diff", OID, "HEAD", "--patch", "--", "a.txt"])
+        );
+        for p in ["../x", "--all", "."] {
+            assert!(bad(diff_file_argv(&repo, None, None, false, p)), "{p}");
+        }
     }
 
     #[test]
