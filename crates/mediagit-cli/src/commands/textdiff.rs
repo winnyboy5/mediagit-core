@@ -121,6 +121,13 @@ pub fn compare(old: &Side, new: &Side) -> FileText {
                             |k: &str| hunk.lines.iter().filter(|l| l.kind != k).count() as u32;
                         hunk.old_lines = count("+");
                         hunk.new_lines = count("-");
+                        // A side with nothing kept starts at 0, as in unified diffs.
+                        if hunk.old_lines == 0 && o_len > 0 {
+                            hunk.old_start -= 1;
+                        }
+                        if hunk.new_lines == 0 && n_len > 0 {
+                            hunk.new_start -= 1;
+                        }
                         out.hunks.push(hunk);
                     }
                     return out;
@@ -264,50 +271,23 @@ mod tests {
 
     #[test]
     fn a_cut_hunk_header_counts_only_the_kept_lines() {
-        let old: String = (0..MAX_LINES)
-            .map(|i| {
-                format!(
-                    "old{i}
-"
-                )
-            })
-            .collect();
-        let new: String = (0..MAX_LINES)
-            .map(|i| {
-                format!(
-                    "new{i}
-"
-                )
-            })
-            .collect();
+        let old: String = (0..MAX_LINES).map(|i| format!("old{i}\n")).collect();
+        let new: String = (0..MAX_LINES).map(|i| format!("new{i}\n")).collect();
         let t = compare(&b(&old), &b(&new));
         assert!(t.truncated);
         let h = t.hunks.last().unwrap();
         let minus = h.lines.iter().filter(|l| l.kind == "-").count() as u32;
         let plus = h.lines.iter().filter(|l| l.kind == "+").count() as u32;
         assert_eq!((h.old_lines, h.new_lines), (minus, plus));
+        // Every kept line is a removal: the new side is empty and starts at 0.
+        assert_eq!((h.new_start, h.new_lines), (0, 0));
     }
 
     #[test]
     fn a_file_where_every_line_changes_finishes_quickly() {
         // Interleaved changes are Myers' worst case; the deadline bounds it.
-        let old: String = (0..200_000)
-            .map(|i| {
-                format!(
-                    "{i}
-"
-                )
-            })
-            .collect();
-        let new: String = (0..200_000)
-            .map(|i| {
-                format!(
-                    "{}
-",
-                    i * 7 + 3
-                )
-            })
-            .collect();
+        let old: String = (0..200_000).map(|i| format!("{i}\n")).collect();
+        let new: String = (0..200_000).map(|i| format!("{}\n", i * 7 + 3)).collect();
         let t0 = std::time::Instant::now();
         let t = compare(&b(&old), &b(&new));
         assert_eq!(t.kind, "text");
