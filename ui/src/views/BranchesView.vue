@@ -95,19 +95,15 @@ function openDetails(name: string) {
 // Protection ------------------------------------------------------------------
 const protecting = ref<string | null>(null)
 const protectOpen = ref(false)
-const requireReviews = ref(false)
 const unprotectOpen = ref(false)
 function askProtect(name: string, isProtected: boolean) {
   protecting.value = name
   branches.actionError = null
   if (isProtected) unprotectOpen.value = true
-  else {
-    requireReviews.value = false
-    protectOpen.value = true
-  }
+  else protectOpen.value = true
 }
 async function protect() {
-  if (protecting.value && (await branches.protect(protecting.value, requireReviews.value === true))) protectOpen.value = false
+  if (protecting.value && (await branches.protect(protecting.value))) protectOpen.value = false
 }
 
 // Rename ----------------------------------------------------------------
@@ -329,7 +325,6 @@ function doDelete() {
     />
 
     <Dialog v-model:open="protectOpen" :title="`Protect ${protecting ?? ''}`" description="A protected branch cannot be deleted or have its history overwritten.">
-      <OptionCheck v-model="requireReviews" label="Ask for a review first" flag="--require-reviews" hint="Changes need one approval before they are merged" />
       <p v-if="branches.actionError && protectOpen" class="derr" role="alert">{{ branches.actionError.message }}</p>
       <template #footer>
         <Button @click="protectOpen = false">Cancel</Button>

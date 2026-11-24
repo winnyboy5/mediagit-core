@@ -92,7 +92,8 @@ verbose output.
 
 Protect a branch against force-push and deletion (see
 `[protected_branches]` in the [Configuration Reference](../reference/config.md)).
-`--require-reviews` additionally requires pull-request reviews before merge;
+`--require-reviews` records that merges need a review. It is not enforced:
+MediaGit has no review workflow yet.
 `--unprotect` removes protection.
 
 ## Examples
@@ -122,7 +123,7 @@ $ mediagit branch delete -d feature-done
 $ mediagit branch delete -D feature-abandoned
 
 # Protect main
-$ mediagit branch protect main --require-reviews
+$ mediagit branch protect main
 ```
 
 

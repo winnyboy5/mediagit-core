@@ -270,7 +270,7 @@ pub struct ProtectOpts {
     #[arg(value_name = "BRANCH")]
     pub branch: String,
 
-    /// Require pull request reviews before merge
+    /// Record that merges need a review. Not enforced: MediaGit has no review workflow yet
     #[arg(long)]
     pub require_reviews: bool,
 
@@ -1265,7 +1265,7 @@ impl BranchCmd {
             if !opts.quiet {
                 let mut rules = vec!["prevent force-push", "prevent deletion"];
                 if opts.require_reviews {
-                    rules.push("require reviews");
+                    rules.push("require reviews (recorded, not enforced)");
                 }
                 output::success(&format!(
                     "Protected branch '{}' ({})",

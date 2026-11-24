@@ -119,13 +119,13 @@ test.describe('Branches: options', () => {
     await expect.poll(() => args(page, 'branch_rename')).toMatchObject([{ from: 'feature/grade', to: 'review/cut-2', force: true, confirmed: true }])
   })
 
-  test('protect with reviews, then remove protection after asking; details dialog', async ({ page }) => {
+  test('protect (no review option: nothing enforces it), then remove protection after asking; details dialog', async ({ page }) => {
     await boot(page, '/branches', 'Branches')
     await menu(page, 'feature/grade', 'Protect branch…')
     const dlg = page.getByRole('dialog', { name: 'Protect feature/grade' })
-    await dlg.getByRole('checkbox', { name: 'Ask for a review first' }).click()
+    await expect(dlg.getByRole('checkbox', { name: 'Ask for a review first' })).toHaveCount(0)
     await dlg.getByRole('button', { name: 'Protect branch' }).click()
-    await expect.poll(() => args(page, 'branch_protect')).toMatchObject([{ name: 'feature/grade', requireReviews: true, unprotect: false }])
+    await expect.poll(() => args(page, 'branch_protect')).toMatchObject([{ name: 'feature/grade', requireReviews: false, unprotect: false }])
 
     await menu(page, 'main', 'Remove protection…')
     const ask = page.getByRole('alertdialog')
