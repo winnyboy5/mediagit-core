@@ -422,6 +422,8 @@ pub fn run() {
             repo_clone,
             cancel_op,
             commands::repo_allow,
+            commands::last_repo_get,
+            commands::last_repo_set,
             commands::repo_log,
             commands::repo_show,
             commands::repo_extract,

@@ -687,6 +687,57 @@ pub fn repo_allow(
     Ok(())
 }
 
+/// The repository the app last had open, kept in `<app data>/last-repo.json`.
+/// WebView2 does not flush localStorage when the app is killed, so the UI's
+/// own copy can reopen an older repository after a crash (R-03). A plain
+/// file write survives a killed process.
+fn last_repo_file(app: &tauri::AppHandle) -> Result<PathBuf, EngineError> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|e| EngineError::Spawn(e.to_string()))?
+        .join("last-repo.json"))
+}
+
+fn read_last_repo(file: &Path) -> Option<String> {
+    let v: Value = serde_json::from_slice(&std::fs::read(file).ok()?).ok()?;
+    v.get("path")?.as_str().map(str::to_owned)
+}
+
+/// Write to a temp file, then rename: a kill mid-write leaves the old file.
+fn write_last_repo(file: &Path, repo: Option<&str>) -> std::io::Result<()> {
+    let Some(repo) = repo else {
+        return match std::fs::remove_file(file) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        };
+    };
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = file.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::json!({ "path": repo }).to_string())?;
+    std::fs::rename(&tmp, file)
+}
+
+/// The last open repository, or `None` (never opened, closed, or unreadable).
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)] // tauri injects AppHandle by value
+pub fn last_repo_get(app: tauri::AppHandle) -> Option<String> {
+    read_last_repo(&last_repo_file(&app).ok()?)
+}
+
+/// Remember `repo` as the last open repository; `None` forgets it.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)] // tauri injects AppHandle by value
+pub fn last_repo_set(app: tauri::AppHandle, repo: Option<String>) -> Result<(), EngineError> {
+    if let Some(r) = &repo {
+        repo_path(r)?;
+    }
+    write_last_repo(&last_repo_file(&app)?, repo.as_deref())
+        .map_err(|e| EngineError::Spawn(e.to_string()))
+}
+
 /// Commit list page (`log`), newest first, plus all refs.
 #[tauri::command]
 pub async fn repo_log(
@@ -1573,6 +1624,25 @@ pub mod views_b;
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+    /// R-03: the last repo round-trips through a file, `None` forgets it,
+    /// and a missing, half-written or foreign file reads as `None`.
+    #[test]
+    fn last_repo_file_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("app").join("last-repo.json");
+        assert_eq!(read_last_repo(&file), None);
+        write_last_repo(&file, Some(r"C:\work\hero")).unwrap();
+        assert_eq!(read_last_repo(&file).as_deref(), Some(r"C:\work\hero"));
+        write_last_repo(&file, Some("/work/other")).unwrap();
+        assert_eq!(read_last_repo(&file).as_deref(), Some("/work/other"));
+        assert!(!file.with_extension("json.tmp").exists());
+        write_last_repo(&file, None).unwrap();
+        assert_eq!(read_last_repo(&file), None);
+        write_last_repo(&file, None).unwrap(); // already gone: still fine
+        std::fs::write(&file, b"{\"path\": 4").unwrap();
+        assert_eq!(read_last_repo(&file), None);
+    }
 
     #[allow(clippy::needless_pass_by_value)] // call sites pass temporaries
     fn bad(r: Result<Vec<String>, EngineError>) -> bool {

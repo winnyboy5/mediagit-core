@@ -22,6 +22,8 @@ const api = vi.hoisted(() => ({
   cancelOp: vi.fn(),
   repoStatus: vi.fn(),
   allowRepo: vi.fn(),
+  lastRepoGet: vi.fn(),
+  lastRepoSet: vi.fn(),
 }))
 vi.mock('@/api', async (orig) => ({ ...(await orig<typeof import('@/api')>()), api }))
 
@@ -271,6 +273,44 @@ describe('repo store', () => {
     expect(await repo.open('/repos/hero/art/sub')).toBe(true)
     expect(repo.path).toBe('/repos/hero')
     expect(api.allowRepo).toHaveBeenCalledWith('/repos/hero')
+  })
+
+  it('R-03: open and close tell the desktop side; a failure there never blocks', async () => {
+    api.repoStatus.mockResolvedValue({ root: '/repos/hero', branch: { name: 'main' } })
+    api.lastRepoSet.mockRejectedValue(new Error('read-only app data'))
+    const repo = useRepoStore()
+    expect(await repo.open('/repos/hero')).toBe(true)
+    expect(api.lastRepoSet).toHaveBeenLastCalledWith('/repos/hero')
+    repo.close()
+    expect(api.lastRepoSet).toHaveBeenLastCalledWith(null)
+    expect(repo.path).toBeNull()
+  })
+
+  it('R-03: on startup the desktop record wins over a stale localStorage path', async () => {
+    const repo = useRepoStore()
+    repo.path = '/repos/older'
+    api.lastRepoGet.mockResolvedValue('/repos/hero')
+    await repo.restoreLast()
+    expect(repo.path).toBe('/repos/hero')
+    expect(JSON.parse(localStorage.getItem('mg.repo')!)).toBe('/repos/hero')
+  })
+
+  it('R-03: no desktop record, an error, or a repo opened meanwhile keeps the current path', async () => {
+    const repo = useRepoStore()
+    repo.path = '/repos/older'
+    api.lastRepoGet.mockResolvedValue(null)
+    await repo.restoreLast()
+    expect(repo.path).toBe('/repos/older')
+    api.lastRepoGet.mockRejectedValue(new Error('not in the app'))
+    await repo.restoreLast()
+    expect(repo.path).toBe('/repos/older')
+    let release!: (v: string) => void
+    api.lastRepoGet.mockReturnValue(new Promise<string>((r) => (release = r)))
+    const pending = repo.restoreLast()
+    repo.path = '/repos/picked'
+    release('/repos/hero')
+    await pending
+    expect(repo.path).toBe('/repos/picked')
   })
 })
 

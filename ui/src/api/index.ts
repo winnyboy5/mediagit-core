@@ -234,6 +234,9 @@ export const api = {
 
   /** Let the webview load files under this repository (previews). */
   allowRepo: (repo: string) => invoke<void>('repo_allow', { repo }),
+  /** Last open repository, kept by the desktop side (survives a killed app; localStorage may not). */
+  lastRepoGet: () => invoke<string | null>('last_repo_get'),
+  lastRepoSet: (repo: string | null) => invoke<void>('last_repo_set', { repo }),
   /** A URL the webview can load for a local file. */
   fileSrc: (path: string) => convertFileSrc(path),
 

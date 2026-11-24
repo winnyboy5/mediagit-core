@@ -26,6 +26,35 @@ export const useRepoStore = defineStore('repo', () => {
     })
   }
 
+  /** Tell the desktop side; a failure must never block opening or closing. */
+  async function remember(p: string | null) {
+    try {
+      await api.lastRepoSet(p)
+    } catch {
+      // Not in the desktop app, or the app data folder is not writable.
+    }
+  }
+
+  /**
+   * Startup: prefer the desktop side's record over localStorage, which
+   * WebView2 may not have flushed when the app was killed (R-03). Never
+   * rejects; skipped if a repository was opened meanwhile.
+   */
+  async function restoreLast() {
+    const before = path.value
+    let last: string | null = null
+    try {
+      // The app mounts after this: never let a stuck call keep the window blank.
+      last = await Promise.race([api.lastRepoGet(), new Promise<null>((r) => setTimeout(() => r(null), 1000))])
+    } catch {
+      return
+    }
+    if (last && path.value === before && last !== before) {
+      path.value = last
+      save(KEY, last)
+    }
+  }
+
   /** Leaving a repository forgets its session passphrase. */
   function lock(p: string) {
     useUnlockStore().lock(p)
@@ -71,6 +100,7 @@ export const useRepoStore = defineStore('repo', () => {
     loading.value = false
     allow(root)
     save(KEY, root)
+    await remember(root)
     useRecentStore().add(root, (status.value as StatusReport | null)?.branch.name)
     return true
   }
@@ -83,7 +113,8 @@ export const useRepoStore = defineStore('repo', () => {
     error.value = null
     loading.value = false
     forget(KEY)
+    void remember(null)
   }
 
-  return { path, status, loading, error, open, refresh, close }
+  return { path, status, loading, error, open, refresh, close, restoreLast }
 })
