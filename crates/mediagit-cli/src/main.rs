@@ -265,32 +265,22 @@ fn preprocess_args(args: Vec<String>) -> Vec<String> {
         //    `branch` / `tag` — matching the muscle-memory `branch feat-a`
         //    idiom. `remote` keeps list-default because `remote add`/`remove`
         //    have distinct verbs without an obvious name-only sugar.
-        let default_action: Option<(&str, &[&str], &'static str)> = match subcmd {
-            "branch" => Some((
-                "branch",
-                &[
-                    "list", "create", "delete", "rename", "show", "switch", "checkout", "co",
-                    "merge", "protect", "help",
-                ][..],
-                "create",
-            )),
-            "tag" => Some((
-                "tag",
-                &["list", "create", "delete", "show", "verify", "help"][..],
-                "create",
-            )),
-            "remote" => Some((
-                "remote",
-                &[
-                    "list", "add", "remove", "rename", "show", "set-url", "ls-tree", "repos",
-                    "help",
-                ][..],
-                "list",
-            )),
-            "lock" => Some(("lock", &["create", "unlock", "list", "help"][..], "create")),
+        let default_action: Option<&'static str> = match subcmd {
+            "branch" | "tag" | "lock" => Some("create"),
+            "remote" => Some("list"),
             _ => None,
         };
-        if let Some((_cmd, known_subcmds, positional_action)) = default_action {
+        if let Some(positional_action) = default_action {
+            // Known verbs come from clap itself (names AND aliases), so an
+            // alias like `tag rm` is never mistaken for a tag name. A
+            // hardcoded list here once drifted and missed `ls`/`rm`.
+            let cli = Cli::command();
+            let is_verb = |s: &str| {
+                s == "help"
+                    || cli
+                        .find_subcommand(subcmd)
+                        .is_some_and(|c| c.find_subcommand(s).is_some())
+            };
             // Check if -h/--help appears before any positional argument
             let has_help = args[pos + 1..]
                 .iter()
@@ -304,7 +294,7 @@ fn preprocess_args(args: Vec<String>) -> Vec<String> {
             let inject: Option<&str> = match next_positional {
                 None if has_help => None, // --help → don't inject, let clap show real help
                 None => Some("list"),
-                Some(s) if known_subcmds.contains(&s) => None,
+                Some(s) if is_verb(s) => None,
                 // BUG-CLI-B2: an unrecognized word after `branch` used to be
                 // silently routed to `create` (so `branch unprotect` created
                 // a branch named "unprotect"). `branch`'s own after_help
@@ -868,6 +858,23 @@ fn generate_completions(shell: Shell) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pre(args: &[&str]) -> Vec<String> {
+        preprocess_args(args.iter().map(|s| s.to_string()).collect())
+    }
+
+    /// Subcommand aliases (`tag rm`, `tag ls`, `lock ls`) are verbs, not
+    /// names: the create-sugar must not wrap them (`tag rm v1` once became
+    /// `tag create rm v1`). A bare name still gets the sugar.
+    #[test]
+    fn shorthand_leaves_aliases_alone() {
+        assert_eq!(pre(&["m", "tag", "rm", "v1"]), ["m", "tag", "rm", "v1"]);
+        assert_eq!(pre(&["m", "tag", "ls"]), ["m", "tag", "ls"]);
+        assert_eq!(pre(&["m", "lock", "ls"]), ["m", "lock", "ls"]);
+        assert_eq!(pre(&["m", "tag", "v1"]), ["m", "tag", "create", "v1"]);
+        assert_eq!(pre(&["m", "tag"]), ["m", "tag", "list"]);
+        assert!(Cli::try_parse_from(pre(&["m", "tag", "rm", "v1"])).is_ok());
+    }
 
     /// `--server` is a subcommand-local flag (declared on `LoginOpts`), not
     /// a value-taking *global* flag, so `preprocess_args` needs no change
