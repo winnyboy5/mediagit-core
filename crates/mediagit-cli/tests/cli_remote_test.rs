@@ -390,6 +390,30 @@ fn test_remote_add_duplicate() {
         .failure();
 }
 
+/// `remote add -f` really fetches: against a dead server it now fails and
+/// says so (it used to print "coming soon" and exit 0). The remote stays.
+#[test]
+fn test_remote_add_fetch_runs_fetch() {
+    let temp_dir = TempDir::new().unwrap();
+    init_repo(temp_dir.path());
+
+    mediagit()
+        .args(["remote", "add", "-f", "origin", "http://127.0.0.1:1/repo"])
+        .current_dir(temp_dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "remote 'origin' was added, but the fetch failed",
+        ));
+
+    mediagit()
+        .args(["remote", "list"])
+        .current_dir(temp_dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("origin"));
+}
+
 #[test]
 fn test_remote_remove_nonexistent() {
     let temp_dir = TempDir::new().unwrap();

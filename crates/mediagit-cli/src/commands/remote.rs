@@ -152,11 +152,11 @@ pub enum RemoteSubcommand {
         #[arg(value_name = "NAME")]
         name: String,
 
-        /// Remote URL (http://, https://, file://, ssh://)
+        /// Remote URL (http:// or https://; file:// and ssh:// are not supported)
         #[arg(value_name = "URL")]
         url: String,
 
-        /// Fetch immediately after adding
+        /// Fetch all branches from the new remote after adding it
         #[arg(short, long)]
         fetch: bool,
 
@@ -488,30 +488,35 @@ impl RemoteCmd {
         // Save config
         config.save(&repo_root)?;
 
+        if !output::machine_mode() {
+            println!(
+                "{} Added remote '{}' → {}",
+                style("✓").green(),
+                style(name).yellow(),
+                style(url).cyan()
+            );
+        }
+
+        // `-f`: fetch every branch, like `git remote add -f`. The remote stays
+        // added when the fetch fails; the error says so and exits non-zero.
+        if fetch {
+            super::fetch::FetchCmd {
+                remote: Some(name.to_string()),
+                branch: None,
+                all: true,
+                prune: false,
+                quiet: false,
+                verbose: false,
+                embedded: true,
+            }
+            .execute()
+            .await
+            .map_err(|e| e.context(format!("remote '{name}' was added, but the fetch failed")))?;
+        }
+
         if output::machine_mode() {
             return emit_remotes(&config);
         }
-
-        println!(
-            "{} Added remote '{}' → {}",
-            style("✓").green(),
-            style(name).yellow(),
-            style(url).cyan()
-        );
-
-        if fetch {
-            println!(
-                "{} Fetching from '{}'...",
-                style("→").cyan(),
-                style(name).yellow()
-            );
-            // Future enhancement: implement standalone fetch (pull command already works)
-            println!(
-                "{} Standalone fetch coming soon - use 'pull' for now",
-                style("ℹ").blue()
-            );
-        }
-
         Ok(())
     }
 
