@@ -99,8 +99,17 @@ pub fn init_tracing_with_config(config: LogConfig) -> Result<(), LogError> {
             // line. Applying `with_target`/`with_thread_ids`/timer settings
             // here would defeat that; the other variants are where the knobs
             // apply.
+            //
+            // The one exception is colour: the bare layer always wrote ANSI
+            // escapes, so when the desktop app (or a log file, or a service
+            // manager) captured the server's output it showed `[2m...[0m`
+            // garbage. Colour only when the stream is a real terminal.
             registry
-                .with(fmt::layer().with_writer(get_writer(&config.output)))
+                .with(
+                    fmt::layer()
+                        .with_writer(get_writer(&config.output))
+                        .with_ansi(stream_is_terminal(&config.output)),
+                )
                 .init();
         }
         LogFormat::Compact => {
@@ -146,6 +155,14 @@ pub fn init_tracing_with_config(config: LogConfig) -> Result<(), LogError> {
     }
 
     Ok(())
+}
+
+fn stream_is_terminal(output: &LogOutput) -> bool {
+    use std::io::IsTerminal;
+    match output {
+        LogOutput::Stdout => io::stdout().is_terminal(),
+        LogOutput::Stderr => io::stderr().is_terminal(),
+    }
 }
 
 /// A `MakeWriter` over stdout/stderr that allocates nothing per event.

@@ -155,3 +155,49 @@ fn readiness_is_announced_once_the_port_is_actually_bound() {
          --- stdout ---\n{stdout}"
     );
 }
+
+/// The desktop app pipes the server's output into its "What the server
+/// printed" panel. The bare `fmt::layer()` always wrote ANSI colour escapes,
+/// so that panel (and any log file or service manager capturing stdout)
+/// showed `[2m...[0m` garbage. Output that is not a terminal must be plain.
+///
+/// A failed bind is used because it makes the server log and exit on its own.
+#[test]
+fn piped_server_output_has_no_ansi_escapes() {
+    let squatter = TcpListener::bind("127.0.0.1:0").expect("bind squatter");
+    let port = squatter.local_addr().expect("local_addr").port();
+    let data_dir = std::env::temp_dir().join(format!("mediagit-ansi-test-{port}"));
+    std::fs::create_dir_all(&data_dir).expect("create data dir");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_mediagit-server"))
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--host")
+        .arg("127.0.0.1")
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .current_dir(&data_dir)
+        // tracing honours NO_COLOR; an inherited one would hide the bug.
+        .env_remove("NO_COLOR")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run mediagit-server");
+    let _ = std::fs::remove_dir_all(&data_dir);
+    drop(squatter);
+
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Without a log line there is nothing to inspect and the check is empty.
+    assert!(
+        text.contains("INFO") || text.contains("ERROR") || text.contains("WARN"),
+        "server printed no log lines to inspect:\n{text}"
+    );
+    assert!(
+        !text.contains('\u{1b}'),
+        "piped server output contains ANSI escapes:\n{text}"
+    );
+}
