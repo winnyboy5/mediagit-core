@@ -183,6 +183,15 @@ impl RebaseCmd {
             anyhow::bail!("A rebase is already in progress. Use --continue, --skip, or --abort.");
         }
 
+        let storage_path = repo_root.join(".mediagit");
+        let storage = create_storage_backend(&repo_root).await?;
+        let refdb = RefDatabase::new(&storage_path);
+        let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 1000));
+
+        // Resolve UPSTREAM once, before BRANCH is switched to: a HEAD-relative
+        // upstream (HEAD~1) names a commit of the branch the user is on, as in git.
+        let upstream_oid = resolve_revision(upstream, &refdb, &odb).await?;
+
         // `rebase <upstream> <branch>` rebases that branch: switch to it first
         // (as git does). The switch's own guard refuses unsaved work it would
         // overwrite, before anything moves. BRANCH used to be ignored.
@@ -196,12 +205,6 @@ impl RebaseCmd {
             if head.as_deref() != Some(&format!("refs/heads/{wanted}")) {
                 // Every refusal rebase itself can make must happen before the
                 // switch, or a failed rebase leaves the user on BRANCH.
-                let refdb = RefDatabase::new(repo_root.join(".mediagit"));
-                let odb = Arc::new(ObjectDatabase::with_smart_compression(
-                    create_storage_backend(&repo_root).await?,
-                    1000,
-                ));
-                let upstream_oid = resolve_revision(upstream, &refdb, &odb).await?;
                 let branch_oid = resolve_revision(wanted, &refdb, &odb)
                     .await
                     .with_context(|| format!("Cannot rebase '{wanted}': no such branch"))?;
@@ -256,14 +259,6 @@ impl RebaseCmd {
                 .with_context(|| format!("Cannot switch to '{wanted}' to rebase it"))?;
             }
         }
-
-        let storage_path = repo_root.join(".mediagit");
-        let storage = create_storage_backend(&repo_root).await?;
-        let refdb = RefDatabase::new(&storage_path);
-        let odb = Arc::new(ObjectDatabase::with_smart_compression(storage, 1000));
-
-        // Resolve upstream branch
-        let upstream_oid = resolve_revision(upstream, &refdb, &odb).await?;
 
         // Get current HEAD
         let head = refdb.read("HEAD").await?;

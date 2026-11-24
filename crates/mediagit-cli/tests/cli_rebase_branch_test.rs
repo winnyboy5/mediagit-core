@@ -155,3 +155,19 @@ fn an_untracked_file_upstream_would_overwrite_refuses_before_switching() {
         "mine, untracked"
     );
 }
+
+#[test]
+fn a_head_relative_upstream_means_the_branch_you_are_on() {
+    // main: base, m1, m2. HEAD~1 from main is m1; from feature it would be base.
+    let dir = repo();
+    let r = dir.path();
+    commit(r, "m2.txt", "main 2", "m2");
+    let (code, v) = machine(r, &["rebase", "HEAD~1", "feature"]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(head_branch(r), "feature");
+    assert!(
+        r.join("m.txt").exists(),
+        "feature must sit on m1 (main's HEAD~1)"
+    );
+    assert!(!r.join("m2.txt").exists(), "m2 is past main's HEAD~1");
+}
