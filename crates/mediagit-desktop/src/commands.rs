@@ -692,12 +692,19 @@ pub fn repo_allow(
 /// own copy can reopen an older repository after a crash (R-03). A plain
 /// file write survives a killed process.
 fn last_repo_file(app: &tauri::AppHandle) -> Result<PathBuf, EngineError> {
-    Ok(app
-        .path()
-        .app_data_dir()
-        .map_err(|e| EngineError::Spawn(e.to_string()))?
-        .join("last-repo.json"))
+    let dir = match std::env::var_os(STATE_DIR_ENV) {
+        Some(d) => PathBuf::from(d),
+        None => app
+            .path()
+            .app_data_dir()
+            .map_err(|e| EngineError::Spawn(e.to_string()))?,
+    };
+    Ok(dir.join("last-repo.json"))
 }
+
+/// Override for the folder that holds `last-repo.json` (the real-app e2e,
+/// so test runs neither share it nor touch the user's own app data).
+pub const STATE_DIR_ENV: &str = "MEDIAGIT_DESKTOP_STATE_DIR";
 
 fn read_last_repo(file: &Path) -> Option<String> {
     let v: Value = serde_json::from_slice(&std::fs::read(file).ok()?).ok()?;

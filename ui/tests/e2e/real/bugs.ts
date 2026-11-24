@@ -26,8 +26,20 @@ export const mg = (st: E2EState, cwd: string, args: string[], input?: string) =>
 
 export const tmp = (tag: string) => mkdtempSync(join(tmpdir(), `mg-${tag}-`))
 
+/**
+ * Keep the desktop side's last-repo record (R-03) in step with a spec that
+ * sets or clears `mg.repo` by hand: on reload the app prefers the record.
+ */
+export async function setLastRepo(page: Page, repo: string | null) {
+  await page.evaluate(
+    (r) => (window as unknown as { __TAURI_INTERNALS__: { invoke(c: string, a: unknown): Promise<unknown> } }).__TAURI_INTERNALS__.invoke('last_repo_set', { repo: r }),
+    repo,
+  )
+}
+
 /** Open `repo` from the Welcome page's recent list, the way a person would. */
 export async function openRecent(page: Page, repo: string, name: string) {
+  await setLastRepo(page, null)
   await page.evaluate(
     ([recent]) => {
       localStorage.removeItem('mg.repo')

@@ -173,6 +173,8 @@ export default async function globalSetup() {
       // W5: the app starts its own local server from an isolated data folder.
       MEDIAGIT_DESKTOP_SERVER: server,
       MEDIAGIT_DESKTOP_SERVER_DIR: join(root, 'app-server'),
+      // R-03: the app's last-repo record, kept out of the user's app data.
+      MEDIAGIT_DESKTOP_STATE_DIR: join(root, 'app-state'),
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${cdpPort}`,
       WEBVIEW2_USER_DATA_FOLDER: wvData,
     })

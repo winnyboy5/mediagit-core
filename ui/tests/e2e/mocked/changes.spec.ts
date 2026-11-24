@@ -31,8 +31,9 @@ test.describe('Changes: states', () => {
 
   test('empty: no changes state', async ({ page }) => {
     await boot(page, { repo_status: fixture('status_empty') })
-    await expect(page.getByText('No changes')).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Save version' })).toHaveCount(0)
+    await expect(page.getByRole('heading', { name: 'No changes' })).toBeVisible()
+    // The dock stays (it holds "Allow a version with no changes"); Save is off.
+    await expect(page.getByRole('button', { name: 'Save version' })).toBeDisabled()
     await expectNoAxeViolations(page)
   })
 

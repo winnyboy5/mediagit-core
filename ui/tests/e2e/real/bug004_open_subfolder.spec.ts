@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { expect, test } from '@playwright/test'
-import { attach, mg, stubPicker, tmp, type Ctx } from './bugs'
+import { attach, mg, setLastRepo, stubPicker, tmp, type Ctx } from './bugs'
 
 // BUG-004, real app: choosing a subfolder in the folder picker opens the repository root.
 let c: Ctx
@@ -17,6 +17,7 @@ test('BUG-004: the rail shows the parent name and no nested .mediagit appears', 
   mg(st, repo, ['add', '.'])
   mg(st, repo, ['commit', '-m', 'art'])
 
+  await setLastRepo(page, null)
   await page.evaluate(() => { localStorage.removeItem('mg.repo'); localStorage.setItem('mg.recent', '[]') })
   await page.evaluate(() => { window.location.hash = '#/welcome' })
   await page.reload()

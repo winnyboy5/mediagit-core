@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path'
 import { chromium, expect, test, type Browser, type Page } from '@playwright/test'
 import { expectNoAxeViolations } from '../mocked/helpers'
 import { sectionPath } from '../mocked/nav'
+import { setLastRepo } from './bugs'
 import { readState, type E2EState } from './setup'
 
 // Gate G4: the REAL Tauri app (WebView2 over CDP) against a real repo, server and CLI.
@@ -43,6 +44,7 @@ test.afterAll(async () => {
 })
 
 test('a. Welcome shows the engine version from the real engine_info', async () => {
+  await setLastRepo(page, null)
   await page.evaluate(
     ([recent]) => {
       localStorage.removeItem('mg.repo')
@@ -64,7 +66,7 @@ test('b. open the fixture repo from Recent: sidebar shows repo and main; Changes
   await expect(page.getByTestId('repo-switcher')).toContainText('hero-film')
   await expect(page.getByTestId('branch-indicator')).toContainText('main')
   await go('changes', 'Changes')
-  await expect(page.getByText('No changes')).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'No changes' })).toBeVisible()
   expect(cli(st.repo, 'status', '--porcelain').trim()).toBe('')
   await shot('02-changes-clean')
 })
@@ -88,7 +90,7 @@ test('d. stage both and commit in the UI; the CLI agrees', async () => {
   await expect(changes().getByRole('checkbox', { checked: true })).toHaveCount(2)
   await page.getByLabel('Message').fill('G4 edit and add')
   await page.getByRole('button', { name: 'Save version', exact: true }).click()
-  await expect(page.getByText('No changes')).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'No changes' })).toBeVisible()
   expect(cli(st.repo, 'status', '--porcelain').trim()).toBe('')
   expect(cli(st.repo, 'log', '--oneline', '-n', '1')).toContain('G4 edit and add')
   await shot('04-changes-committed')

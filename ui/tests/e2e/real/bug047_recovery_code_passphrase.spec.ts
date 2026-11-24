@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { chromium, expect, test, type Browser, type Page } from '@playwright/test'
 import { goTo } from './nav'
+import { setLastRepo } from './bugs'
 import { readState, type E2EState } from './setup'
 
 // BUG-047, real app.
@@ -31,6 +32,7 @@ test.describe('BUG-047: the recovery code shows with a passphrase', () => {
   test('code dialog first, unlock prompt held until "I saved it"', async () => {
     const repo = mkdtempSync(join(tmpdir(), 'mg-bug047-'))
     execFileSync(st.cli, ['init'], { cwd: repo, env: { ...process.env, ...st.env }, encoding: 'utf8' })
+    await setLastRepo(page, null)
     await page.evaluate(
       ([recent]) => {
         localStorage.removeItem('mg.repo')

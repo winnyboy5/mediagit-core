@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path'
 import { chromium, expect, test, type Browser, type Page } from '@playwright/test'
 import { formatBytes } from '../../../src/components/format'
 import { goTo } from './nav'
+import { setLastRepo } from './bugs'
 import { readState, type E2EState } from './setup'
 
 // Gate G4, wave W3: Storage, Maintenance, Settings, Advanced and Security in the REAL app.
@@ -229,6 +230,7 @@ test('v. Advanced reflog lists the same entries as the CLI', async () => {
 
 test('w. Security: unlock prompt, wrong then right passphrase, Lock, push with the passphrase', async () => {
   const wrong = 'definitely-Wrong-77'
+  await setLastRepo(page, null)
   await page.evaluate(
     ([recent]) => {
       localStorage.removeItem('mg.repo')

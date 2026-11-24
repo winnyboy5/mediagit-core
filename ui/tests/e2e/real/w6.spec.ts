@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { chromium, expect, test, type Browser, type Page } from '@playwright/test'
+import { setLastRepo } from './bugs'
 import { readState, type E2EState } from './setup'
 
 // Gate G4, wave W6: the file watcher in the REAL app. A file written from outside
@@ -29,6 +30,7 @@ test('watcher: an outside write updates the Files count within 3 s, no refresh',
   mkdirSync(repo)
   execFileSync(st.cli, ['init', '-q'], { cwd: repo, env: { ...process.env, ...st.env }, encoding: 'utf8' })
 
+  await setLastRepo(page, repo)
   await page.evaluate(
     ([p, recent]) => {
       localStorage.setItem('mg.repo', JSON.stringify(p))
@@ -41,7 +43,7 @@ test('watcher: an outside write updates the Files count within 3 s, no refresh',
   const nav = page.getByRole('navigation', { name: 'Main' })
   await expect(nav).toBeVisible()
   await expect(page.getByTestId('repo-switcher')).toContainText('watch-repo')
-  await expect(page.getByText('No changes')).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'No changes' })).toBeVisible()
   await expect(nav.getByLabel(/changed files?$/)).toHaveCount(0)
   // Let the repo-open path (which starts the watcher) settle.
   await page.waitForTimeout(1500)
