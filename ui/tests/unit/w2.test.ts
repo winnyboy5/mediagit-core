@@ -480,6 +480,21 @@ describe('compare store', () => {
     expect(c.fileText).toBeNull()
   })
 
+  it('a refresh refetches the picked file\'s line changes instead of keeping old ones', async () => {
+    const c = await ready()
+    api.diff.mockResolvedValue(report({ files: [{ path: 'notes.txt', status: 'modified', old_size: 1, new_size: 2, binary: false }] }))
+    await c.compare()
+    const hunks = (t: string) => ({ kind: 'text', truncated: false, hunks: [{ old_start: 1, old_lines: 1, new_start: 1, new_lines: 1, lines: [{ kind: '+', text: t }] }] })
+    api.diffFile.mockResolvedValue(report({ files: [{ path: 'notes.txt', status: 'modified', old_size: 1, new_size: 2, binary: false, text: hunks('old') }] }))
+    c.select('notes.txt')
+    await vi.waitFor(() => expect(c.fileText).toEqual(hunks('old')))
+    // The file changes outside the app; the view refreshes on focus.
+    api.diffFile.mockResolvedValue(report({ files: [{ path: 'notes.txt', status: 'modified', old_size: 1, new_size: 3, binary: false, text: hunks('new') }] }))
+    await c.compare()
+    expect(api.diffFile).toHaveBeenCalledTimes(2)
+    await vi.waitFor(() => expect(c.fileText).toEqual(hunks('new')))
+  })
+
   it('keeps an error from the comparison', async () => {
     const c = await ready()
     api.diff.mockRejectedValue({ code: 'error', message: 'bad version' })

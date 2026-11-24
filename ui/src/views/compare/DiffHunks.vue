@@ -6,13 +6,16 @@ import type { FileText } from '@/api'
 
 const props = defineProps<{ text: FileText }>()
 
+/** A side of a hunk header; a side with no lines (added or deleted file) has none to name. */
+const range = (start: number, count: number) => (count === 0 ? 'no lines' : `Lines ${start}–${start + count - 1}`)
+
 /** Each line with the line numbers it has on each side. */
 const hunks = computed(() =>
   props.text.hunks.map((h) => {
     let o = h.old_start
     let n = h.new_start
     return {
-      header: `Lines ${h.old_start}–${h.old_start + Math.max(h.old_lines, 1) - 1} before, ${h.new_start}–${h.new_start + Math.max(h.new_lines, 1) - 1} after`,
+      header: `${range(h.old_start, h.old_lines)} before, ${range(h.new_start, h.new_lines)} after`,
       lines: h.lines.map((l) => ({
         kind: l.kind,
         text: l.text,

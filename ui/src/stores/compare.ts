@@ -103,6 +103,8 @@ export const useCompareStore = defineStore('compare', () => {
       // A null report means nothing differs.
       report.value = r ?? { mode: working.value ? 'working' : 'commits', from: from.value, to: to.value, files: [] }
       if (!report.value.files.some((f) => f.path === selectedPath.value)) selectedPath.value = null
+      // A refresh (focus, new compare) can change the file: its old hunks must not stay on screen.
+      reloadText(selectedPath.value)
     } catch (e) {
       if (mine === token) error.value = toApiError(e)
     } finally {
@@ -110,15 +112,20 @@ export const useCompareStore = defineStore('compare', () => {
     }
   }
 
-  /** Start fetching what the selected file needs: previews for images, metadata where a parser exists. */
-  function select(path: string | null) {
-    selectedPath.value = path
+  /** Drop any line diff on screen (or in flight) and fetch it again for `path`. */
+  function reloadText(path: string | null) {
     textToken++
     fileText.value = null
     textError.value = null
     textLoading.value = false
     // Line diffs only where they mean something: a text file, the one picked.
     if (path && file.value && !file.value.binary) void loadText(path)
+  }
+
+  /** Start fetching what the selected file needs: previews for images, metadata where a parser exists. */
+  function select(path: string | null) {
+    selectedPath.value = path
+    reloadText(path)
     const { before, after } = sides.value
     for (const side of [before, after]) {
       if (!side) continue
