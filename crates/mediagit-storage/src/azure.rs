@@ -442,6 +442,12 @@ impl AzureBackend {
             Err(e) if e.kind() == opendal::ErrorKind::NotFound => {
                 Err(crate::StorageError::BucketNotFound(self.container_name.clone()).into())
             }
+            // A refused key stays typed, so callers can word it per backend.
+            Err(e) if e.kind() == opendal::ErrorKind::PermissionDenied => Err(map_error(
+                &e,
+                &format!("container '{}' is not usable", self.container_name),
+            )
+            .into()),
             Err(e) => Err(anyhow::anyhow!(
                 "Azure container '{}' is not usable: {} (OpenDAL kind {:?}).",
                 self.container_name,
@@ -1008,6 +1014,23 @@ mod tests {
             !seen.lock().unwrap().iter().any(|l| l.starts_with("PUT")),
             "must not attempt to create the container: {:?}",
             seen.lock().unwrap()
+        );
+    }
+
+    /// A wrong account key (403 on the first call) stays a typed `PermissionDenied`
+    /// naming Azure, so the server words it for Azure and not for S3.
+    #[tokio::test]
+    async fn a_wrong_account_key_is_a_typed_azure_refusal() {
+        let (conn, _) =
+            stub_azure(|_, _| ("403 Forbidden", azure_error_xml("AuthenticationFailed"))).await;
+        let err = match AzureBackend::with_connection_string("c", conn).await {
+            Ok(_) => panic!("a refused key must fail"),
+            Err(e) => e,
+        };
+        let typed = err.chain().find_map(|c| c.downcast_ref::<StorageError>());
+        assert!(
+            matches!(typed, Some(StorageError::PermissionDenied(m)) if m.starts_with("Azure:")),
+            "{err:#}"
         );
     }
 

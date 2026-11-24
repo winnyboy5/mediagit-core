@@ -371,6 +371,35 @@ async fn probe_names_the_region_of_a_bucket_in_another_region() {
     assert!(!e.contains(SECRET) && !e.contains(ACCESS), "{e}");
 }
 
+/// A wrong Azure account key is worded for Azure, not as an S3 access key.
+#[tokio::test]
+async fn probe_words_a_refused_azure_key_for_azure() {
+    let ep =
+        serve(b"HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
+    let cfg = StorageConfig::Azure(mediagit_config::AzureStorage {
+        container: "qa-container".into(),
+        prefix: String::new(),
+        auth: Some(mediagit_config::AzureAuth::ConnectionString {
+            value: format!(
+                "AccountName=fakeacct;AccountKey=ZmFrZS1rZXk=;BlobEndpoint={ep}/fakeacct"
+            ),
+        }),
+        legacy: Default::default(),
+    });
+    let e = mediagit_server::handlers::probe_storage(&cfg)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.starts_with("Azure refused the account key or connection string"),
+        "{e}"
+    );
+    assert!(
+        !e.contains("ZmFrZS1rZXk=") && !e.contains("secret key"),
+        "{e}"
+    );
+}
+
 /// A 400 with no region header is a bad bucket name.
 #[tokio::test]
 async fn probe_says_a_bad_bucket_name_is_not_valid() {

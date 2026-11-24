@@ -1774,11 +1774,10 @@ mod tests {
     async fn test_gcs_backend_new_missing_file() {
         let result = GcsBackend::new("project", "bucket", "nonexistent.json").await;
         assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
         assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("service account file not found")
+            msg.contains("nonexistent.json") && msg.contains("cannot be found"),
+            "{msg}"
         );
     }
 
