@@ -93,8 +93,9 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
             let _ = std::fs::remove_file(&tmp);
             // Keep the OS error as the source (not just its text), so the CLI
             // can say "in use" or "denied" in plain words (R-12).
+            // The retry's OS text follows in the chain (it is the source).
             let msg = format!(
-                "failed to rename {} -> {}: {first} (retry: {retry})",
+                "failed to rename {} -> {} (first attempt: {first}; retried)",
                 tmp.display(),
                 path.display()
             );
@@ -142,7 +143,7 @@ mod tests {
         std::fs::create_dir(&target).unwrap();
         std::fs::write(target.join("keep"), b"x").unwrap();
         let err = write_atomic(&target, b"new").unwrap_err();
-        assert!(err.to_string().contains("(retry:"), "{err}");
+        assert!(err.to_string().contains("retried"), "{err}");
         let os = std::error::Error::source(&err)
             .and_then(|s| s.downcast_ref::<io::Error>())
             .and_then(io::Error::raw_os_error);

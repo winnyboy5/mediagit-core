@@ -382,5 +382,10 @@ fn reset_hard_over_a_locked_file_has_a_plain_headline() {
         headline.contains("in use by another program") || headline.contains("denied"),
         "{stderr}"
     );
-    assert!(stderr.contains("Details:"), "{stderr}");
+    // The failure must be the rename over the held file, not an earlier read.
+    let details = stderr
+        .lines()
+        .find(|l| l.contains("Details:"))
+        .unwrap_or("");
+    assert!(details.contains("rename"), "{stderr}");
 }

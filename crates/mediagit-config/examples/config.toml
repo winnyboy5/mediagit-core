@@ -93,8 +93,6 @@ merge = "refs/heads/main"
 [protected_branches.main]
 prevent_force_push = true
 prevent_deletion = true
-require_reviews = false
-min_approvals = 1
 
 # ---------------------------------------------------------------------------
 # Your own keys. MediaGit never interprets anything here — and, unlike the
