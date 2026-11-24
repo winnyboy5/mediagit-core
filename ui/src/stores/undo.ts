@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { api, type RestoreFailure, type RestoreReport } from '@/api'
+import { api, toApiError, type RestoreFailure, type RestoreReport } from '@/api'
 import { shortOid } from '@/lib/history'
 import { useAction } from './action'
 import { useHistoryStore } from './history'
@@ -82,7 +82,15 @@ export const useUndoStore = defineStore('undo', () => {
       const fresh = p.files.filter((f) => f.isNew).map((f) => f.path)
       const both = async (root: string) => {
         const a = changed.length ? await api.restore(root, changed, false) : null
-        const b = fresh.length ? await api.restore(root, fresh, true) : null
+        let b: RestoreReport | null = null
+        try {
+          b = fresh.length ? await api.restore(root, fresh, true) : null
+        } catch (e) {
+          // The first call already discarded its files: report that, not just the error.
+          if (!a) throw e
+          const message = toApiError(e).message
+          b = { source: a.source, restored: [], deleted: [], unstaged: [], failed: fresh.map((path) => ({ path, message })) }
+        }
         const merged = [a, b].filter((x): x is RestoreReport => !!x)
         return {
           restored: merged.flatMap((x) => x.restored),

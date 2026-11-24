@@ -160,11 +160,26 @@ impl CherryPickCmd {
         }
 
         if let Some(branch) = &self.onto {
-            let head = RefDatabase::new(repo_root.join(".mediagit"))
-                .read("HEAD")
-                .await
-                .ok()
-                .and_then(|h| h.target);
+            let refdb = RefDatabase::new(repo_root.join(".mediagit"));
+            // Exact name from the branch list only. On a case-folding or
+            // dot-trimming file system `MAIN` or `main.` reach main's ref file,
+            // and the check below would then move the checked-out branch
+            // behind the working folder.
+            let exact = refdb.list_branches().await?.iter().any(|r| {
+                let r = r.replace('\\', "/");
+                r.strip_prefix("refs/heads/")
+                    .or_else(|| r.strip_prefix("heads/"))
+                    .unwrap_or(&r)
+                    == branch
+            });
+            if !exact {
+                return Err(output::CodedError::new(
+                    "invalid_args",
+                    format!("No branch named '{branch}' (branch names are case-sensitive)"),
+                )
+                .into());
+            }
+            let head = refdb.read("HEAD").await.ok().and_then(|h| h.target);
             if head.as_deref() != Some(&format!("refs/heads/{branch}")) {
                 return self.pick_onto(&repo_root, branch).await;
             }
@@ -606,6 +621,16 @@ impl CherryPickCmd {
 
         let mut tip = start;
         let mut created = Vec::new();
+        // Same refusal as the normal path for versions with unsafe file paths.
+        let mut listed = Vec::with_capacity(self.commits.len());
+        for commit_ref in &self.commits {
+            listed.push(
+                self.resolve_commit(&refdb, repo_root, commit_ref)
+                    .await
+                    .context(format!("Failed to resolve commit: {}", commit_ref))?,
+            );
+        }
+        crate::repo::ensure_no_unsafe_paths(&odb, repo_root, &listed).await?;
         for commit_ref in &self.commits {
             let oid = self
                 .resolve_commit(&refdb, repo_root, commit_ref)

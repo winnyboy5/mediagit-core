@@ -188,3 +188,47 @@ fn a_pick_on_a_detached_head_moves_head() {
         "from-main"
     );
 }
+
+#[test]
+fn onto_the_current_branch_is_the_usual_pick() {
+    let dir = repo();
+    let r = dir.path();
+    run(r, &["branch", "switch", "feature"]);
+    let c1 = tip(r, "main");
+    let (code, v) = machine(r, &["cherry-pick", "--onto", "feature", &c1]);
+    assert_eq!(code, 0, "{v}");
+    // The usual path writes the working folder; --onto elsewhere never does.
+    assert_eq!(
+        std::fs::read_to_string(r.join("b.txt")).unwrap(),
+        "from-main"
+    );
+}
+
+/// Branch names are matched exactly: another spelling that the file system
+/// folds to the current branch must not move it behind the working folder.
+#[test]
+fn another_spelling_of_a_branch_is_refused() {
+    let dir = repo();
+    let r = dir.path();
+    let main_before = tip(r, "main");
+    for b in ["MAIN", "Main"] {
+        let (code, v) = machine(r, &["cherry-pick", "--onto", b, "feature"]);
+        assert_ne!(code, 0, "{b}: {v}");
+        assert_eq!(v["error"]["code"], "invalid_args", "{b}: {v}");
+    }
+    assert_eq!(tip(r, "main"), main_before);
+}
+
+#[test]
+fn a_copy_already_on_the_target_is_refused_as_empty() {
+    let dir = repo();
+    let r = dir.path();
+    let c1 = tip(r, "main");
+    let (code, _) = machine(r, &["cherry-pick", "--onto", "feature", &c1]);
+    assert_eq!(code, 0);
+    let feature = tip(r, "feature");
+    let (code, v) = machine(r, &["cherry-pick", "--onto", "feature", &c1]);
+    assert_ne!(code, 0);
+    assert_eq!(v["error"]["code"], "empty_commit", "{v}");
+    assert_eq!(tip(r, "feature"), feature);
+}

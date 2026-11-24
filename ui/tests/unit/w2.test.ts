@@ -368,6 +368,17 @@ describe('undo store', () => {
     expect(api.restore).toHaveBeenLastCalledWith('/repos/hero', ['art/a.psd'], false)
     expect(u.discardFailed).toEqual([])
   })
+
+  it('discard: if deleting new files fails after the changed ones were restored, both are reported', async () => {
+    open()
+    const u = useUndoStore()
+    api.restore
+      .mockResolvedValueOnce({ source: 'o', restored: ['art/a.psd'], deleted: [], unstaged: [], failed: [] })
+      .mockRejectedValueOnce({ code: 'error', message: 'disk gone' })
+    u.ask({ kind: 'discard', files: [{ path: 'art/a.psd', size: 1, isNew: false }, { path: 'n.exr', size: 1, isNew: true }] })
+    expect(await u.confirm()).toBe(true)
+    expect(u.discardFailed).toEqual([{ path: 'n.exr', message: 'disk gone' }])
+  })
 })
 
 describe('compare store', () => {

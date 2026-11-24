@@ -101,11 +101,16 @@ const copyTargets = computed(() => {
 })
 async function openCopy() {
   pickStore.error = null
+  branches.actionError = null
   clashOn.value = null
   copyOpen.value = true
   if (!branches.loaded) await branches.refresh()
   copyTo.value = branches.current ?? branches.list[0]?.name ?? ''
 }
+// A clash shown here must not reappear later as the Advanced panel's banner.
+watch(copyOpen, (o) => {
+  if (!o) pickStore.error = null
+})
 async function doCopy() {
   const c = commit.value
   if (!c || !copyTo.value) return

@@ -61,7 +61,8 @@ const rebaseBranches = computed(() => [{ value: CURRENT, label: 'The branch I am
 // A copy can go to another branch without switching ('' = the current one).
 const pickOnto = ref(CURRENT)
 const ontoBranches = computed(() => [{ value: CURRENT, label: 'The branch I am on' }, ...branches.list.filter((b) => b.name !== branches.current).map((b) => ({ value: b.name, label: b.name }))])
-const onto = computed(() => (isRebase || pickOnto.value === CURRENT ? undefined : pickOnto.value))
+// After a switch the chosen branch may be the current one: then it is the usual copy.
+const onto = computed(() => (isRebase || pickOnto.value === CURRENT || pickOnto.value === branches.current ? undefined : pickOnto.value))
 const keepEmpty = ref(false)
 const noCommit = ref(false)
 const appendMessage = ref(false)
