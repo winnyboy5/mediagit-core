@@ -153,7 +153,7 @@ it('H-06: a repo switch mid-flight discards the stale refs', async () => {
 })
 
 // QA review round 2: a branch switch must move the HEAD marker in the history labels.
-it('B-07b: a branch action refreshes the history refs', async () => {
+it('H-06: a branch action refreshes the history refs', async () => {
   const { useHistoryStore } = await import('@/stores/history')
   const { useBranchesStore } = await import('@/stores/branches')
   useRepoStore().path = '/repos/hero'

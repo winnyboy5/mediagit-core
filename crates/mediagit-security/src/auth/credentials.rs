@@ -111,7 +111,8 @@ fn verify_dummy(password: &str) {
     static DUMMY_HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     #[cfg(test)]
     DUMMY_VERIFIES.with(|c| c.set(c.get() + 1));
-    let dummy = DUMMY_HASH.get_or_init(|| hash("dummy", bcrypt_cost()).unwrap_or_default());
+    let dummy = DUMMY_HASH
+        .get_or_init(|| hash("dummy", bcrypt_cost()).expect("bcrypt hash of a fixed string"));
     let _ = verify(password, dummy);
 }
 

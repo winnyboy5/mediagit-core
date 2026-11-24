@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="MediaGit">
+<rect width="32" height="32" rx="7.5" fill="#33312D"/>
+<rect x="0.5" y="0.5" width="31" height="31" rx="7" fill="none" stroke="#77736A"/>
+<path d="M4.5 2.5H27.5" stroke="#A29D92" stroke-width="1" stroke-linecap="round" opacity=".55"/>
+<path d="M8 23.5V9L16 19 24 9V23.5" fill="none" stroke="#F7F6F3" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="16" cy="19" r="3.1" fill="#F0A33A" stroke="#33312D" stroke-width="1.6"/>
+</svg>
