@@ -228,25 +228,7 @@ impl LcaFinder {
 
     /// Get all ancestors of a commit
     async fn get_all_ancestors(&self, oid: &Oid) -> anyhow::Result<HashSet<Oid>> {
-        let mut ancestors = HashSet::new();
-        let mut queue = VecDeque::new();
-        queue.push_back(*oid);
-
-        while let Some(current) = queue.pop_front() {
-            if !ancestors.insert(current) {
-                continue;
-            }
-
-            if let Ok(commit) = Commit::read(&self.odb, &current).await {
-                for parent in &commit.parents {
-                    if !ancestors.contains(parent) {
-                        queue.push_back(*parent);
-                    }
-                }
-            }
-        }
-
-        Ok(ancestors)
+        ancestors(&self.odb, oid).await
     }
 
     /// Filter common ancestors to find lowest (most recent) ones
@@ -368,6 +350,30 @@ impl LcaFinder {
         // Not found in either direction
         Ok(usize::MAX)
     }
+}
+
+/// `oid` and every commit reachable from it through parents (git's
+/// "reachable from"). The exclusion set of a `log A..B` range.
+pub async fn ancestors(odb: &ObjectDatabase, oid: &Oid) -> anyhow::Result<HashSet<Oid>> {
+    let mut ancestors = HashSet::new();
+    let mut queue = VecDeque::new();
+    queue.push_back(*oid);
+
+    while let Some(current) = queue.pop_front() {
+        if !ancestors.insert(current) {
+            continue;
+        }
+
+        if let Ok(commit) = Commit::read(odb, &current).await {
+            for parent in &commit.parents {
+                if !ancestors.contains(parent) {
+                    queue.push_back(*parent);
+                }
+            }
+        }
+    }
+
+    Ok(ancestors)
 }
 
 #[cfg(test)]

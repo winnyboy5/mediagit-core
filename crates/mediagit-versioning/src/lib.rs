@@ -112,7 +112,7 @@ pub use conflict::{Conflict, ConflictDetector, ConflictSide, ConflictStats, Conf
 pub use delta::{Delta, DeltaDecoder, DeltaEncoder};
 pub use diff::{ModifiedEntry, ThreeWayDiff, TreeDiff, TreeDiffer};
 pub use index::{Index, IndexEntry, is_stage_debris_key};
-pub use lca::{LcaFinder, LcaResult};
+pub use lca::{LcaFinder, LcaResult, ancestors};
 pub use merge::{
     FastForwardInfo, MergeEngine, MergeResult, MergeStrategy, apply_merge_to_workdir,
     clear_merge_state, stage_tree, tree_with_index,
@@ -128,7 +128,7 @@ pub use pack::{
 pub use reachability::walk_reachable;
 pub use reflog::{Reflog, ReflogEntry};
 pub use refs::{Ref, RefDatabase, RefType, normalize_ref_name};
-pub use revision::resolve_revision;
+pub use revision::{RevRange, resolve_revision, split_range};
 pub use similarity::{ObjectMetadata, SimilarityDetector, SimilarityScore};
 pub use sparse::{SparseFilter, SparseMode};
 pub use stat_cache::StatCache;

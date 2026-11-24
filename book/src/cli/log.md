@@ -223,9 +223,23 @@ j2l6g9i Update compression profiles
 
 ## Starting Revisions
 
-`log` walks history from a single starting revision (branch, tag, commit
-hash, `HEAD~N`, or a full ref path). Git-style `A..B` / `A...B` range
-syntax is **not supported**.
+`log` walks history from a starting revision (branch, tag, commit hash,
+`HEAD~N`, or a full ref path), or from a range:
+
+- `A..B`: commits reachable from `B` but not from `A` ("what `B` has that
+  `A` does not").
+- `A...B`: commits reachable from either side but not from both.
+- An empty side means `HEAD` (`..feature`, `main..`).
+
+`--all` cannot be combined with a range.
+
+```bash
+# What feature adds on top of main
+$ mediagit log main..feature --oneline
+
+# Both sides since they split
+$ mediagit log main...feature --oneline
+```
 
 ```bash
 # Commits reachable from a branch

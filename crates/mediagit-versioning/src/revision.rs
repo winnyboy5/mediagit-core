@@ -11,6 +11,46 @@
 use crate::{Commit, ObjectDatabase, Oid, RefDatabase};
 use anyhow::{Context, Result};
 
+/// A `from..to` or `from...to` range (`log` only). An empty side means `HEAD`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevRange {
+    pub from: String,
+    pub to: String,
+    /// `...`: commits reachable from either side but not from both.
+    pub symmetric: bool,
+}
+
+/// Split `spec` into a range, `Ok(None)` when it is a single revision.
+/// Refuses `..`, `...`, nested ranges and more than three dots.
+pub fn split_range(spec: &str) -> Result<Option<RevRange>> {
+    let (sep, symmetric) = if spec.contains("...") {
+        ("...", true)
+    } else if spec.contains("..") {
+        ("..", false)
+    } else {
+        return Ok(None);
+    };
+    let (from, to) = spec.split_once(sep).expect("checked above");
+    if from.contains("..") || to.contains("..") || to.starts_with('.') || from.ends_with('.') {
+        anyhow::bail!("Invalid range '{spec}': use A..B or A...B");
+    }
+    if from.is_empty() && to.is_empty() {
+        anyhow::bail!("Invalid range '{spec}': name at least one side");
+    }
+    let side = |s: &str| {
+        if s.is_empty() {
+            "HEAD".to_owned()
+        } else {
+            s.to_owned()
+        }
+    };
+    Ok(Some(RevRange {
+        from: side(from),
+        to: side(to),
+        symmetric,
+    }))
+}
+
 /// Parse and resolve a revision specifier to an OID
 ///
 /// Supports:
@@ -149,6 +189,41 @@ async fn walk_parents(start_oid: Oid, count: usize, odb: &ObjectDatabase) -> Res
     }
 
     Ok(current_oid)
+}
+
+#[cfg(test)]
+mod range_tests {
+    use super::*;
+
+    fn r(from: &str, to: &str, symmetric: bool) -> Option<RevRange> {
+        Some(RevRange {
+            from: from.into(),
+            to: to.into(),
+            symmetric,
+        })
+    }
+
+    #[test]
+    fn split_range_forms() {
+        assert_eq!(split_range("main").unwrap(), None);
+        assert_eq!(split_range("HEAD~2").unwrap(), None);
+        assert_eq!(
+            split_range("main..feature").unwrap(),
+            r("main", "feature", false)
+        );
+        assert_eq!(
+            split_range("main...feature").unwrap(),
+            r("main", "feature", true)
+        );
+        assert_eq!(
+            split_range("..feature").unwrap(),
+            r("HEAD", "feature", false)
+        );
+        assert_eq!(split_range("main..").unwrap(), r("main", "HEAD", false));
+        for bad in ["..", "...", "a....b", "a..b..c", "a..b...c", "a.....b"] {
+            assert!(split_range(bad).is_err(), "{bad}");
+        }
+    }
 }
 
 #[cfg(test)]

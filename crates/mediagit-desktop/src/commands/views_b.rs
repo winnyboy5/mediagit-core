@@ -53,6 +53,23 @@ pub fn target_ok(what: &str, t: &str) -> Result<(), EngineError> {
     }
 }
 
+/// A revision for `log`: a branch, tag or commit id, or a range `A..B` /
+/// `A...B` whose sides each pass [`target_ok`]. One side may be empty
+/// (HEAD), not both.
+pub fn log_revision_ok(r: &str) -> Result<(), EngineError> {
+    let Some(sep) = ["...", ".."].into_iter().find(|sep| r.contains(sep)) else {
+        return target_ok("revision", r);
+    };
+    let (a, b) = r.split_once(sep).expect("checked above");
+    if (a.is_empty() && b.is_empty()) || b.starts_with('.') || a.ends_with('.') {
+        return Err(invalid("revision", "use A..B or A...B"));
+    }
+    for side in [a, b].into_iter().filter(|x| !x.is_empty()) {
+        target_ok("revision", side)?;
+    }
+    Ok(())
+}
+
 /// `YYYY-MM-DD` or an RFC 3339 timestamp.
 fn date_ok(d: &str) -> bool {
     (8..=40).contains(&d.len())
@@ -118,7 +135,7 @@ pub fn log_argv(
         .map(str::trim)
         .filter(|r| !r.is_empty());
     if let Some(r) = revision {
-        target_ok("revision", r)?;
+        log_revision_ok(r)?;
     }
     let paths: Vec<&str> = path
         .into_iter()
@@ -638,6 +655,24 @@ mod tests {
             log_argv(0, 5, false, None, &rev_only, repo).unwrap(),
             s(&["log", "--skip", "0", "-n", "5", "v1.0"])
         );
+    }
+
+    #[test]
+    fn log_revision_accepts_ranges_with_valid_sides() {
+        for ok in [
+            "main..feature",
+            "main...feature",
+            "..feature",
+            "v1.0..",
+            "abcd1234..HEAD",
+        ] {
+            assert!(log_revision_ok(ok).is_ok(), "{ok}");
+        }
+        for bad_r in [
+            "..", "...", "a....b", "a..b..c", "-x..b", "a..--all", "a b..c",
+        ] {
+            assert!(log_revision_ok(bad_r).is_err(), "{bad_r}");
+        }
     }
 
     #[test]

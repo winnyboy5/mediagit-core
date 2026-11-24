@@ -5,7 +5,10 @@ use super::super::repo::{create_storage_backend, find_repo_root};
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
-use mediagit_versioning::{Commit, ObjectDatabase, Oid, RefDatabase, Tag, Tree, resolve_revision};
+use mediagit_versioning::{
+    Commit, ObjectDatabase, Oid, RefDatabase, RevRange, Tag, Tree, ancestors, resolve_revision,
+    split_range,
+};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -43,7 +46,7 @@ use std::path::{Path, PathBuf};
 SEE ALSO:
     mediagit-show(1), mediagit-diff(1), mediagit-reflog(1)")]
 pub struct LogCmd {
-    /// Commit to start from: branch, tag or commit (default HEAD). Ranges such as A..B are not supported
+    /// Commit to start from (branch, tag or commit; default HEAD), or a range: A..B (in B, not in A), A...B (in either, not both)
     #[arg(value_name = "REVISION")]
     pub revision: Option<String>,
 
@@ -120,55 +123,61 @@ impl LogCmd {
         let refdb = RefDatabase::new(&storage_path);
         let odb = ObjectDatabase::with_smart_compression(storage, 1000);
 
-        // Get starting commit OID
-        let start_oid = if let Some(revision) = &self.revision {
-            let oid = resolve_revision(revision, &refdb, &odb)
-                .await
-                .with_context(|| format!("Invalid revision: {}", revision))?;
-            // Peel annotated tags (resolve to a tag object, not a commit).
-            Self::peel_to_commit(oid, &odb).await?
+        let range = self.range()?;
+        // Get starting commit OID(s); a range also names what to leave out.
+        let (stack_init, exclude) = if let Some(r) = &range {
+            Self::range_starts(r, &refdb, &odb).await?
         } else {
-            // Use HEAD
-            match refdb.read("HEAD").await {
-                Ok(head) => {
-                    match head.oid {
-                        Some(oid) => oid,
-                        None => {
-                            // HEAD might be symbolic, resolve it
-                            if let Some(target) = head.target {
-                                match refdb.read(&target).await {
-                                    Ok(target_ref) => match target_ref.oid {
-                                        Some(oid) => oid,
-                                        None => {
+            let start_oid = if let Some(revision) = &self.revision {
+                let oid = resolve_revision(revision, &refdb, &odb)
+                    .await
+                    .with_context(|| format!("Invalid revision: {}", revision))?;
+                // Peel annotated tags (resolve to a tag object, not a commit).
+                Self::peel_to_commit(oid, &odb).await?
+            } else {
+                // Use HEAD
+                match refdb.read("HEAD").await {
+                    Ok(head) => {
+                        match head.oid {
+                            Some(oid) => oid,
+                            None => {
+                                // HEAD might be symbolic, resolve it
+                                if let Some(target) = head.target {
+                                    match refdb.read(&target).await {
+                                        Ok(target_ref) => match target_ref.oid {
+                                            Some(oid) => oid,
+                                            None => {
+                                                println!("{}", style("No commits yet").dim());
+                                                return Ok(());
+                                            }
+                                        },
+                                        Err(_) => {
+                                            // Branch doesn't exist yet (e.g., refs/heads/main on fresh repo)
                                             println!("{}", style("No commits yet").dim());
                                             return Ok(());
                                         }
-                                    },
-                                    Err(_) => {
-                                        // Branch doesn't exist yet (e.g., refs/heads/main on fresh repo)
-                                        println!("{}", style("No commits yet").dim());
-                                        return Ok(());
                                     }
+                                } else {
+                                    println!("{}", style("No commits yet").dim());
+                                    return Ok(());
                                 }
-                            } else {
-                                println!("{}", style("No commits yet").dim());
-                                return Ok(());
                             }
                         }
                     }
+                    Err(_) => {
+                        // HEAD doesn't exist yet
+                        println!("{}", style("No commits yet").dim());
+                        return Ok(());
+                    }
                 }
-                Err(_) => {
-                    // HEAD doesn't exist yet
-                    println!("{}", style("No commits yet").dim());
-                    return Ok(());
-                }
-            }
+            };
+            (vec![start_oid], HashSet::new())
         };
 
         // Traverse commit history
         let mut commits_to_show = Vec::new();
         let mut visited = HashSet::new();
-        let mut stack = vec![start_oid];
+        let mut stack = stack_init;
 
         // When --all is requested, seed the stack with every branch tip
         if self.all {
@@ -200,7 +209,7 @@ impl LogCmd {
         }
 
         while let Some(oid) = stack.pop() {
-            if visited.contains(&oid) {
+            if visited.contains(&oid) || exclude.contains(&oid) {
                 continue;
             }
             visited.insert(oid);
@@ -615,6 +624,54 @@ impl LogCmd {
         }))
     }
 
+    /// The revision as an `A..B` / `A...B` range, if it is one. `--all` with a
+    /// range would show everything again, so it is refused.
+    fn range(&self) -> Result<Option<RevRange>> {
+        let Some(r) = self
+            .revision
+            .as_deref()
+            .map(split_range)
+            .transpose()?
+            .flatten()
+        else {
+            return Ok(None);
+        };
+        if self.all {
+            return Err(crate::output::CodedError::new(
+                "invalid_args",
+                "--all cannot be combined with a range (A..B); drop one of them",
+            )
+            .into());
+        }
+        Ok(Some(r))
+    }
+
+    /// Start commits and the commits to leave out for `range`:
+    /// `A..B` = reachable from B, not from A; `A...B` = reachable from
+    /// either, not from both.
+    async fn range_starts(
+        r: &RevRange,
+        refdb: &RefDatabase,
+        odb: &ObjectDatabase,
+    ) -> Result<(Vec<Oid>, HashSet<Oid>)> {
+        let mut side = Vec::with_capacity(2);
+        for rev in [&r.from, &r.to] {
+            let oid = resolve_revision(rev, refdb, odb)
+                .await
+                .with_context(|| format!("Invalid revision: {}", rev))?;
+            side.push(Self::peel_to_commit(oid, odb).await?);
+        }
+        let (from, to) = (side[0], side[1]);
+        let from_anc = ancestors(odb, &from).await?;
+        if r.symmetric {
+            let to_anc = ancestors(odb, &to).await?;
+            let both = from_anc.intersection(&to_anc).copied().collect();
+            Ok((vec![from, to], both))
+        } else {
+            Ok((vec![to], from_anc))
+        }
+    }
+
     // ponytail: loads every reachable commit to order it; stream/paginate if histories reach millions.
     async fn execute_machine(&self) -> Result<()> {
         let repo_root = find_repo_root()?;
@@ -624,7 +681,10 @@ impl LogCmd {
         let odb = ObjectDatabase::with_smart_compression(storage, 1000);
 
         let mut starts: Vec<Oid> = Vec::new();
-        if let Some(revision) = &self.revision {
+        let mut exclude: HashSet<Oid> = HashSet::new();
+        if let Some(r) = self.range()? {
+            (starts, exclude) = Self::range_starts(&r, &refdb, &odb).await?;
+        } else if let Some(revision) = &self.revision {
             let oid = resolve_revision(revision, &refdb, &odb)
                 .await
                 .with_context(|| format!("Invalid revision: {}", revision))?;
@@ -656,13 +716,18 @@ impl LogCmd {
         let mut commits: HashMap<Oid, Commit> = HashMap::new();
         let mut stack = starts;
         while let Some(oid) = stack.pop() {
-            if commits.contains_key(&oid) {
+            if commits.contains_key(&oid) || exclude.contains(&oid) {
                 continue;
             }
             let data = odb.read(&oid).await?;
             let commit = Commit::deserialize(&data)
                 .with_context(|| format!("Failed to deserialize commit {}", oid))?;
-            stack.extend(commit.parents.iter().filter(|p| !commits.contains_key(*p)));
+            stack.extend(
+                commit
+                    .parents
+                    .iter()
+                    .filter(|p| !commits.contains_key(*p) && !exclude.contains(*p)),
+            );
             commits.insert(oid, commit);
         }
 
@@ -712,7 +777,14 @@ impl LogCmd {
             if since_bound.is_some_and(|b| ts < b) || until_bound.is_some_and(|b| ts > b) {
                 continue;
             }
-            let parent_tree = c.parents.first().map(|p| commits[p].tree);
+            // A range leaves the boundary parent out of `commits`: read it.
+            let parent_tree = match c.parents.first() {
+                Some(p) => match commits.get(p) {
+                    Some(pc) => Some(pc.tree),
+                    None => Some(Commit::read(&odb, p).await?.tree),
+                },
+                None => None,
+            };
             if !self
                 .touches_paths(&odb, &c.tree, parent_tree.as_ref())
                 .await?
