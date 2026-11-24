@@ -351,10 +351,15 @@ describe('undo store', () => {
     u.open = false // Keep my files
     expect(api.restore).not.toHaveBeenCalled()
 
-    api.restore.mockResolvedValue({ source: 'o', restored: ['art/a.psd'], deleted: [], unstaged: [], failed: [{ path: 'render/x.exr', message: 'in use' }] })
+    api.restore
+      .mockResolvedValueOnce({ source: 'o', restored: ['art/a.psd'], deleted: [], unstaged: [], failed: [] })
+      .mockResolvedValueOnce({ source: 'o', restored: [], deleted: [], unstaged: [], failed: [{ path: 'render/x.exr', message: 'in use' }] })
     u.ask({ kind: 'discard', files })
     expect(await u.confirm()).toBe(true)
-    expect(api.restore).toHaveBeenCalledWith('/repos/hero', ['art/a.psd', 'render/x.exr'], true)
+    // Changed and new files go in separate calls: --delete-new never covers a "changed" file.
+    expect(api.restore).toHaveBeenCalledWith('/repos/hero', ['art/a.psd'], false)
+    expect(api.restore).toHaveBeenCalledWith('/repos/hero', ['render/x.exr'], true)
+    expect(api.restore).toHaveBeenCalledTimes(2)
     expect(u.discardFailed).toEqual([{ path: 'render/x.exr', message: 'in use' }])
 
     api.restore.mockResolvedValue({ source: 'o', restored: ['art/a.psd'], deleted: [], unstaged: [], failed: [] })

@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { api, type RestoreFailure } from '@/api'
+import { api, type RestoreFailure, type RestoreReport } from '@/api'
 import { shortOid } from '@/lib/history'
 import { useAction } from './action'
 import { useHistoryStore } from './history'
@@ -75,10 +75,24 @@ export const useUndoStore = defineStore('undo', () => {
     }
     if (p.kind === 'discard') {
       const paths = p.files.map((f) => f.path)
-      const deleteNew = p.files.some((f) => f.isNew)
+      // Two calls: --delete-new only ever covers the files the dialog listed
+      // as new, so a file it called "changed" is refused by the CLI rather
+      // than deleted if its status was stale.
+      const changed = p.files.filter((f) => !f.isNew).map((f) => f.path)
+      const fresh = p.files.filter((f) => f.isNew).map((f) => f.path)
+      const both = async (root: string) => {
+        const a = changed.length ? await api.restore(root, changed, false) : null
+        const b = fresh.length ? await api.restore(root, fresh, true) : null
+        const merged = [a, b].filter((x): x is RestoreReport => !!x)
+        return {
+          restored: merged.flatMap((x) => x.restored),
+          deleted: merged.flatMap((x) => x.deleted),
+          failed: merged.flatMap((x) => x.failed),
+        }
+      }
       const r = await run(
         paths.length === 1 ? `Discard ${paths[0]}` : `Discard ${paths.length} files`,
-        (root) => api.restore(root, paths, deleteNew),
+        both,
         (x) => (x.failed.length ? `${x.failed.length} of ${paths.length} could not be discarded` : `Discarded ${paths.length === 1 ? paths[0] : `${paths.length} files`}`),
         (x) => x.failed.length > 0,
       )

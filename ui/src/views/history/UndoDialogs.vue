@@ -146,7 +146,7 @@ const bar = computed(() => (undo.running ? primaryBar(undo.running) : undefined)
     <AlertDialog
       v-model:open="restoreOpen"
       :title="`Restore ${p?.kind === 'restore' ? p.path : ''}?`"
-      :description="`Your copy of this file is replaced with the one from ${rev}. Unsaved changes to this file are lost.`"
+      :description="`Your copy of this file is replaced with the one from ${rev}, and any staged change to it is dropped. Unsaved changes to this file are lost.`"
       confirm-label="Restore file"
       destructive
       @confirm="undo.confirm()"

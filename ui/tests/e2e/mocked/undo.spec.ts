@@ -190,7 +190,7 @@ test.describe('Undo: restore one file', () => {
     await detail(page).getByRole('button', { name: 'Restore this file…' }).click()
     await page.getByRole('alertdialog').getByRole('button', { name: 'Restore file' }).click()
     await expect.poll(async () => (await ipcCalls(page, 'repo_restore_file')).map((c) => c.args)).toEqual([
-      { repo: '/repos/hero-film', rev: SECOND, path: 'art/hero_preview.png' },
+      { repo: '/repos/hero-film', rev: SECOND, path: 'art/hero_preview.png', confirmed: true },
     ])
     await expect(page.getByText('Restored from 0001000').first()).toBeVisible()
   })

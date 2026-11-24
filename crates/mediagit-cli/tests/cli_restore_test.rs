@@ -251,3 +251,99 @@ fn a_locked_file_fails_alone() {
     assert_eq!(read(r, "keep.txt"), b"keep");
     assert_eq!(read(r, "a.txt"), b"edit a");
 }
+
+// ---- review round 1: links, alias names, broken HEAD ----
+
+/// A folder that links out of the repo must not carry a restore or a delete
+/// outside it.
+#[test]
+fn a_folder_linking_out_of_the_repo_is_refused() {
+    let dir = repo();
+    let r = dir.path();
+    let elsewhere = TempDir::new().unwrap();
+    std::fs::write(elsewhere.path().join("victim.txt"), "not yours").unwrap();
+    let link = r.join("link");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(elsewhere.path(), &link).unwrap();
+    #[cfg(windows)]
+    assert!(
+        std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(elsewhere.path())
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let (code, v) = machine(r, &["--yes", "--delete-new", "--", "link/victim.txt"]);
+    assert_ne!(code, 0);
+    assert_eq!(v["error"]["code"], "invalid_args", "{v}");
+    assert_eq!(
+        std::fs::read(elsewhere.path().join("victim.txt")).unwrap(),
+        b"not yours"
+    );
+    assert!(link.exists(), "the link itself was removed");
+}
+
+/// Other spellings of `.mediagit` resolve to it and are refused too.
+#[test]
+fn alias_names_of_the_repo_data_are_refused() {
+    let dir = repo();
+    let r = dir.path();
+    for p in [
+        ".MEDIAGIT/index",
+        "./.mediagit/index",
+        "sub/../.mediagit/index",
+    ] {
+        let (code, v) = machine(r, &["--yes", "--delete-new", "--", p]);
+        assert_ne!(code, 0, "{p}");
+        assert_eq!(v["error"]["code"], "invalid_args", "{p}: {v}");
+    }
+    #[cfg(windows)]
+    for p in [".mediagit./index", ".mediagit /index"] {
+        let (code, v) = machine(r, &["--yes", "--delete-new", "--", p]);
+        assert_ne!(code, 0, "{p}: {v}");
+    }
+    assert!(r.join(".mediagit/index").exists());
+}
+
+/// A tracked file named in other letter case is restored, not "deleted as new".
+#[cfg(windows)]
+#[test]
+fn other_letter_case_restores_the_tracked_file() {
+    let dir = repo();
+    let r = dir.path();
+    std::fs::write(r.join("a.txt"), "my edit").unwrap();
+    let (code, v) = machine(r, &["--yes", "--", "A.TXT"]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["data"]["restored"][0], "a.txt");
+    assert_eq!(read(r, "a.txt"), b"v2");
+}
+
+/// HEAD that cannot be read is an error, not "nothing saved yet": tracked
+/// files must never be planned as new files (and deleted).
+#[test]
+fn an_unreadable_head_deletes_nothing() {
+    let dir = repo();
+    let r = dir.path();
+    std::fs::write(r.join(".mediagit/refs/heads/main"), "garbage").unwrap();
+    let (code, _) = machine(r, &["--yes", "--delete-new", "--", "a.txt"]);
+    assert_ne!(code, 0);
+    assert_eq!(read(r, "a.txt"), b"v2");
+}
+
+/// A repository with no commits yet: every file is new.
+#[test]
+fn an_unborn_repo_deletes_new_files_with_the_flag() {
+    let dir = TempDir::new().unwrap();
+    let r = dir.path();
+    run(r, &["init", "-q"]);
+    std::fs::write(r.join("draft.txt"), "x").unwrap();
+    let (code, v) = machine(r, &["--yes", "--", "draft.txt"]);
+    assert_eq!(v["error"]["code"], "would_delete", "{v}");
+    assert_ne!(code, 0);
+    let (code, v) = machine(r, &["--yes", "--delete-new", "--", "draft.txt"]);
+    assert_eq!(code, 0, "{v}");
+    assert!(!r.join("draft.txt").exists());
+}

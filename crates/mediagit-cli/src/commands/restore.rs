@@ -109,7 +109,10 @@ impl RestoreCmd {
         let rev = self.source.as_deref().unwrap_or("HEAD");
         let source = match resolve_revision(rev, &refdb, &odb).await {
             Ok(oid) => Some(super::show::ShowCmd::peel_to_commit(oid, &odb).await?),
-            Err(_) if self.source.is_none() => None,
+            // Only a branch with no commits yet means "nothing saved": any
+            // other failure to read HEAD must not turn tracked files into
+            // "new" ones (which --delete-new would delete).
+            Err(_) if self.source.is_none() && head_is_unborn(&refdb).await? => None,
             Err(e) => {
                 return Err(output::CodedError::new(
                     "invalid_args",
@@ -123,19 +126,24 @@ impl RestoreCmd {
                 .tracked_files_at(c)
                 .await?
                 .into_iter()
-                .map(|(p, v)| (p.to_string_lossy().replace('\\', "/"), v))
+                .map(|(p, v)| (key_of(&p), v))
                 .collect(),
             None => HashMap::new(),
         };
 
         // Plan first (read-only): a refusal or a "no" changes nothing.
-        let mut index = Index::load(&repo_root)?;
+        let index = Index::load(&repo_root)?;
         let cwd = std::env::current_dir()?;
         let mut plan: BTreeMap<String, Step> = BTreeMap::new();
         for p in &self.paths {
-            let rel = repo_relative(&repo_root, &cwd.join(p))
-                .map_err(|e| output::CodedError::new("invalid_args", format!("{e:#}")))?;
-            let key = rel.to_string_lossy().replace('\\', "/");
+            let invalid =
+                |e: anyhow::Error| output::CodedError::new("invalid_args", format!("{e:#}"));
+            let spelled = repo_relative(&repo_root, &cwd.join(p)).map_err(invalid)?;
+            // What the file system really names it: a folder that links out of
+            // the repo is refused, and alias names (`MEDIAG~1`, `.mediagit.`,
+            // other letter case) become the real name before any check.
+            let rel = on_disk_rel(&repo_root, &repo_root.join(&spelled)).map_err(invalid)?;
+            let key = key_of(&rel);
             // The repository's own data is never a file to restore or delete
             // (case-insensitive: Windows and macOS fold `.MediaGit`).
             if key
@@ -191,6 +199,8 @@ impl RestoreCmd {
         if !self.yes {
             self.confirm(&repo_root, &restore, &delete)?;
         }
+        // Read again after the prompt: an `add` made while it waited stays.
+        let mut index = Index::load(&repo_root)?;
 
         // Act: every path is tried; failures are collected, not fatal.
         let mut report = RestoreReport {
@@ -298,6 +308,58 @@ impl RestoreCmd {
             anyhow::bail!("cancelled; nothing was changed");
         }
         Ok(())
+    }
+}
+
+/// A repo-relative path as the index and trees spell it (`/`-separated on
+/// Windows; elsewhere a backslash is an ordinary name character).
+fn key_of(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    if cfg!(windows) {
+        s.replace('\\', "/")
+    } else {
+        s.into_owned()
+    }
+}
+
+/// `abs` relative to the repo root, as the file system names it. Every folder
+/// on the way is resolved (links, junctions, short and case-folded names); the
+/// file's own name is taken as stored unless it is a link itself, which is
+/// restored or deleted as a link. Errors when the path leaves the repository.
+fn on_disk_rel(repo_root: &Path, abs: &Path) -> Result<PathBuf> {
+    let root = dunce::canonicalize(repo_root)?;
+    let name = abs.file_name().context("no file name")?;
+    let mut dir = abs.parent().context("no folder")?;
+    // Folders not on disk yet (a deleted file's deleted folder) keep their spelling.
+    let mut missing = Vec::new();
+    while !dir.is_dir() {
+        missing.push(dir.file_name().context("no folder name")?.to_owned());
+        dir = dir.parent().context("no folder")?;
+    }
+    let real = dunce::canonicalize(dir)?;
+    let mut rel = real
+        .strip_prefix(&root)
+        .map_err(|_| anyhow::anyhow!("'{}' leaves the repository through a link", abs.display()))?
+        .to_path_buf();
+    rel.extend(missing.iter().rev());
+    let stored = match abs.symlink_metadata() {
+        Ok(m) if !m.file_type().is_symlink() => dunce::canonicalize(abs)
+            .ok()
+            .and_then(|c| c.file_name().map(|n| n.to_owned())),
+        _ => None,
+    };
+    rel.push(stored.as_deref().unwrap_or(name));
+    if rel.as_os_str().is_empty() {
+        anyhow::bail!("'{}' is the repository folder itself", abs.display());
+    }
+    Ok(rel)
+}
+
+/// HEAD names a branch that has no commit yet (a new repository).
+async fn head_is_unborn(refdb: &RefDatabase) -> Result<bool> {
+    match refdb.read("HEAD").await?.target {
+        Some(branch) => Ok(!refdb.exists(&branch).await?),
+        None => Ok(false),
     }
 }
 

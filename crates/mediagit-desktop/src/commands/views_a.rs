@@ -396,6 +396,9 @@ pub fn restore_argv(
         if rel == "." {
             return Err(invalid("path", p));
         }
+        // A folder on the way that links out of the repo would send the write
+        // (or delete) elsewhere: same guard as the old show --output path.
+        super::stays_in_repo(repo, &repo.join(&rel))?;
         argv.push(rel);
     }
     Ok(argv)

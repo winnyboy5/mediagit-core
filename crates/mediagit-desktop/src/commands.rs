@@ -2217,6 +2217,14 @@ mod tests {
             file_at_argv(&repo, "HEAD", "link/a.psd").is_err(),
             "folder is a link out"
         );
+        // Restore (History "Restore this file", Changes "Discard") writes and
+        // deletes through the same paths: same guard.
+        let one = |p: &str| vec![p.to_owned()];
+        assert!(views_a::restore_argv(&repo, &one("real/a.psd"), None, true, true).is_ok());
+        assert!(
+            views_a::restore_argv(&repo, &one("link/a.psd"), None, true, true).is_err(),
+            "restore through a link out"
+        );
     }
 
     #[test]
