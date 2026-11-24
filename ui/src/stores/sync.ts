@@ -70,6 +70,7 @@ export const useSyncStore = defineStore('sync', () => {
     actionError.value = null
     try {
       const r = await ops.track({ kind: 'other', label }, () => run(root))
+      token++ // a refresh still in flight must not put back an older list
       remotes.value = r.remotes
       return true
     } catch (e) {
