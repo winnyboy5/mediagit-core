@@ -263,3 +263,36 @@ test.describe('Changes: stopped operation (BUG-021)', () => {
     await expect(page.getByTestId('operation-banner')).toHaveCount(0)
   })
 })
+
+test.describe('Changes: discard selected files', () => {
+  const RESTORED = { source: 'o', restored: [], deleted: [], unstaged: [], failed: [] }
+
+  test('one changed file: the dialog names it, Keep my files sends nothing, Discard sends it confirmed', async ({ page }) => {
+    await boot(page, { repo_restore: RESTORED })
+    await list(page).getByRole('treeitem', { name: /rig_lod1/ }).click()
+    await page.getByRole('button', { name: 'Discard selected (1)…' }).click()
+    let dlg = page.getByRole('dialog', { name: /Discard .*rig_lod1\.fbx\?/ })
+    await expect(dlg.getByTestId('discard-changed-files')).toContainText('char/rig_lod1.fbx')
+    await expect(dlg.getByTestId('discard-new-files')).toHaveCount(0)
+    await expectNoAxeViolations(page)
+    await dlg.getByRole('button', { name: 'Keep my files' }).click()
+    expect(await ipcCalls(page, 'repo_restore')).toHaveLength(0)
+
+    await page.getByRole('button', { name: 'Discard selected (1)…' }).click()
+    dlg = page.getByRole('dialog', { name: /Discard .*rig_lod1\.fbx\?/ })
+    await dlg.getByRole('button', { name: 'Discard', exact: true }).click()
+    await expect.poll(async () => (await ipcCalls(page, 'repo_restore')).length).toBe(1)
+    expect((await ipcCalls(page, 'repo_restore'))[0]!.args).toMatchObject({ paths: ['char/rig_lod1.fbx'], deleteNew: false, confirmed: true })
+  })
+
+  test('a new file is listed as deleted and the button says so', async ({ page }) => {
+    await boot(page, { repo_restore: RESTORED })
+    await list(page).getByRole('treeitem', { name: /fog_vol/ }).click()
+    await page.getByRole('button', { name: 'Discard selected (1)…' }).click()
+    const dlg = page.getByRole('dialog', { name: /Discard .*fog_vol\.vdb\?/ })
+    await expect(dlg.getByTestId('discard-new-files')).toContainText('env/fog_vol.vdb')
+    await dlg.getByRole('button', { name: 'Discard and delete' }).click()
+    await expect.poll(async () => (await ipcCalls(page, 'repo_restore')).length).toBe(1)
+    expect((await ipcCalls(page, 'repo_restore'))[0]!.args).toMatchObject({ paths: ['env/fog_vol.vdb'], deleteNew: true, confirmed: true })
+  })
+})

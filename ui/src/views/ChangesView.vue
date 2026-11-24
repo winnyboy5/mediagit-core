@@ -24,6 +24,11 @@ const repo = useRepoStore()
 const changes = useChangesStore()
 const shell = useShellStore()
 const undo = useUndoStore()
+// Discard asks first: the dialog names every file. A new (never saved) file is deleted.
+function askDiscard() {
+  const files = changes.selectedFiles.map((f) => ({ path: f.path, size: f.size ?? null, isNew: f.status === 'untracked' || f.status === 'added' }))
+  if (files.length) undo.ask({ kind: 'discard', files })
+}
 const ops = useOpsStore()
 const MORE = [{ id: 'discard', label: 'Discard all unsaved changes…', danger: true }]
 
@@ -98,10 +103,13 @@ const MODES = [
         <Button size="sm" variant="ghost" @click="changes.error = null">Dismiss</Button>
       </div>
 
-      <div v-if="changes.selectedCount > 1" class="sel" role="group" aria-label="Selected changes">
+      <div v-if="changes.selectedCount" class="sel" role="group" aria-label="Selected changes">
         <span>{{ changes.selectedCount }} selected</span>
-        <Button size="sm" :disabled="busy" :loading="changes.busy === 'add'" @click="changes.includeSelected()">Include selected ({{ changes.selectedCount }})</Button>
-        <Button size="sm" :disabled="busy" :loading="changes.busy === 'unstage'" @click="changes.excludeSelected()">Exclude selected ({{ changes.selectedCount }})</Button>
+        <template v-if="changes.selectedCount > 1">
+          <Button size="sm" :disabled="busy" :loading="changes.busy === 'add'" @click="changes.includeSelected()">Include selected ({{ changes.selectedCount }})</Button>
+          <Button size="sm" :disabled="busy" :loading="changes.busy === 'unstage'" @click="changes.excludeSelected()">Exclude selected ({{ changes.selectedCount }})</Button>
+        </template>
+        <Button size="sm" variant="danger" :disabled="busy || undo.busy" @click="askDiscard()">Discard selected ({{ changes.selectedFiles.length }})…</Button>
       </div>
 
       <FileList

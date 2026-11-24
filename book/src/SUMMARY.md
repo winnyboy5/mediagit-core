@@ -36,6 +36,7 @@
   - [bisect](./cli/bisect.md)
   - [stash](./cli/stash.md)
   - [reset](./cli/reset.md)
+  - [restore](./cli/restore.md)
   - [revert](./cli/revert.md)
   - [tag](./cli/tag.md)
   - [lock](./cli/lock.md)

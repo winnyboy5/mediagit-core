@@ -1,14 +1,24 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { api } from '@/api'
+import { api, type RestoreFailure } from '@/api'
 import { shortOid } from '@/lib/history'
 import { useAction } from './action'
 import { useHistoryStore } from './history'
+import { useRepoStore } from './repo'
 
 export type Pending =
   | { kind: 'reset'; mode: 'soft' | 'mixed' | 'hard'; rev: string }
   | { kind: 'revert'; rev: string; summary: string; also?: string[]; noCommit?: boolean; message?: string }
   | { kind: 'restore'; rev: string; path: string }
+  /** Changes view: throw away unsaved changes to these files; `isNew` ones are deleted. */
+  | { kind: 'discard'; files: DiscardFile[] }
+
+export interface DiscardFile {
+  path: string
+  size: number | null
+  /** Never saved in any version: discarding deletes it. */
+  isNew: boolean
+}
 
 /**
  * Undo actions on versions and files. `ask` opens the matching confirm dialog;
@@ -23,6 +33,8 @@ export const useUndoStore = defineStore('undo', () => {
   const open = ref(false)
   /** A revert that stopped on clashes: its files, until continued or abandoned. */
   const revertConflicts = ref<string[]>([])
+  /** Files the last discard could not touch (for example, open in another program). */
+  const discardFailed = ref<RestoreFailure[]>([])
 
   function ask(p: Pending) {
     error.value = null
@@ -61,6 +73,19 @@ export const useUndoStore = defineStore('undo', () => {
       if (r) revertConflicts.value = r.value.status === 'conflict' ? r.value.conflicts : []
       return !!r
     }
+    if (p.kind === 'discard') {
+      const paths = p.files.map((f) => f.path)
+      const deleteNew = p.files.some((f) => f.isNew)
+      const r = await run(
+        paths.length === 1 ? `Discard ${paths[0]}` : `Discard ${paths.length} files`,
+        (root) => api.restore(root, paths, deleteNew),
+        (x) => (x.failed.length ? `${x.failed.length} of ${paths.length} could not be discarded` : `Discarded ${paths.length === 1 ? paths[0] : `${paths.length} files`}`),
+        (x) => x.failed.length > 0,
+      )
+      discardFailed.value = r?.value.failed ?? []
+      await useRepoStore().refresh()
+      return !!r
+    }
     const r = await run(`Restore ${p.path}`, (root) => api.restoreFile(root, p.rev, p.path), () => `Restored from ${shortOid(p.rev)}`)
     return !!r
   }
@@ -76,5 +101,5 @@ export const useUndoStore = defineStore('undo', () => {
     return !!r
   }
 
-  return { pending, open, busy, error, running, revertConflicts, ask, confirm, revertControl }
+  return { pending, open, busy, error, running, revertConflicts, discardFailed, ask, confirm, revertControl }
 })

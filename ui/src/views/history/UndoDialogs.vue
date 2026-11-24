@@ -10,6 +10,7 @@ import MoreOptions from '@/components/MoreOptions.vue'
 import OptionCheck from '@/components/OptionCheck.vue'
 import ProgressBar from '@/components/ProgressBar.vue'
 import TextField from '@/components/TextField.vue'
+import { formatBytes } from '@/components/format'
 import { shortOid } from '@/lib/history'
 import { useHistoryStore } from '@/stores/history'
 import { primaryBar } from '@/stores/ops'
@@ -22,12 +23,26 @@ const repo = useRepoStore()
 
 const p = computed(() => undo.pending)
 const kind = computed(() => (p.value?.kind === 'reset' ? (p.value.mode === 'hard' ? 'hard' : 'reset') : p.value?.kind))
-const rev = computed(() => (p.value ? (p.value.rev === 'HEAD' ? 'the latest version' : shortOid(p.value.rev)) : ''))
+/** The version the pending action is about (a discard has none). */
+const pRev = computed(() => (p.value && 'rev' in p.value ? p.value.rev : undefined))
+const rev = computed(() => (pRev.value ? (pRev.value === 'HEAD' ? 'the latest version' : shortOid(pRev.value)) : ''))
 const isOpen = (k: string) => computed({ get: () => undo.open && kind.value === k, set: (o: boolean) => !o && (undo.open = false) })
 const resetOpen = isOpen('reset')
 const hardOpen = isOpen('hard')
 const revertOpen = isOpen('revert')
 const restoreOpen = isOpen('restore')
+const discardOpen = isOpen('discard')
+
+// Discard: both groups lose work for good, so both are named with their sizes.
+const discardFiles = computed(() => (p.value?.kind === 'discard' ? p.value.files : []))
+const discardChanged = computed(() => discardFiles.value.filter((f) => !f.isNew))
+const discardNew = computed(() => discardFiles.value.filter((f) => f.isNew))
+const discardTotal = computed(() => discardFiles.value.reduce((n, f) => n + (f.size ?? 0), 0))
+const discardTitle = computed(() => {
+  const f = discardFiles.value
+  return f.length === 1 ? `Discard ${f[0]!.path}?` : `Discard changes to ${f.length} files?`
+})
+const size = (n: number | null) => (n == null ? '' : formatBytes(n))
 
 const s = computed(() => repo.status?.summary)
 const unsaved = computed(() => (s.value ? s.value.staged + s.value.modified + s.value.deleted : 0))
@@ -54,7 +69,7 @@ const resetText = computed(() =>
 const revertMessage = ref('')
 const revertNoCommit = ref(false)
 const alsoPicked = ref(new Set<string>())
-const alsoChoices = computed(() => history.visible.filter((c) => c.oid !== p.value?.rev).slice(0, 12))
+const alsoChoices = computed(() => history.visible.filter((c) => c.oid !== pRev.value).slice(0, 12))
 function toggleAlso(oid: string, on: boolean) {
   const s = new Set(alsoPicked.value)
   if (on) s.add(oid)
@@ -89,6 +104,14 @@ const bar = computed(() => (undo.running ? primaryBar(undo.running) : undefined)
       <Button size="sm" variant="primary" :disabled="undo.busy" @click="undo.revertControl('continue')">Continue undo</Button>
       <Button size="sm" :disabled="undo.busy" @click="undo.revertControl('skip')">Skip this version</Button>
       <Button size="sm" variant="danger" :disabled="undo.busy" @click="undo.revertControl('abort')">Abandon undo</Button>
+    </div>
+
+    <div v-if="undo.discardFailed.length" class="banner" role="alert" data-testid="discard-failed">
+      <span>
+        {{ undo.discardFailed.length === 1 ? 'This file was' : 'These files were' }} not discarded:
+        <template v-for="(f, i) in undo.discardFailed" :key="f.path">{{ i ? '; ' : '' }}{{ f.path }} ({{ f.message }})</template>
+      </span>
+      <Button size="sm" variant="ghost" @click="undo.discardFailed = []">Dismiss</Button>
     </div>
 
     <div v-if="undo.running" class="busy" role="status" data-testid="undo-progress">
@@ -129,6 +152,28 @@ const bar = computed(() => (undo.running ? primaryBar(undo.running) : undefined)
       @confirm="undo.confirm()"
     />
 
+    <Dialog v-model:open="discardOpen" :title="discardTitle" description="This cannot be undone: MediaGit has no copy of unsaved work.">
+      <div class="cons" data-testid="discard-files">
+        <template v-if="discardChanged.length">
+          <p><strong>Your edits to {{ discardChanged.length === 1 ? 'this file are' : 'these files are' }} lost:</strong></p>
+          <ul data-testid="discard-changed-files">
+            <li v-for="f in discardChanged" :key="f.path">{{ f.path }} <span class="flag">{{ size(f.size) }}</span></li>
+          </ul>
+        </template>
+        <template v-if="discardNew.length">
+          <p><strong>{{ discardNew.length === 1 ? 'This file was' : 'These files were' }} never saved and {{ discardNew.length === 1 ? 'is' : 'are' }} deleted:</strong></p>
+          <ul data-testid="discard-new-files">
+            <li v-for="f in discardNew" :key="f.path">{{ f.path }} <span class="flag">{{ size(f.size) }}</span></li>
+          </ul>
+        </template>
+        <p v-if="discardTotal">Total: {{ formatBytes(discardTotal) }}</p>
+      </div>
+      <template #footer>
+        <Button @click="undo.open = false">Keep my files</Button>
+        <Button variant="danger" :disabled="undo.busy" @click="undo.confirm()">{{ discardNew.length ? 'Discard and delete' : 'Discard' }}</Button>
+      </template>
+    </Dialog>
+
     <Dialog v-model:open="hardOpen" :title="`Discard everything back to ${rev}?`" description="This cannot be undone.">
       <ul class="cons">
         <li>Your files are replaced with how they were at {{ rev }}.</li>
@@ -139,7 +184,7 @@ const bar = computed(() => (undo.running ? primaryBar(undo.running) : undefined)
         </li>
         <li v-if="kept" data-testid="discard-kept">{{ kept }} new {{ kept === 1 ? 'file' : 'files' }} you have not included {{ kept === 1 ? 'is' : 'are' }} kept as {{ kept === 1 ? 'it is' : 'they are' }}.</li>
         <li v-if="changedFiles.length" data-testid="discard-changed">These go back to how they were: {{ names(changedFiles) }}.</li>
-        <li v-if="p?.rev !== 'HEAD'">Versions after it leave this branch. They stay in the project until it is cleaned up.</li>
+        <li v-if="pRev !== 'HEAD'">Versions after it leave this branch. They stay in the project until it is cleaned up.</li>
       </ul>
       <Checkbox v-model="understood" label="I understand my unsaved work will be lost" />
       <template #footer>

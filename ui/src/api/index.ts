@@ -40,6 +40,7 @@ import type {
   PushReport,
   RemotesReport,
   ResetReport,
+  RestoreReport,
   RevertReport,
   ShowCommitReport,
   StashReport,
@@ -325,7 +326,10 @@ export const api = {
   revertControl: (repo: string, action: 'continue' | 'abort' | 'skip') =>
     invoke<RevertReport>('repo_revert_control', { repo, action }),
   /** Overwrite one working file with its content at `rev`. */
-  restoreFile: (repo: string, rev: string, path: string) => invoke<unknown>('repo_restore_file', { repo, rev, path }),
+  /** Only after the person confirmed in a dialog: unsaved edits to the file are lost. */
+  restoreFile: (repo: string, rev: string, path: string) => invoke<RestoreReport>('repo_restore_file', { repo, rev, path, confirmed: true }),
+  /** Discard unsaved changes to `paths` (and delete never-saved ones with `deleteNew`). Only after the person confirmed. */
+  restore: (repo: string, paths: string[], deleteNew: boolean) => invoke<RestoreReport>('repo_restore', { repo, paths, deleteNew, confirmed: true }),
   /** One folder level of a remote repository; null ref = the server's default branch. */
   remoteLsTree: (repo: string, remote: string, dir: string | null, gitRef: string | null) =>
     invoke<LsTreeReport>('remote_ls_tree', { repo, remote, dir, gitRef }),

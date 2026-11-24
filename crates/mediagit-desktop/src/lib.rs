@@ -448,6 +448,7 @@ pub fn run() {
             commands::views_a::remote_set_url,
             commands::views_a::remote_show,
             commands::views_a::repo_unstage,
+            commands::views_a::repo_restore,
             commands::remote_remove,
             commands::repo_fetch,
             commands::repo_pull,

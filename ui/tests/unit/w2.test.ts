@@ -28,6 +28,7 @@ const api = vi.hoisted(() => ({
   revert: vi.fn(),
   revertControl: vi.fn(),
   restoreFile: vi.fn(),
+  restore: vi.fn(),
   show: vi.fn(),
 }))
 vi.mock('@/api', async (orig) => ({ ...(await orig<typeof import('@/api')>()), api }))
@@ -336,6 +337,31 @@ describe('undo store', () => {
     expect(await u.confirm()).toBe(false)
     expect(api.restoreFile).toHaveBeenCalledWith('/repos/hero', 'abcd', 'art/a.png')
     expect(u.error?.message).toBe('locked')
+  })
+
+  it('discard calls nothing until confirmed, deletes new files only when listed, keeps failures', async () => {
+    open()
+    const u = useUndoStore()
+    const files = [
+      { path: 'art/a.psd', size: 10, isNew: false },
+      { path: 'render/x.exr', size: 5, isNew: true },
+    ]
+    u.ask({ kind: 'discard', files })
+    expect(api.restore).not.toHaveBeenCalled()
+    u.open = false // Keep my files
+    expect(api.restore).not.toHaveBeenCalled()
+
+    api.restore.mockResolvedValue({ source: 'o', restored: ['art/a.psd'], deleted: [], unstaged: [], failed: [{ path: 'render/x.exr', message: 'in use' }] })
+    u.ask({ kind: 'discard', files })
+    expect(await u.confirm()).toBe(true)
+    expect(api.restore).toHaveBeenCalledWith('/repos/hero', ['art/a.psd', 'render/x.exr'], true)
+    expect(u.discardFailed).toEqual([{ path: 'render/x.exr', message: 'in use' }])
+
+    api.restore.mockResolvedValue({ source: 'o', restored: ['art/a.psd'], deleted: [], unstaged: [], failed: [] })
+    u.ask({ kind: 'discard', files: [files[0]!] })
+    await u.confirm()
+    expect(api.restore).toHaveBeenLastCalledWith('/repos/hero', ['art/a.psd'], false)
+    expect(u.discardFailed).toEqual([])
   })
 })
 

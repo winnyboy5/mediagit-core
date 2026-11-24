@@ -1486,7 +1486,8 @@ pub async fn repo_revert_control(
     write(&engine, &queues, &repo, &revert_control_argv(&action)?).await
 }
 
-/// Overwrite one working file with its content at `rev`. The file's unsaved edits are lost.
+/// Overwrite one working file with its content at `rev`. The file's unsaved
+/// edits are lost, so the person must have confirmed (`confirmed`).
 #[tauri::command]
 pub async fn repo_restore_file(
     engine: tauri::State<'_, Engine>,
@@ -1494,9 +1495,10 @@ pub async fn repo_restore_file(
     repo: String,
     rev: String,
     path: String,
+    confirmed: bool,
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
-    let (_, argv) = file_at_argv(&repo, &rev, &path)?;
+    let argv = views_a::restore_argv(&repo, &[path], Some(&rev), false, confirmed)?;
     write(&engine, &queues, &repo, &argv).await
 }
 

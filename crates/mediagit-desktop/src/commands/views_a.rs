@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::{
-    RepoQueues, as_args, invalid, plain_arg, ref_name_ok, repo_path, repo_relative, write,
+    RepoQueues, as_args, invalid, plain_arg, ref_name_ok, repo_path, repo_relative, rev_ok, write,
 };
 use crate::engine::{Engine, EngineError, Secret};
 
@@ -367,6 +367,40 @@ pub fn unstage_argv(repo: &Path, paths: &[String]) -> Result<Vec<String>, Engine
     Ok(argv)
 }
 
+/// `restore --yes [--source <rev>] [--delete-new] -- <paths>`: put files back,
+/// throwing their unsaved changes away. Only ever built after the person
+/// confirmed in the app (`confirmed`); `--yes` is never sent otherwise, and
+/// `delete_new` additionally deletes files that were never saved.
+pub fn restore_argv(
+    repo: &Path,
+    paths: &[String],
+    source: Option<&str>,
+    delete_new: bool,
+    confirmed: bool,
+) -> Result<Vec<String>, EngineError> {
+    if !confirmed {
+        return Err(invalid("restore", "needs the person's confirmation"));
+    }
+    if paths.is_empty() {
+        return Err(invalid("paths", "none to restore"));
+    }
+    let mut argv = vec!["restore".to_owned(), "--yes".into()];
+    if let Some(rev) = source {
+        rev_ok(rev)?;
+        argv.extend(["--source".into(), rev.into()]);
+    }
+    flag(&mut argv, delete_new, "--delete-new");
+    argv.push("--".into());
+    for p in paths {
+        let rel = repo_relative(repo, p)?;
+        if rel == "." {
+            return Err(invalid("path", p));
+        }
+        argv.push(rel);
+    }
+    Ok(argv)
+}
+
 // ---------------------------------------------------------------------------
 // commands
 // ---------------------------------------------------------------------------
@@ -451,6 +485,22 @@ pub async fn repo_unstage(
 ) -> Result<Value, EngineError> {
     let repo = repo_path(&repo)?;
     write(&engine, &queues, &repo, &unstage_argv(&repo, &paths)?).await
+}
+
+/// Throw away the unsaved changes to `paths` (and, with `delete_new`, delete
+/// the ones never saved). Refused unless the person confirmed in the app.
+#[tauri::command]
+pub async fn repo_restore(
+    engine: tauri::State<'_, Engine>,
+    queues: tauri::State<'_, RepoQueues>,
+    repo: String,
+    paths: Vec<String>,
+    delete_new: bool,
+    confirmed: bool,
+) -> Result<Value, EngineError> {
+    let repo = repo_path(&repo)?;
+    let argv = restore_argv(&repo, &paths, None, delete_new, confirmed)?;
+    write(&engine, &queues, &repo, &argv).await
 }
 
 #[cfg(test)]
@@ -839,5 +889,45 @@ mod tests {
         assert!(bad(unstage_argv(&repo, &[])));
         assert!(bad(unstage_argv(&repo, &s(&["--hard"]))));
         assert!(bad(unstage_argv(&repo, &s(&["../x"]))));
+    }
+
+    /// Discard never runs without the person's yes; `--yes` rides only on a
+    /// confirmed call, and new files need `delete_new` on top.
+    #[test]
+    fn restore_needs_confirmation_and_safe_paths() {
+        let repo = std::env::temp_dir();
+        let one = s(&["art/hero.psd"]);
+        assert!(bad(restore_argv(&repo, &one, None, false, false)));
+        assert!(bad(restore_argv(&repo, &one, None, true, false)));
+        assert_eq!(
+            restore_argv(&repo, &one, None, false, true).unwrap(),
+            s(&["restore", "--yes", "--", "art/hero.psd"])
+        );
+        assert_eq!(
+            restore_argv(&repo, &s(&["a.txt", "n.exr"]), None, true, true).unwrap(),
+            s(&["restore", "--yes", "--delete-new", "--", "a.txt", "n.exr"])
+        );
+        assert_eq!(
+            restore_argv(&repo, &one, Some("abcd1234"), false, true).unwrap(),
+            s(&[
+                "restore",
+                "--yes",
+                "--source",
+                "abcd1234",
+                "--",
+                "art/hero.psd"
+            ])
+        );
+        assert!(bad(restore_argv(&repo, &[], None, false, true)));
+        for p in ["../x", "--hard", "."] {
+            assert!(bad(restore_argv(&repo, &s(&[p]), None, true, true)), "{p}");
+        }
+        assert!(bad(restore_argv(
+            &repo,
+            &one,
+            Some("main; rm"),
+            false,
+            true
+        )));
     }
 }
