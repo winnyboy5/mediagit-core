@@ -194,6 +194,27 @@ impl RebaseCmd {
                 .and_then(|h| h.target);
             let wanted = branch.strip_prefix("refs/heads/").unwrap_or(branch);
             if head.as_deref() != Some(&format!("refs/heads/{wanted}")) {
+                // Every refusal rebase itself can make must happen before the
+                // switch, or a failed rebase leaves the user on BRANCH.
+                let refdb = RefDatabase::new(repo_root.join(".mediagit"));
+                let odb = ObjectDatabase::with_smart_compression(
+                    create_storage_backend(&repo_root).await?,
+                    1000,
+                );
+                let upstream_oid = resolve_revision(upstream, &refdb, &odb).await?;
+                let branch_oid = resolve_revision(wanted, &refdb, &odb)
+                    .await
+                    .with_context(|| format!("Cannot rebase '{wanted}': no such branch"))?;
+                let current = refdb.resolve("HEAD").await.ok();
+                crate::worktree_guard::ensure_index_clean(
+                    &repo_root,
+                    &odb,
+                    current.as_ref(),
+                    "rebase",
+                )
+                .await?;
+                crate::repo::ensure_no_unsafe_paths(&odb, &repo_root, &[branch_oid, upstream_oid])
+                    .await?;
                 super::branch::BranchCmd {
                     subcommand: super::branch::BranchSubcommand::Switch(
                         super::branch::SwitchOpts {

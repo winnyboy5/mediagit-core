@@ -96,3 +96,37 @@ fn unsaved_work_the_switch_would_overwrite_refuses_before_anything_moves() {
     assert_eq!(tip(r, "feature"), feature_before);
     assert_eq!(std::fs::read_to_string(r.join("m.txt")).unwrap(), "unsaved");
 }
+
+#[test]
+fn a_bad_upstream_refuses_before_switching() {
+    let dir = repo();
+    let r = dir.path();
+    let (code, _) = machine(r, &["rebase", "no-such-upstream", "feature"]);
+    assert_ne!(code, 0);
+    assert_eq!(head_branch(r), "main", "a failed rebase must not switch");
+    assert!(!r.join("f.txt").exists());
+}
+
+#[test]
+fn a_staged_change_refuses_before_switching() {
+    let dir = repo();
+    let r = dir.path();
+    // A new file the switch would carry: only rebase's own check refuses it.
+    std::fs::write(r.join("new.txt"), "staged").unwrap();
+    run(r, &["add", "new.txt"]);
+    let (code, _) = machine(r, &["rebase", "main", "feature"]);
+    assert_ne!(code, 0);
+    assert_eq!(head_branch(r), "main", "a failed rebase must not switch");
+    assert!(!r.join("f.txt").exists());
+}
+
+#[test]
+fn a_missing_branch_refuses_with_nothing_moved() {
+    let dir = repo();
+    let r = dir.path();
+    let main_before = tip(r, "main");
+    let (code, _) = machine(r, &["rebase", "main", "no-such-branch"]);
+    assert_ne!(code, 0);
+    assert_eq!(head_branch(r), "main");
+    assert_eq!(tip(r, "main"), main_before);
+}
