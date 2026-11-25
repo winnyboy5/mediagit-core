@@ -46,21 +46,21 @@ test('10 Share work with your team', async () => {
 
     await header(page, 'Send').click()
     await page.getByTestId('transfer-progress').waitFor({ timeout: 30_000 }).catch(() => {})
-    const sending = ch.caption('Send uploads your new versions, with live progress for big files', 6000)
-    await busy(page)
-    await sending
-    await ch.pace(1500)
+    // Show the progress bar under its caption, then cut the rest of the real upload out of the video.
+    await ch.caption('Send uploads your new versions, with live progress for big files', 6000)
+    await ch.skip(() => busy(page))
+    await ch.pace(800)
     await ch.caption('Done. Your teammates can now get everything you sent', 3000)
 
     // A teammate gets the project and sends one new version.
-    const meanwhile = ch.caption('Meanwhile, a teammate gets the project and adds their own notes', 12_000)
-    await ch.pace(400)
-    cli(WORK, ['clone', srv!.url('dragon-keep'), ben])
-    writeFileSync(join(ben, 'grade_notes.txt'), 'Warmer highlights on plate 010\n')
-    cli(ben, ['add', '--all'])
-    cli(ben, ['commit', '-m', 'Grade notes'])
-    cli(ben, ['push', 'origin', 'main'])
-    await meanwhile
+    await ch.caption('Meanwhile, a teammate gets the project and adds their own notes', 4000)
+    await ch.skip(async () => { // the teammate's work happens off screen: cut the wait
+      cli(WORK, ['clone', srv!.url('dragon-keep'), ben])
+      writeFileSync(join(ben, 'grade_notes.txt'), 'Warmer highlights on plate 010\n')
+      cli(ben, ['add', '--all'])
+      cli(ben, ['commit', '-m', 'Grade notes'])
+      cli(ben, ['push', 'origin', 'main'])
+    })
     await refocus(page)
     await ch.pace(1500)
     await page.getByRole('button', { name: 'Fetch' }).first().click()

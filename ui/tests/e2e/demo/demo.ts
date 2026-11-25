@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { chromium, type Browser, type Locator, type Page } from '@playwright/test'
-import { CDP_PORT, OUT, WORK, cdpUp, launchApp, quitApp } from './demo-env'
+import { CDP_PORT, DEMO_ROOT, OUT, WORK, cdpUp, launchApp, quitApp } from './demo-env'
 
 // Demo recorder: attaches to the real app over CDP, records a 1920x1080 clip from
 // Page.startScreencast frames (30 fps CFR mp4), and draws plain-English captions.
@@ -20,6 +20,8 @@ export interface Chapter {
   type(loc: Locator, text: string): Promise<void>
   /** Blur a field (access key IDs, account names) before it is typed into. */
   blur(loc: Locator): Promise<void>
+  /** Run fn (a real wait, such as a transfer) and cut the time it took out of the video; later captions and audio shift to match. */
+  skip<T>(fn: () => Promise<T>): Promise<T>
   stop(): Promise<string>
 }
 
@@ -97,7 +99,7 @@ export async function startChapter(id: string, title: string): Promise<Chapter> 
 }
 
 async function launchChapter(id: string, title: string): Promise<Chapter> {
-  if (!/^[\\/]?.*qa-live[\\/]demo[\\/]work[\\/]work$/i.test(WORK)) throw new Error(`unsafe demo work path: ${WORK}`)
+  if (WORK.toLowerCase() !== join(DEMO_ROOT, 'work').toLowerCase()) throw new Error(`unsafe demo work path: ${WORK}`)
   // Lock is already ours. A previous holder's WebView2 may still be exiting: wait up to 45 s for the port to free.
   if (!(await waitCdpDown(45_000))) throw new Error(`something still answers CDP on :${CDP_PORT} (held by pid ${portPid()}); refusing to record against an app this run did not start`)
   // Fresh app state per chapter; state.json and ui-server.log (what setup started) stay.
@@ -136,6 +138,14 @@ async function launchChapter(id: string, title: string): Promise<Chapter> {
   })
   await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 90, maxWidth: W * SCALE, maxHeight: H * SCALE, everyNthFrame: 1 })
 
+  // Narration: text -> wav/duration from narrate.mjs (never synthesized here). Times are Date.now() ms.
+  let manifest: Record<string, { wav: string; durationMs: number }> = {}
+  try { manifest = JSON.parse(readFileSync(join(OUT, 'tts-cache', 'manifest.json'), 'utf8')) } catch { /* no narration */ }
+  const narration: { text: string; t: number; wav: string }[] = []
+  const caps: { text: string; t: number; ms: number }[] = []
+  let firstCap = 0
+  const skips: { a: number; b: number }[] = []
+
   // Caption survives navigation and reload: re-inject whatever is current.
   let current: string | null = null
   const paint = () => page.evaluate(CAP_JS, current).catch(() => {})
@@ -145,29 +155,62 @@ async function launchChapter(id: string, title: string): Promise<Chapter> {
   return {
     page,
     async caption(text, ms) {
+      const nar = manifest[text]
+      if (nar) ms = Math.max(ms, nar.durationMs + 600)
       current = text
       await paint()
+      const t = Date.now()
+      firstCap ||= t
+      caps.push({ text, t, ms })
+      if (nar) narration.push({ text, t, wav: nar.wav })
       await page.waitForTimeout(ms)
       current = null
       await paint()
     },
     pace: (ms) => page.waitForTimeout(ms),
+    async skip(fn) {
+      const a = Date.now()
+      try { return await fn() } finally { skips.push({ a, b: Date.now() }) }
+    },
     async type(loc, text) {
       await loc.click()
       await loc.pressSequentially(text, { delay: 80 })
     },
     blur: (loc) => loc.evaluate((el) => { (el as HTMLElement).style.filter = 'blur(7px)' }),
     async stop() {
-      const end = Date.now()
+      let end = Date.now()
       await cdp.send('Page.stopScreencast').catch(() => {})
       await chain
       const out = join(OUT, `${slug}.mp4`)
       if (!frames.length) throw new Error('screencast produced no frames')
-      const list = frames.map((g, i) => `file '${g.f.replace(/\\/g, '/')}'\nduration ${(((frames[i + 1]?.t ?? end) - g.t) / 1000).toFixed(3)}`).join('\n')
-      writeFileSync(join(dir, 'list.txt'), `${list}\nfile '${frames.at(-1)!.f.replace(/\\/g, '/')}'\n`)
-      execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', join(dir, 'list.txt'),
-        '-vf', 'fps=30,format=yuv420p', '-r', '30', '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', out], { stdio: ['ignore', 'pipe', 'pipe'] })
-      writeFileSync(join(OUT, `${slug}.json`), JSON.stringify({ id, title, clip: `${slug}.mp4`, frames: frames.length }, null, 2))
+      // Cut skipped spans: drop their frames, pull every later time earlier by the skipped time.
+      const adj = (t: number) => t - skips.reduce((n, s) => n + Math.min(Math.max(t - s.a, 0), s.b - s.a), 0)
+      const live = frames.filter((g) => !skips.some((s) => g.t >= s.a && g.t < s.b)).map((g) => ({ ...g, t: adj(g.t) }))
+      frames.splice(0, frames.length, ...live)
+      end = adj(end)
+      firstCap = firstCap && adj(firstCap)
+      for (const c of caps) c.t = adj(c.t)
+      for (const n of narration) n.t = adj(n.t)
+      // Drop the empty opening: keep frames from 0.3 s before the first caption (all, if there is none).
+      const cut = firstCap ? firstCap - 300 : frames[0]!.t
+      let k = frames.findIndex((g) => g.t > cut)
+      k = k < 0 ? frames.length - 1 : Math.max(0, k - 1)
+      const kept = frames.slice(k).map((g, i) => (i === 0 ? { ...g, t: Math.max(g.t, cut) } : g))
+      const t0 = kept[0]!.t
+      const list = kept.map((g, i) => `file '${g.f.replace(/\\/g, '/')}'\nduration ${(((kept[i + 1]?.t ?? end) - g.t) / 1000).toFixed(3)}`).join('\n')
+      writeFileSync(join(dir, 'list.txt'), `${list}\nfile '${kept.at(-1)!.f.replace(/\\/g, '/')}'\n`)
+      // Audio: each narration wav delayed to its caption; no narration = a silent track. Always 48 kHz stereo AAC.
+      const aIn = narration.length ? narration.flatMap((n) => ['-i', n.wav]) : ['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo']
+      const aFilter = narration.length
+        ? [...narration.map((n, i) => `[${i + 1}:a]aresample=48000,aformat=channel_layouts=stereo,adelay=${Math.max(0, n.t - t0)}:all=1[a${i}]`),
+          `${narration.map((_, i) => `[a${i}]`).join('')}amix=inputs=${narration.length}:normalize=0,loudnorm=I=-16[a]`].join(';')
+        : '[1:a]acopy[a]'
+      execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', join(dir, 'list.txt'), ...aIn,
+        '-filter_complex', aFilter, '-map', '0:v', '-map', '[a]', '-vf', 'fps=30,format=yuv420p', '-r', '30',
+        '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2', '-shortest', out],
+      { stdio: ['ignore', 'pipe', 'pipe'] })
+      writeFileSync(join(OUT, `${slug}.json`), JSON.stringify({ id, title, clip: `${slug}.mp4`, frames: kept.length,
+        captions: caps.map((c) => ({ text: c.text, startMs: c.t - t0, endMs: c.t - t0 + c.ms })) }, null, 2))
       await browser.close().catch(() => {}) // detaches only
       await quitApp()
       rmSync(dir, { recursive: true, force: true })

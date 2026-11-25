@@ -14,7 +14,7 @@ const PROJECTS = process.env.MG_DEMO_PROJECTS ?? 'D:\\Studio'
 
 /** A fresh, empty project folder PROJECTS\name (shown on screen, so keep it short). Wipes only that folder. */
 export function folder(name: string): string {
-  if (!/^[A-Za-z0-9._ -]+$/.test(name) || name === '.' || name === '..') throw new Error(`bad project folder name: ${name}`)
+  if (!/^[A-Za-z0-9._ -]+$/.test(name) || name === '.' || name === '..' || /mediagit/i.test(name)) throw new Error(`bad project folder name: ${name}`)
   const d = resolve(PROJECTS, name)
   if (resolve(d, '..').toLowerCase() !== resolve(PROJECTS).toLowerCase()) throw new Error(`refusing to wipe outside ${PROJECTS}: ${d}`)
   rmSync(d, { recursive: true, force: true })

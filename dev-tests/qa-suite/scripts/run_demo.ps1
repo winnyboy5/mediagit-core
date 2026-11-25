@@ -58,6 +58,15 @@ function Wipe-Silo {
 $code = 0
 Push-Location $ui
 try {
+  # Narration: synthesize every caption once (cached) before recording. MG_DEMO_TTS=none skips it; default sapi.
+  # A stale manifest from another engine would narrate with the wrong voice, so none also removes it.
+  if (-not $env:MG_DEMO_VOICE) { $env:MG_DEMO_VOICE = "expr-voice-3-m" }
+  if ($env:MG_DEMO_TTS -eq "none") {
+    Remove-Item (Join-Path $out "tts-cache\manifest.json") -ErrorAction SilentlyContinue
+  } else {
+    & node (Join-Path $ui "tests\e2e\demo\narrate.mjs") $out
+    if ($LASTEXITCODE -ne 0) { Say "narrate exited $LASTEXITCODE"; exit 5 }
+  }
   & pnpm exec playwright test -c playwright.demo.config.ts @grep
   if ($LASTEXITCODE -ne 0) { Say "playwright exited $LASTEXITCODE"; $code = 1 }
 }

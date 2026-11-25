@@ -19,12 +19,12 @@ test('07 Branches and merging', async () => {
   seedRepo(dir, 'Starting point')
   const dlg = page.getByRole('dialog')
   const startMerge = async (branch: string) => {
-    await go(page, 'branches/merge'); await refocus(page); await ch.pace(2500); await page.reload(); await page.getByRole('button', { name: 'Start a merge' }).waitFor(); await ch.pace(800)
+    await go(page, 'branches/merge'); await refocus(page); await ch.pace(1200); await page.reload(); await page.getByRole('button', { name: 'Start a merge' }).waitFor(); await ch.pace(800)
     await page.getByRole('button', { name: 'Start a merge' }).click()
     await ch.pace(700)
     await choose(page, 'Merge this branch', branch, 600)
     await dlg.getByRole('button', { name: 'Start merge' }).click()
-    await ch.pace(4500)
+    await ch.pace(1500)
   }
   try {
     await toWelcome(page, true)
@@ -38,7 +38,7 @@ test('07 Branches and merging', async () => {
     await ch.type(dlg.getByLabel('Branch name'), 'new-colours')
     await ch.pace(500)
     await dlg.getByRole('button', { name: 'Create and switch' }).click()
-    await ch.pace(2500)
+    await ch.pace(1000)
     await ch.caption('Create a branch and switch to it in one step', 3000)
 
     // Work done on the branch (the artist saves from their editor).
@@ -48,7 +48,7 @@ test('07 Branches and merging', async () => {
     await refocus(page)
     await ch.pace(1500)
     await page.getByLabel('Branches', { exact: true }).locator('li', { hasText: 'main' }).getByRole('button', { name: 'Switch to' }).click()
-    await ch.pace(3500)
+    await ch.pace(1200)
     await ch.caption('Switch back to main and your files change with it', 3500)
 
     await startMerge('new-colours')
@@ -69,10 +69,10 @@ test('07 Branches and merging', async () => {
     await group.waitFor({ timeout: 20_000 })
     await ch.pace(800)
     await ch.caption('Keep mine, or keep theirs. Nothing is blended or damaged', 3500)
-    await group.getByRole('button', { name: /^Keep / }).first().click()
-    await ch.pace(2000)
-    await page.getByRole('button', { name: 'Finish merge' }).first().click()
-    await ch.pace(5000)
+    await ch.skip(() => group.getByRole('button', { name: /^Keep / }).first().click())
+    await ch.pace(1000)
+    await ch.skip(() => page.getByRole('button', { name: 'Finish merge' }).first().click())
+    await ch.pace(1800)
     await ch.caption('Merge finished with the version you chose', 3000)
   } finally {
     console.log('clip:', await ch.stop())
