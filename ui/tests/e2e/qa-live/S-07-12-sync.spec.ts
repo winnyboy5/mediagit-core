@@ -3,6 +3,7 @@ import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statS
 import { dirname, join } from 'node:path'
 import { test, type Page } from '@playwright/test'
 import { CORPUS, WORK } from './env'
+import { ensureBig } from './big'
 import { Recorder, closeTerm, workDir } from './rec'
 import { answerPicker, dialogText, flat, go, openRepo, refocus, rowMenu, toWelcome, visibleErrors } from './gui'
 import { intCheck, sha256, walk } from './integrity'
@@ -380,7 +381,7 @@ test('S-12 Remote files: browse, preview, download a small and a large file', as
   const dl = await rec.cli(out, ['download', 'art/photo.jpeg', '--remote', 'origin', '-C', k.repo], { env: NOKEY })
   rec.note(`CLI download twin: exit ${dl.code} ${flat(dl.stdout + dl.stderr).slice(0, 300)} | files now ${walk(out, () => false).concat(walk(k.repo).filter((f) => /photo\.jpeg$/.test(f))).map((f) => f.split(/[\\/]/).slice(-2).join('/')).join(', ')}`)
 
-  const big = join(WORK, 'big')
+  const big = ensureBig((s) => rec.note(s))
   const bigFiles = existsSync(join(big, '.mediagit')) ? walk(big).map((f) => ({ f, n: statSync(f).size })).filter((x) => x.n > 1e9).sort((x, y) => x.n - y.n) : []
   if (!bigFiles.length) rec.note('no repository with files over 1 GB under work/big: the large download is NOT tested')
   else {

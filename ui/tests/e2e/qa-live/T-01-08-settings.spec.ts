@@ -303,7 +303,13 @@ test('T-08 Security: encryption on, lock, wrong passphrase, recovery code', asyn
   rec.check(!raw(wc) && /code|not match|wrong|invalid|recover/i.test(wc), 'a wrong recovery code is refused in plain words', wc.slice(0, 300))
   await page.getByRole('button', { name: 'Dismiss' }).click().catch(() => {}); await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click().catch(() => {}); await page.waitForTimeout(500)
   const NEW = 'Recovered-Pass!2026'
-  await rec.step('Recover with the real code and a new passphrase', async () => { if (!(await dlg.isVisible().catch(() => false))) { await enc.getByRole('button', { name: 'Recover with a code…' }).click(); await page.waitForTimeout(500) } await dlg.getByLabel('Recovery code').fill(code); await dlg.getByLabel('New passphrase').fill(NEW); await dlg.getByRole('button', { name: 'Recover' }).click(); await page.waitForTimeout(4000) })
+  await rec.step('Recover with the real code and a new passphrase', async () => {
+    // The locked repository asks for its passphrase again after a failed recovery: dismiss that prompt (it can return) before opening the recovery dialog.
+    const unlockDlg = page.getByRole('dialog', { name: 'Unlock this repository' }); const recDlg = page.getByRole('dialog', { name: 'Recover the key' })
+    for (let i = 0; i < 6 && (await unlockDlg.isVisible().catch(() => false)); i++) { await unlockDlg.getByRole('button', { name: 'Cancel' }).click().catch(() => {}); await page.waitForTimeout(500) }
+    if (!(await recDlg.isVisible().catch(() => false))) { await enc.getByRole('button', { name: 'Recover with a code…' }).click(); await page.waitForTimeout(500) }
+    await recDlg.getByLabel('Recovery code').fill(code); await recDlg.getByLabel('New passphrase').fill(NEW); await recDlg.getByRole('button', { name: 'Recover' }).click(); await page.waitForTimeout(4000)
+  })
   rec.note(`after recovery: ${flat(await enc.innerText())} | alerts ${await alerts(page)}`)
   const outN = join(WORK, 'T-08-new.txt'), outO = join(WORK, 'T-08-old.txt'); rmSync(outN, { force: true }); rmSync(outO, { force: true })
   const viaNew = await rec.cli(dir, ['--machine', '--secret-stdin', 'show', 'HEAD:secret.txt', '--output', outN], { input: NEW + '\n', quietFrame: true })

@@ -36,6 +36,16 @@ function memMb(pid: number): number {
   }
 }
 
+/** Command line, start time and parent of a PID, for the case log (an orphan is only fixable once we know what it is). */
+function describePid(pid: number): string {
+  try {
+    const ps = `$p=Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"; if(-not $p){'gone'} else {$q=Get-CimInstance Win32_Process -Filter "ProcessId=$($p.ParentProcessId)"; "pid ${pid} started $($p.CreationDate.ToString('s')) cmd [$($p.CommandLine)] parent $($p.ParentProcessId) " + $(if($q){"alive ($($q.Name) $($q.CommandLine))"}else{'DEAD'})}`
+    return execFileSync('powershell', ['-NoProfile', '-Command', ps], { encoding: 'utf8', windowsHide: true }).trim().replace(/\s+/g, ' ').slice(0, 700)
+  } catch (e) {
+    return `pid ${pid} (could not inspect: ${String(e).slice(0, 80)})`
+  }
+}
+
 export class Recorder {
   readonly dir: string
   readonly log: string
@@ -225,10 +235,17 @@ killed by the harness after ${opts.timeoutMs} ms`; killTree(p.pid!) }, opts.time
     a.push({ ok: this.pageErrors.length === 0, what: 'ambient: no page errors', detail: this.pageErrors.slice(0, 8).join(' | ') })
     a.push({ ok: this.cliNoise.length === 0, what: 'ambient: no panic or backtrace in CLI output', detail: this.cliNoise.join(' | ') })
     const stray = () => pidsOf('mediagit.exe').filter((p) => !this.mgBefore.includes(p))
+    // Describe each stray while it is still alive: it can exit between the last poll and the report.
+    const seen = new Map<number, string>()
+    const note = () => { for (const p of stray()) if (!seen.has(p)) seen.set(p, describePid(p)) }
+    note()
     // children of a just-closed app/server need a moment to exit
-    for (let i = 0; i < 20 && stray().length; i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500)
+    for (let i = 0; i < 20 && stray().length; i++) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500); note() }
+    for (const [p, d] of seen) this.line(`STRAY ${p} ${d}`)
     const orphans = stray()
     a.push({ ok: orphans.length === 0, what: 'ambient: no orphan mediagit.exe', detail: orphans.join(',') })
+    // Say what each orphan is: command line, start time, and whether its parent is alive (and what it is).
+    for (const pid of orphans) this.line(`ORPHAN ${describePid(pid)}`)
     for (const repo of this.repos) {
       if (!existsSync(join(repo, '.mediagit'))) continue
       let out = ''

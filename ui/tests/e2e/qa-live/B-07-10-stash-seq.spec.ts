@@ -2,6 +2,7 @@ import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, st
 import { dirname, join } from 'node:path'
 import { test, type Page } from '@playwright/test'
 import { CORPUS, WORK } from './env'
+import { ensureBig } from './big'
 import { Recorder, closeTerm, workDir } from './rec'
 import { choose, dialogText, flat, go, openRepo, refocus, toWelcome, visibleErrors } from './gui'
 import { intCheck, sha256, walk } from './integrity'
@@ -63,6 +64,7 @@ test('B-07 Stash: every option, with one large file', async () => {
   const k = kit(rec, repo)
   await k.init()
   k.put('art/banner.ai', { from: banner(1) }); k.put('art/photo.jpeg', { from: P1 }); k.put('notes.txt', 'base\n')
+  ensureBig((s) => rec.note(s))
   const bigSrc = walk(join(WORK, 'big')).map((f) => ({ f, n: statSync(f).size })).sort((a, b) => b.n - a.n)[0]
   if (bigSrc) { mkdirSync(join(repo, 'video'), { recursive: true }); cpSync(bigSrc.f, join(repo, 'video/master.mov')); rec.note(`large file: ${bigSrc.f} ${(bigSrc.n / 1e9).toFixed(2)} GB`) } else rec.note('no large file found under work/big; large-file part skipped')
   await k.save('base')

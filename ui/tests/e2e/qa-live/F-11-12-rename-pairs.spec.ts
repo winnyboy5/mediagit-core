@@ -1,7 +1,8 @@
 import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { test } from '@playwright/test'
-import { CORPUS, WORK, freeGb } from './env'
+import { CORPUS, freeGb } from './env'
+import { ensureBig } from './big'
 import { Recorder, closeTerm, workDir } from './rec'
 import { go, openRepo, toWelcome } from './gui'
 import { corpusHash, hashCompare, intCheck, restoreCheck, sha256 } from './integrity'
@@ -14,8 +15,7 @@ const out = (r: { stdout: string; stderr: string }) => `${r.stdout}\n${r.stderr}
 test('F-11 Rename a 1.7 GB file and move a folder', async () => {
   const rec = await Recorder.start('F-11', 'rename-move', { gui: true })
   const page = rec.page!
-  const repo = join(WORK, 'big')
-  if (!existsSync(join(repo, '.mediagit'))) throw new Error('F-11 needs work\\big from the pilot (F-06)')
+  const repo = ensureBig((s) => rec.note(s))
   await rec.cli(repo, ['reset', '--hard', 'HEAD'], { quietFrame: true })
   const ls = async () => (JSON.parse((await rec.cli(repo, ['ls-files', '--machine'], { quietFrame: true })).stdout) as { data: { files: LsFile[] } }).data.files
   const before = await ls()

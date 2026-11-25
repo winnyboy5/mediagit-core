@@ -3,6 +3,7 @@ import { cpSync, existsSync, mkdirSync, renameSync, rmSync, statSync, writeFileS
 import { dirname, join } from 'node:path'
 import { test, type Page } from '@playwright/test'
 import { CLI, CLI_ENV, CORPUS, DESKTOP, SERVER, WORK, CDP_PORT, cdpUp, killApp, launchApp, pidsOf, readState, waitFor } from './env'
+import { ensureBig } from './big'
 import { Recorder, closeTerm, workDir } from './rec'
 import { flat, go, openRepo, sampleProgress, store, toWelcome, visibleErrors } from './gui'
 import { intCheck, sha256, walk } from './integrity'
@@ -19,7 +20,7 @@ function bigRepo(rec: Recorder, name: string): { dir: string; files: { rel: stri
   const dir = workDir(name)
   rmSync(dir, { recursive: true, force: true }); mkdirSync(dir, { recursive: true })
   execFileSync(CLI, ['init'], { cwd: dir, env: { ...process.env, ...CLI_ENV }, stdio: 'ignore' })
-  const src = join(WORK, 'big')
+  const src = ensureBig((s) => rec.note(s))
   const files = walk(src).map((f) => ({ f, n: statSync(f).size })).sort((a, b) => b.n - a.n).slice(0, 4)
   for (const x of files) { const rel = x.f.slice(src.length + 1); mkdirSync(dirname(join(dir, rel)), { recursive: true }); cpSync(x.f, join(dir, rel)) }
   rec.note(`large files: ${files.map((x) => `${x.f.slice(src.length + 1)} ${(x.n / 1e9).toFixed(2)} GB`).join(', ')}`)

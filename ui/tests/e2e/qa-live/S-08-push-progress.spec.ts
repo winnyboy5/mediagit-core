@@ -1,6 +1,7 @@
 import { existsSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from '@playwright/test'
+import { ensureBig } from './big'
 import { Recorder, closeTerm } from './rec'
 import { go, openRepo, sampleProgress, visibleErrors, type ProgressSample } from './gui'
 import { corpusHash, intCheck } from './integrity'
@@ -18,8 +19,7 @@ const FILES: Record<string, string> = {
 test('S-08 push with progress, then clone and compare', async () => {
   const rec = await Recorder.start('S-08', 'push-progress', { gui: true })
   const page = rec.page!
-  const repo = join(WORK, 'big')
-  if (!existsSync(join(repo, '.mediagit'))) throw new Error('run F-06 first: work\\big is missing')
+  const repo = ensureBig((s) => rec.note(s))
   const want: Record<string, string> = {}
   for (const [rel, src] of Object.entries(FILES)) want[rel] = await corpusHash(src)
   const total = Object.keys(want).reduce((n, f) => n + statSync(join(repo, f)).size, 0)

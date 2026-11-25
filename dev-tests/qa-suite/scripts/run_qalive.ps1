@@ -139,6 +139,9 @@ function Clear-Work {
     if (-not (Test-Path $work)) { return $true }
     Start-Sleep -Seconds 2
   }
+  # L-08 makes names Win32 cannot delete (a trailing dot: "shot.v1."); the extended-length prefix can.
+  cmd.exe /c rd /s /q ('\\?\' + $work) 2>&1 | Out-Null
+  if (-not (Test-Path $work)) { return $true }
   Say "WARNING: could not fully remove $work"
   return $false
 }
@@ -212,6 +215,12 @@ if (-not $SkipCleanup) {
 }
 $kcBefore = @(Get-LoopbackTargets)
 New-Item -ItemType Directory -Path $runDir -Force | Out-Null
+
+# S-13 needs the Silo client; GA's native Silo keeps it in <profile>\silo. Unset and absent = S-13 records SKIP.
+if (-not $env:MG_QA_MCLI) {
+  $mcli = Join-Path $env:USERPROFILE "silo\mcli.exe"
+  if (Test-Path $mcli) { $env:MG_QA_MCLI = $mcli; Say "MG_QA_MCLI = $mcli" } else { Say "MG_QA_MCLI unset and $mcli not found: S-13 will SKIP" }
+}
 
 $env:MG_QA_ROOT = $qaRoot
 $env:MG_QA_DAY  = $RunId

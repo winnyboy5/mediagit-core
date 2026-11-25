@@ -2,6 +2,7 @@ import { existsSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { test, type Page } from '@playwright/test'
 import { WORK, pidsOf } from './env'
+import { ensureBig } from './big'
 import { Recorder, closeTerm } from './rec'
 import { flat, go, openRepo, toWelcome, visibleErrors } from './gui'
 import { intCheck, sha256, walk } from './integrity'
@@ -14,8 +15,7 @@ const alerts = async (page: Page) => JSON.stringify(await visibleErrors(page)).s
 test('R-02 Cancel mid-push, then retry', async () => {
   const rec = await Recorder.start('R-02', 'cancel-push', { gui: true })
   const page = rec.page!
-  const big = join(WORK, 'big')
-  if (!existsSync(join(big, '.mediagit'))) throw new Error('needs the 9.4 GB repository work/big')
+  const big = ensureBig((s) => rec.note(s))
   const s = await startServer(join(WORK, 'R-02-srv'), ['big'])
   const cli = (...a: string[]) => rec.cli(big, a, { quietFrame: true, env: NOKEY })
   for (const r of ['origin', 'qa12', 'r02']) await cli('remote', 'remove', r)
