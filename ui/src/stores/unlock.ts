@@ -16,8 +16,9 @@ export const useUnlockStore = defineStore('unlock', () => {
   /** Repositories a command found locked (`needs_input`) and that are not unlocked now. */
   const locked = reactive(new Set<string>())
   /**
-   * Repositories whose prompt the person cancelled. Implicit requests (a refresh, focus, an action)
-   * do not ask again; they stay locked. An explicit unlock, opening the repo again, or a restart does.
+   * Repositories whose prompt the person cancelled. Requests the person did not just make (commands
+   * from the api layer, a view's refresh on mount) do not ask again: they fail as locked and the
+   * view offers Unlock. A button (unlock, run, recalculate), opening the repo again, or a restart prompts.
    */
   const declined = reactive(new Set<string>())
   /** Set when the previous answer did not work. */
@@ -53,14 +54,19 @@ export const useUnlockStore = defineStore('unlock', () => {
     w?.(passphrase)
   }
 
-  /** Run `fn`; if it needs the passphrase, ask and run it again (until it works or is cancelled). */
-  async function withUnlock<T>(fn: (passphrase?: string) => Promise<T>): Promise<T> {
+  /**
+   * Run `fn`; if it needs the passphrase, ask and run it again (until it works or is cancelled).
+   * Pass `implicitFor` (the repository) for a call nobody clicked, such as a refresh on mount: after
+   * a Cancel it fails as `needs_input` instead of asking again.
+   */
+  async function withUnlock<T>(fn: (passphrase?: string) => Promise<T>, implicitFor?: string): Promise<T> {
     let pass: string | undefined
     for (;;) {
       try {
         return await fn(pass)
       } catch (e) {
         if (toApiError(e).code !== 'needs_input') throw e
+        if (implicitFor && declined.has(implicitFor)) throw e
         const next = await ask(pass !== undefined)
         if (next === null) throw { code: 'cancelled', message: 'Cancelled' }
         pass = next
@@ -95,7 +101,6 @@ export const useUnlockStore = defineStore('unlock', () => {
           await api.unlockRepo(repo, pass)
           unlocked.add(repo)
           locked.delete(repo)
-          declined.delete(repo)
           return true
         } catch (e) {
           // Only a rejected passphrase is asked about again; any other failure is the real answer.

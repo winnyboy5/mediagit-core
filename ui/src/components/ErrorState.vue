@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, inject } from 'vue'
+import { getActivePinia } from 'pinia'
 import { routerKey } from 'vue-router'
 import { CircleAlert } from 'lucide-vue-next'
 import { useRepoStore } from '@/stores/repo'
@@ -12,7 +13,13 @@ const emit = defineEmits<{ retry: [] }>()
 const router = inject(routerKey, null)
 
 // The first sentence names the problem; any rest is the explanation.
-const locked = computed(() => props.code === 'needs_input')
+// After a Cancel the error is "cancelled": on a repository left locked, say it is locked. Any other error keeps its own text.
+const repoLocked = computed(() => {
+  if (!getActivePinia()) return false
+  const path = useRepoStore().path
+  return !!path && useUnlockStore().locked.has(path)
+})
+const locked = computed(() => props.code === 'needs_input' || (props.code === 'cancelled' && repoLocked.value))
 // Stores are touched only when asked, so this stays a plain component everywhere else.
 async function unlockThenRetry() {
   const path = useRepoStore().path

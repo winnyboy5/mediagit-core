@@ -259,13 +259,19 @@ test('R-07 + R-08 + R-09 Dark theme, 1024 px wide, keyboard only', async () => {
   rec.note(`focus after Ctrl+F: ${await focus()}`)
   rec.check(/input/.test(await focus()), 'Ctrl+F puts the cursor in the search field', await focus())
   await page.keyboard.press('Escape')
-  await rec.step('Keyboard: Alt+2 (Changes), then Tab 25 times', async () => { await page.keyboard.press('Alt+2'); await page.waitForTimeout(1200) })
+  await rec.step('Keyboard: Alt+2 (Changes), then Tab through two full cycles', async () => { await page.keyboard.press('Alt+2'); await page.waitForTimeout(1200) })
   const stops: string[] = []
-  for (let i = 0; i < 25; i++) { await page.keyboard.press('Tab'); await page.waitForTimeout(60); stops.push(await focus()) }
-  await rec.shot('after 25 tabs')
+  // One full cycle is the controls plus one (body) stop where focus leaves the page and wraps; walk past two cycles to see it repeat.
+  for (let i = 0; i < 45; i++) { await page.keyboard.press('Tab'); await page.waitForTimeout(60); stops.push(await focus()) }
+  await rec.shot('after the tabs')
   rec.note(`tab order on Changes: ${stops.join(' > ')}`)
   rec.check(!stops.some((s) => s.includes('ring=NONE')), 'every Tab stop shows a focus ring', stops.filter((s) => s.includes('ring=NONE')).slice(0, 5).join(' | '))
-  rec.check(new Set(stops).size >= 10 && stops.filter((s) => s === '(body)').length <= 1, 'Tab walks through real controls and never falls to the page body (one wrap after the last control is normal)', `${new Set(stops).size} distinct stops; (body) x${stops.filter((s) => s === '(body)').length}`)
+  const bodyAt = stops.flatMap((s, i) => (s === '(body)' ? [i] : []))
+  const period = bodyAt.length > 1 ? bodyAt[1]! - bodyAt[0]! : 0
+  const controls = new Set(stops.filter((s) => s !== '(body)')).size
+  // The page body appears once per cycle, at the same place (the wrap after the last control). Two or more body stops must be one full cycle of the distinct controls plus the wrap apart: a period of 1 (stuck on body) or a body stop in the middle of the cycle is a control that drops focus.
+  const regular = bodyAt.length < 2 || (period === controls + 1 && bodyAt.every((b, i) => i === 0 || b - bodyAt[i - 1]! === period))
+  rec.check(new Set(stops).size >= 10 && regular, 'Tab walks through real controls and falls to the page body only at the one regular wrap after the last control', `${new Set(stops).size} distinct stops; (body) at ${bodyAt.join(',')}`)
   await rec.step('Keyboard only: save a version (Space to include, type a message, Ctrl+Enter)', async () => {
     await page.keyboard.press('Alt+2'); await page.waitForTimeout(800)
     const box = page.getByRole('button', { name: 'Include all' }); await box.focus(); await page.keyboard.press('Enter'); await page.waitForTimeout(2500)

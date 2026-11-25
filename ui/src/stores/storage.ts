@@ -13,14 +13,15 @@ export const useStorageStore = defineStore('storage', () => {
   const error = ref<ApiError | null>(null)
   let token = 0
 
-  async function refresh() {
+  /** `clicked`: the person asked (a button); otherwise it is a refresh on mount and a Cancel is respected. */
+  async function refresh(clicked = false) {
     const root = repo.path
     if (!root) return
     const mine = ++token
     loading.value = true
     error.value = null
     try {
-      const r = await unlock.withUnlock((p) => api.stats(root, p))
+      const r = await unlock.withUnlock((p) => api.stats(root, p), clicked ? undefined : root)
       if (mine === token) stats.value = r
     } catch (e) {
       if (mine === token) error.value = toApiError(e)

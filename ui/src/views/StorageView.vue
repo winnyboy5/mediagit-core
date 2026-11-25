@@ -41,12 +41,12 @@ const n = (x: number) => x.toLocaleString('en-US')
       <div class="ttl">
         <h2 class="pt sr-only">Storage</h2>
       </div>
-      <Button :disabled="st.loading" @click="st.refresh()"><RefreshCw :size="16" aria-hidden="true" /> Recalculate storage</Button>
+      <Button :disabled="st.loading" @click="st.refresh(true)"><RefreshCw :size="16" aria-hidden="true" /> Recalculate storage</Button>
     </header>
 
     <div v-if="!s && !st.error" class="pad"><SkeletonRows :count="6" /></div>
     <div v-else-if="st.error && !s" class="pad">
-      <ErrorState :code="st.error.code" :message="st.error.message" :details="st.error.details" @retry="st.refresh()" />
+      <ErrorState :code="st.error.code" :message="st.error.message" :details="st.error.details" @retry="st.refresh(true)" />
     </div>
     <div v-else-if="empty" class="pad">
       <EmptyState title="Nothing stored yet" description="Save your first version and its size shows up here.">

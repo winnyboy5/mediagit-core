@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import { routerKey } from 'vue-router'
 
 const core = vi.hoisted(() => ({ invoke: vi.fn() }))
 vi.mock('@tauri-apps/api/core', () => ({
@@ -15,6 +16,7 @@ vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn() }))
 import { api, setStillLockedHandler, setUnlockHandler } from '@/api'
 import ErrorState from '@/components/ErrorState.vue'
 import { useRepoStore } from '@/stores/repo'
+import { useStorageStore } from '@/stores/storage'
 import { useUnlockStore } from '@/stores/unlock'
 
 const REPO = '/repos/a'
@@ -119,5 +121,58 @@ describe('the unlock prompt asks once', () => {
     expect(await quiet(u)).toBe('prompted')
     u.answer(null)
     await other
+  })
+})
+
+describe('views that read while locked', () => {
+  it('ErrorState offers Unlock for a locked repo even when the error is "cancelled"', async () => {
+    const u = useUnlockStore()
+    const repo = useRepoStore()
+    repo.path = REPO
+    const w = mount(ErrorState, { props: { code: 'cancelled', message: 'Cancelled' } })
+    expect(w.text()).not.toContain('Unlock')
+    u.locked.add(REPO)
+    await w.vm.$nextTick()
+    expect(w.text()).toContain('Unlock')
+    expect(w.text()).not.toContain('Stopped')
+  })
+
+  it('withUnlock for a call nobody clicked respects a Cancel; a click still prompts', async () => {
+    const u = useUnlockStore()
+    await cancelOnce(u)
+    const fn = vi.fn().mockRejectedValue(needs)
+    await expect(u.withUnlock(fn, REPO)).rejects.toMatchObject({ code: 'needs_input' })
+    expect(await quiet(u)).toBe('quiet')
+    const clicked = u.withUnlock(fn).catch((e) => e)
+    expect(await quiet(u)).toBe('prompted')
+    u.answer(null)
+    expect(await clicked).toMatchObject({ code: 'cancelled' })
+  })
+
+  it('the storage view refresh on mount does not prompt after a Cancel; the button does', async () => {
+    const u = useUnlockStore()
+    useRepoStore().path = REPO
+    core.invoke.mockRejectedValue(needs)
+    await cancelOnce(u)
+    const st = useStorageStore()
+    await st.refresh()
+    expect(st.error).toMatchObject({ code: 'needs_input' })
+    expect(await quiet(u)).toBe('quiet')
+    const clicked = st.refresh(true)
+    expect(await quiet(u)).toBe('prompted')
+    u.answer(null)
+    await clicked
+  })
+})
+
+describe('ErrorState scope', () => {
+  it('a non-lock error on a locked repo keeps its own text and button', async () => {
+    const u = useUnlockStore()
+    useRepoStore().path = REPO
+    u.locked.add(REPO)
+    const w = mount(ErrorState, { props: { code: 'error', message: "Remote 'origin' not found in configuration" }, global: { provide: { [routerKey as symbol]: { push: () => {} } } } })
+    expect(w.text()).not.toContain('This repository is locked')
+    expect(w.text()).not.toContain('Unlock')
+    expect(w.text()).toContain('Add remote')
   })
 })
