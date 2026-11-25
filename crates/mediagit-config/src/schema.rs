@@ -870,21 +870,23 @@ impl BranchConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct BranchProtection {
-    /// Prevent force-push to this branch
-    #[serde(default = "default_true")]
-    pub prevent_force_push: bool,
-
     /// Prevent deletion of this branch
     #[serde(default = "default_true")]
     pub prevent_deletion: bool,
 
     // ---- accepted, discarded, never written (see `Config`) -----------
     //
-    // `require_reviews` / `min_approvals` were dropped 2026-11-24: nothing
-    // ever enforced them (there is no review workflow). Every protected
-    // branch an older binary saved carries both keys, so they must still
-    // parse; `save()` no longer writes them. Not warned about: the common
-    // value is the default `false`, and warning on it would be noise.
+    // `require_reviews` / `min_approvals` were dropped 2026-11-24 and
+    // `prevent_force_push` on 2026-11-25: nothing ever enforced them (there
+    // is no review workflow, and the server never blocked a force push).
+    // Every protected branch an older binary saved carries these keys, so
+    // they must still parse; `save()` no longer writes them. Not warned
+    // about: they sit in every saved protected branch (`prevent_force_push`
+    // defaulted to true), so a warning would be noise.
+    /// Was `prevent_force_push`.
+    #[serde(default, rename = "prevent_force_push", skip_serializing)]
+    pub deprecated_prevent_force_push: Option<serde_json::Value>,
+
     /// Was `require_reviews`.
     #[serde(default, rename = "require_reviews", skip_serializing)]
     pub deprecated_require_reviews: Option<serde_json::Value>,
@@ -895,11 +897,11 @@ pub struct BranchProtection {
 }
 
 impl BranchProtection {
-    /// Create default protection (prevent force-push and deletion)
+    /// Create default protection (prevent deletion)
     pub fn default_protection() -> Self {
         Self {
-            prevent_force_push: true,
             prevent_deletion: true,
+            deprecated_prevent_force_push: None,
             deprecated_require_reviews: None,
             deprecated_min_approvals: None,
         }
@@ -1067,6 +1069,26 @@ min_approvals = 2
         assert!(out.contains("[protected_branches.main]"), "{out}");
         assert!(!out.contains("require_reviews"), "{out}");
         assert!(!out.contains("min_approvals"), "{out}");
+    }
+
+    /// `prevent_force_push` was dropped 2026-11-25: the server never blocked a
+    /// force push. Old configs still parse; the key is never written.
+    #[test]
+    fn dropped_force_push_key_parses_and_is_not_written() {
+        let toml_str = r#"
+[storage]
+backend = "filesystem"
+base_path = "./data"
+[protected_branches.main]
+prevent_force_push = true
+prevent_deletion = true
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.is_branch_protected("main"));
+        let out = toml::to_string(&config).unwrap();
+        assert!(out.contains("[protected_branches.main]"), "{out}");
+        assert!(out.contains("prevent_deletion"), "{out}");
+        assert!(!out.contains("prevent_force_push"), "{out}");
     }
 
     #[test]

@@ -1255,7 +1255,7 @@ impl BranchCmd {
 
             if !opts.quiet {
                 output::success(&format!(
-                    "Protected branch '{}' (prevent force-push, prevent deletion)",
+                    "Protected branch '{}' (deleting and renaming are blocked)",
                     branch_name
                 ));
             }

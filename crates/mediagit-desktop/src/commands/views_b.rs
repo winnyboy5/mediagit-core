@@ -568,7 +568,7 @@ pub async fn branch_show(
     read(&engine, &repo, &argv).await
 }
 
-/// Protect a branch from force pushes and deletion, or lift that (`unprotect`).
+/// Protect a branch from deletion and rename, or lift that (`unprotect`).
 #[tauri::command]
 pub async fn branch_protect(
     engine: tauri::State<'_, Engine>,

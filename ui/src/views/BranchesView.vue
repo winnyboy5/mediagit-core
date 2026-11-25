@@ -324,7 +324,7 @@ function doDelete() {
       @confirm="forgetting && branches.forgetRemote(forgetting)"
     />
 
-    <Dialog v-model:open="protectOpen" :title="`Protect ${protecting ?? ''}`" description="A protected branch cannot be deleted or have its history overwritten.">
+    <Dialog v-model:open="protectOpen" :title="`Protect ${protecting ?? ''}`" description="A protected branch cannot be deleted or renamed.">
       <p v-if="branches.actionError && protectOpen" class="derr" role="alert">{{ branches.actionError.message }}</p>
       <template #footer>
         <Button @click="protectOpen = false">Cancel</Button>

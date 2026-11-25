@@ -54,7 +54,6 @@ email = "alice@example.com"
 url = "http://media-server.example.com/my-project"
 
 [protected_branches.main]
-prevent_force_push = true
 prevent_deletion = true
 
 [custom]
@@ -356,14 +355,14 @@ Set automatically by `mediagit push -u origin main`. Rarely edited manually.
 
 ```toml
 [protected_branches.main]
-prevent_force_push = true
 prevent_deletion = true
 ```
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `prevent_force_push` | bool | `true` | Block force pushes. |
 | `prevent_deletion` | bool | `true` | Block branch deletion. |
+
+Protection blocks deleting and renaming the branch; it does not block force pushes. Server-side force-push protection is planned. A `prevent_force_push` key in an older config is accepted and ignored.
 
 ---
 

@@ -90,7 +90,7 @@ verbose output.
 
 ### `protect <branch>`
 
-Protect a branch against force-push and deletion (see
+Protect a branch against deletion and rename (see
 `[protected_branches]` in the [Configuration Reference](../reference/config.md)).
 `--unprotect` removes protection.
 

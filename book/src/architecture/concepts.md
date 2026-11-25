@@ -161,7 +161,7 @@ gitGraph
 
 ### Branch Protection
 - Branches can be marked as protected with `mediagit branch protect`
-- A protected branch cannot be deleted with `branch delete` unless `--force` is given
+- A protected branch cannot be deleted with `branch delete`, not even with `--force`; unprotect it first
 
 ## Merge Strategies
 
