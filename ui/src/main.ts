@@ -17,7 +17,7 @@ const pinia = createPinia()
 // Apply the saved theme and density before anything is shown.
 useLookStore(pinia)
 // An encrypted repository that needs its passphrase asks for it, whichever view hit it.
-setUnlockHandler((repo) => useUnlockStore(pinia).unlockRepo(repo))
+setUnlockHandler((repo) => useUnlockStore(pinia).unlockForCommand(repo))
 setStillLockedHandler((repo) => useUnlockStore(pinia).markLocked(repo))
 // Settle which repository to reopen before the router's first redirect reads it.
 void useRepoStore(pinia)

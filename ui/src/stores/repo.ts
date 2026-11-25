@@ -82,6 +82,8 @@ export const useRepoStore = defineStore('repo', () => {
 
   /** Open a repository; returns false (and stays closed) when it cannot be read. */
   async function open(dir: string): Promise<boolean> {
+    // Opening again resumes the passphrase prompt, and the status call below may need it.
+    useUnlockStore().resume(dir)
     // Validate before touching `path`: other stores watch it and reset on change.
     let s: StatusReport
     try {
@@ -94,6 +96,7 @@ export const useRepoStore = defineStore('repo', () => {
     // The picked folder may be inside the repository; the app works on its root.
     const root = s.root
     if (path.value && path.value !== root) lock(path.value)
+    useUnlockStore().resume(root)
     path.value = root
     status.value = s
     error.value = null

@@ -93,7 +93,7 @@ function channel(onProgress?: (p: Progress) => void): Channel<Progress> {
 type Report = (p: Progress) => void
 
 /** Asks the person to unlock `repo`; true once it is unlocked, false if they cancelled. */
-type UnlockHandler = (repo: string) => Promise<boolean>
+type UnlockHandler = (repo: string) => Promise<boolean | 'declined'>
 let unlockHandler: UnlockHandler | null = null
 
 /** Told when a command still needs the passphrase right after the person unlocked the repository. */
@@ -119,7 +119,10 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
   } catch (e) {
     const repo = args?.repo
     if (toApiError(e).code !== 'needs_input' || typeof repo !== 'string' || !unlockHandler) throw e
-    if (!(await unlockHandler(repo))) throw { code: 'cancelled', message: 'Cancelled' } satisfies ApiError
+    const unlocked = await unlockHandler(repo)
+    // Cancelled earlier: no new prompt, the command fails as locked and the view offers Unlock.
+    if (unlocked === 'declined') throw e
+    if (!unlocked) throw { code: 'cancelled', message: 'Cancelled' } satisfies ApiError
     try {
       return await rawInvoke<T>(cmd, args)
     } catch (e2) {

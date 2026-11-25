@@ -15,6 +15,11 @@ export const useUnlockStore = defineStore('unlock', () => {
   const unlocked = reactive(new Set<string>())
   /** Repositories a command found locked (`needs_input`) and that are not unlocked now. */
   const locked = reactive(new Set<string>())
+  /**
+   * Repositories whose prompt the person cancelled. Implicit requests (a refresh, focus, an action)
+   * do not ask again; they stay locked. An explicit unlock, opening the repo again, or a restart does.
+   */
+  const declined = reactive(new Set<string>())
   /** Set when the previous answer did not work. */
   const retry = ref(false)
   let waiting: ((answer: string | null) => void) | null = null
@@ -69,8 +74,10 @@ export const useUnlockStore = defineStore('unlock', () => {
   /**
    * Unlock `repo` for the session: ask until the backend accepts the passphrase or the person
    * cancels. The passphrase goes straight to `unlock_repo` and nowhere else.
+   * This is a person asking to unlock (a button): it prompts even after an earlier Cancel.
    */
   function unlockRepo(repo: string): Promise<boolean> {
+    declined.delete(repo)
     const existing = asking.get(repo)
     if (existing) return existing
     // A command just needed the passphrase, so whatever we believed before is stale.
@@ -80,11 +87,15 @@ export const useUnlockStore = defineStore('unlock', () => {
       let again = false
       for (;;) {
         const pass = await ask(again)
-        if (pass === null) return false
+        if (pass === null) {
+          declined.add(repo)
+          return false
+        }
         try {
           await api.unlockRepo(repo, pass)
           unlocked.add(repo)
           locked.delete(repo)
+          declined.delete(repo)
           return true
         } catch (e) {
           // Only a rejected passphrase is asked about again; any other failure is the real answer.
@@ -97,8 +108,22 @@ export const useUnlockStore = defineStore('unlock', () => {
     return job
   }
 
+  /**
+   * A command needs the passphrase. After an earlier Cancel for this repository it does not ask
+   * again: `'declined'` lets the command fail with its own `needs_input`, which the view shows.
+   */
+  function unlockForCommand(repo: string): Promise<boolean | 'declined'> {
+    return declined.has(repo) ? Promise.resolve('declined') : unlockRepo(repo)
+  }
+
+  /** The repository was opened or switched to: prompting resumes. */
+  function resume(repo: string) {
+    declined.delete(repo)
+  }
+
   /** Forget the session passphrase for `repo`; its next encrypted read asks again. */
   function lock(repo: string) {
+    declined.delete(repo)
     unlocked.delete(repo)
     locked.add(repo)
     void Promise.resolve()
@@ -112,5 +137,5 @@ export const useUnlockStore = defineStore('unlock', () => {
     locked.add(repo)
   }
 
-  return { open, hold, retry, unlocked, locked, markLocked, answer, withUnlock, unlockRepo, lock }
+  return { open, hold, retry, unlocked, locked, markLocked, resume, answer, unlockForCommand, withUnlock, unlockRepo, lock }
 })
