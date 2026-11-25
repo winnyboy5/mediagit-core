@@ -21,6 +21,9 @@ pub struct Friendly {
     pub message: String,
     /// The full `{:#}` chain, scrubbed. For a "Details" fold.
     pub details: String,
+    /// The message names the locked or denied file, so `details` only adds OS
+    /// error codes and can stay behind `--verbose`.
+    pub names_file: bool,
 }
 
 /// OS-level problems with a code of their own.
@@ -168,16 +171,67 @@ pub fn friendly(err: &anyhow::Error) -> Option<Friendly> {
         if let Some(io) = c.downcast_ref::<std::io::Error>() {
             return os_problem(io).map(|p| {
                 let (code, text) = os_friendly(p);
-                (code, text.to_owned())
+                // Name the file when a context line of the chain carries its path (R-12).
+                let text = match (p, file_name_in_chain(err)) {
+                    (Os::InUse | Os::Denied, Some(n)) => text.replacen('.', &format!(" ({n})."), 1),
+                    _ => text.to_owned(),
+                };
+                (code, text)
             });
         }
         None
     })?;
+    let names_file =
+        matches!(code, "file_in_use" | "permission_denied") && file_name_in_chain(err).is_some();
     Some(Friendly {
         code,
         message: crate::output::scrub(&message),
         details: scrubbed_chain(err),
+        names_file,
     })
+}
+
+/// File name of the first absolute path any message in the chain mentions
+/// (`Failed to read file: C:/repo/b.txt: ...`, `Failed to rename C:/repo/b.txt.mgtmp to ...`).
+/// The path ends at `: `, ` to ` or ` (`; a `.mgtmp` temp suffix is dropped.
+fn file_name_in_chain(err: &anyhow::Error) -> Option<String> {
+    err.chain().find_map(|c| file_name_in(&c.to_string()))
+}
+
+fn file_name_in(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    let start = (0..b.len()).find(|&i| {
+        let boundary = i == 0 || !b[i - 1].is_ascii_alphanumeric();
+        let drive = i + 2 < b.len()
+            && b[i].is_ascii_alphabetic()
+            && b[i + 1] == b':'
+            && (b[i + 2] == b'\\' || b[i + 2] == b'/');
+        let unix = b[i] == b'/' && (i == 0 || b[i - 1] == b' ');
+        boundary && (drive || unix)
+    })?;
+    let rest = &s[start..];
+    let from = if rest.as_bytes().get(1) == Some(&b':') {
+        2
+    } else {
+        1
+    };
+    // Paths may contain " (" and " to " (`shot (2).psd`, `Back to School\`): cut only at
+    // the retry note and at a rename's " to " that starts the second path.
+    let tail = &rest[from..];
+    let to_path = tail.match_indices(" to ").map(|(i, _)| i).find(|&i| {
+        let n = tail.as_bytes();
+        let j = i + 4;
+        n.get(j) == Some(&b'/')
+            || (n.get(j).is_some_and(u8::is_ascii_alphabetic) && n.get(j + 1) == Some(&b':'))
+    });
+    let end = [tail.find(": "), tail.find(" (first attempt"), to_path]
+        .into_iter()
+        .flatten()
+        .min()
+        .map_or(rest.len(), |i| i + from);
+    let path = rest[..end].trim_end_matches(".mgtmp");
+    let name = path.rsplit(['\\', '/']).next()?.trim();
+    (!name.is_empty()).then(|| name.to_owned())
 }
 
 /// The full `{:#}` chain with URL credentials, query strings and fragments removed.
@@ -336,6 +390,38 @@ mod tests {
         let e = anyhow::anyhow!("PUT https://b.example/k?X-Amz-Signature=abc123 failed");
         let t = scrubbed_chain(&e);
         assert!(t.contains("b.example/k") && !t.contains("abc123"), "{t}");
+    }
+
+    #[test]
+    fn the_locked_file_is_named_from_the_context_lines() {
+        assert_eq!(
+            file_name_in(
+                r"Failed to read file: D:\work\R-12\b.txt: The process cannot access (os error 32)"
+            )
+            .as_deref(),
+            Some("b.txt")
+        );
+        assert_eq!(
+            file_name_in(
+                r"Failed to rename D:\w\b.txt.mgtmp to D:\w\b.txt (first attempt: x; retried)"
+            )
+            .as_deref(),
+            Some("b.txt")
+        );
+        assert_eq!(
+            file_name_in("Failed to read file: /tmp/r/b c.txt: busy").as_deref(),
+            Some("b c.txt")
+        );
+        assert_eq!(file_name_in("no path in this text"), None);
+        // Media names with " (" or " to " stay whole.
+        assert_eq!(
+            file_name_in(r"Failed to read file: D:\proj\shot (2).psd: busy").as_deref(),
+            Some("shot (2).psd")
+        );
+        assert_eq!(
+            file_name_in(r"Failed to rename D:\Back to School\b.psd.mgtmp to D:\Back to School\b.psd (first attempt: x)").as_deref(),
+            Some("b.psd")
+        );
     }
 
     #[test]

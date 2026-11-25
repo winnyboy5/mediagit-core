@@ -447,6 +447,7 @@ fn main() {
         .try_get_matches_from(&args)
         .unwrap_or_else(|e| usage_exit(e, &args));
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| usage_exit(e, &args));
+    let verbose = cli.verbose;
 
     if cli.machine {
         output::set_machine_mode(true);
@@ -533,7 +534,15 @@ fn main() {
                     std::process::exit(1);
                 }
                 output::error(&format!("Error: {}", f.message));
-                eprintln!("  Details: {}", f.details);
+                // A locked or denied file is fully explained by the headline, which names
+                // it; its Details are only OS error codes. Every other error keeps them:
+                // they carry context the headline lacks (remote saved but fetch failed, ...).
+                let headline_says_it_all = f.names_file;
+                if verbose || !headline_says_it_all {
+                    eprintln!("  Details: {}", f.details);
+                } else {
+                    eprintln!("  Run again with --verbose for the technical details.");
+                }
                 std::process::exit(1);
             }
             if output::machine_mode() {

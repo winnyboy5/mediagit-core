@@ -367,7 +367,7 @@ fn reset_hard_over_a_locked_file_has_a_plain_headline() {
         .open(dir.join("a.txt"))
         .unwrap();
     let out = mediagit()
-        .args(["reset", "--hard", "HEAD~1"])
+        .args(["--verbose", "reset", "--hard", "HEAD~1"])
         .current_dir(dir)
         .output()
         .unwrap();
